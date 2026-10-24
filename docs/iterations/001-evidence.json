@@ -50,6 +50,25 @@
     "No production QQ/DSH adapter",
     "No self-image feature implemented"
   ],
+  "publication": {
+    "repository": "sophisticate9008/qq-agent-framework",
+    "visibility": "public",
+    "license": "MIT",
+    "defaultBranch": "main",
+    "verifiedImplementationCommit": "c7e4e6adec8850e30487ac7f6ad9ba87c344a1dd",
+    "independentClone": {
+      "install": "passed",
+      "check": "passed",
+      "sourceTestsPassed": 58,
+      "compiledTestsPassed": 58
+    },
+    "githubActions": {
+      "runId": 40066776704,
+      "status": "completed",
+      "conclusion": "success",
+      "includesBrowserSmoke": true
+    }
+  },
   "sha256": {
     ".github/workflows/verify.yml": "a5b6814cb51f6f5378175064e578b04a4a73a8a23892566fc52af23149f6caab",
     "package-lock.json": "09783a10ffb66d1f1cb32c2f3088e2a660a06629347412d08e9bc2a6d567774e",

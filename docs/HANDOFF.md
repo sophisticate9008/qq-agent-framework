@@ -6,7 +6,7 @@
 
 - 本机独立框架：`/root/qq-agent-framework`；仓库名 `qq-agent-framework`。
 - 旧项目：`/root/qq-bridge`，原交接在其 `runtime/workspace/framework-iteration-handoff.md`。
-- 公开发布目标：`sophisticate9008/qq-agent-framework`；发布状态在本轮完成后追加，不凭目标名推断已上传。
+- 已公开发布：`sophisticate9008/qq-agent-framework`（MIT、默认分支 main）；实际核验记录见下文。
 - 读 AGENTS、GOALS、ARCHITECTURE、EXTENDING 和 iterations/001-independent-engine。
 - 原项目的局部原型和其他会话修改保留；本框架不依赖其私有目录才能构建。
 
@@ -50,3 +50,12 @@ npm run test:built
 
 可选 Chromium 见 README。真实 QQ/DSH 验收未完成，不要为了勾选清单擅自使用生产会话。
 GitHub 操作复用现有 gh 认证，先核对当前账号、目标仓库和变更文件；不查看/输出凭据原文。
+
+## 发布核验记录
+
+- 2026-10-24 已创建公开仓库并推送 main；GitHub API 确认 public、MIT、默认分支 main。
+- 首个实现提交：`c7e4e6adec8850e30487ac7f6ad9ba87c344a1dd`；API 返回的 main 与本地 HEAD 一致。
+- 从 GitHub 独立克隆后重新 npm ci、check、源码58项、编译产物58项全部通过，不依赖旧私有目录。
+- GitHub Actions 运行 `40066776704` 对上述实现提交 completed/success，包含浏览器验收。
+- 本轮后续证据文档提交不修改 TS 源码；实现文件摘要见 iterations/001-evidence.json。
+- 本机日志：runtime/iterations/001/clean-clone.log；原始失败日志和截图保留但不上传。

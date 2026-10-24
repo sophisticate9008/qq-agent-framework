@@ -25,7 +25,7 @@
 | 浏览器 | 真实 Chromium 连通、两种演示、动态标签不执行、无持久口令、移动端无横向溢出 | browser-smoke.ts；本机摘要及两张截图 |
 | 编译产物 | 同一组测试针对 dist 的 JS 而不是只跑源 TS | npm run test:built |
 | 旧成果保护 | 不批量回滚、迁移或上传旧私有资源；既有离线回归未被新框架替代 | 旧项目本机回归日志；新项目独立 Git 根 |
-| 发布 | 核对账号、公开仓库、主分支对象和独立克隆验收 | 发布后记录到 HANDOFF 的发布状态；未做就不能勾选 |
+| 发布 | 核对账号、公开仓库、主分支对象和独立克隆验收 | 已公开发布，独立克隆检查/源码58/产物58通过；CI40066776704成功 |
 
 完整测试组：admin11 + app4 + context10 + engine17 + features9 + policy4 + scenarios1 + values2 = 58。
 源码测试通过58项、编译产物通过58项是同一组测试的两种执行方式，不合并声称116个独立用例。
@@ -42,6 +42,9 @@
 `typescript-tests.log`、`compiled-tests-first-run.log`、`compiled-tests.log`、`typescript-browser.log`、
 `browser.json`、`ui-desktop.png`、`ui-mobile.png`、`check.log`；发布后还保存 clean-clone.log。
 公开的结构化摘要为 `001-evidence.json`，只含命令结果、计数和源文件摘要，不含管理口令或旧项目资料。
+
+公开仓库为 sophisticate9008/qq-agent-framework，首个实现提交及 API/CI/独立克隆核验详见 HANDOFF。
+后续文档留档提交与被验收的实现提交分开记录，避免用自引用 commit 摘要冒充证据。
 
 ## 发现、修正与保留的失败
 

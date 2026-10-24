@@ -2,7 +2,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { assert, errorCode, identifier, reference, snapshot } from '../core/values.ts';
 import type { Clock, JsonObject } from '../core/types.ts';
 import type { DurableStore, StoredRecord } from './types.ts';
-import { json, object, records } from './data.ts';
+import { json, object } from './data.ts';
 import { withDeadline } from './deadlines.ts';
 
 export interface TaskInput {
@@ -30,6 +30,9 @@ export interface TaskMetadata {
   errorCode: string | null;
 }
 const namespace = 'tasks';
+const pendingNamespace = 'tasks.pending';
+const indexNamespace = 'tasks.meta';
+const indexKey = 'pending-index';
 
 function task(record: StoredRecord) {
   const value = object(record.value);
@@ -56,19 +59,72 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
   let running: Promise<{ scanned: number; executed: number }> | null = null;
 
   function editable() { assert(!stopped, 'TASK_QUEUE_STOPPED', 'The task queue is stopped.'); }
-  function update(record: StoredRecord, changes: JsonObject) {
-    return store.write(namespace, record.key, json({ ...task(record), ...changes }), { expectedRevision: record.revision });
-  }
-  function recoverEntries(entries: Iterable<StoredRecord>) {
-    let recovered = 0;
-    for (const record of entries) {
-      if (task(record).status !== 'running' || active.has(record.key)) continue;
-      try { update(record, { status: 'unknown', errorCode: 'TASK_INTERRUPTED' }); recovered++; }
-      catch (error) { if (errorCode(error) !== 'STORE_CONFLICT') throw error; }
+  function pending(status: unknown) { return status === 'waiting' || status === 'running'; }
+  function ensurePending(id: string) {
+    if (store.read(pendingNamespace, id)) return;
+    try { store.write(pendingNamespace, id, { id }, { expectedRevision: null }); }
+    catch (error) {
+      if (errorCode(error) !== 'STORE_CONFLICT' || !store.read(pendingNamespace, id)) throw error;
     }
+  }
+  function removePending(id: string) {
+    const indexed = store.read(pendingNamespace, id);
+    if (!indexed) return;
+    try { store.delete(pendingNamespace, id, indexed.revision); }
+    catch (error) { if (errorCode(error) !== 'STORE_CONFLICT') throw error; }
+  }
+  function prunePending(id: string) {
+    const current = store.read(namespace, id);
+    if (!current || !pending(task(current).status)) removePending(id);
+  }
+  function update(record: StoredRecord, changes: JsonObject) {
+    const updated = store.write(namespace, record.key, json({ ...task(record), ...changes }), { expectedRevision: record.revision });
+    if (!pending(task(updated).status)) removePending(record.key);
+    return updated;
+  }
+  function repairPage(limit: number, after: string | undefined, interrupt: boolean) {
+    const options = after === undefined ? { limit } : { limit, after };
+    const tasks = store.list(namespace, options);
+    const indexed = store.list(pendingNamespace, options);
+    const entries = new Map(tasks.map(record => [record.key, record]));
+    const keys = [...new Set([...entries.keys(), ...indexed.map(record => record.key)])]
+      .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))).slice(0, limit);
+    let recovered = 0;
+    for (const key of keys) {
+      const record = entries.get(key) ?? store.read(namespace, key);
+      if (!record) { removePending(key); continue; }
+      const value = task(record);
+      if (!pending(value.status)) { removePending(key); continue; }
+      ensurePending(key);
+      if (interrupt && value.status === 'running' && !active.has(key)) {
+        try { update(record, { status: 'unknown', errorCode: 'TASK_INTERRUPTED' }); recovered++; }
+        catch (error) { if (errorCode(error) !== 'STORE_CONFLICT') throw error; }
+      }
+    }
+    return { recovered, next: keys.length === limit ? keys.at(-1)! : null };
+  }
+  function recover() {
+    let recovered = 0;
+    let after: string | undefined;
+    do {
+      const page = repairPage(1000, after, true);
+      recovered += page.recovered;
+      after = page.next ?? undefined;
+    } while (after !== undefined);
     return recovered;
   }
-  function recover() { return recoverEntries(records(store, namespace)); }
+
+  const version = store.read(indexNamespace, indexKey);
+  if (!version) {
+    let after: string | undefined;
+    do {
+      const page = repairPage(1000, after, false);
+      after = page.next ?? undefined;
+    } while (after !== undefined);
+    store.write(indexNamespace, indexKey, { version: 1 }, { expectedRevision: null });
+  } else {
+    assert(object(version.value).version === 1, 'INVALID_STORED_DATA', 'Stored task index version is unsupported.');
+  }
 
   async function run(limit: number) {
     await Promise.resolve();
@@ -79,12 +135,15 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
         await nextTurn();
         if (stopped) break;
       }
-      const batch = store.list(namespace, cursor === undefined ? { limit: 1 } : { limit: 1, after: cursor });
+      const batch = store.list(pendingNamespace, cursor === undefined ? { limit: 1 } : { limit: 1, after: cursor });
       if (!batch.length) { cursor = undefined; break; }
-      const record = batch[0];
-      cursor = record.key;
+      const indexed = batch[0];
+      cursor = indexed.key;
       scanned++;
+      const record = store.read(namespace, indexed.key);
+      if (!record) { removePending(indexed.key); continue; }
       const value = task(record);
+      if (!pending(value.status)) { removePending(record.key); continue; }
       if (value.status !== 'waiting') continue;
       if (typeof value.expiresAt === 'number' && value.expiresAt <= clock()) {
         try { update(record, { status: 'expired' }); }
@@ -133,8 +192,12 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
       'INVALID_TASK', 'A bounded, scoped task is required.');
       object(value.payload);
       assert(Buffer.byteLength(JSON.stringify(value.payload)) <= 64 * 1024, 'INVALID_TASK', 'Task payload is too large.');
-      store.write(namespace, value.id, json({ ...value, expiresAt, maxAttempts, attempts: 0,
-        status: expiresAt !== null && expiresAt <= clock() ? 'expired' : 'waiting' }), { expectedRevision: null });
+      ensurePending(value.id);
+      try {
+        const stored = store.write(namespace, value.id, json({ ...value, expiresAt, maxAttempts, attempts: 0,
+          status: expiresAt !== null && expiresAt <= clock() ? 'expired' : 'waiting' }), { expectedRevision: null });
+        if (!pending(task(stored).status)) removePending(value.id);
+      } catch (error) { prunePending(value.id); throw error; }
       return value.id;
     },
     runDue({ limit = 16 }: { limit?: number } = {}) {
@@ -148,17 +211,18 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
     },
     recover,
     recoverPage({ limit = 100, after }: { limit?: number; after?: string } = {}) {
-      const batch = store.list(namespace, after === undefined ? { limit } : { limit, after });
-      return { recovered: recoverEntries(batch), next: batch.length === limit ? batch.at(-1)!.key : null };
+      assert(Number.isSafeInteger(limit) && limit > 0 && limit <= 1000, 'INVALID_TASK_LIMIT', 'A finite recovery limit is required.');
+      return repairPage(limit, after, true);
     },
     cancel(id: string) {
       editable();
       const current = store.read(namespace, id);
       if (!current || !['waiting', 'running'].includes(String(task(current).status))) return false;
       const controller = active.get(id);
-      update(current, controller || task(current).status === 'running' ? { status: 'unknown', errorCode: 'TASK_CANCEL_REQUESTED' }
-        : { status: 'cancelled' });
-      controller?.abort();
+      try {
+        update(current, controller || task(current).status === 'running' ? { status: 'unknown', errorCode: 'TASK_CANCEL_REQUESTED' }
+          : { status: 'cancelled' });
+      } finally { controller?.abort(); }
       return true;
     },
     retry(id: string) {
@@ -166,7 +230,9 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
       const current = store.read(namespace, id);
       assert(current && task(current).status === 'failed' && Number(task(current).attempts) < Number(task(current).maxAttempts),
         'TASK_RETRY_DENIED', 'Only failed tasks with remaining attempts can be retried.');
-      update(current, { status: 'waiting' });
+      ensurePending(id);
+      try { update(current, { status: 'waiting' }); }
+      catch (error) { prunePending(id); throw error; }
       cursor = undefined;
     },
     list({ limit = 100, after }: { limit?: number; after?: string } = {}): readonly TaskMetadata[] {

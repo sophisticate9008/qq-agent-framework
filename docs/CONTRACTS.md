@@ -129,9 +129,11 @@ manifest 声明只是静态需求。每次副作用仍需匹配有效授权并�
 
 ### 持久任务
 
-`createTaskQueue({ store, clock?, maxScan?, handlerTimeoutMs? })` 提供 `register`、`schedule`、`runDue`、`recover`、`cancel`、`retry`、`list` 和 `stop`。
+`createTaskQueue({ store, clock?, maxScan?, handlerTimeoutMs? })` 提供 `register`、`schedule`、`runDue`、`recover`、`recoverPage`、`cancel`、`retry`、`list` 和 `stop`。
 
 任务有 kind、scope、JSON payload、到期时间、可选过期时间和 1–10 次尝试上限。单 payload 最大 64 KiB；单次 `runDue` 最多执行 100 项，扫描量受 `maxScan` 限制。handler 默认期限为 30 秒，可在 10–300000 毫秒内调整；任务有 TTL 时，实际运行期限取 TTL 剩余时间与 handler 上限的较小值，排队期间过期的任务不执行。超时或恢复发现遗留 `running` 时任务进入 `unknown`，不能通过 `retry` 重放。只有明确 `failed` 且仍有预算的任务可以显式重试。
+
+调度只扫描持久 pending 索引，并在执行前重新读取权威任务记录；终态任务从索引移除，但仍保留任务历史。已有数据库首次打开时按版本建立索引，`recoverPage({ limit, after? })` 可分批修复缺失或孤立索引，不把索引当作重放未知动作的依据。
 
 ### 资源目录
 

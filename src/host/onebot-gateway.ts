@@ -40,7 +40,7 @@ export function loadOneBotGatewayConfiguration(filename: string): Readonly<OneBo
   assert(Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65535
     && typeof input.upstreamEndpoint === 'string' && reference(input.tokenFile) && reference(input.storeFilename)
     && (input.upstreamTokenFile === undefined || reference(input.upstreamTokenFile))
-    && Array.isArray(input.allowedConversations) && input.allowedConversations.length > 0
+    && Array.isArray(input.allowedConversations)
     && input.allowedConversations.length <= 1000 && input.allowedConversations.every(value => typeof value === 'string'
       && /^(?:group|private):[1-9]\d{0,15}$/.test(value))
     && new Set(input.allowedConversations).size === input.allowedConversations.length

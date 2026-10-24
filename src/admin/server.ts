@@ -18,10 +18,10 @@ const DEFAULT_HANDLER_TIMEOUT_MS = 10 * 1000
 const MIN_HANDLER_TIMEOUT_MS = 10
 const MAX_HANDLER_TIMEOUT_MS = 5 * 60 * 1000
 const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
-const WEB_ROOT = new URL('../../web/', import.meta.url)
-const APP_URL = import.meta.url.endsWith('.ts')
-  ? new URL('../../dist/web/app.js', import.meta.url)
-  : new URL('../../web/app.js', import.meta.url)
+const WEB_ROOT = import.meta.url.endsWith('.ts')
+  ? new URL('../../dist/admin-web/', import.meta.url)
+  : new URL('../../admin-web/', import.meta.url)
+const APP_URL = new URL('app.js', WEB_ROOT)
 
 interface StaticAsset {
   readonly url: URL
@@ -29,11 +29,15 @@ interface StaticAsset {
 }
 
 export interface AdminServerOptions {
-  token: string
+  token: string | (() => string | null)
   snapshot: (signal?: AbortSignal) => unknown | Promise<unknown>
   dispatchDemo?: (body: Record<string, unknown>, signal?: AbortSignal) => unknown | Promise<unknown>
   routes?: readonly AdminRoute[]
   handlerTimeoutMs?: number
+  setup?: {
+    status: () => unknown
+    initialize: () => unknown
+  }
 }
 
 export interface AdminRoute {
@@ -54,7 +58,7 @@ const STATIC_ROUTES = new Map<string, StaticAsset>([
 
 const SECURITY_HEADERS: Readonly<OutgoingHttpHeaders> = {
   'Cache-Control': 'no-store',
-  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'",
+  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
@@ -98,7 +102,8 @@ function sendError(
   sendJson(response, statusCode, { error: code }, extraHeaders)
 }
 
-function hasValidBearer(request: IncomingMessage, tokenBuffer: Buffer): boolean {
+function hasValidBearer(request: IncomingMessage, tokenBuffer: Buffer | null): boolean {
+  if (tokenBuffer === null) return false
   const authorization = request.headers.authorization
   if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) return false
   const supplied = Buffer.from(authorization.slice(7))
@@ -287,9 +292,10 @@ export function createAdminServer({
   snapshot,
   dispatchDemo,
   routes = [],
+  setup,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS
 }: AdminServerOptions): Server {
-  if (typeof token !== 'string' || token.length < 24) {
+  if (typeof token !== 'function' && (typeof token !== 'string' || token.length < 24)) {
     throw new TypeError('token must contain at least 24 characters')
   }
   if (typeof snapshot !== 'function' || dispatchDemo !== undefined && typeof dispatchDemo !== 'function') {
@@ -306,14 +312,17 @@ export function createAdminServer({
   const methods = new Map<string, string[]>()
   for (const route of routes) {
     if (!/^\/api\/[a-z][a-z0-9/-]{0,127}$/.test(route.pathname) || route.pathname.includes('//')
-      || route.pathname === '/api/snapshot' || route.pathname === '/api/demo/events'
+      || route.pathname === '/api/snapshot' || route.pathname === '/api/demo/events' || route.pathname === '/api/setup'
       || !['GET', 'POST'].includes(route.method) || typeof route.handle !== 'function'
       || extensions.has(`${route.method} ${route.pathname}`)) throw new TypeError('Invalid or duplicate admin route')
     extensions.set(`${route.method} ${route.pathname}`, Object.freeze({ ...route }))
     methods.set(route.pathname, [...(methods.get(route.pathname) ?? []), route.method])
   }
 
-  const tokenBuffer = Buffer.from(token)
+  const currentToken = (): Buffer | null => {
+    const value = typeof token === 'function' ? token() : token
+    return typeof value === 'string' && value.length >= 24 ? Buffer.from(value) : null
+  }
   const staticCache = new Map<string, Promise<Buffer>>()
   const server = createServer({
     connectionsCheckingInterval: 1000,
@@ -327,13 +336,27 @@ export function createAdminServer({
       const queryIndex = requestTarget.indexOf('?')
       const pathname = queryIndex === -1 ? requestTarget : requestTarget.slice(0, queryIndex)
 
+      if (setup && pathname === '/api/setup') {
+        if (request.method === 'GET') { sendJson(response, 200, setup.status()); return }
+        if (request.method === 'POST') {
+          if (!hasSameOrigin(request)) { sendError(response, 403, 'origin_forbidden'); return }
+          if (!hasJsonContentType(request)) { sendError(response, 415, 'unsupported_media_type'); return }
+          const body = await readJsonBody(request)
+          if (Object.keys(body).length !== 0) { sendError(response, 400, 'invalid_setup_request'); return }
+          sendJson(response, 200, setup.initialize())
+          return
+        }
+        sendError(response, 405, 'method_not_allowed', { Allow: 'GET, POST' })
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/health') {
         sendJson(response, 200, { ok: true, mode: dispatchDemo ? 'demo' : 'framework' })
         return
       }
 
       if (request.method === 'GET' && pathname === '/api/snapshot') {
-        if (!hasValidBearer(request, tokenBuffer)) {
+        if (!hasValidBearer(request, currentToken())) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }
@@ -349,7 +372,7 @@ export function createAdminServer({
       }
 
       if (dispatchDemo && request.method === 'POST' && pathname === '/api/demo/events') {
-        if (!hasValidBearer(request, tokenBuffer)) {
+        if (!hasValidBearer(request, currentToken())) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }
@@ -375,7 +398,7 @@ export function createAdminServer({
 
       const route = extensions.get(`${request.method} ${pathname}`)
       if (route) {
-        if (!hasValidBearer(request, tokenBuffer)) {
+        if (!hasValidBearer(request, currentToken())) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }

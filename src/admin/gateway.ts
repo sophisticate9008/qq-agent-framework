@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { isIP, type AddressInfo } from 'node:net';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import type { OneBotCompatGatewayMetrics, OneBotCompatPolicyMetric } from '../adapters/onebot-compat.ts';
 import { assert, isRecord, reference, snapshot } from '../core/values.ts';
@@ -11,6 +11,11 @@ import {
   type OneBotGatewayConfiguration
 } from '../host/onebot-gateway.ts';
 import { createAdminServer, type AdminRoute } from './server.ts';
+import { createAdminBootstrap } from './bootstrap.ts';
+import { createSettingsRoutes } from './settings.ts';
+import { createManagementOperations } from './operations.ts';
+import { createLegacyAdminRoutes } from '../integrations/legacy-admin.ts';
+import { createConfigurationRoutes } from './configuration.ts';
 
 const FRAMEWORK_VERSION = '0.1.0';
 const PROBE_TIMEOUT_MS = 2_500;
@@ -21,6 +26,8 @@ export interface GatewayAdminConfiguration {
   port: number;
   tokenFile: string;
   gatewayConfiguration: string;
+  legacyRoot?: string;
+  serviceManager?: string;
 }
 
 interface GatewayHealth {
@@ -75,20 +82,23 @@ function gatewayRevision(configuration: Readonly<OneBotGatewayConfiguration>): s
 export function loadGatewayAdminConfiguration(filename: string): Readonly<GatewayAdminConfiguration> {
   const input: unknown = JSON.parse(privateText(filename, 64 * 1024));
   assert(isRecord(input)
-    && Object.keys(input).length === 4
-    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration'].includes(key))
+    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'legacyRoot', 'serviceManager'].includes(key))
     && validHost(input.host)
     && Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65_535
-    && reference(input.tokenFile) && reference(input.gatewayConfiguration),
+    && reference(input.tokenFile) && reference(input.gatewayConfiguration)
+    && (input.legacyRoot === undefined || reference(input.legacyRoot))
+    && (input.serviceManager === undefined || reference(input.serviceManager)),
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator configuration contains invalid fields.');
   const base = dirname(resolve(filename));
   const configuration = snapshot({
     host: input.host,
     port: Number(input.port),
     tokenFile: resolve(base, input.tokenFile),
-    gatewayConfiguration: resolve(base, input.gatewayConfiguration)
+    gatewayConfiguration: resolve(base, input.gatewayConfiguration),
+    ...(input.legacyRoot === undefined ? {} : { legacyRoot: resolve(base, input.legacyRoot) }),
+    ...(input.serviceManager === undefined ? {} : { serviceManager: resolve(base, input.serviceManager) }),
   });
-  adminToken(configuration.tokenFile);
+  if (existsSync(configuration.tokenFile)) adminToken(configuration.tokenFile);
   loadOneBotGatewayConfiguration(configuration.gatewayConfiguration);
   return configuration;
 }
@@ -316,7 +326,8 @@ function liveSnapshot(
   revision: string,
   configuration: Readonly<OneBotGatewayConfiguration>,
   health: GatewayHealth,
-  status: GatewayStatus
+  status: GatewayStatus,
+  configurable: boolean
 ) {
   const metrics = health.metrics;
   const operationalMetrics = metrics === null ? null : {
@@ -373,7 +384,7 @@ function liveSnapshot(
       persona: configuration.persona,
       configuration: {
         gatewayMode: 'legacy-egress-compatibility',
-        managementMode: 'read-only'
+        managementMode: configurable ? 'controlled-configuration' : 'read-only'
       },
       preferences: null,
       provenance: {
@@ -418,29 +429,34 @@ async function closeServer(server: Server): Promise<void> {
   await closed;
 }
 
-export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConfiguration>) {
+export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConfiguration>, options: { configurationFilename?: string } = {}) {
   assert(validHost(configuration.host)
     && Number.isSafeInteger(configuration.port) && configuration.port >= 0 && configuration.port <= 65_535
     && reference(configuration.tokenFile) && reference(configuration.gatewayConfiguration),
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator configuration is invalid.');
-  const token = adminToken(configuration.tokenFile);
-  const gatewayConfiguration = loadOneBotGatewayConfiguration(configuration.gatewayConfiguration);
-  const gatewayToken = privateText(gatewayConfiguration.tokenFile, 4_096).trim();
-  assert(gatewayToken.length >= 16 && !/[\r\n]/.test(gatewayToken), 'GATEWAY_ADMIN_INVALID_GATEWAY_TOKEN',
-    'A private gateway token is required.');
+  const bootstrap = createAdminBootstrap({ tokenFile: configuration.tokenFile });
+  function currentGateway() {
+    const current = loadOneBotGatewayConfiguration(configuration.gatewayConfiguration);
+    const token = privateText(current.tokenFile, 4_096).trim();
+    assert(token.length >= 16 && !/[\r\n]/.test(token), 'GATEWAY_ADMIN_INVALID_GATEWAY_TOKEN', 'A private gateway token is required.');
+    return { configuration: current, token };
+  }
+  currentGateway();
   const revision = configurationRevision(configuration);
   const snapshotHandler = async (signal?: AbortSignal) => {
-    const health = await probeHealth(gatewayConfiguration, gatewayToken, signal);
+    const current = currentGateway();
+    const health = await probeHealth(current.configuration, current.token, signal);
     const status = health.ok
-      ? await probeStatus(gatewayConfiguration, gatewayToken, signal)
+      ? await probeStatus(current.configuration, current.token, signal)
       : { verified: false, online: null, good: null, error: health.error };
-    return liveSnapshot(revision, gatewayConfiguration, health, status);
+    return liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined);
   };
   const healthRoute: AdminRoute = {
     method: 'GET',
     pathname: '/api/gateway/health',
     async handle({ signal }) {
-      const health = await probeHealth(gatewayConfiguration, gatewayToken, signal);
+      const current = currentGateway();
+      const health = await probeHealth(current.configuration, current.token, signal);
       return snapshot({
         ok: health.ok,
         mode: 'gateway-live',
@@ -450,7 +466,32 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       });
     }
   };
-  const server = createAdminServer({ token, snapshot: snapshotHandler, routes: [healthRoute] });
+  const operations = options.configurationFilename && configuration.serviceManager ? createManagementOperations({
+    adminConfigurationFilename: options.configurationFilename,
+    gatewayConfigurationFilename: configuration.gatewayConfiguration,
+    serviceManager: configuration.serviceManager,
+    ...(configuration.legacyRoot === undefined ? {} : { legacyConfigurationFilename: join(configuration.legacyRoot, 'config.json') }),
+  }) : undefined;
+  const routes: AdminRoute[] = [healthRoute];
+  if (options.configurationFilename) {
+    const filenames = { adminConfigurationFilename: options.configurationFilename, gatewayConfigurationFilename: configuration.gatewayConfiguration };
+    routes.push(...createSettingsRoutes({ ...filenames,
+      ...(operations === undefined ? {} : { apply: operations.apply }),
+    }));
+    routes.push(...createConfigurationRoutes({ ...filenames,
+      ...(configuration.legacyRoot === undefined ? {} : { legacyRoot: configuration.legacyRoot }),
+      ...(operations === undefined ? {} : { apply: operations.apply }),
+    }));
+  }
+  if (configuration.legacyRoot) routes.push(...createLegacyAdminRoutes({ legacyRoot: configuration.legacyRoot,
+    ...(operations === undefined ? {} : { beforeAccessSave: operations.synchronizeAccess }),
+  }));
+  const server = createAdminServer({ token: () => bootstrap.token(), snapshot: snapshotHandler, routes, handlerTimeoutMs: 70_000,
+    setup: {
+      status: () => ({ ...bootstrap.status(), revision }),
+      initialize: () => ({ ...bootstrap.initialize(), revision }),
+    },
+  });
   try {
     await new Promise<void>((resolvePromise, rejectPromise) => {
       const fail = (error: Error): void => rejectPromise(error);

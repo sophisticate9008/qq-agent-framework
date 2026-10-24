@@ -162,7 +162,7 @@ test('serves public health and only explicit static assets', async t => {
     const contentSecurityPolicy = asset.headers['content-security-policy']
     if (typeof contentSecurityPolicy !== 'string') throw new Error('Missing content security policy')
     assert.match(contentSecurityPolicy, /default-src 'self'/)
-    if (path === '/') assert.match(asset.text, /id="conversation-id" value="demo:room"/)
+    if (path === '/') assert.match(asset.text, /id="root"/)
     if (path === '/app.js') assert.doesNotMatch(asset.text, /interface |: unknown|: string/)
   }
 
@@ -493,11 +493,11 @@ test('returns stable errors without leaking handler failures', async t => {
   assert.doesNotMatch(dispatch.text, /secret/)
 })
 
-test('frontend keeps token ephemeral and renders dynamic values as text', async () => {
-  const asset = import.meta.url.endsWith('.ts') ? '../web/app.ts' : '../web/app.js'
+test('frontend client keeps authentication in request headers and out of persistent storage', async () => {
+  const asset = import.meta.url.endsWith('.ts') ? '../web/lib/api.ts' : '../../web/lib/api.ts'
   const source = await readFile(new URL(asset, import.meta.url), 'utf8')
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML/)
-  assert.match(source, /textContent/)
+  assert.match(source, /authorization: `Bearer/)
   assert.doesNotMatch(source, /setInterval|setTimeout/)
 })
 

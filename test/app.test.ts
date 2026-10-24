@@ -49,7 +49,7 @@ test('localhost UI reaches real demo assembly through authenticated API', async 
   try {
     const page = await fetch(origin);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /QQ Agent Framework/);
+    assert.match(await page.text(), /<title>工作台 · QQ Agent<\/title>/);
     assert.equal((await fetch(`${origin}/api/snapshot`)).status, 401);
     const response = await fetch(`${origin}/api/demo/events`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, origin, 'content-type': 'application/json' },

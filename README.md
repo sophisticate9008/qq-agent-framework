@@ -13,17 +13,16 @@ npm ci
 npm run build
 ```
 
-启动仅监听回环地址的演示管理页：
+已有兼容网关私有配置时，创建并启动管理工作台：
 
 ```sh
-read -r -s BRIDGE_ADMIN_TOKEN
-export BRIDGE_ADMIN_TOKEN
-npm run demo
+node scripts/configure-gateway-admin.ts \
+  --config "$PRIVATE_ADMIN_CONFIG" \
+  --gateway-config "$PRIVATE_GATEWAY_CONFIG"
+node scripts/gateway-admin.ts --config "$PRIVATE_ADMIN_CONFIG"
 ```
 
-口令至少 24 个字符。启动后访问 `http://127.0.0.1:3210`；演示数据只在当前进程内有效。
-
-连接真实出站网关、生成独立管理令牌及配置局域网监听，见[管理界面初始化教程](docs/GATEWAY_ADMIN.md)。管理监听地址、端口和令牌文件均由私有配置决定，不与演示模式混用。
+监听地址和端口均可配置，不写死在页面中。首次打开网页时，工作台会自动创建固定的私有管理令牌文件并显示文件路径；无需先手工生成令牌。完整六页配置、旧 bridge 接入与安全要求见[管理工作台教程](docs/GATEWAY_ADMIN.md)。
 
 运行测试：
 
@@ -45,7 +44,8 @@ npm run test:built
 - 有限任务队列，以及需显式驱动、带时区/DST 与漏触发策略的 daily/weekly 日历触发服务。
 - OneBot HTTP 收发适配器与可注入成熟 client 的 DSH agent adapter。
 - `createBridgeHost` 组装持久 policy/state、会话、follow、任务和出站恢复。
-- 本地演示 transport、model、功能包和只读管理快照。
+- React、shadcn/ui（Base UI）、Tailwind CSS 与 Vite 构建的中文管理工作台，支持日间、夜间和跟随系统主题。
+- 六页配置可管理真实人设、功能触发、访问范围、模型回复、发送预算和运行参数；保存与应用保持为不同操作。
 
 ## 使用边界
 
@@ -54,9 +54,11 @@ npm run test:built
 - 内核中的事件去重、审计和演示出站记录是有限的进程内状态。
 - 持久组件能保存状态和标记中断结果，但不会把 `unknown` 自动重放为成功或失败。
 - `confirmed`、`rejected` 与 `unknown` 必须分开处理；结果未知不能直接视为失败并盲目重发。
+- 管理端的“重启已受理，需要重连”不等于服务已应用；应在新地址重新连接并核对状态。
 - 资源块只携带资源标识，不代表任意本机路径或 URL 可被访问。
 - 文档图片需要注入浏览器、受控发布器及本地字体；准备或批准图片不等于获得发送权限。
 - 候选版本发布/回滚、业务状态迁移、可恢复长工作管理与全局保留清理策略尚未形成完整流程。
+- HTTP compatibility gateway 保留旧部署并治理其出站路径，不替换旧 OneBot WebSocket、DSH runtime、现有 session、插件或完整宿主。
 - 尚未经过对应集成与故障恢复测试的适配器，不应标记为生产可用。
 
 ## 项目结构
@@ -67,8 +69,8 @@ src/host/       宿主持久化、会话和恢复基础件
 src/adapters/   外部协议与 agent 适配器
 src/rendering/  可选的离线 Markdown 渲染
 src/features/   可独立装配的功能包
-src/admin/      认证管理接口与网关观察宿主
-web/            管理页与离线演示模式
+src/admin/      认证、配置与受控应用接口
+web/            中文管理工作台与共享界面组件
 test/           自动化测试
 scripts/        构建、检查和基准脚本
 docs/           公共设计与使用文档
@@ -81,6 +83,7 @@ docs/           公共设计与使用文档
 - [公共契约](docs/CONTRACTS.md)
 - [旧 OneBot HTTP 出站兼容网关](docs/LEGACY_GATEWAY.md)
 - [管理界面初始化与配置](docs/GATEWAY_ADMIN.md)
+- [管理界面与扩展约定](docs/UI.md)
 - [扩展功能](docs/EXTENDING.md)
 - [文档表达与最小装配](docs/PRESENTATION.md)
 - [安全边界](docs/SECURITY.md)

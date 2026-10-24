@@ -444,7 +444,7 @@ export function createOneBotCompatGateway(options: OneBotCompatGatewayOptions): 
     || typeof options.persona.version !== 'string' || options.persona.version.length === 0) {
     throw new TypeError('OneBot compatibility gateway requires a persona identity.')
   }
-  if (!Array.isArray(options.allowedConversations) || options.allowedConversations.length === 0
+  if (!Array.isArray(options.allowedConversations)
     || options.allowedConversations.length > 1_000) {
     throw new TypeError('OneBot compatibility gateway requires explicit allowed conversations.')
   }

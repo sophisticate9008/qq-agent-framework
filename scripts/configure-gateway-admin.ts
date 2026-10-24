@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -36,20 +35,17 @@ export function configureGatewayAdmin(options: ConfigureGatewayAdminOptions) {
   loadOneBotGatewayConfiguration(gatewayConfiguration);
   privateDirectory(dirname(filename));
   privateDirectory(dirname(tokenFile));
-  let tokenCreated = false;
   if (existsSync(tokenFile)) {
     const status = lstatSync(tokenFile);
     assert(status.isFile() && !status.isSymbolicLink() && (status.mode & 0o077) === 0 && status.size <= 4096,
       'ADMIN_SETUP_INVALID_TOKEN', 'Existing administrator token must be a private bounded file.');
     const token = readFileSync(tokenFile, 'utf8').trim();
     assert(token.length >= 24 && !/[\r\n]/.test(token), 'ADMIN_SETUP_INVALID_TOKEN', 'Administrator token must have at least 24 characters.');
-  } else {
-    writeFileSync(tokenFile, randomBytes(32).toString('hex') + '\n', { mode: 0o600, flag: 'wx' });
-    tokenCreated = true;
   }
   writeFileSync(filename, JSON.stringify({ host, port, tokenFile, gatewayConfiguration }, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
   loadGatewayAdminConfiguration(filename);
-  return Object.freeze({ configuration: filename, host, port, tokenFile, tokenCreated,
+  return Object.freeze({ configuration: filename, host, port, tokenFile, tokenCreated: false,
+    initialization: existsSync(tokenFile) ? 'ready' : 'first-web-visit',
     gatewayConfiguration, access: host === '0.0.0.0' || host === '::' ? 'Use this machine’s actual network address.' : host });
 }
 

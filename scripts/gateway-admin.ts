@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
 
 import { errorCode, isRecord } from '../src/core/values.ts';
@@ -37,6 +37,14 @@ try {
     });
     process.exitCode = ready ? 0 : 1;
   } else if (argumentsList.includes('--health')) {
+    if (!existsSync(configuration.tokenFile)) {
+      const response = await fetch(`${address}/api/setup`, { signal: AbortSignal.timeout(5_000), redirect: 'error' });
+      const setup: unknown = await response.json();
+      if (!response.ok || !isRecord(setup) || setup.initialized !== false || setup.canInitialize !== true
+        || setup.revision !== createRevision(configuration)) throw new Error('Administrator setup is unavailable.');
+      console.log('Framework administrator awaiting first connection.');
+      process.exit(0);
+    }
     const token = readFileToken(configuration.tokenFile);
     const response = await fetch(`${address}/api/gateway/health`, {
       headers: { authorization: `Bearer ${token}` },
@@ -48,7 +56,7 @@ try {
       || result.revision !== createRevision(configuration)) throw new Error('Gateway administrator is not ready.');
     console.log('Framework gateway administrator ready.');
   } else {
-    const service = await startGatewayAdmin(configuration);
+    const service = await startGatewayAdmin(configuration, { configurationFilename: argumentsList[configIndex + 1] });
     console.log(`Framework gateway administrator listening on ${gatewayAdminAddress({
       ...configuration,
       port: service.address.port

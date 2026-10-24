@@ -30,6 +30,8 @@ jobs:
         if: matrix.node == '24'
       - run: npm run test:browser
         if: matrix.node == '24'
+      - run: node scripts/management-smoke.ts
+        if: matrix.node == '24'
       - run: node scripts/markdown-smoke.ts
         if: matrix.node == '24'
       - run: node scripts/presentation-smoke.ts

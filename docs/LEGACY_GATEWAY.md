@@ -77,7 +77,7 @@ CLI 接受一个严格 JSON 配置文件。配置文件、token 文件必须是�
 | `tokenFile` | 是 | 旧 HTTP 调用方访问 gateway 的 Bearer token 文件。只改旧 `httpUrl` 时，其内容必须匹配旧调用方已经发送的 token。 |
 | `upstreamTokenFile` | 否 | gateway 访问 upstream 的 Bearer token；省略时复用 `tokenFile`。 |
 | `storeFilename` | 是 | 私有 SQLite 状态文件。父目录由服务以私有权限创建。 |
-| `allowedConversations` | 是 | 1–1000 个唯一 `private:<decimal-id>` / `group:<decimal-id>`。这是固定拒绝式 allowlist，不是旁路列表。 |
+| `allowedConversations` | 是 | 0–1000 个唯一 `private:<decimal-id>` / `group:<decimal-id>`。这是固定拒绝式 allowlist，不是旁路列表；空数组表示拒绝全部带目标的请求。 |
 | `persona` | 是 | `{ id, version }`，进入持久状态、幂等与授权作用域。 |
 | `authorizationVersion` | 否 | 显式授权代次，默认 `1`；只允许 1–64 位字母、数字、点、下划线或短横线。 |
 | `timeoutMs` | 否 | 单次请求期限；host 配置范围 10–120000 ms，默认 15000 ms。 |
@@ -105,7 +105,7 @@ gateway 为每个 allowlisted conversation 创建 `messaging.send` 和 `messagin
 }
 ```
 
-此时两个数值仍保留在配置中，但有效授权不限制发送次数且不设置到期日。改为 `true` 后才启用已填写值；显式 `true` 但未填写某一项时，该项仍不限制。当前管理页面只读展示状态，开关需修改私有配置文件。
+此时两个数值仍保留在配置中，但有效授权不限制发送次数且不设置到期日。改为 `true` 后才启用已填写值；显式 `true` 但未填写某一项时，该项仍不限制。管理工作台可编辑开关和数值；保存预算更改时会生成新的 `authorizationVersion`，应用网关后才建立新一代授权。
 
 grant 身份包含 persona、conversation 与 `authorizationVersion`：
 
@@ -116,7 +116,15 @@ grant 身份包含 persona、conversation 与 `authorizationVersion`：
 
 因此重启不是续期操作。只有显式设置限额或期限的部署，才需要监控对应剩余值并在耗尽前复核授权；默认持续服务不要求周期续期。
 
-启用、关闭或调整预算后，必须同时更新 `authorizationVersion` 并重载 gateway 才会生效；只修改预算字段而沿用原版本会安全拒绝启动。
+手工启用、关闭或调整预算时，必须同时更新 `authorizationVersion` 并重载 gateway 才会生效；只修改预算字段而沿用原版本会安全拒绝启动。通过管理工作台保存时会自动更新该版本。
+
+### 管理工作台接入
+
+管理工作台提供六页中文配置，可编辑真实人设、旧 bridge 功能、访问范围、模型与回复、预算和运行参数。它通过私有配置选择监听地址和端口，首次网页访问自动创建固定的私有管理令牌文件并显示文件路径；无需预先手工生成管理令牌。完整部署和操作结果语义见[管理工作台教程](GATEWAY_ADMIN.md)。
+
+允许群聊和允许私聊可以同时清空。保存访问范围时，工作台先把过滤后的目标同步到 gateway，再保存旧 bridge 白名单；同步后的 `allowedConversations: []` 会拒绝全部带群聊或私聊目标的读取、写入和发送。它不影响无目标的受认证状态读取，也不能拦截绕过 HTTP gateway 的旧 WebSocket 路径。
+
+工作台将“写入配置”和“应用到运行服务”分开。gateway 或 bridge 的应用成功表示服务管理操作已经完成；管理端修改监听地址或端口时只表示重启请求已接受，用户仍需在新地址重新连接。超时或响应不确定显示为 `unknown`，不得据此自动重复应用。
 
 ## 启动与健康检查
 

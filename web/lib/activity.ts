@@ -1,3 +1,5 @@
+import { parseNativeUsageSnapshot } from './native-usage.ts';
+
 export interface ConversationIdentity {
   readonly key: string;
   readonly kind: 'group' | 'private' | 'internal' | 'unattributed' | 'other';
@@ -49,17 +51,22 @@ export interface ManagedSession {
   readonly key: string;
   readonly sessionId: string;
   readonly owner: boolean;
+  readonly bindingRevision?: string;
 }
 
 export interface SessionSnapshot {
   readonly sessions: readonly ManagedSession[];
   readonly revision: string;
+  readonly next?: string | null;
+  readonly resetAvailable?: boolean;
 }
 
 export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
-  if (!isRecord(value) || !Array.isArray(value.sessions) || value.sessions.length > 256) return null;
+  if (!isRecord(value) || !Array.isArray(value.sessions) || value.sessions.length > 1000) return null;
   const revision = boundedText(value.revision, 256);
   if (!revision) return null;
+  if (value.next !== undefined && value.next !== null && (typeof value.next !== 'string' || value.next.length === 0 || value.next.length > 160 || /[\x00-\x1f\x7f]/.test(value.next))) return null;
+  if (value.resetAvailable !== undefined && typeof value.resetAvailable !== 'boolean') return null;
   const sessions: ManagedSession[] = [];
   const keys = new Set<string>();
   for (const item of value.sessions) {
@@ -70,7 +77,8 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
     keys.add(key);
     sessions.push({ key, sessionId, owner: item.owner });
   }
-  return { sessions, revision };
+  return { sessions, revision, ...(value.next === undefined ? {} : { next: value.next as string | null }),
+    ...(value.resetAvailable === undefined ? {} : { resetAvailable: value.resetAvailable }) };
 }
 
 export interface SessionResetResult {
@@ -94,19 +102,19 @@ export function parseSessionResetResult(value: unknown, key: string, sessionId: 
 }
 
 export interface UsageTotals {
-  readonly totalTokens: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheHitTokens: number;
-  readonly cacheMissTokens: number;
-  readonly cacheWriteTokens: number;
-  readonly reasoningTokens: number;
-  readonly cost: number;
+  readonly totalTokens: number | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly cacheHitTokens: number | null;
+  readonly cacheMissTokens: number | null;
+  readonly cacheWriteTokens: number | null;
+  readonly reasoningTokens: number | null;
+  readonly cost: number | null;
   readonly estimated: boolean;
   readonly conversations: number;
   readonly turns: number;
   readonly steps: number;
-  readonly unattributedCost: number;
+  readonly unattributedCost: number | null;
   readonly attributedCost: number | null;
   readonly buckets: UsageBuckets | null;
   readonly byTier: UsageByTier | null;
@@ -116,11 +124,11 @@ export interface UsageTotals {
 }
 
 export interface UsageBuckets {
-  readonly cacheMiss: number;
-  readonly cacheHit: number;
-  readonly cacheWrite: number;
-  readonly output: number;
-  readonly reasoning: number;
+  readonly cacheMiss: number | null;
+  readonly cacheHit: number | null;
+  readonly cacheWrite: number | null;
+  readonly output: number | null;
+  readonly reasoning: number | null;
 }
 
 export interface UsageByTier {
@@ -131,7 +139,7 @@ export interface UsageByTier {
 export interface UsageNowTier {
   readonly model: string;
   readonly label: string;
-  readonly tier: 'peak' | 'off';
+  readonly tier: 'peak' | 'off' | 'flat';
   readonly tierLabel: string;
   readonly currency: string;
   readonly symbol: string;
@@ -154,6 +162,7 @@ export interface UsagePriceModel {
 }
 
 export interface UsagePriceTable {
+  readonly pricingMode?: 'flat';
   readonly version: string;
   readonly currency: string;
   readonly symbol: string;
@@ -179,11 +188,11 @@ export interface UsageLedgerStats {
 export interface ConversationUsage {
   readonly key: string;
   readonly sessionCount: number;
-  readonly totalTokens: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheHitTokens: number;
-  readonly cost: number;
+  readonly totalTokens: number | null;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly cacheHitTokens: number | null;
+  readonly cost: number | null;
   readonly estimated: boolean;
   readonly turns: number;
   readonly steps: number;
@@ -195,9 +204,25 @@ export interface ConversationUsage {
   readonly byTier: UsageByTier | null;
   readonly cacheHitRate: number | null;
   readonly firstAt: string | null;
+  readonly coverage?: UsageCoverage;
+  readonly knownCosts?: Readonly<Record<string, number>>;
+}
+
+export interface UsageCoverage {
+  readonly partial: boolean;
+  readonly incompleteTurns: number;
+  readonly records: number;
+  readonly tokenUsageAvailable: boolean;
+  readonly missingCostTurns: number;
+  readonly knownTokens: Readonly<Record<string, number>>;
+  readonly missingTokens: Readonly<Record<string, number>>;
+  readonly knownCosts: Readonly<Record<string, number>>;
 }
 
 export interface UsageSnapshot {
+  readonly native?: true;
+  readonly coverage?: UsageCoverage;
+  readonly resetAvailable?: false;
   readonly source: 'chat-ledger';
   readonly revision: string | null;
   readonly generatedAt: string;
@@ -381,6 +406,7 @@ function parseLedger(value: unknown): UsageLedgerStats | null {
 }
 
 export function parseUsageSnapshot(value: unknown): UsageSnapshot | null {
+  if (isRecord(value) && value.native === true) return parseNativeUsageSnapshot(value);
   if (!isRecord(value) || value.source !== 'chat-ledger' || !Array.isArray(value.conversations)
     || value.conversations.length > 1000 || typeof value.limited !== 'boolean') return null;
   const generatedAt = timestamp(value.generatedAt);
@@ -433,7 +459,8 @@ export function formatActivityCount(value: number): string {
   return countFormatter.format(value);
 }
 
-export function formatUsageCount(value: number, detailed = false): string {
+export function formatUsageCount(value: number | null, detailed = false): string {
+  if (value === null) return '未知';
   if (!Number.isFinite(value) || value < 0) throw new RangeError('Usage count must be finite and nonnegative.');
   if (detailed || value < 1_000) return formatActivityCount(value);
   const units = [
@@ -448,6 +475,11 @@ export function formatUsageCount(value: number, detailed = false): string {
   return formatActivityCount(value);
 }
 
-export function formatActivityCost(value: number, _currency: string, symbol: string): string {
+export function formatActivityCost(value: number | null, _currency: string, symbol: string): string {
+  if (value === null) return '未知';
   return `${symbol}${decimalFormatter.format(value)}`;
+}
+
+export function sumUsageCounts(...values: readonly (number | null)[]): number | null {
+  return values.reduce<number | null>((total, value) => total === null || value === null ? null : total + value, 0);
 }

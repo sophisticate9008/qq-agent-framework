@@ -59,17 +59,35 @@ test('event timeout options reject disabled and out-of-range deadlines', () => {
   }
 });
 
-test('per-event timeout is bounded by the engine limit and starts when emitted', async () => {
+test('per-event timeout is bounded by the engine limit and starts when emitted', { timeout: 5000 }, async context => {
+  let monotonic = 0;
+  context.mock.method(performance, 'now', () => monotonic);
+  context.mock.timers.enable({ apis: ['setTimeout'] });
   const { engine } = fixture({ eventTimeoutMs: 50 });
-  engine.install(feature(() => new Promise<void>(() => {})));
+  context.after(async () => { monotonic = 1000; context.mock.timers.tick(1000); await engine.stop(); });
+  let enteredAt: number | null = null;
+  const entered = deferred<void>();
+  engine.install(feature(() => { enteredAt = performance.now(); entered.resolve(); return new Promise<void>(() => {}); }));
   assert.throws(() => engine.emit(event('disabled'), { timeoutMs: 0 }), { code: 'INVALID_EVENT_OPTIONS' });
   assert.throws(() => engine.emit(event('over-limit'), { timeoutMs: 51 }), { code: 'INVALID_EVENT_OPTIONS' });
   assert.throws(() => engine.emit(event('invalid-signal'), { signal: {} as AbortSignal }), { code: 'INVALID_EVENT_OPTIONS' });
-  const startedAt = performance.now();
-  const report = await within(engine.emit(event('short'), { timeoutMs: 15 }));
+  let settled = false;
+  const pending = engine.emit(event('short'), { timeoutMs: 15 }).then(report => { settled = true; return report; });
+  void pending.catch(() => undefined);
+  monotonic = 10;
+  context.mock.timers.tick(10);
+  await Promise.race([entered.promise, pending.then(() => assert.fail('Event ended before its handler could enter.'))]);
+  assert.equal(enteredAt, 10);
+  monotonic = 14;
+  context.mock.timers.tick(4);
+  await nextTurn();
+  assert.equal(settled, false);
+  monotonic = 15;
+  context.mock.timers.tick(1);
+  await nextTurn();
+  assert.equal(settled, true);
+  const report = await pending;
   assert.equal(report.outcomes[0].errorCode, 'EVENT_TIMEOUT');
-  assert(performance.now() - startedAt < 45);
-  await engine.stop();
 });
 
 test('hung handlers time out, abort their execution, release capacity, and let stop finish', async () => {

@@ -476,10 +476,14 @@ test('gateway mounts explicit WS protocol controls, verifies login, drops incomi
   assert.equal(parseObject(connected.connection).selfId, '123');
   assert.equal(parseObject(connected.connection).chatReady, false);
   const statusResponse = await fetch(`${origin}/api/chat/status`, { headers });
-  assert.deepEqual(await statusResponse.json(), { runtimeConnected: false });
+  const nativeStatus = parseObject(await statusResponse.json());
+  assert.equal(nativeStatus.runtimeConnected, false);
+  assert.equal(nativeStatus.chatReady, false);
+  assert.equal(nativeStatus.protocolConnected, true);
   const counted = await getAdapters();
   assert.equal(parseObject(counted.connection).received, 1);
-  assert.equal(parseObject(counted.connection).dropped, 1);
+  assert.equal(parseObject(counted.connection).dropped, 0);
+  assert.equal(parseObject(nativeStatus.ingress).droppedWhileStopped, 1);
   const stoppedResponse = await post('/disconnect', {});
   assert.equal(stoppedResponse.status, 200);
   const stopped = parseObject(await stoppedResponse.json());

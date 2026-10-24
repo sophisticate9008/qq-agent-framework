@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { connect, isIP } from 'node:net';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,19 +21,23 @@ import {
 } from '../src/host/onebot-gateway.ts';
 
 const PLAYWRIGHT_VERSION = '1.61.1';
+const BROWSER_TYPESCRIPT_VERSION = '5.9.3';
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
 const PROJECT_ROOT = basename(sourceRoot) === 'dist' ? dirname(sourceRoot) : sourceRoot;
-const BROWSER_SMOKES = Object.freeze([
-  'scripts/browser-smoke.ts',
-  'scripts/management-smoke.ts',
-  'scripts/page-navigation-smoke.ts',
-  'scripts/activity-smoke.ts',
-  'scripts/usage-smoke.ts',
-  'scripts/markdown-smoke.ts',
-  'scripts/presentation-smoke.ts'
-]);
+const BROWSER_TARGETS = Object.freeze({
+  browser: 'scripts/browser-smoke.ts',
+  management: 'scripts/management-smoke.ts',
+  'page-navigation': 'scripts/page-navigation-smoke.ts',
+  activity: 'scripts/activity-smoke.ts',
+  usage: 'scripts/usage-smoke.ts',
+  markdown: 'scripts/markdown-smoke.ts',
+  presentation: 'scripts/presentation-smoke.ts',
+  'virtual-list-perf': 'scripts/virtual-list-perf-smoke.ts',
+  'native-chat-ui': 'scripts/native-chat-ui-smoke.ts'
+});
 
-type CliCommand = 'init' | 'start' | 'status' | 'test' | 'build';
+type CliCommand = 'init' | 'start' | 'status' | 'test' | 'build' | 'install' | 'uninstall';
+type BrowserTarget = keyof typeof BROWSER_TARGETS;
 
 export interface ParsedCliArguments {
   readonly command: CliCommand;
@@ -46,6 +50,8 @@ export interface ParsedCliArguments {
   readonly browser: boolean;
   readonly withDeps: boolean;
   readonly adminOnly: boolean;
+  readonly target?: BrowserTarget;
+  readonly skipBrowserDownload?: boolean;
 }
 
 export interface CliIo {
@@ -72,7 +78,9 @@ const GENERAL_HELP = `QQ Agent Framework 命令行
   npm run cli -- init --gateway-config <网关配置> [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]
   npm run cli -- start [--config <管理配置>] [--admin-only]
   npm run cli -- status [--config <管理配置>]
-  npm run cli -- test [--browser] [--with-deps]
+  npm run cli -- test [--browser [--target <项目>] [--with-deps]]
+  npm run cli -- install --browser [--skip-browser-download] [--with-deps]
+  npm run cli -- uninstall --browser
   npm run cli -- build
 
 配置优先级：--config > QQ_AGENT_CONFIG > runtime/admin/config.json
@@ -81,7 +89,11 @@ init 默认创建独立的本机 OneBot HTTP 网关配置；--gateway-config 可
 新配置不允许任何会话发送；请首次访问管理网页生成管理令牌，再显式配置外部 OneBot 和发送范围。
 只有显式提供 --service-manager 时才启用服务管理，不会自动猜测或执行脚本。
 start 默认启动或复用配置匹配的 gateway；--admin-only 仅启动管理界面。
-普通启动和测试不需要 Playwright；只有 test --browser 会按需安装。`;
+普通安装、构建、启动和单元测试不需要 Playwright。
+install --browser 或 test --browser 才准备 runtime/testing/ 内的独立浏览器测试工具。
+--skip-browser-download 只安装测试包；--with-deps 额外安装系统库，可能需要管理员权限。
+--target 可选：${Object.keys(BROWSER_TARGETS).join('、')}；省略时执行全部浏览器测试。
+uninstall --browser 只清理 runtime/testing/，不修改项目依赖、配置、会话或测试证据。`;
 
 function usage(message: string): never {
   throw new CliUsageError(message);
@@ -100,7 +112,7 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     if (argumentsList.length !== 1) usage('帮助命令不接受其他参数。');
     return { command: 'start', help: true, browser: false, withDeps: false, adminOnly: false };
   }
-  if (!['init', 'start', 'status', 'test', 'build'].includes(first)) usage('未知命令。');
+  if (!['init', 'start', 'status', 'test', 'build', 'install', 'uninstall'].includes(first)) usage('未知命令。');
   const command = first as CliCommand;
   const values = new Map<string, string>();
   const flags = new Set<string>();
@@ -110,12 +122,12 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
       if (argumentsList.length !== 2) usage('帮助参数不能与其他参数同时使用。');
       return { command, help: true, browser: false, withDeps: false, adminOnly: false };
     }
-    if (['--browser', '--with-deps', '--admin-only'].includes(argument)) {
+    if (['--browser', '--with-deps', '--admin-only', '--skip-browser-download'].includes(argument)) {
       if (flags.has(argument)) usage(`参数 ${argument} 不能重复。`);
       flags.add(argument);
       continue;
     }
-    if (['--config', '--gateway-config', '--service-manager', '--host', '--port'].includes(argument)) {
+    if (['--config', '--gateway-config', '--service-manager', '--host', '--port', '--target'].includes(argument)) {
       if (values.has(argument)) usage(`参数 ${argument} 不能重复。`);
       values.set(argument, optionValue(argumentsList, index, argument));
       index += 1;
@@ -128,11 +140,19 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     ? new Set(['--config', '--gateway-config', '--service-manager', '--host', '--port'])
     : command === 'start' ? new Set(['--config', '--admin-only'])
       : command === 'status' ? new Set(['--config'])
-      : command === 'test' ? new Set(['--browser', '--with-deps']) : new Set<string>();
+      : command === 'test' ? new Set(['--browser', '--with-deps', '--target'])
+        : command === 'install' ? new Set(['--browser', '--with-deps', '--skip-browser-download'])
+          : command === 'uninstall' ? new Set(['--browser']) : new Set<string>();
   for (const option of [...values.keys(), ...flags]) {
     if (!allowed.has(option)) usage(`命令 ${command} 不支持参数 ${option}。`);
   }
   if (flags.has('--with-deps') && !flags.has('--browser')) usage('--with-deps 只能与 --browser 一起使用。');
+  if ((command === 'install' || command === 'uninstall') && !flags.has('--browser')) usage('请指定 --browser，只管理可选的浏览器测试工具。');
+  if (flags.has('--skip-browser-download') && flags.has('--with-deps')) usage('--skip-browser-download 不能与 --with-deps 同时使用。');
+  const target = values.get('--target');
+  if (target !== undefined && (!flags.has('--browser') || !Object.hasOwn(BROWSER_TARGETS, target))) {
+    usage(`--target 必须与 --browser 一起使用，可选：${Object.keys(BROWSER_TARGETS).join('、')}。`);
+  }
   const portText = values.get('--port');
   if (portText !== undefined && !/^[1-9]\d{0,4}$/.test(portText)) usage('--port 必须是 1 到 65535 的整数。');
   const port = portText === undefined ? undefined : Number(portText);
@@ -147,7 +167,9 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     ...(port === undefined ? {} : { port }),
     browser: flags.has('--browser'),
     withDeps: flags.has('--with-deps'),
-    adminOnly: flags.has('--admin-only')
+    adminOnly: flags.has('--admin-only'),
+    ...(target === undefined ? {} : { target: target as BrowserTarget }),
+    ...(flags.has('--skip-browser-download') ? { skipBrowserDownload: true } : {})
   };
 }
 
@@ -296,11 +318,14 @@ function cliErrorMessage(error: unknown): string {
   return errorCode(error, 'CLI_FAILED');
 }
 
-function runProcess(executable: string, argumentsList: readonly string[]): Promise<void> {
+function runProcess(executable: string, argumentsList: readonly string[], options: {
+  readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
+} = {}): Promise<void> {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(executable, argumentsList, {
-      cwd: PROJECT_ROOT,
-      env: process.env,
+      cwd: options.cwd ?? PROJECT_ROOT,
+      env: options.env ?? process.env,
       shell: false,
       stdio: 'inherit'
     });
@@ -314,40 +339,118 @@ function runProcess(executable: string, argumentsList: readonly string[]): Promi
   });
 }
 
-function nodeArguments(...argumentsList: string[]): readonly string[] {
-  return argumentsList.map(argument => resolve(PROJECT_ROOT, argument));
-}
-
 async function build(webOnly = false): Promise<void> {
   await runProcess(process.execPath, [resolve(PROJECT_ROOT, 'scripts/build.ts'), ...(webOnly ? ['--web'] : [])]);
 }
 
-function playwrightInstalled(): boolean {
+export function browserToolchainPaths(root = PROJECT_ROOT) {
+  const directory = resolve(root, 'runtime/testing');
+  return Object.freeze({
+    directory,
+    manifest: join(directory, 'package.json'),
+    browsers: join(directory, 'browsers'),
+    configuration: join(directory, 'tsconfig.json'),
+    playwright: join(directory, 'node_modules/playwright/cli.js'),
+    typescript: join(directory, 'node_modules/typescript/bin/tsc'),
+    resolver: resolve(root, 'scripts/browser-toolchain.ts')
+  });
+}
+
+export function browserSmokeFiles(target?: BrowserTarget): readonly string[] {
+  return target === undefined ? Object.values(BROWSER_TARGETS) : [BROWSER_TARGETS[target]];
+}
+
+function requireBrowserToolchainMarker(filename: string): void {
+  let descriptor: number | undefined;
   try {
-    const filename = resolve(PROJECT_ROOT, 'node_modules/playwright/package.json');
-    const value: unknown = JSON.parse(readFileSync(filename, 'utf8'));
-    return isRecord(value) && value.version === PLAYWRIGHT_VERSION;
+    const pathname = lstatSync(filename);
+    if (!pathname.isFile() || pathname.isSymbolicLink() || pathname.size > 4096) throw new Error('invalid_marker');
+    descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const before = fstatSync(descriptor);
+    if (!before.isFile() || before.size > 4096 || before.dev !== pathname.dev || before.ino !== pathname.ino) {
+      throw new Error('invalid_marker');
+    }
+    const buffer = Buffer.alloc(4097);
+    const count = readSync(descriptor, buffer, 0, buffer.length, 0);
+    const after = fstatSync(descriptor);
+    const current = lstatSync(filename);
+    if (count === 0 || count > 4096 || count !== before.size || before.size !== after.size
+      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+      || !current.isFile() || current.isSymbolicLink() || current.dev !== before.dev || current.ino !== before.ino) {
+      throw new Error('invalid_marker');
+    }
+    const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, count)));
+    if (!isRecord(value) || value.name !== 'qq-agent-browser-testing' || value.private !== true || value.type !== 'module') {
+      throw new Error('invalid_marker');
+    }
   } catch {
-    return false;
+    throw new CliOperationError('浏览器测试目录缺少有效的本工具安装标记，拒绝覆盖或清理；请保留文件并手动核对。');
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
-async function prepareBrowser(withDeps: boolean): Promise<void> {
-  if (!playwrightInstalled()) {
+async function prepareBrowser(withDeps: boolean, downloadBrowser: boolean, io: CliIo): Promise<void> {
+  const paths = browserToolchainPaths();
+  privateDirectory(dirname(paths.directory));
+  privateDirectory(paths.directory);
+  const manifest = JSON.stringify({
+    name: 'qq-agent-browser-testing',
+    private: true,
+    type: 'module',
+    dependencies: { playwright: PLAYWRIGHT_VERSION, typescript: BROWSER_TYPESCRIPT_VERSION }
+  }, null, 2) + '\n';
+  if (pathExists(paths.manifest) || readdirSync(paths.directory).length > 0) requireBrowserToolchainMarker(paths.manifest);
+  const changed = !existsSync(paths.manifest) || readFileSync(paths.manifest, 'utf8') !== manifest;
+  if (changed) writeFileSync(paths.manifest, manifest, { mode: 0o600 });
+  const installed = (name: string, version: string): boolean => {
+    try {
+      const metadata: unknown = JSON.parse(readFileSync(join(paths.directory, 'node_modules', name, 'package.json'), 'utf8'));
+      return isRecord(metadata) && metadata.version === version;
+    } catch { return false; }
+  };
+  const environment = { ...io.env, PLAYWRIGHT_BROWSERS_PATH: paths.browsers, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1' };
+  if (changed || !installed('playwright', PLAYWRIGHT_VERSION) || !installed('playwright-core', PLAYWRIGHT_VERSION)
+    || !installed('typescript', BROWSER_TYPESCRIPT_VERSION) || !existsSync(paths.playwright) || !existsSync(paths.typescript)) {
+    io.stdout('正在安装独立浏览器测试包，不修改项目依赖。');
     const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     await runProcess(npm, [
-      'install',
-      '--no-save',
-      '--package-lock=false',
+      'install', '--prefix', paths.directory,
       '--ignore-scripts',
+      '--package-lock=true',
+      '--prefer-offline',
       '--no-audit',
-      '--no-fund',
-      `playwright@${PLAYWRIGHT_VERSION}`
-    ]);
+      '--no-fund'
+    ], { cwd: paths.directory, env: environment });
   }
-  const playwrightCli = resolve(PROJECT_ROOT, 'node_modules/playwright/cli.js');
-  if (!existsSync(playwrightCli)) throw new CliOperationError('Playwright 安装不完整。');
-  await runProcess(process.execPath, [playwrightCli, 'install', ...(withDeps ? ['--with-deps'] : []), 'chromium']);
+  writeFileSync(paths.configuration, JSON.stringify({
+    extends: resolve(PROJECT_ROOT, 'tsconfig.browser.json'),
+    compilerOptions: {
+      paths: {
+        '@/*': [resolve(PROJECT_ROOT, 'web/*')],
+        playwright: [join(paths.directory, 'node_modules/playwright/index.d.ts')],
+        'playwright/*': [join(paths.directory, 'node_modules/playwright/*')],
+        'playwright-core': [join(paths.directory, 'node_modules/playwright-core/index.d.ts')]
+      }
+    }
+  }, null, 2) + '\n', { mode: 0o600 });
+  if (downloadBrowser && (withDeps || !io.env.CHROMIUM_EXECUTABLE)) {
+    io.stdout('正在准备测试用 Chromium；系统库仅在指定 --with-deps 时安装。');
+    await runProcess(process.execPath, [paths.playwright, 'install', ...(withDeps ? ['--with-deps'] : []), 'chromium'],
+      { cwd: paths.directory, env: environment });
+  }
+  io.stdout(downloadBrowser ? '浏览器测试工具已就绪。' : '浏览器测试包已安装，未下载浏览器。');
+}
+
+export function uninstallBrowserToolchain(root = PROJECT_ROOT): void {
+  const paths = browserToolchainPaths(root);
+  if (!pathExists(paths.directory)) return;
+  if (lstatSync(dirname(paths.directory)).isSymbolicLink() || !lstatSync(paths.directory).isDirectory()
+    || lstatSync(paths.directory).isSymbolicLink()) {
+    throw new CliOperationError('浏览器测试目录必须是真实目录，拒绝清理符号链接。');
+  }
+  requireBrowserToolchainMarker(paths.manifest);
+  rmSync(paths.directory, { recursive: true, force: true });
 }
 
 function testFiles(directory: string, extension: '.ts' | '.js'): readonly string[] {
@@ -358,22 +461,29 @@ function testFiles(directory: string, extension: '.ts' | '.js'): readonly string
     .sort();
 }
 
-async function runTests(browser: boolean, withDeps: boolean): Promise<void> {
+async function runTests(parsed: ParsedCliArguments, io: CliIo): Promise<void> {
+  const { browser, withDeps, target } = parsed;
   if (!browser) {
     await build();
     await runProcess(process.execPath, ['--test', '--test-concurrency=4', ...testFiles('test', '.ts')]);
     await runProcess(process.execPath, ['--test', '--test-concurrency=4', ...testFiles('dist/test', '.js')]);
     return;
   }
-  await prepareBrowser(withDeps);
+  await prepareBrowser(withDeps, true, io);
+  const paths = browserToolchainPaths();
   await runProcess(process.execPath, [
-    resolve(PROJECT_ROOT, 'node_modules/typescript/bin/tsc'),
+    paths.typescript,
     '-p',
-    resolve(PROJECT_ROOT, 'tsconfig.browser.json'),
+    paths.configuration,
     '--noEmit'
   ]);
   await build();
-  for (const smoke of BROWSER_SMOKES) await runProcess(process.execPath, nodeArguments(smoke));
+  for (const smoke of browserSmokeFiles(target)) {
+    io.stdout(`执行浏览器测试：${smoke}`);
+    await runProcess(process.execPath, ['--import', pathToFileURL(paths.resolver).href, resolve(PROJECT_ROOT, smoke)], {
+      env: { ...io.env, QQ_AGENT_BROWSER_TOOLCHAIN_ROOT: paths.directory, PLAYWRIGHT_BROWSERS_PATH: paths.browsers }
+    });
+  }
 }
 
 function revision(configuration: Readonly<GatewayAdminConfiguration> | Readonly<OneBotGatewayConfiguration>): string {
@@ -581,7 +691,12 @@ export async function runCli(argumentsList: readonly string[], io: CliIo = DEFAU
     } else if (parsed.command === 'status') {
       await status(resolveConfigurationFilename(parsed.config, io.env, io.cwd), io.stdout);
     } else if (parsed.command === 'test') {
-      await runTests(parsed.browser, parsed.withDeps);
+      await runTests(parsed, io);
+    } else if (parsed.command === 'install') {
+      await prepareBrowser(parsed.withDeps, !parsed.skipBrowserDownload, io);
+    } else if (parsed.command === 'uninstall') {
+      uninstallBrowserToolchain();
+      io.stdout('浏览器测试工具已卸载；项目依赖、配置、会话和测试证据保持不变。');
     } else {
       await build();
     }

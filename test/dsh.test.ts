@@ -13,6 +13,7 @@ import {
   type DshSdkClient,
 } from '../src/adapters/dsh.ts'
 import type { AgentEvent } from '../src/host/types.ts'
+import type { JsonObject } from '../src/core/types.ts'
 
 interface PortFixture {
   port: DshClientPort
@@ -122,13 +123,13 @@ test('DSH adapter sends queue prompts with requestId and keeps acceptance separa
           id: 'assistant-1',
           content: [
             { type: 'text', text: 'generated reply' },
-            { type: 'image', assetId: 'generated-image' },
-            { type: 'image', url: 'https://untrusted.invalid/raw' },
+            { type: 'reasoning', text: 'private reasoning' },
           ],
         },
       },
     },
   })
+  assert.deepEqual(events, [])
   await client.followRequest().onEvent({
     type: 'session/event',
     sessionId: 'session-1',
@@ -145,17 +146,11 @@ test('DSH adapter sends queue prompts with requestId and keeps acceptance separa
     type: 'message',
     content: [
       { type: 'text', text: 'generated reply' },
-      { type: 'image', assetId: 'generated-image' },
     ],
     data: {
       turn: 'turn-1',
       message: {
         id: 'assistant-1',
-        content: [
-          { type: 'text', text: 'generated reply' },
-          { type: 'image', assetId: 'generated-image' },
-          { type: 'image', url: 'https://untrusted.invalid/raw' },
-        ],
       },
     },
   })
@@ -171,6 +166,64 @@ test('DSH adapter sends queue prompts with requestId and keeps acceptance separa
   assert.equal(events.length, 2)
   await stop()
   assert.equal(client.stopped(), true)
+})
+
+test('DSH waits for successful matching turn end and suppresses tools, thoughts, private or interrupted output', async () => {
+  const unsafeFrames: JsonObject[] = [
+    { message: { content: [{ type: 'text', text: 'working' }, { type: 'tool-call', name: 'shell', arguments: { private: 'secret' } }] } },
+    { message: { content: [{ type: 'reasoning', text: 'private thoughts' }] } },
+    { interrupted: true, message: { content: [{ type: 'text', text: 'interrupted prefix' }] } },
+    { channel: 'analysis', message: { content: [{ type: 'text', text: 'analysis' }] } },
+    { message: { content: [{ type: 'text', text: 'private', visibility: 'private' }] } },
+    { message: { role: 'tool', content: [{ type: 'text', text: 'tool secret' }] } },
+    { message: { content: [{ type: 'image', assetId: 'not-a-dsh-attachment' }] } },
+  ]
+  for (const unsafe of unsafeFrames) {
+    const client = fixture()
+    const events: AgentEvent[] = []
+    await createDshAdapter(client.port).follow({ sessionId: 's', signal: new AbortController().signal, onEvent(event) { events.push(event) } })
+    await client.followRequest().onEvent({ type: 'session/event', sessionId: 's', event: { seq: 1, type: 'assistant/message', data: { turn: 1, ...unsafe } } })
+    assert.equal(events.length, 0)
+    await client.followRequest().onEvent({ type: 'session/event', sessionId: 's', event: { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } } })
+    assert(!events.some(event => event.type === 'message'))
+    assert(!JSON.stringify(events).includes('private thoughts'))
+  }
+  for (const reason of ['aborted', 'max-tokens', 'error']) {
+    const client = fixture()
+    const events: AgentEvent[] = []
+    await createDshAdapter(client.port).follow({ sessionId: 's', signal: new AbortController().signal, onEvent(event) { events.push(event) } })
+    await client.followRequest().onEvent({ type: 'session/event', sessionId: 's', event: { seq: 1, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'not final' }] } } } })
+    await client.followRequest().onEvent({ type: 'session/event', sessionId: 's', event: { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: reason } } } })
+    assert(!events.some(event => event.type === 'message'))
+  }
+})
+
+test('DSH final answer replaces work-step text and usage preserves actual disjoint counters without private replay data', async () => {
+  const client = fixture()
+  const events: AgentEvent[] = []
+  await createDshAdapter(client.port).follow({ sessionId: 's', signal: new AbortController().signal, onEvent(event) { events.push(event) } })
+  const emit = (seq: number, type: string, data: JsonObject) => client.followRequest().onEvent({ type: 'session/event', sessionId: 's', event: { seq, type, data } })
+  await emit(1, 'turn/start', { turn: 2 })
+  await emit(2, 'assistant/message', { turn: 2, step: 1, message: {
+    source: { kind: 'model', provider: 'external-route', model: 'model-1', replayState: { secret: 'never expose' } },
+    content: [{ type: 'text', text: 'doing work' }, { type: 'tool-call', name: 'shell' }],
+  }, usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 3 } })
+  await emit(3, 'step/start', { turn: 2, step: 2 })
+  await emit(4, 'assistant/message', { turn: 2, step: 2, message: {
+    source: { kind: 'model', provider: 'external-route', model: 'model-1', replayState: { secret: 'never expose' } },
+    content: [{ type: 'reasoning', text: 'private internal' }, { type: 'text', text: 'final answer' }],
+  }, usage: { inputTokens: 20, outputTokens: 6, totalTokens: 33, cacheReadTokens: 7 } })
+  assert.equal(events.length, 0)
+  await emit(5, 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.deepEqual(events.map(event => event.type), ['message', 'completed'])
+  assert.deepEqual(events[0]?.content, [{ type: 'text', text: 'final answer' }])
+  assert.equal(events[1]?.data?.usageComplete, true)
+  const usageSteps = events[1]?.data?.usageSteps
+  assert(Array.isArray(usageSteps))
+  assert.equal(usageSteps.length, 2)
+  assert(!JSON.stringify(events).includes('never expose'))
+  assert(!JSON.stringify(events).includes('private internal'))
+  assert(!JSON.stringify(events).includes('doing work'))
 })
 
 test('DSH adapter normalizes questions, approvals, failures and cancellation', async () => {
@@ -224,7 +277,7 @@ test('DSH adapter normalizes questions, approvals, failures and cancellation', a
     callId: 'call-1',
     reason: 'required',
   })
-  assert.deepEqual(events[3]!.data, { code: 'transport/closed' })
+  assert.deepEqual(events[3]!.data, { terminal: true, code: 'transport/closed' })
   assert.doesNotMatch(JSON.stringify(events[3]), /private detail/)
 
   await adapter.cancel?.({ sessionId: 'session-1', signal })
@@ -410,7 +463,7 @@ test('createDshSdkPort unwraps mature SDK RPCs and filters mux subscriptions by 
       sessionId: 'sdk-session',
       event: {
         type: 'assistant/message',
-        data: { turn: 'turn-sdk', message: { id: 'message-sdk', content: [{ type: 'text', text: 'done' }] } },
+        data: { turn: 3, message: { id: 'message-sdk', content: [{ type: 'text', text: 'done' }] } },
       },
     },
   })

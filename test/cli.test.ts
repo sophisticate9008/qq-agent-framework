@@ -1,20 +1,26 @@
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import {
+  browserSmokeFiles,
+  browserToolchainPaths,
   parseCliArguments,
   prepareGatewayForStart,
   resolveConfigurationFilename,
   runCli,
+  uninstallBrowserToolchain,
   type CliIo
 } from '../scripts/cli.ts';
+import { registerBrowserToolchainResolver } from '../scripts/browser-toolchain.ts';
 import { loadGatewayAdminConfiguration, startGatewayAdmin } from '../src/admin/gateway.ts';
 import { loadOneBotGatewayConfiguration, startOneBotGateway } from '../src/host/onebot-gateway.ts';
+import { isRecord } from '../src/core/values.ts';
 
 const ADMIN_SECRET = 'cli-administrator-secret-0123456789';
 const GATEWAY_SECRET = 'cli-gateway-secret-0123456789';
@@ -92,6 +98,160 @@ test('CLI parses only supported command options and presents standalone init fir
 test('init rejects removed bridge directory options', () => {
   assert.throws(() => parseCliArguments(['init', '--bridge-dir', '/tmp/bridge']), /无法识别/);
   assert.throws(() => parseCliArguments(['init', '--legacy-root', '/tmp/bridge']), /无法识别/);
+});
+
+test('browser dependency commands and targeted tests require explicit valid options', () => {
+  assert.equal(parseCliArguments(['install', '--browser']).command, 'install');
+  assert.equal(parseCliArguments(['install', '--browser', '--skip-browser-download']).skipBrowserDownload, true);
+  assert.equal(parseCliArguments(['uninstall', '--browser']).command, 'uninstall');
+  assert.equal(parseCliArguments(['test', '--browser', '--target', 'markdown']).target, 'markdown');
+  for (const argumentsList of [
+    ['install'], ['uninstall'], ['test', '--target', 'markdown'],
+    ['test', '--browser', '--target', 'missing'], ['test', '--browser', '--target', '__proto__'],
+    ['test', '--skip-browser-download'], ['uninstall', '--browser', '--with-deps'],
+    ['install', '--browser', '--skip-browser-download', '--with-deps'],
+    ['install', '--browser', '--target', 'markdown'], ['start', '--browser']
+  ]) assert.throws(() => parseCliArguments(argumentsList));
+});
+
+test('each browser alias selects exactly its named test and the default selects all', () => {
+  const root = dirname(dirname(browserToolchainPaths().directory));
+  const packageValue: unknown = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert(isRecord(packageValue) && isRecord(packageValue.scripts));
+  const aliases = {
+    'test:management': 'management', 'test:page-navigation': 'page-navigation',
+    'test:activity': 'activity', 'test:usage': 'usage',
+    'test:markdown-smoke': 'markdown', 'test:presentation-smoke': 'presentation',
+    'test:virtual-list-perf': 'virtual-list-perf', 'test:native-chat-ui': 'native-chat-ui'
+  };
+  for (const [alias, target] of Object.entries(aliases)) {
+    const command: unknown = packageValue.scripts[alias];
+    assert.equal(command, `node scripts/cli.ts test --browser --target ${target}`);
+    const parsed = parseCliArguments(['test', '--browser', '--target', target]);
+    assert.deepEqual(browserSmokeFiles(parsed.target), [`scripts/${target}-smoke.ts`]);
+  }
+  assert.equal(packageValue.scripts['test:browser'], 'node scripts/cli.ts test --browser');
+  assert.equal(browserSmokeFiles().length, 9);
+  assert.equal(new Set(browserSmokeFiles()).size, 9);
+  assert(browserSmokeFiles().includes('scripts/browser-smoke.ts'));
+  assert.equal(packageValue.scripts.test, 'node scripts/cli.ts test');
+  for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+    const dependencies = packageValue[section];
+    if (isRecord(dependencies)) assert(Object.keys(dependencies).every(name => !name.includes('playwright')));
+  }
+});
+
+test('browser resolver handles static imports from the isolated package, not the project package', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain space-'));
+  const isolated = browserToolchainPaths(directory).directory;
+  const fixture = join(directory, 'smoke.ts');
+  const hooks = registerBrowserToolchainResolver(isolated);
+  try {
+    writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
+    for (const [root, marker] of [[directory, 'project'], [isolated, 'isolated']] as const) {
+      const dependency = join(root, 'node_modules/playwright');
+      mkdirSync(dependency, { recursive: true });
+      writeFileSync(join(dependency, 'package.json'), JSON.stringify({
+        name: 'playwright', marker, exports: { '.': './package.json', './package.json': './package.json' }
+      }));
+    }
+    writeFileSync(fixture, 'import metadata from "playwright" with { type: "json" };\nexport default metadata;\n');
+    const imported: unknown = await import(pathToFileURL(fixture).href);
+    assert(isRecord(imported) && isRecord(imported.default));
+    assert.equal(imported.default.marker, 'isolated');
+    assert.throws(() => registerBrowserToolchainResolver('relative/directory'), /绝对路径/);
+  } finally {
+    hooks.deregister();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('browser resolver refuses to fall back to an unrelated project dependency', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-fallback-'));
+  const dependency = join(directory, 'node_modules/playwright');
+  mkdirSync(dependency, { recursive: true });
+  writeFileSync(join(dependency, 'package.json'), JSON.stringify({ name: 'playwright', exports: './package.json' }));
+  writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
+  const fixture = join(directory, 'smoke.ts');
+  writeFileSync(fixture, 'import metadata from "playwright" with { type: "json" };\nexport default metadata;\n');
+  const hooks = registerBrowserToolchainResolver(browserToolchainPaths(directory).directory);
+  try {
+    await assert.rejects(import(pathToFileURL(fixture).href), /浏览器测试依赖缺失/);
+  } finally {
+    hooks.deregister();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('uninstall removes only the isolated toolchain and preserves configurations and evidence', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-remove-'));
+  try {
+    const paths = browserToolchainPaths(directory);
+    assert.equal(paths.manifest, join(directory, 'runtime/testing/package.json'));
+    assert.equal(paths.playwright, join(directory, 'runtime/testing/node_modules/playwright/cli.js'));
+    assert.equal(paths.browsers, join(directory, 'runtime/testing/browsers'));
+    const preserved = [
+      'package.json', 'package-lock.json', 'node_modules/retained',
+      'runtime/admin/config.json', 'runtime/sessions/state.json', 'runtime/ui-smoke/evidence.json'
+    ];
+    for (const filename of [...preserved, 'runtime/testing/browsers/download', 'runtime/testing/node_modules/installed']) {
+      mkdirSync(dirname(join(directory, filename)), { recursive: true });
+      writeFileSync(join(directory, filename), 'keep');
+    }
+    writeFileSync(paths.manifest, JSON.stringify({ name: 'qq-agent-browser-testing', private: true, type: 'module' }));
+    uninstallBrowserToolchain(directory);
+    assert.equal(existsSync(paths.directory), false);
+    for (const filename of preserved) assert.equal(readFileSync(join(directory, filename), 'utf8'), 'keep');
+    uninstallBrowserToolchain(directory);
+    symlinkSync(join(directory, 'runtime/admin'), paths.directory, 'dir');
+    assert.throws(() => uninstallBrowserToolchain(directory), /符号链接/);
+    assert.equal(readFileSync(join(directory, 'runtime/admin/config.json'), 'utf8'), 'keep');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('uninstall refuses missing, foreign, invalid and symlinked markers without deleting data', () => {
+  const markers: readonly (string | undefined)[] = [
+    undefined,
+    JSON.stringify({ name: 'foreign-browser-testing', private: true, type: 'module' }),
+    JSON.stringify({ name: 'qq-agent-browser-testing', private: false, type: 'module' }),
+    JSON.stringify({ name: 'qq-agent-browser-testing', private: true, type: 'commonjs' }),
+    '{not-json', ' '.repeat(4097)
+  ];
+  for (const marker of markers) {
+    const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-unowned-'));
+    try {
+      const paths = browserToolchainPaths(directory);
+      mkdirSync(paths.directory, { recursive: true });
+      const retained = join(paths.directory, 'unrelated-data');
+      writeFileSync(retained, 'preserve');
+      if (marker !== undefined) writeFileSync(paths.manifest, marker);
+      assert.throws(() => uninstallBrowserToolchain(directory), /安装标记/);
+      assert.equal(readFileSync(retained, 'utf8'), 'preserve');
+      assert.equal(existsSync(paths.manifest), marker !== undefined);
+      if (marker !== undefined) assert.equal(readFileSync(paths.manifest, 'utf8'), marker);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-linked-marker-'));
+  try {
+    const paths = browserToolchainPaths(directory);
+    mkdirSync(paths.directory, { recursive: true });
+    const externalMarker = join(directory, 'external-package.json');
+    const content = JSON.stringify({ name: 'qq-agent-browser-testing', private: true, type: 'module' });
+    writeFileSync(externalMarker, content);
+    symlinkSync(externalMarker, paths.manifest);
+    const retained = join(paths.directory, 'unrelated-data');
+    writeFileSync(retained, 'preserve');
+    assert.throws(() => uninstallBrowserToolchain(directory), /安装标记/);
+    assert.equal(readFileSync(retained, 'utf8'), 'preserve');
+    assert.equal(readFileSync(externalMarker, 'utf8'), content);
+    assert.equal(readFileSync(paths.manifest, 'utf8'), content);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('gateway preparation starts only an unused port and closes only the owned service', async context => {

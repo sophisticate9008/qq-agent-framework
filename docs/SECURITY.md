@@ -63,6 +63,18 @@ Markdown renderer 禁用原始 HTML 与输入脚本，浏览器 context 关闭�
 
 真实网关管理宿主的监听地址由私有配置指定，可显式开放全部网卡，但不会关闭认证。它使用独立管理员凭据，支持受控配置保存与应用。首次网页初始化只在服务器私有文件生成管理员凭据并显示文件位置，不把凭据值返回浏览器，也不允许浏览器抢先指定管理员凭据。普通 HTTP 无链路加密，包括访问 cookie；非可信网络应使用 HTTPS 反向代理或受控隧道，开放监听不是公网安全部署。
 
+### 本机 TLS 终止代理
+
+普通 HTTPS→HTTP 反向代理必须在“设置 → HTTPS 反向代理”同时设置管理端 `publicOrigin` 与 `trustedLoopbackProxy: true`，并将管理端 `host` 绑定为回环 **IP 字面量**。例如公开来源为 `https://console.example.test`，后端监听 `127.0.0.1:3210`；不把公网地址或域名当成受信代理地址。公开 origin 必须是规范化 HTTPS origin，不含账号、路径、尾斜杠、查询或 fragment。两个字段默认 `''/false`，本机普通 HTTP 的既有行为不变。配置进入公开 schema/UI，CAS 保存后仍须在另行授权维护窗口重启管理服务生效，保存不会自动重启或假装已应用。
+
+启用后服务器对**所有**请求验证真实 socket 的 remoteAddress 和 localAddress 均是回环地址；IPv4 `127/8`、`::1` 及 IPv4-mapped loopback 可用，`localhost`/DNS、网段声明、zone id 和远端地址不构成代理身份。网关配置加载器另拒绝通配或非回环 bind。可信代理边界是本机传输，而不是请求自报；它不能隔离本机其他有能力连接回环端口的进程，不应把它当作恶意本地用户隔离机制。
+
+所有写路由（登录、退出、首次初始化、演示和管理扩展）仍要求浏览器原始 `Origin` **精确等于**配置的 publicOrigin，以及 JSON、认证和原有限界。服务器不使用 `X-Forwarded-Proto`、`X-Forwarded-Host`、`Forwarded` 或客户端 Host 来推断公开 HTTPS 来源。未启用该模式时伪造转发头不会把 HTTP 请求变成 HTTPS；显式代理模式下来自非回环 socket 的请求即使携带正确 Origin/转发头也拒绝。签发和清除访问 cookie 均含 `Secure; HttpOnly; SameSite=Strict`，维持 host-only、`Path=/api`；无 Cookie Domain 扩域、无跨域/CORS 例外、无 Bearer 写请求的 CSRF 豁免。
+
+TLS 代理必须监听预期公开虚拟主机、完成证书校验/HTTPS 跳转，**保留**浏览器原始 Origin（不要覆盖为可信固定值），并把流量转给指定回环地址。代理可保留或重写 Host，本模式不依赖它；不要把后端端口公开，不要在普通 HTTP 公网链路传递管理员凭据或 cookie。修改了公开 origin 后应通过新的 HTTPS 地址访问；错误 origin 不会因重定向头或 Cookie 存在被放行。框架不安装证书、不部署代理、不提供 TLS server，也不自动扩大监听范围。
+
+`src/admin/public-origin.ts` 是纯策略边界；`test/admin-public-origin.test.ts` 用临时回环 HTTP server 验证 TLS 终止的登录/保存/初始化与 Secure cookie，纯传输测试覆盖外部/伪造地址拒绝。没有实际部署代理、重启服务或联系外部主机；通过这些测试不等于已完成公网部署验收。
+
 写请求要求 JSON、同源和体积限制；静态文件使用白名单路由；动态文本不得作为 HTML 注入。演示管理页没有用户体系、TLS、分布式限流或公网抗攻击能力。
 
 host.storageStats 与 GET /api/host/storage 是只读统计；SQLite 只读事务保持单次总数/分页一致，不返回业务值。它们不会自动清理 unknown、清空历史、释放容量或尝试重发；统计健康不能代替 retention、对账、备份与恢复策略。

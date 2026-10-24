@@ -7,6 +7,7 @@ import { createDurableTransport } from '../host/outbox.ts'
 import { digest, json } from '../host/data.ts'
 import type { DurableStore, StoredRecord } from '../host/types.ts'
 import { createPersistentPolicy } from '../storage/policy.ts'
+import { classifyOneBotResponse } from './onebot-response.ts'
 
 const FEATURE_ID = 'onebot.compat'
 const COMMAND_NAMESPACE = 'commands'
@@ -414,19 +415,18 @@ function failure(statusCode: number, wording: string): BufferedResponse {
   return { statusCode, body: { status: 'failed', retcode: statusCode, data: null, wording } }
 }
 
-function classifyResponse(response: BufferedResponse, fallbackMessageId: string): DeliveryReceipt {
+function classifyResponse(response: BufferedResponse): DeliveryReceipt {
   if (response.statusCode === 401 || response.statusCode === 403 || response.statusCode === 400
     || response.statusCode === 404 || response.statusCode === 409 || response.statusCode === 422) {
     return { status: 'rejected' }
   }
-  if (response.statusCode < 200 || response.statusCode >= 300 || !isRecord(response.body)
-    || !Number.isSafeInteger(response.body.retcode)) return { status: 'unknown' }
-  if (response.body.retcode !== 0) return { status: 'rejected' }
-  if (response.body.status === 'failed') return { status: 'unknown' }
+  if (response.statusCode < 200 || response.statusCode >= 300) return { status: 'unknown' }
+  const result = classifyOneBotResponse(response.body)
+  if (result !== 'confirmed') return { status: result }
+  if (!isRecord(response.body)) return { status: 'unknown' }
   const data = response.body.data
   const rawMessageId = isRecord(data) ? data.message_id : undefined
-  const confirmedId = messageId(rawMessageId) ? String(rawMessageId) : fallbackMessageId
-  return { status: 'confirmed', messageId: confirmedId }
+  return messageId(rawMessageId) ? { status: 'confirmed', messageId: String(rawMessageId) } : { status: 'unknown' }
 }
 
 export function createOneBotCompatGateway(options: OneBotCompatGatewayOptions): Readonly<{
@@ -638,7 +638,7 @@ export function createOneBotCompatGateway(options: OneBotCompatGatewayOptions): 
         try { updateCommand(stored, { status: 'unknown' }) } catch {}
         return { status: 'unknown' }
       }
-      const receipt = classifyResponse(result, command.fingerprint)
+      const receipt = classifyResponse(result)
       try {
         updateCommand(stored, {
           status: receipt.status,

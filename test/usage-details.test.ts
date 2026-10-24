@@ -40,7 +40,7 @@ function seriesFixture() {
 test('usage section labels are the single stable source for page and search titles', () => {
   assert.deepEqual(usageSectionLabels, {
     summary: '账本汇总', breakdown: 'Token 构成', chart: '消耗走势', conversations: '按会话汇总',
-    turns: '逐轮花费', recent: '最近调用流水', prices: '当前生效价目表', management: '账本管理',
+    turns: '逐轮花费', recent: '最近调用流水', prices: '当前生效价目表', pricingEditor: '配置后续用量单价', management: '账本管理',
   });
 });
 

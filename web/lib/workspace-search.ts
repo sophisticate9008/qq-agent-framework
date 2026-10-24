@@ -191,6 +191,8 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     ...settingsTargets(sources.settings),
     { page: 'model', title: '聊天方案', sectionTitle: '聊天方案', kind: 'section' },
     { page: 'persona', title: '人设库', sectionTitle: '人设库', kind: 'section' },
+    { page: 'access', title: '消息处理授权', sectionTitle: '消息处理授权', kind: 'section' },
+    { page: 'adapters', title: '聊天运行', sectionTitle: '聊天运行', kind: 'section' },
     ...(runtimeConnected ? Object.values(usageSectionLabels).map(title => ({
       page: 'usage' as const, title, sectionTitle: title, kind: 'section' as const,
     })) : []),
@@ -208,7 +210,7 @@ export function normalizeWorkspaceSearchQuery(query: string): readonly string[] 
 function searchableText(target: WorkspaceSearchTarget): string {
   const aliases = target.kind === 'page' && target.page === 'usage' ? 'token tokens 费用 花费 用量'
     : target.kind === 'page' && target.page === 'sessions' ? 'session sessions 群聊 私聊 会话'
-      : target.kind === 'page' && target.page === 'adapters' ? 'adapter adapters OneBot WebSocket WS WSS HTTP webhook DSH 协议 接入 服务地址 连接凭据 收消息 发消息'
+      : target.kind === 'page' && target.page === 'adapters' ? 'adapter adapters OneBot WebSocket WS WSS HTTP webhook DSH 协议 接入 服务地址 连接凭据 收消息 发消息 启动聊天 应用聊天设置 模型容量 配置文件'
         : target.kind === 'page' && target.page === 'providers' ? 'provider providers OpenAI Anthropic API key 服务商 密钥 模型昵称'
           : target.kind === 'page' && target.page === 'model' ? '模型 回复 prompt 方案 指令 群聊上下文 私聊上下文' : '';
   return [workspacePageTitle(target.page), target.sectionTitle, target.title, aliases]

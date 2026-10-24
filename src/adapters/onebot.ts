@@ -11,6 +11,7 @@ import type {
 import { normalizeContent } from '../core/content.ts'
 import { normalizeOutboundScope, personaKey } from '../core/scope.ts'
 import type { InboundMessage } from '../host/types.ts'
+import { classifyOneBotResponse } from './onebot-response.ts'
 
 type MaybePromise<Value> = Value | Promise<Value>
 
@@ -219,10 +220,9 @@ async function outboundSegments(
 }
 
 function receiptFromResponse(value: unknown): DeliveryReceipt {
-  if (!record(value)) return { status: 'unknown' }
-  if (!Number.isSafeInteger(value.retcode)) return { status: 'unknown' }
-  if (value.retcode !== 0) return { status: 'rejected' }
-  if (value.status === 'failed' || !record(value.data)) return { status: 'unknown' }
+  const result = classifyOneBotResponse(value)
+  if (result !== 'confirmed') return { status: result }
+  if (!record(value) || !record(value.data)) return { status: 'unknown' }
   const messageId = messageIdentifier(value.data.message_id)
   return messageId === null
     ? { status: 'unknown' }

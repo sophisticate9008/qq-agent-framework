@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { request, type Server } from 'node:http'
+import { connect } from 'node:net'
 import test from 'node:test'
 
 import { createAdminServer, type AdminServerOptions } from '../src/admin/server.ts'
@@ -187,4 +188,76 @@ test('aborts a disconnected custom handler and keeps serving requests', { timeou
   await cancelled.promise
 
   assert.deepEqual(await call(fixture.origin, '/api/ready'), { status: 200, body: { ready: true } })
+})
+
+test('active handler deadlines extend socket inactivity for GET and POST, but keep bounded cancellation', { timeout: 5000 }, async context => {
+  let overdueSignal: AbortSignal | undefined
+  const fixture = await start({
+    handlerTimeoutMs: 150,
+    snapshot: () => ({}),
+    routes: [
+      ...(['GET', 'POST'] as const).map(method => ({
+        method,
+        pathname: `/api/slow-${method.toLowerCase()}`,
+        async handle() {
+          await new Promise<void>(resolvePromise => setTimeout(resolvePromise, 60))
+          return { ok: true }
+        }
+      })),
+      { method: 'POST', pathname: '/api/overdue', handle({ signal }) {
+        overdueSignal = signal
+        return never()
+      } }
+    ]
+  })
+  context.after(() => stop(fixture.server))
+  fixture.server.prependListener('request', incoming => incoming.socket.setTimeout(20))
+  for (const method of ['GET', 'POST'] as const) {
+    assert.deepEqual(await call(fixture.origin, `/api/slow-${method.toLowerCase()}`,
+      method === 'POST' ? { method, body: {} } : {}), { status: 200, body: { ok: true } })
+  }
+  assert.deepEqual(await call(fixture.origin, '/api/overdue', { method: 'POST', body: {} }),
+    { status: 504, body: { error: 'operation_unknown' } })
+  assert.equal(overdueSignal?.aborted, true)
+})
+
+test('configured long handler deadlines survive the default twenty-second socket cutoff', { timeout: 30_000 }, async context => {
+  const fixture = await start({
+    handlerTimeoutMs: 25_000,
+    snapshot: () => ({}),
+    routes: [...(['GET', 'POST'] as const).map(method => ({
+      method,
+      pathname: '/api/long-handler',
+      async handle() {
+        await new Promise<void>(resolvePromise => setTimeout(resolvePromise, 21_000))
+        return { ok: true }
+      }
+    })), { method: 'GET', pathname: '/api/fast', async handle() {
+      await new Promise<void>(resolvePromise => setTimeout(resolvePromise, 50))
+      return { fast: true }
+    } }]
+  })
+  context.after(() => stop(fixture.server))
+  const target = new URL(fixture.origin)
+  const pipelined = new Promise<string>((resolvePromise, rejectPromise) => {
+    const socket = connect({ host: target.hostname, port: Number(target.port) })
+    const chunks: Buffer[] = []
+    socket.on('data', chunk => chunks.push(Buffer.from(chunk)))
+    socket.once('error', rejectPromise)
+    socket.once('end', () => resolvePromise(Buffer.concat(chunks).toString('utf8')))
+    socket.once('connect', () => socket.write(
+      `GET /api/fast HTTP/1.1\r\nHost: ${target.host}\r\nAuthorization: Bearer ${TOKEN}\r\n\r\n`
+      + `GET /api/long-handler HTTP/1.1\r\nHost: ${target.host}\r\nAuthorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n`
+    ))
+  })
+  const [results, pipeline] = await Promise.all([Promise.all([
+    call(fixture.origin, '/api/long-handler'),
+    call(fixture.origin, '/api/long-handler', { method: 'POST', body: {} })
+  ]), pipelined])
+  assert.deepEqual(results, [
+    { status: 200, body: { ok: true } },
+    { status: 200, body: { ok: true } }
+  ])
+  assert.equal(pipeline.match(/HTTP\/1\.1 200 OK/g)?.length, 2)
+  assert(pipeline.includes('"fast":true') && pipeline.includes('"ok":true'))
 })

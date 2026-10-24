@@ -117,6 +117,8 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     } });
   const controller = new AbortController();
   const follows = new Map<string, { binding: SessionBinding; controller: AbortController; dispose?: () => void | Promise<void> }>();
+  const retiringFollows = new Map<string, { binding: SessionBinding; controller: AbortController; dispose?: () => void | Promise<void> }>();
+  const unhealthyFollows = new Set<string>();
   const following = new Map<string, Promise<void>>();
   const pending = new Map<string, { fingerprint: string; promise: Promise<InboundReceipt> }>();
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -147,6 +149,9 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       await ensureFollow(binding);
       assert(!request.signal.aborted && sessions.get(binding.conversationId)?.generation === binding.generation,
         'SESSION_STALE', 'The agent session is no longer current.');
+      assert(follows.get(binding.conversationId)?.binding.sessionId === binding.sessionId
+        && !follows.get(binding.conversationId)?.controller.signal.aborted,
+      'AGENT_FOLLOW_UNAVAILABLE', 'A live agent follow is required before submitting new work.');
       return json(await agent.submit({ sessionId: binding.sessionId,
         requestId: digest([request.scope.conversationId, request.scope.eventId, 'prompt']), content, signal: request.signal }));
     } } } });
@@ -327,7 +332,9 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   function ensureFollow(binding: SessionBinding, signal = controller.signal): Promise<void> {
     assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
     const key = digest(binding);
-    const previous = follows.get(binding.conversationId);
+    const opening = following.get(key);
+    if (opening) return opening;
+    const previous = follows.get(binding.conversationId) ?? retiringFollows.get(binding.conversationId);
     if (previous?.binding.generation === binding.generation && !previous.controller.signal.aborted) {
       return following.get(key) ?? Promise.resolve();
     }
@@ -343,17 +350,36 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       if (previous?.dispose) await previous.dispose();
       try {
         const dispose = await agent.follow({ sessionId: binding.sessionId, signal: followController.signal,
-          onEvent: event => { enqueueAgentEvent(binding, event); } });
-        let disposed = false;
-        entry.dispose = () => { if (!disposed) { disposed = true; return dispose(); } };
-        if (followController.signal.aborted) await entry.dispose();
+          onEvent: event => {
+            if (follows.get(binding.conversationId) !== entry || followController.signal.aborted) return;
+            enqueueAgentEvent(binding, event);
+            if (event.type === 'failed' && event.sessionId === binding.sessionId && reference(event.id)
+              && event.data?.terminal === true) {
+              follows.delete(binding.conversationId);
+              retiringFollows.set(binding.conversationId, entry);
+              unhealthyFollows.add(binding.conversationId);
+              followController.abort();
+              fault(new FrameworkError('AGENT_FOLLOW_TERMINATED', 'The agent event stream ended.'));
+              if (entry.dispose) void Promise.resolve(entry.dispose()).then(() => {
+                if (retiringFollows.get(binding.conversationId) === entry) retiringFollows.delete(binding.conversationId);
+              }).catch(fault);
+            }
+          } });
+        let disposing: Promise<void> | undefined;
+        entry.dispose = () => disposing ??= Promise.resolve().then(dispose);
+        if (followController.signal.aborted) {
+          await entry.dispose();
+          assert(false, 'AGENT_FOLLOW_UNAVAILABLE', 'The agent follow ended before it was ready.');
+        }
+        unhealthyFollows.delete(binding.conversationId);
+        if (retiringFollows.get(binding.conversationId) === previous) retiringFollows.delete(binding.conversationId);
       } catch (error) {
         if (follows.get(binding.conversationId) === entry) follows.delete(binding.conversationId);
         throw error;
       } finally { parent.removeEventListener('abort', abort); }
     })();
     following.set(key, work);
-    const settled = () => following.delete(key);
+    const settled = () => { if (following.get(key) === work) following.delete(key); };
     work.then(settled, settled);
     return work;
   }
@@ -387,7 +413,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         fault(error);
         return snapshot({ status: 'rejected', eventId: message.id, errorCode: errorCode(error, 'INBOUND_DENIED') });
       }
-      if (!allowed) return snapshot({ status: 'rejected', eventId: message.id, errorCode: 'INBOUND_DENIED' });
+      if (allowed !== true) return snapshot({ status: 'rejected', eventId: message.id, errorCode: 'INBOUND_DENIED' });
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
       let routed: FrameworkEvent | undefined;
       if (routeIncoming) {
@@ -461,6 +487,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       return started;
     },
     metrics() { return snapshot({ engine: engine.metrics(), replies: replies.metrics(), followedSessions: follows.size,
+      unhealthyFollows: unhealthyFollows.size,
       pendingIngress: pending.size, unsettledAuthorizations, faults: faultCount, timeouts: timeoutCount, lastFaultCode,
       startupState, started: started !== null, stopped: controller.signal.aborted }); },
     stop() {
@@ -469,6 +496,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       startupState = 'stopped';
       if (timer) clearInterval(timer);
       for (const entry of follows.values()) entry.controller.abort();
+      for (const entry of retiringFollows.values()) entry.controller.abort();
       stopped = (async () => {
         const draining = tasks.stop();
         const replyDraining = replies.stop();
@@ -479,7 +507,11 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         for (const entry of follows.values()) if (entry.dispose) {
           try { await entry.dispose(); } catch (error) { fault(error); }
         }
+        for (const entry of retiringFollows.values()) if (entry.dispose) {
+          try { await entry.dispose(); } catch (error) { fault(error); }
+        }
         follows.clear();
+        retiringFollows.clear();
       })();
       return stopped;
     },

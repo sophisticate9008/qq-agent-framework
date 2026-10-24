@@ -9,6 +9,7 @@ import {
 } from 'node:http'
 
 import { createAccessSessionStore, type AccessSessionStore } from './access-sessions.ts'
+import { createAdminOriginPolicy } from './public-origin.ts'
 
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_HEADER_BYTES = 16 * 1024
@@ -24,6 +25,10 @@ const MIN_ACCESS_SESSION_TTL_MS = 10
 const MAX_ACCESS_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const ACCESS_SESSION_COOKIE = 'qq_admin_access'
 const AUTH_ROUTE_PREFIX = '/api/auth/'
+const handlerSocketTimeouts = new WeakMap<IncomingMessage['socket'], {
+  readonly baseline: number
+  readonly deadlines: Map<symbol, number>
+}>()
 const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const WEB_ROOT = import.meta.url.endsWith('.ts')
   ? new URL('../../dist/admin-web/', import.meta.url)
@@ -42,6 +47,8 @@ export interface AdminServerOptions {
   routes?: readonly AdminRoute[]
   handlerTimeoutMs?: number
   accessSessionTtlMs?: number
+  publicOrigin?: string
+  trustedLoopbackProxy?: boolean
   setup?: {
     status: () => unknown
     initialize: () => unknown
@@ -51,6 +58,7 @@ export interface AdminServerOptions {
 export interface AdminRoute {
   readonly method: 'GET' | 'POST'
   readonly pathname: string
+  readonly maxRequestBytes?: number
   readonly maxResponseBytes?: number
   readonly handle: (request: {
     query: URLSearchParams
@@ -125,19 +133,6 @@ function isTlsRequest(request: IncomingMessage): boolean {
   return 'encrypted' in request.socket && request.socket.encrypted === true
 }
 
-function hasSameOrigin(request: IncomingMessage): boolean {
-  const origin = request.headers.origin
-  const host = request.headers.host
-  if (typeof origin !== 'string' || typeof host !== 'string') return false
-  try {
-    const parsed = new URL(origin)
-    const expected = new URL(`${isTlsRequest(request) ? 'https' : 'http'}://${host}`)
-    return origin === parsed.origin && parsed.origin === expected.origin
-  } catch {
-    return false
-  }
-}
-
 function accessTokenFromCookie(request: IncomingMessage): string | null {
   const header = request.headers.cookie
   if (typeof header !== 'string') return null
@@ -203,12 +198,12 @@ function hasForbiddenObjectKey(value: unknown): boolean {
   return false
 }
 
-async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(request: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   const declaredLength = request.headers['content-length']
   if (declaredLength !== undefined) {
     const bytes = Number(declaredLength)
     if (!Number.isSafeInteger(bytes) || bytes < 0) throw new RequestError(400, 'invalid_request')
-    if (bytes > MAX_BODY_BYTES) {
+    if (bytes > maxBytes) {
       request.resume()
       throw new RequestError(413, 'request_too_large')
     }
@@ -219,7 +214,7 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
   for await (const chunk of request as AsyncIterable<unknown>) {
     if (!(chunk instanceof Uint8Array)) throw new RequestError(400, 'invalid_request')
     size += chunk.byteLength
-    if (size > MAX_BODY_BYTES) throw new RequestError(413, 'request_too_large')
+    if (size > maxBytes) throw new RequestError(413, 'request_too_large')
     chunks.push(Buffer.from(chunk))
   }
 
@@ -248,6 +243,28 @@ const RequestError = AdminRequestError
 
 class ClientDisconnectedError extends Error {}
 
+function refreshHandlerSocketTimeout(socket: IncomingMessage['socket']): void {
+  const active = handlerSocketTimeouts.get(socket)
+  if (!active || socket.destroyed) return
+  socket.setTimeout(Math.max(SOCKET_TIMEOUT_MS, ...Array.from(active.deadlines.values(), deadline => deadline - Date.now())))
+}
+
+function holdHandlerSocketTimeout(socket: IncomingMessage['socket'], timeoutMs: number): () => void {
+  const active = handlerSocketTimeouts.get(socket) ?? { baseline: socket.timeout ?? 0, deadlines: new Map<symbol, number>() }
+  const token = Symbol()
+  active.deadlines.set(token, Date.now() + timeoutMs + 1_000)
+  handlerSocketTimeouts.set(socket, active)
+  refreshHandlerSocketTimeout(socket)
+  return () => {
+    active.deadlines.delete(token)
+    if (active.deadlines.size > 0) refreshHandlerSocketTimeout(socket)
+    else {
+      handlerSocketTimeouts.delete(socket)
+      if (!socket.destroyed) socket.setTimeout(active.baseline)
+    }
+  }
+}
+
 interface HandlerDeadlineOptions<Value> {
   readonly request: IncomingMessage
   readonly response: ServerResponse
@@ -264,6 +281,7 @@ function waitForHandler<Value>({
   handle
 }: HandlerDeadlineOptions<Value>): Promise<Value> {
   const controller = new AbortController()
+  const releaseSocketTimeout = holdHandlerSocketTimeout(request.socket, timeoutMs)
   return new Promise<Value>((resolvePromise, rejectPromise) => {
     let settled = false
     let timeout: ReturnType<typeof setTimeout> | undefined
@@ -272,6 +290,7 @@ function waitForHandler<Value>({
       if (timeout !== undefined) clearTimeout(timeout)
       request.off('aborted', disconnect)
       response.off('close', disconnect)
+      releaseSocketTimeout()
     }
     const resolve = (value: Value): void => {
       if (settled) return
@@ -347,8 +366,18 @@ export function createAdminServer({
   routes = [],
   setup,
   handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
-  accessSessionTtlMs = DEFAULT_ACCESS_SESSION_TTL_MS
+  accessSessionTtlMs = DEFAULT_ACCESS_SESSION_TTL_MS,
+  publicOrigin,
+  trustedLoopbackProxy
 }: AdminServerOptions): Server {
+  const originPolicy = createAdminOriginPolicy({ publicOrigin, trustedLoopbackProxy })
+  const originRequest = (request: IncomingMessage) => ({
+    origin: request.headers.origin, host: request.headers.host,
+    remoteAddress: request.socket.remoteAddress, localAddress: request.socket.localAddress,
+    tls: isTlsRequest(request),
+  })
+  const hasSameOrigin = (request: IncomingMessage): boolean => originPolicy.sameOrigin(originRequest(request))
+  const secureCookie = (request: IncomingMessage): boolean => originPolicy.secureCookie(originRequest(request))
   if (typeof token !== 'function' && (typeof token !== 'string' || token.length < 24)) {
     throw new TypeError('token must contain at least 24 characters')
   }
@@ -379,6 +408,11 @@ export function createAdminServer({
       || route.maxResponseBytes < 1024 || route.maxResponseBytes > 4 * 1024 * 1024)) {
       throw new TypeError('Admin route maxResponseBytes must be an integer between 1024 and 4194304')
     }
+    if (route.maxRequestBytes !== undefined && (route.method !== 'POST'
+      || !Number.isSafeInteger(route.maxRequestBytes) || route.maxRequestBytes < 1024
+      || route.maxRequestBytes > 1024 * 1024)) {
+      throw new TypeError('Admin POST route maxRequestBytes must be an integer between 1024 and 1048576')
+    }
     extensions.set(`${route.method} ${route.pathname}`, Object.freeze({ ...route }))
     methods.set(route.pathname, [...(methods.get(route.pathname) ?? []), route.method])
   }
@@ -397,6 +431,11 @@ export function createAdminServer({
     requestTimeout: REQUEST_TIMEOUT_MS
   }, async (request, response) => {
     try {
+      if (!originPolicy.allowsTransport(originRequest(request))) {
+        sendError(response, 403, 'proxy_peer_forbidden')
+        return
+      }
+      refreshHandlerSocketTimeout(request.socket)
       const requestTarget = request.url ?? '/'
       const queryIndex = requestTarget.indexOf('?')
       const pathname = queryIndex === -1 ? requestTarget : requestTarget.slice(0, queryIndex)
@@ -422,7 +461,7 @@ export function createAdminServer({
           const expiresAt = accessToken === null ? null : accessSessions.authenticate(accessToken, administratorToken)
           if (expiresAt === null) {
             sendError(response, 401, 'unauthorized', {
-              'Set-Cookie': clearedAccessSessionCookie(isTlsRequest(request)),
+              'Set-Cookie': clearedAccessSessionCookie(secureCookie(request)),
               'WWW-Authenticate': 'Bearer'
             })
             return
@@ -446,7 +485,7 @@ export function createAdminServer({
           const session = accessSessions.issue(administratorToken)
           if (session === null) { sendError(response, 503, 'session_capacity'); return }
           sendJson(response, 200, { authenticated: true, expiresAt: session.expiresAt }, {
-            'Set-Cookie': accessSessionCookie(session.token, accessSessionTtlMs, isTlsRequest(request))
+            'Set-Cookie': accessSessionCookie(session.token, accessSessionTtlMs, secureCookie(request))
           })
           return
         }
@@ -458,14 +497,14 @@ export function createAdminServer({
         const accessToken = accessTokenFromCookie(request)
         if (accessToken === null || accessSessions.authenticate(accessToken, administratorToken) === null) {
           sendError(response, 401, 'unauthorized', {
-            'Set-Cookie': clearedAccessSessionCookie(isTlsRequest(request)),
+            'Set-Cookie': clearedAccessSessionCookie(secureCookie(request)),
             'WWW-Authenticate': 'Bearer'
           })
           return
         }
         accessSessions.revoke(accessToken)
         sendJson(response, 200, { authenticated: false }, {
-          'Set-Cookie': clearedAccessSessionCookie(isTlsRequest(request))
+          'Set-Cookie': clearedAccessSessionCookie(secureCookie(request))
         })
         return
       }
@@ -540,7 +579,7 @@ export function createAdminServer({
         if (route.method === 'POST') {
           if (!hasSameOrigin(request)) { sendError(response, 403, 'origin_forbidden'); return }
           if (!hasJsonContentType(request)) { sendError(response, 415, 'unsupported_media_type'); return }
-          body = await readJsonBody(request)
+          body = await readJsonBody(request, route.maxRequestBytes)
         }
         const result = await waitForHandler({
           request,

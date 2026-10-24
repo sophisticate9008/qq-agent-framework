@@ -28,6 +28,17 @@ import {
   type NativeAdapterConfiguration
 } from '../host/adapter-configuration.ts'
 import { AdminRequestError, type AdminRoute } from './server.ts'
+import { createHostAdminRoutes } from './host.ts'
+import {
+  DEFAULT_NATIVE_CHAT_AUTHORIZATION, DEFAULT_NATIVE_CHAT_DEPLOYMENT,
+  validateNativeChatAuthorization,
+  type NativeChatAuthorization, type NativeChatConfiguration, type NativeChatDeploymentConfiguration,
+  type NativeChatDeploymentRuntime
+} from '../host/native-chat-configuration.ts'
+import { isNativeChatRuntime, type NativeChatRuntime } from '../host/native-chat-runtime.ts'
+import { validateDshModelSettings } from '../adapters/dsh-deployment.ts'
+import type { NativeUsageQuery } from '../host/native-usage.ts'
+import { createNativeUsageProjection } from '../host/native-usage-projection.ts'
 
 const MAX_DOCUMENT_BYTES = 64 * 1024
 const MAX_ACCESS_ENTRIES = 1_024
@@ -72,7 +83,14 @@ interface Document<Value> {
 export interface NativeRuntimeRouteOptions {
   readonly directory: string
   readonly adapterRuntime?: AdapterRuntimePort
+  readonly chatRuntime?: NativeChatRuntime
+  readonly deploymentRuntime?: NativeChatDeploymentRuntime
 }
+
+interface StoredAuthorization { readonly schema: 1; readonly authorization: NativeChatAuthorization }
+interface StoredDeployment { readonly schema: 1; readonly deployment: NativeChatDeploymentConfiguration }
+const DEFAULT_AUTHORIZATION: StoredAuthorization = { schema: 1, authorization: DEFAULT_NATIVE_CHAT_AUTHORIZATION }
+const DEFAULT_DEPLOYMENT: StoredDeployment = { schema: 1, deployment: DEFAULT_NATIVE_CHAT_DEPLOYMENT }
 
 const DEFAULT_PLANS: StoredPlans = Object.freeze({ schema: 1, activePlanId: null, plans: Object.freeze([]) })
 const DEFAULT_PERSONAS: StoredPersonas = Object.freeze({ schema: 1, personas: Object.freeze([]) })
@@ -86,6 +104,7 @@ const DEFAULT_ADAPTERS: StoredAdapters = Object.freeze({ schema: 1, adapters: cr
 const DEFAULT_PROVIDERS: StoredProviders = Object.freeze({ schema: 1, providers: Object.freeze([]) })
 const writeTails = new Map<string, Promise<void>>()
 const adapterControls = new Map<string, Promise<unknown>>()
+const nativeControls = new Set<string>()
 
 function requestError(statusCode: number, code: string): never {
   throw new AdminRequestError(statusCode, code)
@@ -360,6 +379,67 @@ function validateStoredProviders(value: unknown): StoredProviders {
   return Object.freeze({ schema: 1, providers: validateModelProviders(value.providers) })
 }
 
+function validateStoredAuthorization(value: unknown): StoredAuthorization {
+  if (!isRecord(value) || !hasExactKeys(value, ['schema', 'authorization']) || value.schema !== 1) {
+    throw new TypeError('Invalid authorization document')
+  }
+  return { schema: 1, authorization: validateNativeChatAuthorization(value.authorization) }
+}
+
+function validateStoredDeployment(value: unknown): StoredDeployment {
+  if (!isRecord(value) || !hasExactKeys(value, ['schema', 'deployment']) || value.schema !== 1
+    || !isRecord(value.deployment) || !hasExactKeys(value.deployment, ['target', 'modelSettings', 'namespace'])) {
+    throw new TypeError('Invalid deployment document')
+  }
+  const input = value.deployment
+  if (typeof input.namespace !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(input.namespace)
+    || input.target !== null && (!isRecord(input.target)
+      || !['profilePath', 'credentialsPath', 'schemaVersion'].every(key => Object.hasOwn(input.target as object, key))
+      || !Object.keys(input.target).every(key => ['profilePath', 'credentialsPath', 'layerPaths', 'schemaVersion'].includes(key))
+      || typeof input.target.profilePath !== 'string' || input.target.profilePath.length > 4_096
+      || !isAbsolute(input.target.profilePath) || /[\u0000-\u001f\u007f]/.test(input.target.profilePath)
+      || typeof input.target.credentialsPath !== 'string' || input.target.credentialsPath.length > 4_096
+      || !isAbsolute(input.target.credentialsPath) || /[\u0000-\u001f\u007f]/.test(input.target.credentialsPath)
+      || input.target.layerPaths !== undefined && (!Array.isArray(input.target.layerPaths) || input.target.layerPaths.length > 16
+        || !input.target.layerPaths.every(path => typeof path === 'string' && path.length <= 4_096
+          && isAbsolute(path) && !/[\u0000-\u001f\u007f]/.test(path)))
+      || input.target.schemaVersion !== '0.2.1-rc.2')) throw new TypeError('Invalid deployment target')
+  return { schema: 1, deployment: {
+    namespace: input.namespace,
+    target: input.target === null ? null : {
+      profilePath: (input.target as Record<string, unknown>).profilePath as string,
+      credentialsPath: (input.target as Record<string, unknown>).credentialsPath as string,
+      ...((input.target as Record<string, unknown>).layerPaths === undefined ? {}
+        : { layerPaths: (input.target as Record<string, unknown>).layerPaths as readonly string[] }),
+      schemaVersion: '0.2.1-rc.2'
+    },
+    modelSettings: input.modelSettings === null ? null : validateDshModelSettings(input.modelSettings)
+  } }
+}
+
+export async function readNativeChatConfiguration(directory: string): Promise<NativeChatConfiguration> {
+  if (!isAbsolute(directory) || directory.includes('\0')) throw new TypeError('An absolute runtime directory is required')
+  await ensurePrivateDirectory(directory)
+  return withDirectoryWriteLock(directory, async () => {
+    const plans = await readDocument(join(directory, 'chat-plans.json'), DEFAULT_PLANS, validateStoredPlans)
+    const personas = await readDocument(join(directory, 'chat-personas.json'), DEFAULT_PERSONAS, validateStoredPersonas)
+    const access = await readDocument(join(directory, 'chat-access.json'), DEFAULT_ACCESS, validateStoredAccess)
+    const adapters = await readDocument(join(directory, 'chat-adapters.json'), DEFAULT_ADAPTERS, validateStoredAdapters)
+    const providers = await readDocument(join(directory, 'chat-providers.json'), DEFAULT_PROVIDERS, validateStoredProviders)
+    const authorization = await readDocument(join(directory, 'chat-authorization.json'), DEFAULT_AUTHORIZATION, validateStoredAuthorization)
+    const deployment = await readDocument(join(directory, 'chat-deployment.json'), DEFAULT_DEPLOYMENT, validateStoredDeployment)
+    return {
+      revisions: { plans: plans.revision, personas: personas.revision, access: access.revision,
+        adapters: adapters.revision, providers: providers.revision, authorization: authorization.revision,
+        deployment: deployment.revision },
+      catalog: { activePlanId: plans.value.activePlanId, plans: plans.value.plans },
+      personas: personas.value.personas, access: access.value, adapters: adapters.value.adapters,
+      providers: providers.value.providers, authorization: authorization.value.authorization,
+      deployment: deployment.value.deployment
+    }
+  })
+}
+
 interface AdapterRuntimeStatus {
   readonly assembled: boolean
   readonly running: boolean
@@ -379,7 +459,7 @@ async function adapterRuntimeStatus(port: AdapterRuntimePort | undefined): Promi
   }
 }
 
-async function adapterConnectionStatus(port: AdapterRuntimePort | undefined): Promise<AdapterConnectionStatus | undefined> {
+async function adapterConnectionStatus(port: AdapterRuntimePort | undefined, chatRuntime?: NativeChatRuntime): Promise<AdapterConnectionStatus | undefined> {
   if (port?.connectionStatus === undefined) return undefined
   try {
     const status: unknown = await port.connectionStatus()
@@ -388,13 +468,15 @@ async function adapterConnectionStatus(port: AdapterRuntimePort | undefined): Pr
       || status.selfId !== null && (typeof status.selfId !== 'string' || !/^[1-9][0-9]{0,31}$/.test(status.selfId))
       || status.lastError !== null && typeof status.lastError !== 'string'
       || ![status.received, status.dropped].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
-      || status.chatReady !== false) requestError(503, 'adapter_runtime_status_unavailable')
+      || typeof status.chatReady !== 'boolean'
+      || status.chatReady && (!isNativeChatRuntime(chatRuntime) || port !== chatRuntime.adapterRuntime
+        || status.state !== 'connected' || status.selfId === null)) requestError(503, 'adapter_runtime_status_unavailable')
     return Object.freeze({
       state: status.state as AdapterConnectionStatus['state'], selfId: status.selfId as string | null,
       lastError: status.lastError === null ? null
         : /^(?:onebot_ws_[a-z0-9_]{1,64}|adapter_runtime_(?:aborted|closed|busy))$/.test(String(status.lastError))
           ? String(status.lastError) : 'adapter_connection_error',
-      received: status.received as number, dropped: status.dropped as number, chatReady: false
+      received: status.received as number, dropped: status.dropped as number, chatReady: status.chatReady
     })
   } catch {
     requestError(503, 'adapter_runtime_status_unavailable')
@@ -417,7 +499,7 @@ async function controlAdapterRuntime<Value>(
   signal: AbortSignal,
   operation: (signal: AbortSignal) => Promise<Value>
 ): Promise<Value> {
-  if (adapterControls.has(directory)) requestError(409, 'adapter_runtime_busy')
+  if (adapterControls.has(directory) || nativeControls.has(directory)) requestError(409, 'adapter_runtime_busy')
   if (signal.aborted) requestError(499, 'request_aborted')
   const controller = new AbortController()
   let rejectDeadline: ((error: AdminRequestError) => void) | undefined
@@ -598,9 +680,10 @@ function validAdapterRuntimePort(value: unknown): value is AdapterRuntimePort {
 
 export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): readonly AdminRoute[] {
   if (!isRecord(options) || !Object.hasOwn(options, 'directory')
-    || !Object.keys(options).every(key => key === 'directory' || key === 'adapterRuntime')
+    || !Object.keys(options).every(key => ['directory', 'adapterRuntime', 'chatRuntime', 'deploymentRuntime'].includes(key))
     || typeof options.directory !== 'string'
     || options.directory.length === 0 || options.directory.includes('\0') || !isAbsolute(options.directory)
+    || options.chatRuntime !== undefined && !isNativeChatRuntime(options.chatRuntime)
     || options.adapterRuntime !== undefined && !validAdapterRuntimePort(options.adapterRuntime)) {
     throw new TypeError('Native runtime routes require an absolute directory and an optional runtime status port.')
   }
@@ -613,6 +696,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   const adaptersFile = join(directory, 'chat-adapters.json')
   const providersFile = join(directory, 'chat-providers.json')
   const adapterRuntime = options.adapterRuntime
+  const chatRuntime = options.chatRuntime
 
   const routes: AdminRoute[] = [
     {
@@ -757,7 +841,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
       async handle({ query }) {
         requireEmptyQuery(query)
         await ready
-        return { runtimeConnected: false }
+        return chatRuntime === undefined ? { runtimeConnected: false } : chatRuntime.status()
       }
     },
     {
@@ -765,6 +849,15 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
       async handle({ query }) {
         requireEmptyQuery(query)
         await ready
+        if (chatRuntime !== undefined) {
+          const status = await chatRuntime.status()
+          const features = chatRuntime.host()?.engine.describe().features ?? []
+          const installed = features.some(feature => feature.id === 'agent-relay' && feature.status === 'active')
+          return { runtimeConnected: status.chatReady, editableResources: true,
+            capabilities: ['chat-plans', 'personas', 'model-settings', 'access-policy'].map(id => ({ id, installed })),
+            features: features.map(feature => ({ id: feature.id, version: feature.version, status: feature.status,
+              capabilities: feature.capabilities.filter(capability => ['agent.submit', 'messaging.send'].includes(capability)) })) }
+        }
         return {
           runtimeConnected: false,
           editableResources: true,
@@ -780,45 +873,97 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
     },
     {
       method: 'GET', pathname: '/api/chat/sessions',
-      handle({ query }) {
-        requireEmptyQuery(query)
-        requestError(503, 'runtime_not_connected')
+      maxResponseBytes: 1_048_576,
+      async handle({ query }) {
+        if (chatRuntime?.host() === undefined) requestError(503, 'runtime_not_connected')
+        const page = await hostRoute(chatRuntime, '/api/host/sessions').handle({ query, body: null, signal: new AbortController().signal })
+        if (!isRecord(page) || !Array.isArray(page.items)) requestError(500, 'native_session_metadata_invalid')
+        const configuration = await readNativeChatConfiguration(directory)
+        const sessions = page.items.filter(item => isRecord(item) && item.state === 'ready').map(item => {
+          const entry = item as Record<string, unknown>
+          return { key: entry.conversationId, sessionId: entry.sessionId,
+            owner: entry.conversationId === `private:${configuration.access.owner}` }
+        })
+        return { ...page, sessions, revision: revision(Buffer.from(JSON.stringify({ sessions, items: page.items }))), resetAvailable: false }
       }
     },
     {
       method: 'GET', pathname: '/api/chat/usage',
-      handle({ query }) {
-        requireEmptyQuery(query)
-        requestError(503, 'runtime_not_connected')
+      maxResponseBytes: 4_194_304,
+      async handle({ query }) {
+        const host = chatRuntime?.host()
+        if (host === undefined) requestError(503, 'runtime_not_connected')
+        const usage = chatRuntime?.usage()
+        if (usage === undefined) requestError(503, 'runtime_not_connected')
+        const policy = host.policy.describe()
+        return { ...createNativeUsageProjection({ usage }).summary(usageQuery(query)),
+          policy: { paused: policy.paused, grants: policy.grants.slice(0, 1_000), limited: policy.grants.length > 1_000 },
+          metrics: host.metrics(), outbox: host.outbox.metrics() }
       }
     },
     {
       method: 'POST', pathname: '/api/chat/sessions/reset',
       handle() {
+        if (chatRuntime?.host()) requestError(405, 'session_reset_not_enabled')
         requestError(503, 'runtime_not_connected')
       }
     },
     {
       method: 'GET', pathname: '/api/chat/usage/series',
-      handle() {
+      maxResponseBytes: 4_194_304,
+      handle({ query }) {
+        const usage = chatRuntime?.usage()
+        if (usage) {
+          if (query.has('hours') || query.has('buckets')) {
+            const parameters = new URLSearchParams(query)
+            const hours = integerQuery(parameters, 'hours', 24, 2_160)
+            const buckets = integerQuery(parameters, 'buckets', 48, 120)
+            return createNativeUsageProjection({ usage }).series(hours, buckets, usageQuery(parameters))
+          }
+          const parameters = new URLSearchParams(query)
+          const bucket = parameters.get('bucketMs')
+          if (parameters.getAll('bucketMs').length > 1 || bucket !== null && !/^[1-9][0-9]{0,8}$/.test(bucket)) {
+            requestError(400, 'invalid_query')
+          }
+          if (bucket !== null && (Number(bucket) < 60_000 || Number(bucket) > 86_400_000)) requestError(400, 'invalid_query')
+          parameters.delete('bucketMs')
+          return usage.series(usageQuery(parameters), bucket === null ? undefined : Number(bucket))
+        }
         requestError(503, 'runtime_not_connected')
       }
     },
     {
       method: 'GET', pathname: '/api/chat/usage/turns',
-      handle() {
+      maxResponseBytes: 4_194_304,
+      handle({ query }) {
+        const usage = chatRuntime?.usage()
+        if (usage) {
+          if (query.has('key')) {
+            const parameters = new URLSearchParams(query)
+            if (parameters.getAll('key').length !== 1) requestError(400, 'invalid_query')
+            const key = parameters.get('key')!
+            if (!SCOPE_PATTERN.test(key)) requestError(400, 'invalid_query')
+            parameters.delete('key')
+            return createNativeUsageProjection({ usage }).conversation(key, usageQuery(parameters))
+          }
+          return usage.list(usageQuery(query))
+        }
         requestError(503, 'runtime_not_connected')
       }
     },
     {
       method: 'GET', pathname: '/api/chat/usage/recent',
-      handle() {
+      maxResponseBytes: 1_048_576,
+      handle({ query }) {
+        const usage = chatRuntime?.usage()
+        if (usage) return createNativeUsageProjection({ usage }).recent(usageQuery(query))
         requestError(503, 'runtime_not_connected')
       }
     },
     {
       method: 'POST', pathname: '/api/chat/usage/reset',
       handle() {
+        if (chatRuntime?.usage()) requestError(405, 'usage_reset_not_enabled')
         requestError(503, 'runtime_not_connected')
       }
     },
@@ -829,7 +974,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         await ready
         const document = await readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
         const status = await adapterRuntimeStatus(adapterRuntime)
-        return adaptersResponse(document, status, await adapterConnectionStatus(adapterRuntime))
+        return adaptersResponse(document, status, await adapterConnectionStatus(adapterRuntime, chatRuntime))
       }
     },
     {
@@ -842,7 +987,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
           requestError(400, 'invalid_adapter_configuration')
         }
         const status = await adapterRuntimeStatus(adapterRuntime)
-        const connection = await adapterConnectionStatus(adapterRuntime)
+        const connection = await adapterConnectionStatus(adapterRuntime, chatRuntime)
         const document = await updateDocument(
           directory, adaptersFile, body.revision, DEFAULT_ADAPTERS, validateStoredAdapters,
           current => {
@@ -866,12 +1011,13 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         }
         if (adapterRuntime?.connect === undefined) requestError(503, 'adapter_runtime_unavailable')
         await ready
-        return controlAdapterRuntime(directory, signal, async controlSignal => {
+        const document = await controlAdapterRuntime(directory, signal, async controlSignal => {
           const document = await readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
           if (document.revision !== body.revision) requestError(409, 'chat_revision_conflict')
           await adapterRuntime.connect?.(document.value.adapters, controlSignal)
-          return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime))
+          return document
         })
+        return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime, chatRuntime))
       }
     },
     {
@@ -881,14 +1027,191 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         if (!isRecord(body) || !hasExactKeys(body, [])) requestError(400, 'invalid_adapter_configuration')
         if (adapterRuntime?.disconnect === undefined) requestError(503, 'adapter_runtime_unavailable')
         await ready
-        return controlAdapterRuntime(directory, signal, async controlSignal => {
+        const document = await controlAdapterRuntime(directory, signal, async controlSignal => {
           if (controlSignal.aborted) requestError(499, 'request_aborted')
           await adapterRuntime.disconnect?.()
-          const document = await readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
-          return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime))
+          return readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
         })
+        return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime, chatRuntime))
       }
     }
   ]
-  return Object.freeze(routes.map(route => Object.freeze(route)))
+  if (chatRuntime !== undefined) routes.push(...nativeChatControlRoutes(directory, chatRuntime, options.deploymentRuntime))
+  const documents = new Set(['plans', 'personas', 'model', 'providers', 'access', 'adapters', 'authorization', 'deployment', 'usage/pricing']
+    .map(name => `/api/chat/${name}`))
+  return Object.freeze(routes.map(route => Object.freeze(route.method === 'POST' && documents.has(route.pathname)
+    ? { ...route, maxRequestBytes: 128 * 1024 } : route)))
+}
+
+function integerQuery(query: URLSearchParams, key: string, fallback: number, maximum: number): number {
+  const value = query.get(key)
+  if (query.getAll(key).length > 1 || value !== null && (!/^[1-9][0-9]{0,5}$/.test(value)
+    || Number(value) > maximum)) requestError(400, 'invalid_query')
+  query.delete(key)
+  return value === null ? fallback : Number(value)
+}
+
+function hostRoute(runtime: NativeChatRuntime, pathname: string): AdminRoute {
+  const host = runtime.host()
+  if (!host) requestError(503, 'runtime_not_connected')
+  const route = createHostAdminRoutes(host).find(candidate => candidate.pathname === pathname)
+  if (!route) requestError(404, 'not_found')
+  return route
+}
+
+function startRevisions(body: Record<string, unknown> | null, withTarget = false): Readonly<Record<string, string>> {
+  const keys = ['plans', 'personas', 'access', 'adapters', 'providers', 'authorization', 'deployment']
+  if (!isRecord(body) || !hasExactKeys(body, withTarget ? ['revisions', 'targetRevision'] : ['revisions'])
+    || withTarget && (typeof body.targetRevision !== 'string' || !REVISION_PATTERN.test(body.targetRevision))
+    || !isRecord(body.revisions)
+    || !hasExactKeys(body.revisions, keys) || !Object.values(body.revisions).every(value =>
+      typeof value === 'string' && REVISION_PATTERN.test(value))) requestError(400, 'invalid_runtime_revisions')
+  return body.revisions as Readonly<Record<string, string>>
+}
+
+async function nativeControl<Value>(directory: string, operation: () => Promise<Value>): Promise<Value> {
+  if (nativeControls.has(directory) || adapterControls.has(directory)) requestError(409, 'native_chat_busy')
+  nativeControls.add(directory)
+  try { return await operation() } finally { nativeControls.delete(directory) }
+}
+
+function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
+  deploymentRuntime: NativeChatDeploymentRuntime | undefined): AdminRoute[] {
+  const authorizationFile = join(directory, 'chat-authorization.json')
+  const deploymentFile = join(directory, 'chat-deployment.json')
+  const routes: AdminRoute[] = [
+    { method: 'GET', pathname: '/api/chat/runtime', async handle({ query }) {
+      requireEmptyQuery(query)
+      return runtime.status()
+    } },
+    { method: 'POST', pathname: '/api/chat/runtime/start', async handle({ query, body, signal }) {
+      requireEmptyQuery(query)
+      const revisions = startRevisions(body)
+      return nativeControl(directory, async () => {
+        try { await runtime.start(revisions, signal) } catch (error) {
+          if (isRecord(error) && error.code === 'NATIVE_CHAT_REVISION_CONFLICT') requestError(409, 'chat_revision_conflict')
+          if (isRecord(error) && error.code === 'NATIVE_CHAT_BUSY') requestError(409, 'native_chat_busy')
+          requestError(503, 'native_chat_start_failed')
+        }
+        return runtime.status()
+      })
+    } },
+    { method: 'POST', pathname: '/api/chat/runtime/stop', async handle({ query, body }) {
+      requireEmptyQuery(query)
+      if (!isRecord(body) || !hasExactKeys(body, [])) requestError(400, 'invalid_chat_request')
+      await runtime.stop()
+      return runtime.status()
+    } },
+    { method: 'GET', pathname: '/api/chat/authorization', async handle({ query }) {
+      requireEmptyQuery(query)
+      await ensurePrivateDirectory(directory)
+      const document = await readDocument(authorizationFile, DEFAULT_AUTHORIZATION, validateStoredAuthorization)
+      return { revision: document.revision, ...document.value.authorization }
+    } },
+    { method: 'POST', pathname: '/api/chat/authorization', async handle({ query, body }) {
+      requireEmptyQuery(query)
+      if (!isRecord(body) || !hasExactKeys(body, ['revision', 'version', 'grants'])) requestError(400, 'invalid_chat_authorization')
+      const expected = parseRevision(body.revision)
+      let value: NativeChatAuthorization
+      try { value = validateNativeChatAuthorization({ version: body.version, grants: body.grants }) }
+      catch { requestError(400, 'invalid_chat_authorization') }
+      await ensurePrivateDirectory(directory)
+      const document = await updateDocument(directory, authorizationFile, expected, DEFAULT_AUTHORIZATION,
+        validateStoredAuthorization, () => ({ schema: 1, authorization: value }))
+      return { revision: document.revision, ...document.value.authorization }
+    } },
+    { method: 'GET', pathname: '/api/chat/deployment', async handle({ query }) {
+      requireEmptyQuery(query)
+      await ensurePrivateDirectory(directory)
+      const document = await readDocument(deploymentFile, DEFAULT_DEPLOYMENT, validateStoredDeployment)
+      return { revision: document.revision, deployment: document.value.deployment }
+    } },
+    { method: 'POST', pathname: '/api/chat/deployment', async handle({ query, body }) {
+      requireEmptyQuery(query)
+      if (!isRecord(body) || !hasExactKeys(body, ['revision', 'deployment'])) requestError(400, 'invalid_chat_deployment')
+      const expected = parseRevision(body.revision)
+      let value: StoredDeployment
+      try { value = validateStoredDeployment({ schema: 1, deployment: body.deployment }) }
+      catch { requestError(400, 'invalid_chat_deployment') }
+      await ensurePrivateDirectory(directory)
+      const document = await updateDocument(directory, deploymentFile, expected, DEFAULT_DEPLOYMENT,
+        validateStoredDeployment, () => value)
+      return { revision: document.revision, deployment: document.value.deployment }
+    } },
+    { method: 'GET', pathname: '/api/chat/usage/pricing', handle({ query }) {
+      requireEmptyQuery(query)
+      const usage = runtime.usage()
+      if (!usage) requestError(503, 'runtime_not_connected')
+      return usage.pricing()
+    } },
+    { method: 'POST', pathname: '/api/chat/usage/pricing', handle({ query, body }) {
+      requireEmptyQuery(query)
+      if (!isRecord(body) || !hasExactKeys(body, ['revision', 'prices'])
+        || body.revision !== null && (typeof body.revision !== 'number' || !Number.isSafeInteger(body.revision) || body.revision < 1)) {
+        requestError(400, 'invalid_usage_pricing')
+      }
+      const usage = runtime.usage()
+      if (!usage) requestError(503, 'runtime_not_connected')
+      try { return usage.setPricing(body.prices, body.revision as number | null) }
+      catch (error) {
+        if (isRecord(error) && error.code === 'STORE_CONFLICT') requestError(409, 'usage_pricing_revision_conflict')
+        if (isRecord(error) && error.code === 'USAGE_INVALID_PRICING') requestError(400, 'invalid_usage_pricing')
+        requestError(500, 'usage_pricing_operation_unknown')
+      }
+    } }
+  ]
+  for (const operation of ['prepare', 'reconcile', 'apply'] as const) routes.push({
+    method: 'POST', pathname: `/api/chat/deployment/${operation}`, async handle({ query, body, signal }) {
+      requireEmptyQuery(query)
+      const revisions = startRevisions(body, operation === 'apply')
+      if (!deploymentRuntime) requestError(503, 'trusted_deployment_runtime_unavailable')
+      return nativeControl(directory, async () => {
+        const configuration = await readNativeChatConfiguration(directory)
+        if (Object.keys(revisions).some(key => revisions[key] !== configuration.revisions[key])) requestError(409, 'chat_revision_conflict')
+        if (operation === 'apply' && !(await runtime.status()).canApplyDeployment) requestError(409, 'native_chat_busy')
+        if (signal.aborted) requestError(499, 'request_aborted')
+        return operation === 'prepare' ? deploymentRuntime.prepare(configuration)
+          : operation === 'reconcile' ? publicDeploymentResolution(await deploymentRuntime.reconcile(configuration))
+            : deploymentRuntime.apply(configuration, signal, body!.targetRevision as string)
+      })
+    }
+  })
+  for (const name of ['metrics', 'storage', 'sessions', 'tasks', 'outbox', 'replies']) routes.push({
+    method: 'GET', pathname: `/api/host/${name}`,
+    ...(name === 'sessions' ? { maxResponseBytes: 1_048_576 } : {}),
+    handle(context) { return hostRoute(runtime, `/api/host/${name}`).handle(context) }
+  })
+  return routes
+}
+
+function publicDeploymentResolution(result: Awaited<ReturnType<NativeChatDeploymentRuntime['reconcile']>>) {
+  return { verified: result.missingReasons.length === 0 && result.presetBindings.length > 0,
+    missingReasons: result.missingReasons,
+    verificationScope: result.verificationScope ?? null,
+    credentialValueIdentityVerified: false,
+    unverified: result.unverified ?? ['credential_loaded_value_identity'],
+    presets: result.presetBindings.map(binding => ({ agentPreset: binding.agentPreset })) }
+}
+
+function usageQuery(query: URLSearchParams): NativeUsageQuery {
+  const numeric = ['limit', 'since', 'until']
+  const textual = ['after', 'conversationId', 'provider', 'model']
+  if ([...query.keys()].some(key => ![...numeric, ...textual].includes(key))
+    || [...query.keys()].some(key => query.getAll(key).length !== 1)) requestError(400, 'invalid_query')
+  const result: Record<string, string | number> = {}
+  for (const key of numeric) {
+    const value = query.get(key)
+    if (value === null) continue
+    if (!/^(0|[1-9][0-9]{0,15})$/.test(value) || !Number.isSafeInteger(Number(value))
+      || key === 'limit' && (Number(value) < 1 || Number(value) > 1_000)) requestError(400, 'invalid_query')
+    result[key] = Number(value)
+  }
+  for (const key of textual) {
+    const value = query.get(key)
+    if (value === null) continue
+    if (value.length === 0 || value.length > 1_024 || /[\u0000-\u001f\u007f]/.test(value)) requestError(400, 'invalid_query')
+    result[key] = value
+  }
+  if (typeof result.since === 'number' && typeof result.until === 'number' && result.since >= result.until) requestError(400, 'invalid_query')
+  return result
 }

@@ -15,8 +15,11 @@ import { createAdminBootstrap } from './bootstrap.ts';
 import { createSettingsRoutes } from './settings.ts';
 import { createManagementOperations } from './operations.ts';
 import { createConfigurationRoutes } from './configuration.ts';
-import { createNativeRuntimeRoutes } from './runtime.ts';
-import { createOneBotConnectionManager } from '../host/onebot-connection.ts';
+import { createNativeRuntimeRoutes, readNativeChatConfiguration } from './runtime.ts';
+import { createNativeChatRuntime } from '../host/native-chat-runtime.ts';
+import type { NativeChatDeploymentRuntime } from '../host/native-chat-configuration.ts';
+import { createNativeDshDeploymentRuntime } from '../adapters/dsh-profile-deployment.ts';
+import { isLoopbackAddress, validatePublicOrigin } from './public-origin.ts';
 
 const FRAMEWORK_VERSION = '0.1.0';
 const PROBE_TIMEOUT_MS = 2_500;
@@ -29,6 +32,8 @@ export interface GatewayAdminConfiguration {
   gatewayConfiguration: string;
   serviceManager?: string;
   accessSessionTtlMs?: number;
+  publicOrigin?: string;
+  trustedLoopbackProxy?: boolean;
 }
 
 interface GatewayHealth {
@@ -72,6 +77,15 @@ function validHost(value: unknown): value is string {
   return value === 'localhost' || typeof value === 'string' && isIP(value) !== 0;
 }
 
+function validProxyConfiguration(value: { publicOrigin?: unknown; trustedLoopbackProxy?: unknown; host?: unknown }): boolean {
+  try {
+    const origin = validatePublicOrigin(value.publicOrigin ?? '');
+    const proxy = value.trustedLoopbackProxy ?? false;
+    return typeof proxy === 'boolean' && proxy === (origin !== '')
+      && (!proxy || typeof value.host === 'string' && isLoopbackAddress(value.host));
+  } catch { return false; }
+}
+
 function configurationRevision(configuration: Readonly<GatewayAdminConfiguration>): string {
   return createHash('sha256').update(JSON.stringify(configuration)).digest('hex');
 }
@@ -83,11 +97,12 @@ function gatewayRevision(configuration: Readonly<OneBotGatewayConfiguration>): s
 export function loadGatewayAdminConfiguration(filename: string): Readonly<GatewayAdminConfiguration> {
   const input: unknown = JSON.parse(privateText(filename, 64 * 1024));
   assert(isRecord(input)
-    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'serviceManager', 'accessSessionTtlMs'].includes(key))
+    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'serviceManager', 'accessSessionTtlMs',
+      'publicOrigin', 'trustedLoopbackProxy'].includes(key))
     && validHost(input.host)
     && Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65_535
     && reference(input.tokenFile) && reference(input.gatewayConfiguration)
-    && (input.serviceManager === undefined || reference(input.serviceManager))
+    && (input.serviceManager === undefined || reference(input.serviceManager)) && validProxyConfiguration(input)
     && (input.accessSessionTtlMs === undefined || Number.isSafeInteger(input.accessSessionTtlMs)
       && Number(input.accessSessionTtlMs) >= 300_000 && Number(input.accessSessionTtlMs) <= 30 * 86_400_000),
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator configuration contains invalid fields.');
@@ -99,6 +114,8 @@ export function loadGatewayAdminConfiguration(filename: string): Readonly<Gatewa
     gatewayConfiguration: resolve(base, input.gatewayConfiguration),
     ...(input.serviceManager === undefined ? {} : { serviceManager: resolve(base, input.serviceManager) }),
     ...(input.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: Number(input.accessSessionTtlMs) }),
+    ...(input.publicOrigin === undefined ? {} : { publicOrigin: String(input.publicOrigin) }),
+    ...(input.trustedLoopbackProxy === undefined ? {} : { trustedLoopbackProxy: Boolean(input.trustedLoopbackProxy) }),
   });
   if (existsSync(configuration.tokenFile)) adminToken(configuration.tokenFile);
   loadOneBotGatewayConfiguration(configuration.gatewayConfiguration);
@@ -110,7 +127,7 @@ function connectHost(host: string): string {
 }
 
 export function gatewayAdminAddress(configuration: Readonly<GatewayAdminConfiguration>): string {
-  assert(validHost(configuration.host)
+  assert(validHost(configuration.host) && validProxyConfiguration(configuration)
     && Number.isSafeInteger(configuration.port) && configuration.port >= 0 && configuration.port <= 65_535,
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator address is invalid.');
   const host = connectHost(configuration.host);
@@ -428,7 +445,10 @@ async function closeServer(server: Server): Promise<void> {
   await closed;
 }
 
-export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConfiguration>, options: { configurationFilename?: string } = {}) {
+export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConfiguration>, options: {
+  configurationFilename?: string;
+  deploymentRuntime?: NativeChatDeploymentRuntime;
+} = {}) {
   assert(validHost(configuration.host)
     && Number.isSafeInteger(configuration.port) && configuration.port >= 0 && configuration.port <= 65_535
     && reference(configuration.tokenFile) && reference(configuration.gatewayConfiguration),
@@ -448,7 +468,15 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     const status = health.ok
       ? await probeStatus(current.configuration, current.token, signal)
       : { verified: false, online: null, good: null, error: health.error };
-    return liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined);
+    const gateway = liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined);
+    const native = await chatRuntime.status();
+    return { ...gateway,
+      integrations: { nativeRuntimeResources: true, nativeChatRuntime: native.chatReady },
+      overview: { ...gateway.overview, nativeChatRuntimeState: native.state, chatReady: native.chatReady,
+        nativeChatMissingReasons: native.missingReasons },
+      features: [...gateway.features, ...(native.chatReady ? [{ id: 'agent-relay', version: '1.0.0',
+        status: 'active', capabilities: ['agent.submit', 'messaging.send'] }] : [])]
+    };
   };
   const healthRoute: AdminRoute = {
     method: 'GET',
@@ -470,10 +498,16 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     gatewayConfigurationFilename: configuration.gatewayConfiguration,
     serviceManager: configuration.serviceManager
   }) : undefined;
-  const adapterRuntime = createOneBotConnectionManager();
+  const directory = join(dirname(configuration.tokenFile), 'runtime');
+  const deploymentRuntime = options.deploymentRuntime ?? createNativeDshDeploymentRuntime();
+  const chatRuntime = createNativeChatRuntime({ directory,
+    loadConfiguration: () => readNativeChatConfiguration(directory),
+    resolveDeployment: configuration => deploymentRuntime.reconcile(configuration)
+  });
+  const adapterRuntime = chatRuntime.adapterRuntime;
   const routes: AdminRoute[] = [
     healthRoute,
-    ...createNativeRuntimeRoutes({ directory: join(dirname(configuration.tokenFile), 'runtime'), adapterRuntime })
+    ...createNativeRuntimeRoutes({ directory, adapterRuntime, chatRuntime, deploymentRuntime })
   ];
   if (options.configurationFilename) {
     const filenames = { adminConfigurationFilename: options.configurationFilename, gatewayConfigurationFilename: configuration.gatewayConfiguration };
@@ -486,6 +520,8 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
   }
   const server = createAdminServer({ token: () => bootstrap.token(), snapshot: snapshotHandler, routes, handlerTimeoutMs: 70_000,
     ...(configuration.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: configuration.accessSessionTtlMs }),
+    ...(configuration.publicOrigin === undefined ? {} : { publicOrigin: configuration.publicOrigin }),
+    ...(configuration.trustedLoopbackProxy === undefined ? {} : { trustedLoopbackProxy: configuration.trustedLoopbackProxy }),
     setup: {
       status: () => ({ ...bootstrap.status(), revision }),
       initialize: () => ({ ...bootstrap.initialize(), revision }),
@@ -501,7 +537,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       });
     });
   } catch (error: unknown) {
-    await adapterRuntime.close();
+    await chatRuntime.close();
     server.closeAllConnections();
     await closeServer(server);
     throw error;
@@ -516,7 +552,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     close() {
       stopping ??= (async () => {
         try {
-          await adapterRuntime.close();
+          await chatRuntime.close();
         } finally {
           await closeServer(server);
         }

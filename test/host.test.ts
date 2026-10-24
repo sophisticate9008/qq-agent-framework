@@ -536,6 +536,85 @@ test('failed follow setup retries against the existing durable session', async (
   assert.deepEqual(agent.followRequests.map(request => request.sessionId), ['follow-session', 'follow-session']);
 });
 
+test('ingress authorization accepts only literal true and rejects truthy runtime contract violations before history or effects', async context => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  const agent = new FakeAgent(['authorized-session']);
+  const transport = new FakeTransport();
+  let decision: unknown = true;
+  const authorizeIncoming = (() => decision) as unknown as (message: InboundMessage) => boolean;
+  const host = createBridgeHost({ store, agent, transport, ...applicationContext(), authorizeIncoming, taskTickMs: 60000 });
+  context.after(async () => { await host.stop(); store.close(); });
+  grantRelay(host);
+  await host.start();
+  for (const [index, value] of ['yes', 'false', 1, {}, [], new Boolean(true), null, undefined].entries()) {
+    decision = value;
+    const receipt = await host.receive(inbound(`invalid-authorization-${index}`));
+    assert.equal(receipt.status, 'rejected');
+    assert.equal(receipt.errorCode, 'INBOUND_DENIED');
+  }
+  assert.equal(host.history.snapshot('group:100').messages.length, 0);
+  assert.equal(host.sessions.list().length, 0);
+  assert.equal(agent.createRequests.length, 0);
+  assert.equal(agent.submitRequests.length, 0);
+  assert.equal(transport.requests.length, 0);
+  decision = true;
+  assert.equal((await host.receive(inbound('literal-true'))).status, 'accepted');
+  assert.equal(agent.submitRequests.length, 1);
+});
+
+test('terminal follow failure invalidates idle cache and a later prompt opens a fresh follow without replaying old work', async context => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  const agent = new FakeAgent(['terminal-session']);
+  const transport = new FakeTransport();
+  const host = createBridgeHost({ store, agent, transport, ...applicationContext(), authorizeIncoming: () => true, taskTickMs: 60000 });
+  context.after(async () => { await host.stop(); store.close(); });
+  grantRelay(host);
+  await host.start();
+  assert.equal((await host.receive(inbound('before-terminal'))).status, 'accepted');
+  assert.equal(host.metrics().followedSessions, 1);
+  await agent.emit('terminal-session', { id: 'stream-ended', type: 'failed', data: { code: 'DSH_FOLLOW_ENDED', terminal: true } });
+  assert.equal(host.metrics().followedSessions, 0);
+  assert.equal(host.metrics().unhealthyFollows, 1);
+  assert.equal(agent.followRequests[0]?.signal.aborted, true);
+  await agent.emit('terminal-session', { id: 'stale-answer', type: 'message', content: [{ type: 'text', text: 'Must never send.' }] }, 0);
+  assert.equal((await host.receive(inbound('after-terminal'))).status, 'accepted');
+  assert.equal(agent.createRequests.length, 1);
+  assert.equal(agent.submitRequests.length, 2);
+  assert.equal(agent.followRequests.length, 2);
+  assert.equal(agent.followRequests[1]?.signal.aborted, false);
+  assert.equal(host.metrics().unhealthyFollows, 0);
+  assert.equal(host.metrics().followedSessions, 1);
+  assert.equal((await host.receive(inbound('before-terminal'))).status, 'accepted');
+  assert.equal(agent.submitRequests.length, 2);
+  await host.tasks.runDue();
+  assert.equal(transport.requests.length, 0);
+});
+
+test('failed replacement or terminal-during-open follow rejects new work before submit', async context => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  let rejectReplacement = false;
+  const agent = new FakeAgent(['terminal-open-session'], { async followSetup(request, attempt) {
+    if (rejectReplacement) throw new Error('Replacement stream unavailable.');
+    if (attempt === 3) await request.onEvent({ id: 'died-during-open', sessionId: request.sessionId,
+      type: 'failed', data: { terminal: true } });
+  } });
+  const host = createBridgeHost({ store, agent, transport: new FakeTransport(), ...applicationContext(),
+    authorizeIncoming: () => true, taskTickMs: 60000 });
+  context.after(async () => { await host.stop(); store.close(); });
+  grantRelay(host);
+  await host.start();
+  await host.receive(inbound('first-live'));
+  await agent.emit('terminal-open-session', { id: 'terminal', type: 'failed', data: { terminal: true } });
+  rejectReplacement = true;
+  assert.notEqual((await host.receive(inbound('replacement-fails'))).status, 'accepted');
+  assert.equal(agent.submitRequests.length, 1);
+  rejectReplacement = false;
+  assert.notEqual((await host.receive(inbound('terminal-during-open'))).status, 'accepted');
+  assert.equal(agent.submitRequests.length, 1);
+  assert.equal((await host.receive(inbound('fresh-follow'))).status, 'accepted');
+  assert.equal(agent.submitRequests.length, 2);
+});
+
 test('stop racing start and submit completion cannot create later outbound work', async (context) => {
   const temporary = temporaryDatabase();
   context.after(() => rmSync(temporary.directory, { recursive: true, force: true }));

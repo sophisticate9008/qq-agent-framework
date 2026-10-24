@@ -6,6 +6,8 @@ import { ConnectPrompt, Field, PageHeading, SaveBar, Section, StatusPill } from 
 import { Button } from '../components/ui/button.tsx';
 import { Input } from '../components/ui/input.tsx';
 import { Textarea } from '../components/ui/textarea.tsx';
+import { ChatAuthorizationManager } from '../components/chat-authorization-manager.tsx';
+import { ConfigurationEditor } from '../components/configuration-editor.tsx';
 
 interface AccessState {
   readonly revision: string;
@@ -75,7 +77,8 @@ function saveMessage(state: SaveState, dirty: boolean): string {
   return dirty ? '授权更改尚未保存。' : '当前授权与已保存目录一致。';
 }
 
-export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
+export function AccessPage(props: PageProps) {
+  const { api, connected, connect, setDirty } = props;
   const [access, setAccess] = useState<AccessState | null>(null);
   const [form, setForm] = useState<AccessForm | null>(null);
   const [loading, setLoading] = useState(false);
@@ -87,7 +90,12 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
   const [reloadVersion, setReloadVersion] = useState(0);
   const reportedDirty = useRef(false);
   const setDirtyRef = useRef(setDirty);
+  const writeController = useRef<AbortController | null>(null);
+  const lifecycle = useRef(0);
+  const connection = useRef({ api, connected });
+  connection.current = { api, connected };
   const dirty = access !== null && form !== null && !sameAccess(access, form);
+  const blocked = result === 'busy' || result === 'conflict' || result === 'unknown';
 
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
@@ -96,11 +104,19 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
     setDirty(dirty, 'chat-access');
   }, [dirty, setDirty]);
   useEffect(() => () => {
+    lifecycle.current++;
+    writeController.current?.abort();
     reportedDirty.current = false;
     setDirtyRef.current(false, 'chat-access');
   }, []);
 
   useEffect(() => {
+    const generation = ++lifecycle.current;
+    writeController.current?.abort();
+    writeController.current = null;
+    setSaving(false);
+    const current = () => !controller.signal.aborted && generation === lifecycle.current
+      && connection.current.api === api && connection.current.connected;
     if (!connected) {
       setAccess(null);
       setForm(null);
@@ -114,21 +130,23 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
     void api.get('/api/chat/access', controller.signal).then(value => {
       const next = parseAccess(value);
       if (!next) throw new Error('invalid_access_response');
+      if (!current()) return;
       setAccess(next);
       setForm(toForm(next));
     }).catch(error => {
-      if (!controller.signal.aborted) {
+      if (current()) {
         setAccess(null);
         setForm(null);
         setLoadError(errorMessage(error));
       }
     }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (current()) setLoading(false);
     });
-    return () => controller.abort();
+    return () => { controller.abort(); lifecycle.current++; writeController.current?.abort(); };
   }, [api, connected, reloadVersion]);
 
   function update(key: keyof AccessForm, value: string): void {
+    if (saving || blocked) return;
     setForm(current => current ? { ...current, [key]: value } : current);
     setValidationError('');
     setWriteError('');
@@ -136,6 +154,7 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
   }
 
   function reset(): void {
+    if (saving || blocked) return;
     if (access) setForm(toForm(access));
     setValidationError('');
     setWriteError('');
@@ -143,7 +162,7 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
   }
 
   async function save(): Promise<void> {
-    if (!access || !form || !dirty || saving) return;
+    if (!access || !form || !dirty || saving || blocked || writeController.current) return;
     const allow = parseEntries(form.allow);
     const deny = parseEntries(form.deny);
     if (!allow.values || !deny.values) {
@@ -160,6 +179,11 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
       return;
     }
     setSaving(true);
+    const controller = new AbortController();
+    const generation = lifecycle.current;
+    const current = () => !controller.signal.aborted && generation === lifecycle.current
+      && connection.current.api === api && connection.current.connected;
+    writeController.current = controller;
     setWriteError('');
     setResult('idle');
     try {
@@ -168,28 +192,31 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
         allow: allow.values,
         deny: deny.values,
         owner,
-      }));
+      }, controller.signal));
       if (!next) throw new Error('invalid_access_response');
+      if (!current()) return;
       setAccess(next);
       setForm(toForm(next));
       setResult('saved');
     } catch (error) {
+      if (!current()) return;
       setResult(saveState(error));
       setWriteError(errorMessage(error));
     } finally {
-      setSaving(false);
+      if (current()) setSaving(false);
+      if (writeController.current === controller) writeController.current = null;
     }
   }
 
   if (!connected) return <div className="page-stack" data-page="access"><PageHeading title="访问范围" description="管理聊天入口的独立授权目录。" /><ConnectPrompt connect={connect} /></div>;
 
   return <div className="page-stack" data-page="access">
-    <PageHeading title="访问范围" description="访问授权只决定谁可以进入原生聊天链路，不会创建人设、能力、偏好或模型权限。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />
+    <PageHeading title="访问范围" description="聊天入口、消息处理授权和出站网关范围独立管理，不会相互扩大权限。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty && !blocked}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />
     {loading && !access ? <Section title="原生访问授权"><div className="flex min-h-44 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取授权目录</div></Section>
       : !access || !form ? <Section title="原生访问授权不可用" description={loadError || '服务没有返回可识别的授权目录。'}><div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-6">暂时无法读取访问授权，请稍后重试。</div></Section>
         : <>
           {parseEntries(form.allow).values?.length === 0 && <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5"><ShieldX className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" /><p><strong>当前默认全部拒绝。</strong><span className="mt-1 block text-muted-foreground">允许名单为空时，没有会话主体可以进入原生聊天链路，也不会从其他系统继承名单。</span></p></div>}
-          <Section title="授权目录" description="每行填写一个群聊或私聊；拒绝名单用于明确覆盖允许结果。" actions={<StatusPill tone={parseEntries(form.allow).values?.length ? 'success' : 'warning'}>{parseEntries(form.allow).values?.length ?? 0} 个允许主体</StatusPill>} footer={<SaveBar dirty={dirty} saving={saving} message={saveMessage(result, dirty)} onSave={() => void save()} onReset={reset} label="保存授权" />}>
+          <Section title="授权目录" description="每行填写一个群聊或私聊；拒绝名单用于明确覆盖允许结果。" actions={<StatusPill tone={parseEntries(form.allow).values?.length ? 'success' : 'warning'}>{parseEntries(form.allow).values?.length ?? 0} 个允许主体</StatusPill>} footer={<SaveBar dirty={dirty} saving={saving} disabled={blocked} message={saveMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存授权" />}>
             <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1"><div className="grid gap-5 sm:grid-cols-2">
               <Field label="允许名单" description="支持换行或逗号分隔，只接受 group:群号 和 private:用户号。"><Textarea value={form.allow} onChange={event => update('allow', event.target.value)} disabled={saving} className="h-72 resize-none font-mono text-xs leading-6" placeholder={'group:123456\nprivate:654321'} /></Field>
               <Field label="拒绝名单" description="显式拒绝项独立保存，格式与允许名单相同。"><Textarea value={form.deny} onChange={event => update('deny', event.target.value)} disabled={saving} className="h-72 resize-none font-mono text-xs leading-6" placeholder="group:999999" /></Field>
@@ -200,5 +227,7 @@ export function AccessPage({ api, connected, connect, setDirty }: PageProps) {
             </div>
           </Section>
         </>}
+    <ChatAuthorizationManager api={api} connected={connected} setDirty={setDirty} />
+    <ConfigurationEditor category="access" {...props} />
   </div>;
 }

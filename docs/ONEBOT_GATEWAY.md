@@ -64,3 +64,5 @@ node scripts/onebot-gateway.ts --config "$PRIVATE_GATEWAY_CONFIG" --health
 `--health` 使用认证并校验配置 revision；`--listening` 只验证 TCP，不证明业务就绪。健康模式为 `onebot-egress`。
 
 停机为协作式：已发往上游但未取得明确回执的写入仍为 unknown。管理员凭据、网关凭据与上游协议凭据相互独立。管理教程见 [管理工作台](GATEWAY_ADMIN.md)。
+
+按 [OneBot HTTP 响应约定](https://github.com/botuniverse/onebot-11/blob/master/communication/http.md#响应)，`status: async` / `retcode: 1` 只是异步受理，不是确定失败。本框架保留原 HTTP 响应，但将命令与持久出站标为 `unknown`，同一幂等键不会再次发送。只有一致的 `ok/0` 且带有效消息 ID 才确认发送；矛盾状态或缺失消息 ID 也不伪造确认。取得外部确定回执后才能对账，不能把未知当作可安全重试。

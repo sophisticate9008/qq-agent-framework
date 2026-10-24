@@ -2,16 +2,16 @@ import { useMemo } from 'react';
 import { ArrowDown, ArrowUp, Database } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Cell, Tooltip, XAxis, YAxis } from 'recharts';
 
-import { formatActivityCost, formatUsageCount } from '../lib/activity.ts';
+import { formatActivityCost, formatUsageCount, sumUsageCounts } from '../lib/activity.ts';
 import { usageBucketValue, type AggregateUsageTier, type UsageChartMetric, type UsageSeries, type UsageSeriesBucket } from '../lib/usage-details.ts';
 import { ChartContainer, ChartTooltipContent } from './ui/chart.tsx';
 
 const tierLabels: Readonly<Record<AggregateUsageTier, string>> = {
-  peak: '高峰', off: '空闲', mixed: '混合',
+  peak: '高峰', off: '空闲', mixed: '混合', flat: '固定单价',
 };
 
 const tierColors: Readonly<Record<AggregateUsageTier, string>> = {
-  peak: 'var(--color-amber-500)', off: 'var(--color-emerald-500)', mixed: 'var(--color-sky-500)',
+  peak: 'var(--color-amber-500)', off: 'var(--color-emerald-500)', mixed: 'var(--color-sky-500)', flat: 'var(--primary)',
 };
 
 function formatBucketTime(time: number, bucketMs: number): string {
@@ -29,7 +29,7 @@ function BucketCounts({ bucket, detailedCounts }: { readonly bucket: UsageSeries
   return <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[11px] sm:grid-cols-3">
     <div><dt className="text-muted-foreground">Token</dt><dd className="mt-0.5 font-medium tabular-nums">{formatUsageCount(bucket.tokens, detailedCounts)}</dd></div>
     <div><dt className="text-muted-foreground">轮次 / 步骤</dt><dd className="mt-0.5 font-medium tabular-nums">{formatUsageCount(bucket.turns, detailedCounts)} / {formatUsageCount(bucket.steps, detailedCounts)}</dd></div>
-    <div><dt className="flex items-center gap-1 text-muted-foreground"><ArrowUp className="size-3" aria-hidden="true" />输入</dt><dd className="mt-0.5 font-medium tabular-nums">{formatUsageCount(bucket.cacheMiss + bucket.cacheHit + bucket.cacheWrite, detailedCounts)}</dd></div>
+    <div><dt className="flex items-center gap-1 text-muted-foreground"><ArrowUp className="size-3" aria-hidden="true" />输入</dt><dd className="mt-0.5 font-medium tabular-nums">{formatUsageCount(sumUsageCounts(bucket.cacheMiss, bucket.cacheHit, bucket.cacheWrite), detailedCounts)}</dd></div>
     <div><dt className="flex items-center gap-1 text-muted-foreground"><ArrowDown className="size-3" aria-hidden="true" />输出</dt><dd className="mt-0.5 font-medium tabular-nums">{formatUsageCount(bucket.output, detailedCounts)}</dd></div>
     <div title={`缓存写入 ${formatUsageCount(bucket.cacheWrite, detailedCounts)}；未命中 ${formatUsageCount(bucket.cacheMiss, detailedCounts)}。未命中 = 输入 − 缓存命中 − 缓存写入。`}><dt className="flex items-center gap-1 text-muted-foreground"><Database className="size-3" aria-hidden="true" />缓存</dt><dd className="mt-0.5 font-medium tabular-nums">{formatUsageCount(bucket.cacheHit, detailedCounts)}</dd></div>
   </dl>;
@@ -46,14 +46,16 @@ export interface UsageChartProps {
 export function UsageChart({ series, metric, selectedIndex, detailedCounts = false, onSelect }: UsageChartProps) {
   const chartData = useMemo(() => series.buckets.map(bucket => ({ ...bucket, value: usageBucketValue(bucket, metric) })), [metric, series]);
   const allZero = chartData.every(bucket => bucket.value === 0);
+  const allUnknown = chartData.every(bucket => bucket.value === null);
   const selectedBucket = selectedIndex === null ? null : series.buckets[selectedIndex] ?? null;
 
   return <div id="usage-chart" className="grid min-w-0 gap-3" data-chart-engine="recharts">
+    {series.native && <p className="text-[11px] leading-5 text-muted-foreground" data-usage-chart-coverage>{allUnknown ? '所选窗口尚无可确认的用量或费用；未知值留空，不绘制为零。' : '空缺柱表示未记录或未知，不等于零；仅展示已确认数值。'}{series.partial && '扫描达到容量边界，窗口结果不完整。'}</p>}
     <ChartContainer className="h-60 rounded-lg border bg-muted/10 px-1 py-2 sm:h-64 sm:px-3">
       <BarChart data={chartData} accessibilityLayer aria-label={`${metric === 'cost' ? '估算费用' : 'Token'}随时间的用量图`} margin={{ top: 10, right: 10, bottom: 0, left: 0 }} barCategoryGap="28%">
         <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="3 3" />
         <XAxis dataKey="t" axisLine={false} tickLine={false} tickMargin={10} minTickGap={32} interval="preserveStartEnd" tick={{ fill: 'var(--muted-foreground)', fontSize: 11 }} tickFormatter={(value: number) => formatBucketTime(value, series.bucketMs)} />
-        <YAxis width={76} axisLine={false} tickLine={false} tickMargin={8} tick={{ fill: 'var(--muted-foreground)', fontSize: 11 }} domain={allZero ? [0, 1] : [0, 'auto']} ticks={allZero ? [0] : undefined} allowDecimals={metric === 'cost'} tickFormatter={(value: number) => metric === 'cost' ? formatActivityCost(value, series.currency, series.symbol) : formatUsageCount(value, detailedCounts)} />
+        <YAxis width={76} axisLine={false} tickLine={false} tickMargin={8} tick={{ fill: 'var(--muted-foreground)', fontSize: 11 }} domain={allZero || allUnknown ? [0, 1] : [0, 'auto']} ticks={allUnknown ? [] : allZero ? [0] : undefined} allowDecimals={metric === 'cost'} tickFormatter={(value: number) => metric === 'cost' ? formatActivityCost(value, series.currency, series.symbol) : formatUsageCount(value, detailedCounts)} />
         <Tooltip cursor={false} isAnimationActive={false} allowEscapeViewBox={{ x: false, y: false }} offset={12} content={({ active, activeIndex }) => {
           const index = bucketIndex(activeIndex, series.buckets.length);
           const bucket = index === null ? undefined : series.buckets[index];
@@ -70,7 +72,7 @@ export function UsageChart({ series, metric, selectedIndex, detailedCounts = fal
     </ChartContainer>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex flex-wrap gap-x-5 gap-y-2 text-[11px] text-muted-foreground" aria-label="价格时段图例">
-        {(['off', 'peak', 'mixed'] as const).map(tier => <span key={tier} className="inline-flex items-center gap-2"><span className="size-2.5 rounded-sm" style={{ backgroundColor: tierColors[tier] }} />{tierLabels[tier]}</span>)}
+        {(series.native ? ['flat'] as const : ['off', 'peak', 'mixed'] as const).map(tier => <span key={tier} className="inline-flex items-center gap-2"><span className="size-2.5 rounded-sm" style={{ backgroundColor: tierColors[tier] }} />{tierLabels[tier]}</span>)}
       </div>
       <label className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-bucket-select"><span className="shrink-0">时间桶明细</span><select id="usage-bucket-select" aria-label="查看时间桶" className="h-8 min-w-0 rounded-lg border bg-background px-2 text-xs text-foreground" value={selectedBucket ? String(selectedIndex) : ''} onChange={event => {
         const index = bucketIndex(event.target.value, series.buckets.length);

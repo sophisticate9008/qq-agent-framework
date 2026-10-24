@@ -11,6 +11,8 @@ import type { DshClientPort, DshCreateSessionRequest, DshFollowEvent, DshFollowR
 export interface DshPresetBinding {
   readonly agentPreset: string
   readonly definition: ChatSessionDefinition
+  readonly externalProvider?: string
+  readonly conversationKind?: 'group' | 'private'
 }
 
 export interface DshJsonRpcOptions {
@@ -25,7 +27,18 @@ export interface DshJsonRpcOptions {
 }
 
 export interface DshJsonRpcPort extends DshClientPort {
+  verify(signal: AbortSignal): Promise<void>
+  listAgentPresets(signal: AbortSignal): Promise<JsonValue>
+  readAgentPreset(agentPreset: string, signal: AbortSignal): Promise<JsonValue>
+  inspectDeployment(request: { readonly agentPresets: readonly string[]; readonly credentialRefs: readonly string[]; readonly signal: AbortSignal }): Promise<DshDeploymentInspection>
   close(): Promise<void>
+}
+
+export interface DshDeploymentInspection {
+  readonly settings: JsonValue
+  readonly roster: JsonValue
+  readonly documents: readonly JsonValue[]
+  readonly credentials: JsonValue
 }
 
 export const DSH_JSONRPC_CAPABILITIES = Object.freeze({
@@ -100,9 +113,12 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
   const presetIds = new Set<string>()
   const bindings = sourceBindings.map(binding => {
     if (!identifier(binding.agentPreset)) throw failure('DSH_INVALID_OPTIONS')
+    if (binding.externalProvider !== undefined && !identifier(binding.externalProvider)
+      || binding.conversationKind !== undefined && !['group', 'private'].includes(binding.conversationKind)) throw failure('DSH_INVALID_OPTIONS')
     if (presetIds.has(binding.agentPreset)) throw failure('DSH_INVALID_OPTIONS')
     presetIds.add(binding.agentPreset)
-    return { agentPreset: binding.agentPreset, definition: definition(binding.definition) }
+    return { agentPreset: binding.agentPreset, definition: definition(binding.definition),
+      externalProvider: binding.externalProvider, conversationKind: binding.conversationKind }
   })
   const lifetime = new AbortController()
   const follows = new Map<string, () => Promise<void>>()
@@ -184,7 +200,7 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
     return limited(async () => pending, signal)
   }
 
-  const rpc = async (method: 'session/create' | 'session/selectModel' | 'session/prompt' | 'session/cancel', input: JsonObject, signal: AbortSignal): Promise<DshPortResult<JsonValue>> => {
+  const rpc = async (method: 'session/create' | 'session/selectModel' | 'session/prompt' | 'session/cancel' | 'settings/describe' | 'agentPresets/list' | 'agentPresets/read' | 'credentials/describe', input: JsonObject | undefined, signal: AbortSignal, direct = false): Promise<DshPortResult<JsonValue>> => {
     if (pendingRpc >= 32) throw failure('DSH_RPC_BACKPRESSURE')
     pendingRpc += 1
     try {
@@ -195,7 +211,7 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
         const response = await fetch(new URL(`api/${method}`, base), {
           method: 'POST', redirect: 'error', signal: combined,
           headers: { 'content-type': 'application/json', cookie: credential },
-          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: { request: input } } }),
+          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: input === undefined ? {} : direct ? input : { request: input } } }),
         })
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined)
@@ -367,12 +383,48 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
   }
 
   return Object.freeze({
+    async verify(signal: AbortSignal): Promise<void> {
+      const result = await rpc('settings/describe', undefined, signal)
+      if (!result.ok || !record(result.value)) throw failure('DSH_VERIFICATION_FAILED')
+    },
+    async listAgentPresets(signal: AbortSignal): Promise<JsonValue> {
+      const result = await rpc('agentPresets/list', undefined, signal)
+      if (!result.ok) throw failure('DSH_VERIFICATION_FAILED')
+      return result.value
+    },
+    async readAgentPreset(agentPreset: string, signal: AbortSignal): Promise<JsonValue> {
+      if (!identifier(agentPreset)) throw failure('DSH_INVALID_OPTIONS')
+      const result = await rpc('agentPresets/read', { agentPreset }, signal, true)
+      if (!result.ok) throw failure('DSH_VERIFICATION_FAILED')
+      return result.value
+    },
+    async inspectDeployment(request): Promise<DshDeploymentInspection> {
+      if (request.agentPresets.length > 128 || request.credentialRefs.length > 256
+        || !request.agentPresets.every(identifier) || !request.credentialRefs.every(ref => /^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(ref))) {
+        throw failure('DSH_INVALID_OPTIONS')
+      }
+      const read = async (method: 'settings/describe' | 'agentPresets/list' | 'agentPresets/read' | 'credentials/describe', args?: JsonObject): Promise<JsonValue> => {
+        const result = await rpc(method, args, request.signal, true)
+        if (!result.ok) throw failure('DSH_VERIFICATION_FAILED')
+        return result.value
+      }
+      const settings = await read('settings/describe')
+      const roster = await read('agentPresets/list')
+      const documents: JsonValue[] = []
+      for (const agentPreset of request.agentPresets) documents.push(await read('agentPresets/read', { agentPreset }))
+      const credentials = await read('credentials/describe', { refs: [...request.credentialRefs] })
+      return snapshot({ settings, roster, documents, credentials })
+    },
     async createSession(request) {
       request.signal.throwIfAborted()
       if (configuredDefinition === undefined) return rejected('DSH_SESSION_DEFINITION_REQUIRED')
       const selectedDefinition = definition(typeof configuredDefinition === 'function' ? configuredDefinition(request) : configuredDefinition)
-      const binding = bindings.find(candidate => sameDefinition(candidate.definition, selectedDefinition))
-      if (binding === undefined) return rejected('DSH_INSTRUCTIONS_UNSUPPORTED')
+      const conversationKind = request.conversationId.startsWith('group:') ? 'group'
+        : request.conversationId.startsWith('private:') ? 'private' : undefined
+      const matches = bindings.filter(candidate => sameDefinition(candidate.definition, selectedDefinition)
+        && (candidate.conversationKind === undefined || candidate.conversationKind === conversationKind))
+      if (matches.length !== 1) return rejected('DSH_INSTRUCTIONS_UNSUPPORTED')
+      const binding = matches[0]!
       const created = await rpc('session/create', { agentPreset: binding.agentPreset }, request.signal)
       if (!created.ok) return created
       if (!record(created.value) || !identifier(created.value.sessionId) || created.value.agentPreset !== binding.agentPreset) {
@@ -380,9 +432,10 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
       }
       const sessionId = created.value.sessionId
       const model = selectedDefinition.model
-      const selected = await rpc('session/selectModel', { sessionId, provider: model.provider, model: model.name, reasoningEffort: model.reasoningEffort }, request.signal)
+      const externalProvider = binding.externalProvider ?? model.provider
+      const selected = await rpc('session/selectModel', { sessionId, provider: externalProvider, model: model.name, reasoningEffort: model.reasoningEffort }, request.signal)
       if (!selected.ok || !record(selected.value) || !record(selected.value.selected)
-        || selected.value.selected.provider !== model.provider || selected.value.selected.model !== model.name
+        || selected.value.selected.provider !== externalProvider || selected.value.selected.model !== model.name
         || selected.value.selected.reasoningEffort !== model.reasoningEffort) {
         throw failure('DSH_CREATE_CONFIGURATION_UNKNOWN')
       }

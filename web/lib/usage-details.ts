@@ -1,4 +1,5 @@
 import type { UsageBuckets, UsageByTier } from './activity.ts';
+import { parseNativeUsageConversation, parseNativeUsageRecent, parseNativeUsageSeries } from './native-usage.ts';
 
 export const usageSectionLabels = Object.freeze({
   summary: '账本汇总',
@@ -8,10 +9,11 @@ export const usageSectionLabels = Object.freeze({
   turns: '逐轮花费',
   recent: '最近调用流水',
   prices: '当前生效价目表',
+  pricingEditor: '配置后续用量单价',
   management: '账本管理',
 });
 
-export type UsageTier = 'peak' | 'off';
+export type UsageTier = 'peak' | 'off' | 'flat';
 export type AggregateUsageTier = UsageTier | 'mixed';
 export type UsageChartMetric = 'cost' | 'tokens';
 
@@ -74,19 +76,23 @@ function nearlyEqual(left: number, right: number): boolean {
 
 export interface UsageSeriesBucket {
   readonly t: number;
-  readonly cost: number;
-  readonly tokens: number;
-  readonly cacheMiss: number;
-  readonly cacheHit: number;
-  readonly cacheWrite: number;
-  readonly output: number;
+  readonly cost: number | null;
+  readonly tokens: number | null;
+  readonly cacheMiss: number | null;
+  readonly cacheHit: number | null;
+  readonly cacheWrite: number | null;
+  readonly output: number | null;
   readonly turns: number;
   readonly steps: number;
   readonly tier: AggregateUsageTier;
   readonly keys: readonly string[];
+  readonly coverage?: 'complete' | 'partial' | 'unknown';
 }
 
 export interface UsageSeries {
+  readonly native?: true;
+  readonly partial?: boolean;
+  readonly knownCosts?: Readonly<Record<string, number>>;
   readonly ok: true;
   readonly generatedAt: number;
   readonly currency: string;
@@ -96,12 +102,12 @@ export interface UsageSeries {
   readonly from: number;
   readonly to: number;
   readonly buckets: readonly UsageSeriesBucket[];
-  readonly totals: { readonly cost: number; readonly tokens: number; readonly turns: number; readonly steps: number };
-  readonly busiest: { readonly t: number; readonly cost: number; readonly tokens: number } | null;
+  readonly totals: { readonly cost: number | null; readonly tokens: number | null; readonly turns: number; readonly steps: number };
+  readonly busiest: { readonly t: number; readonly cost: number | null; readonly tokens: number | null } | null;
   readonly estimated: boolean;
   readonly countedSamples: number;
-  readonly offChartCost: number;
-  readonly offChartTokens: number;
+  readonly offChartCost: number | null;
+  readonly offChartTokens: number | null;
 }
 
 function parseSeriesBucket(value: unknown): UsageSeriesBucket | null {
@@ -135,6 +141,7 @@ export function formatUsageWindowEndpoint(value: number): string {
 }
 
 export function parseUsageSeries(value: unknown): UsageSeries | null {
+  if (isRecord(value) && value.native === true) return parseNativeUsageSeries(value);
   if (!isRecord(value) || value.ok !== true || typeof value.estimated !== 'boolean'
     || !Array.isArray(value.buckets) || value.buckets.length < 1 || value.buckets.length > 120 || !isRecord(value.totals)) return null;
   const generatedAt = timeValue(value.generatedAt);
@@ -163,8 +170,8 @@ export function parseUsageSeries(value: unknown): UsageSeries | null {
     if (!bucket || bucket.t !== from + index * bucketMs) return null;
     buckets.push(bucket);
   }
-  const summedCost = buckets.reduce((total, bucket) => total + bucket.cost, 0);
-  const summedTokens = buckets.reduce((total, bucket) => total + bucket.tokens, 0);
+  const summedCost = buckets.reduce((total, bucket) => total + (bucket.cost ?? Number.NaN), 0);
+  const summedTokens = buckets.reduce((total, bucket) => total + (bucket.tokens ?? Number.NaN), 0);
   const summedSteps = buckets.reduce((total, bucket) => total + bucket.steps, 0);
   const summedTurns = buckets.reduce((total, bucket) => total + bucket.turns, 0);
   if (!nearlyEqual(summedCost, totalCost) || summedTokens !== totalTokens || summedSteps !== totalSteps
@@ -176,7 +183,7 @@ export function parseUsageSeries(value: unknown): UsageSeries | null {
     const cost = nonNegativeNumber(value.busiest.cost);
     const tokens = nonNegativeInteger(value.busiest.tokens);
     const bucket = t === null ? undefined : buckets.find(item => item.t === t);
-    if (t === null || cost === null || tokens === null || !bucket || !nearlyEqual(bucket.cost, cost)
+    if (t === null || cost === null || tokens === null || !bucket || bucket.cost === null || !nearlyEqual(bucket.cost, cost)
       || bucket.tokens !== tokens) return null;
     busiest = { t, cost, tokens };
   }
@@ -190,7 +197,11 @@ export function parseUsageSeries(value: unknown): UsageSeries | null {
 export interface UsageTurn {
   readonly sessionId: string;
   readonly key: string | null;
-  readonly turn: number;
+  readonly turn: number | null;
+  readonly turnId?: string;
+  readonly generation?: number;
+  readonly coverage?: 'complete' | 'partial' | 'unknown';
+  readonly knownCosts?: Readonly<Record<string, number>>;
   readonly steps: number;
   readonly attempts: number;
   readonly startedAt: number;
@@ -198,11 +209,14 @@ export interface UsageTurn {
   readonly model: string | null;
   readonly provider: string | null;
   readonly buckets: UsageBuckets;
-  readonly cost: number;
+  readonly cost: number | null;
   readonly tier: AggregateUsageTier;
 }
 
 export interface UsageConversationDetails {
+  readonly native?: true;
+  readonly partial?: boolean;
+  readonly knownCosts?: Readonly<Record<string, number>>;
   readonly key: string;
   readonly generatedAt: number;
   readonly currency: string;
@@ -210,10 +224,10 @@ export interface UsageConversationDetails {
   readonly sessionIds: readonly string[];
   readonly sessionCount: number;
   readonly buckets: UsageBuckets;
-  readonly cost: number;
-  readonly attributedCost: number;
-  readonly unattributedCost: number;
-  readonly byTier: UsageByTier;
+  readonly cost: number | null;
+  readonly attributedCost: number | null;
+  readonly unattributedCost: number | null;
+  readonly byTier: UsageByTier | null;
   readonly estimated: boolean;
   readonly firstAt: number;
   readonly lastAt: number;
@@ -244,6 +258,7 @@ function parseUsageTurn(value: unknown): UsageTurn | null {
 }
 
 export function parseUsageConversation(value: unknown, expectedKey?: string): UsageConversationDetails | null {
+  if (isRecord(value) && value.native === true) return parseNativeUsageConversation(value, expectedKey);
   if (!isRecord(value) || typeof value.estimated !== 'boolean' || !Array.isArray(value.sessionIds)
     || !Array.isArray(value.models) || !Array.isArray(value.turns) || value.sessionIds.length > 2000
     || value.models.length > 256 || value.turns.length > 1000) return null;
@@ -284,25 +299,32 @@ export function parseUsageConversation(value: unknown, expectedKey?: string): Us
 }
 
 export interface UsageRecentEntry {
+  readonly id?: string;
   readonly time: number;
   readonly key: string | null;
   readonly sid: string;
-  readonly turn: number;
-  readonly step: number;
-  readonly retry: number;
+  readonly turn: number | null;
+  readonly turnId?: string;
+  readonly step: number | null;
+  readonly retry: number | null;
   readonly model: string | null;
-  readonly tokens: number;
-  readonly cacheMiss: number;
-  readonly cacheHit: number;
-  readonly cacheWrite: number;
-  readonly output: number;
-  readonly reasoning: number;
-  readonly cost: number;
+  readonly tokens: number | null;
+  readonly cacheMiss: number | null;
+  readonly cacheHit: number | null;
+  readonly cacheWrite: number | null;
+  readonly output: number | null;
+  readonly reasoning: number | null;
+  readonly cost: number | null;
+  readonly knownCost?: { readonly amount: number; readonly currency: string; readonly source: string } | null;
+  readonly coverage?: 'complete' | 'partial' | 'unknown';
+  readonly pricingRevision?: number | null;
   readonly tier: UsageTier;
   readonly estimated: boolean;
 }
 
 export interface UsageRecent {
+  readonly native?: true;
+  readonly partial?: boolean;
   readonly symbol: string;
   readonly entries: readonly UsageRecentEntry[];
 }
@@ -332,6 +354,7 @@ function parseRecentEntry(value: unknown): UsageRecentEntry | null {
 }
 
 export function parseUsageRecent(value: unknown): UsageRecent | null {
+  if (isRecord(value) && value.native === true) return parseNativeUsageRecent(value);
   if (!isRecord(value) || !Array.isArray(value.entries) || value.entries.length > 500) return null;
   const symbol = boundedText(value.symbol, 16);
   if (!symbol) return null;
@@ -355,6 +378,6 @@ export function parseUsageResetAccepted(value: unknown): UsageResetAccepted | nu
     : null;
 }
 
-export function usageBucketValue(bucket: UsageSeriesBucket, metric: UsageChartMetric): number {
+export function usageBucketValue(bucket: UsageSeriesBucket, metric: UsageChartMetric): number | null {
   return metric === 'tokens' ? bucket.tokens : bucket.cost;
 }

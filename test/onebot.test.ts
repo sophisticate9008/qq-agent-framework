@@ -86,6 +86,10 @@ test('OneBot transport maps structured content and confirms only a valid receipt
 
 test('OneBot transport distinguishes explicit rejection from uncertain delivery without retrying', async () => {
   const cases: Array<{ reply: () => Promise<Response>; expected: 'rejected' | 'unknown' }> = [
+    { reply: async () => response({ status: 'async', retcode: 1, data: null }), expected: 'unknown' },
+    { reply: async () => response({ status: 'async', retcode: 0, data: { message_id: 1 } }), expected: 'unknown' },
+    { reply: async () => response({ status: 'ok', retcode: 1404, data: null }), expected: 'unknown' },
+    { reply: async () => response({ retcode: 0, data: { message_id: 1 } }), expected: 'unknown' },
     { reply: async () => response({ status: 'failed', retcode: 1404, data: null }), expected: 'rejected' },
     { reply: async () => response({ status: 'failed', retcode: 0, data: { message_id: 1 } }), expected: 'unknown' },
     { reply: async () => response({ status: 'ok', retcode: 0, data: {} }), expected: 'unknown' },

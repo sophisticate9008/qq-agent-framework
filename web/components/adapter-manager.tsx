@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CircleAlert, LoaderCircle, MessagesSquare, Plug, RefreshCw, Server, ServerOff, ShieldCheck, Unplug, Workflow } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
@@ -6,6 +6,8 @@ import { AdapterCredentialField, AdapterEndpointField, AdapterNumberField, uncha
 import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
+import { ChatRuntimeControls } from './chat-runtime-controls.tsx';
+import { DshDeploymentManager } from './dsh-deployment-manager.tsx';
 
 type OutboundId = 'onebotHttp' | 'dshAgent';
 type AdapterId = OutboundId | 'onebotWebhook' | 'onebotWs';
@@ -36,7 +38,7 @@ interface AdapterSnapshot {
     readonly lastError: string | null;
     readonly received: number;
     readonly dropped: number;
-    readonly chatReady: false;
+    readonly chatReady: boolean;
   };
   readonly status: {
     readonly assembled: boolean;
@@ -97,10 +99,10 @@ function parseSnapshot(value: unknown): AdapterSnapshot | null {
       || value.lastError !== null && typeof value.lastError !== 'string'
       || typeof value.received !== 'number' || !Number.isSafeInteger(value.received) || value.received < 0
       || typeof value.dropped !== 'number' || !Number.isSafeInteger(value.dropped) || value.dropped < 0
-      || value.chatReady !== false) return null;
+      || typeof value.chatReady !== 'boolean') return null;
     connection = { state: value.state as NonNullable<AdapterSnapshot['connection']>['state'],
       selfId: value.selfId as string | null, lastError: value.lastError as string | null,
-      received: value.received, dropped: value.dropped, chatReady: false };
+      received: value.received, dropped: value.dropped, chatReady: value.chatReady };
   }
   if (typeof webhook.enabled !== 'boolean' || typeof webhook.host !== 'string'
     || typeof webhook.port !== 'number' || !Number.isSafeInteger(webhook.port)
@@ -239,12 +241,14 @@ function OutboundStatus({ adapter }: { readonly adapter: OutboundConfiguration }
   return <StatusPill>{adapter.endpoint ? adapter.enabled ? '已配置' : '已配置 · 未启用' : '未配置'}</StatusPill>;
 }
 
-export function AdapterManager({ api, connected, connect, setDirty }: PageProps) {
+export function AdapterManager({ api, connected, connect, setDirty, navigate }: PageProps) {
   const [snapshot, setSnapshot] = useState<AdapterSnapshot | null>(null);
   const [draft, setDraft] = useState<AdapterDraft | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [controlling, setControlling] = useState(false);
+  const [deploymentDirty, setDeploymentDirty] = useState(false);
+  const [chatRunning, setChatRunning] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   const [loadError, setLoadError] = useState('');
   const [formError, setFormError] = useState('');
@@ -256,6 +260,10 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
   const blocked = result === 'unknown' || result === 'conflict' || result === 'busy';
   const disabled = saving || controlling || loading || blocked;
   const dirty = snapshot !== null && draft !== null && (definitions.some(definition => changedOutbound(snapshot.outbound[definition.id], draft.outbound[definition.id])) || changedWebhook(snapshot.webhook, draft.webhook) || changedOutbound(snapshot.websocket, draft.websocket));
+  const reportDeploymentDirty = useCallback((value: boolean, scope?: string) => {
+    setDeploymentDirty(value);
+    setDirty(value, scope);
+  }, [setDirty]);
 
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
@@ -404,7 +412,7 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
   }
 
   async function controlConnection(action: 'connect' | 'disconnect'): Promise<void> {
-    if (!snapshot || disabled || dirty || !snapshot.status.applyAvailable) return;
+    if (!snapshot || disabled || dirty || chatRunning || !snapshot.status.applyAvailable) return;
     const controller = new AbortController();
     saveController.current = controller;
     setControlling(true);
@@ -433,12 +441,19 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
   const RuntimeIcon = snapshot.status.running ? Server : ServerOff;
   return <>
     {heading}
-    <Section scrollable height="sm" id="adapter-runtime" title="运行状态" description="WebSocket 负责接收消息，HTTP 负责发送；协议连接与聊天处理分别显示。" actions={<StatusPill tone={snapshot.connection?.state === 'connected' ? 'success' : 'warning'}>{snapshot.connection?.state === 'connected' ? '协议已连接' : snapshot.connection?.state === 'connecting' ? '连接中' : snapshot.connection?.state === 'reconnecting' ? '重连中' : '协议未连接'}</StatusPill>} footer={<><span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置，再执行连接。' : snapshot.status.applyAvailable ? '连接后自动识别账号；修改设置后请重新连接。' : '当前管理实例没有接入协议连接控制。'}</span><Button disabled={disabled || dirty || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接 WebSocket' : '连接 WebSocket'}</Button><Button variant="outline" disabled={disabled || dirty || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开 WebSocket</Button></>}>
-      <dl className="grid grid-cols-3 divide-x text-xs"><div className="pr-3"><dt className="text-muted-foreground">已配置连接</dt><dd className="mt-2 text-lg font-semibold tabular-nums">{configuredCount}<span className="ml-1 text-xs font-normal text-muted-foreground">/ 4</span></dd></div><div className="px-3"><dt className="text-muted-foreground">协议接入</dt><dd className="mt-2 font-medium">{snapshot.connection?.state === 'connected' ? '已连接' : '未连接'}</dd></div><div className="pl-3"><dt className="text-muted-foreground">聊天处理</dt><dd className="mt-2 font-medium">尚未接入</dd></div></dl>
-      <div className="mt-5 flex items-start gap-3 border-t pt-4"><RuntimeIcon className="mt-1 size-4 shrink-0 text-muted-foreground" /><p className="text-xs leading-6"><strong>{snapshot.connection?.state === 'connected' ? '协议已连接，聊天处理尚未接入。' : '聊天收发尚未接通。'}</strong><span className="block text-muted-foreground">WebSocket 已连接不等于聊天模型正在处理消息；未接入处理流程时不会自动生成回复。{snapshot.connection?.selfId && <span className="block">自动识别账号：{snapshot.connection.selfId}</span>}</span></p></div>
+    <div className="grid items-start gap-5 xl:grid-cols-2">
+    <ChatRuntimeControls api={api} connected={connected} dirty={dirty || deploymentDirty} navigate={navigate} onRunningChange={setChatRunning} />
+    <Section scrollable height="sm" id="adapter-runtime" title="运行状态" description="WebSocket 负责接收消息，HTTP 负责发送；协议连接与聊天处理分别显示。" actions={<StatusPill tone={snapshot.connection?.state === 'connected' ? 'success' : 'warning'}>{snapshot.connection?.state === 'connected' ? '协议已连接' : snapshot.connection?.state === 'connecting' ? '连接中' : snapshot.connection?.state === 'reconnecting' ? '重连中' : '协议未连接'}</StatusPill>} footer={<>
+      <span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置，再执行连接。' : chatRunning ? '请先停止聊天，再操作协议连接。' : snapshot.status.applyAvailable ? '连接后自动识别账号；修改设置后请重新连接。' : '当前管理实例没有接入协议连接控制。'}</span>
+      <Button disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接 WebSocket' : '连接 WebSocket'}</Button>
+      <Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开 WebSocket</Button>
+    </>}>
+      <dl className="grid grid-cols-3 divide-x text-xs"><div className="pr-3"><dt className="text-muted-foreground">已配置连接</dt><dd className="mt-2 text-lg font-semibold tabular-nums">{configuredCount}<span className="ml-1 text-xs font-normal text-muted-foreground">/ 4</span></dd></div><div className="px-3"><dt className="text-muted-foreground">协议接入</dt><dd className="mt-2 font-medium">{snapshot.connection?.state === 'connected' ? '已连接' : '未连接'}</dd></div><div className="pl-3"><dt className="text-muted-foreground">聊天处理</dt><dd className="mt-2 font-medium">{snapshot.connection?.chatReady ? '运行中' : chatRunning ? '正在检查' : '未启动'}</dd></div></dl>
+      <div className="mt-5 flex items-start gap-3 border-t pt-4"><RuntimeIcon className="mt-1 size-4 shrink-0 text-muted-foreground" /><p className="text-xs leading-6"><strong>{snapshot.connection?.chatReady ? '协议连接与聊天处理均已就绪。' : snapshot.connection?.state === 'connected' ? '协议已连接；聊天状态请查看上方“聊天运行”。' : '聊天收发尚未接通。'}</strong><span className="block text-muted-foreground">单独连接 WebSocket 只检查协议，不会调用模型。聊天运行期间请用“停止聊天”结束处理后再更换连接。{snapshot.connection?.selfId && <span className="block">自动识别账号：{snapshot.connection.selfId}</span>}</span></p></div>
       {connectionError && <p className="mt-3 text-xs leading-5 text-destructive" role="alert">{connectionError}</p>}
       {snapshot.connection?.lastError && <p className="mt-3 text-xs leading-5 text-destructive" title={snapshot.connection.lastError}>协议连接失败或已中断，请检查 WebSocket 地址与专用密钥，再重新连接。</p>}
     </Section>
+    </div>
     <div className="grid items-start gap-5 xl:grid-cols-2">
       {definitions.map(definition => {
         const adapter = draft.outbound[definition.id];
@@ -473,6 +488,7 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
         </Section>;
       })}
     </div>
+    {snapshot.outbound.dshAgent.enabled && <DshDeploymentManager api={api} connected={connected} setDirty={reportDeploymentDirty} running={chatRunning} />}
     {formError && <div className="flex max-h-32 items-start gap-2 overflow-auto overscroll-contain rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs leading-5 text-destructive" role="alert"><CircleAlert className="mt-0.5 size-4 shrink-0" /><span className="min-w-0 flex-1 break-words">{formError}</span>{blocked && <Button size="sm" variant="outline" disabled={loading || saving} onClick={reload}><RefreshCw className="size-3.5" />重新读取</Button>}</div>}
     <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="size-3.5 shrink-0" /><span>凭据只写入服务端，不会回显；本次输入在提交后清空。</span></div>
     <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-2 border-t bg-background py-3" data-adapter-save-bar><SaveBar dirty={dirty} saving={saving} disabled={blocked || loading} message={writeMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存连接配置" />{blocked && <Button variant="outline" disabled={loading || saving} onClick={reload}><RefreshCw className="size-3.5" />重新读取</Button>}</div>

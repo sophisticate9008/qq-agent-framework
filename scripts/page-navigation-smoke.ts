@@ -297,7 +297,7 @@ async function run(): Promise<void> {
       await section(page, title).waitFor();
     }
     await page.getByText('聊天收发尚未接通。', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 3);
+    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 4);
 
     const desktopNavigator = visibleNavigator(page);
     const sticky = await desktopNavigator.evaluate(element => {

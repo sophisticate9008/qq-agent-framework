@@ -705,7 +705,16 @@ async function run(): Promise<void> {
     await navigate(page, '适配器', 'adapters', '适配器');
     await section(page, '运行状态').waitFor();
     await page.getByText('聊天收发尚未接通。', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 3);
+    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 4);
+    for (const [id, title] of [
+      ['chat-runtime', '聊天运行'], ['adapter-runtime', '运行状态'],
+      ['adapter-onebotHttp', 'OneBot'], ['adapter-dshAgent', 'DSH 聊天引擎']
+    ]) {
+      const card = page.locator(`[data-page="adapters"] section[id="${id}"]`);
+      assert.equal(await card.count(), 1);
+      await card.getByRole('heading', { name: title, exact: true }).waitFor();
+      assert.equal(await card.locator('[data-bounded-card]').count(), 1);
+    }
     assert.equal(await page.getByRole('heading', { name: '图片服务', exact: true }).count(), 0);
     assert.equal(await page.getByRole('switch', { name: '启用此连接', exact: true }).count(), 2);
     assert.equal(await page.getByRole('switch', { name: '收取 OneBot 上报', exact: true, includeHidden: true }).getAttribute('aria-checked'), 'false');
@@ -717,8 +726,15 @@ async function run(): Promise<void> {
     assert.equal(await page.locator('#adapter-onebotHttp-credential-action').inputValue(), 'keep');
     assert.equal(await page.locator('#adapter-onebotHttp-credential-value').count(), 0);
     assert.equal((await page.locator('body').innerText()).includes(fixtureAdapterCredential), false);
-    await section(page, '运行状态').getByText('尚未接入', { exact: true }).waitFor();
-    await page.getByText('WebSocket 已连接不等于聊天模型正在处理消息；未接入处理流程时不会自动生成回复。', { exact: true }).waitFor();
+    await section(page, '运行状态').getByText('未启动', { exact: true }).waitFor();
+    await section(page, '运行状态').getByText('单独连接 WebSocket 只检查协议，不会调用模型。聊天运行期间请用“停止聊天”结束处理后再更换连接。', { exact: true }).waitFor();
+    const chatControls = section(page, '聊天运行');
+    await chatControls.getByText('确认设置已应用后再启动。保存配置、连接协议与启动聊天是不同操作。', { exact: true }).waitFor();
+    await chatControls.getByText('不会自动启动，也不会清空会话。', { exact: true }).waitFor();
+    assert.equal(await chatControls.getByRole('button', { name: '启动聊天', exact: true }).isDisabled(), true);
+    assert.equal(await chatControls.getByRole('button', { name: '停止聊天', exact: true }).count(), 0);
+    assert.equal(requests.filter(request => request.method === 'POST'
+      && /^\/api\/chat\/runtime\/(?:start|stop)$/.test(request.pathname)).length, 0);
     for (const label of ['连接 WebSocket', '断开 WebSocket']) {
       assert.equal(await page.getByRole('button', { name: label, exact: true }).isDisabled(), true);
     }

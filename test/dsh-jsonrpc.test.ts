@@ -30,6 +30,42 @@ test('DSH preset declarations are bounded and cannot reuse an ambiguous preset i
   })) }), { code: 'DSH_INVALID_OPTIONS' })
 })
 
+test('DSH deployment inspection uses only fixed authenticated read-only APIs and direct Typert arguments', async context => {
+  const fake = await fixture(context, { rpc(request, response) {
+    assert(['settings/describe', 'agentPresets/list', 'agentPresets/read', 'credentials/describe'].includes(request.method))
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value: {} } }))
+    return true
+  } })
+  const client = fake.port()
+  await client.verify(signal())
+  await client.inspectDeployment({ agentPresets: ['deployed-chat'], credentialRefs: ['DEPLOYED_KEY'], signal: signal() })
+  assert.deepEqual(fake.requests.map(request => request.method), [
+    'settings/describe', 'settings/describe', 'agentPresets/list', 'agentPresets/read', 'credentials/describe',
+  ])
+  assert.deepEqual(fake.requests.map(request => request.payload.args), [{}, {}, {}, { agentPreset: 'deployed-chat' }, { refs: ['DEPLOYED_KEY'] }])
+})
+
+test('DSH scoped deployment bindings choose external provider ids instead of native catalog ids', async context => {
+  const fake = await fixture(context, { rpc(request, response) {
+    const input = request.payload.args.request
+    const value = request.method === 'session/create' ? { sessionId: 'session-1', agentPreset: input.agentPreset }
+      : { selected: { provider: input.provider, model: input.model, reasoningEffort: input.reasoningEffort } }
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value } }))
+    return true
+  } })
+  const client = fake.port({ presetBindings: [
+    { agentPreset: 'deployed-group', conversationKind: 'group', externalProvider: 'external-group', definition: sessionDefinition },
+    { agentPreset: 'deployed-private', conversationKind: 'private', externalProvider: 'external-private', definition: sessionDefinition },
+  ] })
+  assert.equal((await client.createSession(createRequest())).ok, true)
+  assert.equal((await client.createSession({ ...createRequest(), conversationId: 'private:fixture' })).ok, true)
+  assert.deepEqual(fake.requests.filter(request => request.method === 'session/selectModel').map(request => request.payload.args.request.provider), ['external-group', 'external-private'])
+  assert.equal((await client.createSession({ ...createRequest(), conversationId: 'unknown:fixture' })).ok, false)
+  assert.equal(fake.requests.length, 4)
+})
+
 interface WireRequest {
   type: string
   rpcId: string

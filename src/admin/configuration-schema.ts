@@ -34,7 +34,7 @@ export interface ConfigurationGroup {
   readonly applyLabel?: string;
 }
 
-export type ConfigurationValidation = 'reference' | 'optional-path' | 'loopback-http-url';
+export type ConfigurationValidation = 'reference' | 'optional-path' | 'loopback-http-url' | 'public-origin';
 
 export interface ConfigurationFieldDefinition {
   readonly id: string;
@@ -153,6 +153,15 @@ const gatewayGroups: readonly ConfigurationGroupDefinition[] = [
 ];
 
 const adminGroups: readonly ConfigurationGroupDefinition[] = [
+  {
+    id: 'admin-public-origin', title: 'HTTPS 反向代理', category: 'settings', source: 'admin',
+    description: '仅用于本机 TLS 终止代理。两个选项须同时配置，管理后端须绑定回环 IP；保存后另行重启管理服务生效，不自动重启。',
+    fields: [
+      textField('publicOrigin', '管理页公开 HTTPS 来源', '精确填写 HTTPS origin（例如 https://console.example.test），不带路径、账号、查询或尾斜杠。留空表示普通本机 HTTP。', 2_048,
+        { validation: 'public-origin' }),
+      field('trustedLoopbackProxy', '信任本机 TLS 代理', '仅接受 socket 两端实际为回环 IP 的代理连接；不信任 X-Forwarded-Proto、Forwarded 或转发 Host。启用后浏览器访问 cookie 始终为 Secure。', 'boolean')
+    ]
+  },
   {
     id: 'admin-access-session', title: '访问会话', category: 'settings', source: 'admin',
     description: '管理员凭据只用于登录验证；访问会话允许刷新后继续使用，主动退出时立即注销。保存后重启管理服务生效。',

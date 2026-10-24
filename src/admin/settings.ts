@@ -2,9 +2,10 @@ import { constants } from 'node:fs';
 import { lstat, open, rename, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 
 import { AdminRequestError, type AdminRoute } from './server.ts';
+import { withConfigurationWriteLock } from './configuration-lock.ts';
 
 const MAX_CONFIGURATION_BYTES = 64 * 1024;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
@@ -53,8 +54,6 @@ interface ConfigurationDocument {
   readonly revision: string;
   readonly values: Record<string, unknown>;
 }
-
-const writeTails = new Map<string, Promise<void>>();
 
 function requestError(statusCode: number, code: string): never {
   throw new AdminRequestError(statusCode, code);
@@ -212,27 +211,12 @@ function unchangedBudget(left: GatewaySettingsValues, right: GatewaySettingsValu
     && left.grantTtlMs === right.grantTtlMs;
 }
 
-async function serializeWrite<Value>(filename: string, operation: () => Promise<Value>): Promise<Value> {
-  const previous = writeTails.get(filename) ?? Promise.resolve();
-  let release: (() => void) | undefined;
-  const current = new Promise<void>(resolvePromise => { release = resolvePromise; });
-  const tail = previous.catch(() => undefined).then(() => current);
-  writeTails.set(filename, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release?.();
-    if (writeTails.get(filename) === tail) writeTails.delete(filename);
-  }
-}
-
 async function replaceConfiguration(
   filename: string,
   expectedRevision: string,
   update: (configuration: Record<string, unknown>) => void
 ): Promise<string> {
-  return serializeWrite(filename, async () => {
+  return withConfigurationWriteLock(filename, async () => {
     const current = await readConfiguration(filename);
     if (current.revision !== expectedRevision) requestError(409, 'settings_conflict');
     update(current.values);
@@ -245,6 +229,7 @@ async function replaceConfiguration(
     if (content.byteLength > MAX_CONFIGURATION_BYTES) requestError(413, 'settings_file_too_large');
     const temporary = `${filename}.settings-${process.pid}-${randomUUID()}.tmp`;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let renamed = false;
     try {
       handle = await open(temporary,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -256,8 +241,18 @@ async function replaceConfiguration(
       const latest = await readConfiguration(filename);
       if (latest.revision !== expectedRevision) requestError(409, 'settings_conflict');
       await rename(temporary, filename);
+      renamed = true;
+      const directory = await open(dirname(filename), constants.O_RDONLY);
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+      const written = await readConfiguration(filename);
+      if (written.revision !== revision(content)) requestError(500, 'settings_write_unknown');
       return revision(content);
     } catch (error: unknown) {
+      if (renamed) requestError(500, 'settings_write_unknown');
       if (error instanceof AdminRequestError) throw error;
       requestError(500, 'settings_write_failed');
     } finally {

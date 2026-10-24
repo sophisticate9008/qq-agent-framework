@@ -177,24 +177,17 @@ function eventContent(data: JsonObject | undefined): readonly MessageContent[] |
   const content: MessageContent[] = []
   for (const value of rawContent) {
     const block = jsonRecord(value)
-    if (block === null) continue
+    if (block === null) return undefined
     if (block.type === 'text' && typeof block.text === 'string') {
+      if (Object.keys(block).some(key => key !== 'type' && key !== 'text')) return undefined
       content.push({ type: 'text', text: block.text })
-    } else if (block.type === 'image' && nonEmpty(block.assetId)) {
-      content.push({ type: 'image', assetId: block.assetId })
-    } else if (block.type === 'audio' && nonEmpty(block.assetId)) {
-      content.push({ type: 'audio', assetId: block.assetId })
-    } else if (block.type === 'file' && nonEmpty(block.assetId) && nonEmpty(block.name)) {
-      content.push({ type: 'file', assetId: block.assetId, name: block.name })
-    } else if (block.type === 'mention' && nonEmpty(block.userId)) {
-      content.push({ type: 'mention', userId: block.userId })
-    } else if (block.type === 'reply' && nonEmpty(block.messageId)) {
-      content.push({ type: 'reply', messageId: block.messageId })
-    } else if (block.type === 'forward') {
-      try { content.push(...normalizeContent([block])) } catch { return undefined }
-    }
+    } else if (block.type !== 'reasoning') return undefined
   }
-  return content.length === 0 ? undefined : snapshot(content)
+  try {
+    return content.length === 0 ? undefined : normalizeContent(content)
+  } catch {
+    return undefined
+  }
 }
 
 function sessionEventId(frame: DshSessionEvent): string | null {
@@ -233,6 +226,25 @@ function approvalData(frame: DshApprovalEvent): JsonObject {
   })
 }
 
+function usageStep(frame: DshSessionEvent): JsonObject | undefined {
+  const data = frame.event.data
+  const message = jsonRecord(data?.message)
+  const source = jsonRecord(message?.source)
+  const usage = jsonRecord(data?.usage)
+  const id = sessionEventId(frame)
+  if (!id || !usage || source?.kind !== 'model' || !nonEmpty(source.provider) || !nonEmpty(source.model)
+    || !(nonEmpty(data?.turn) || typeof data?.turn === 'number' && Number.isSafeInteger(data.turn) && data.turn >= 0)
+    || typeof data?.step !== 'number' || !Number.isSafeInteger(data.step) || data.step < 0) return undefined
+  const copied: JsonObject = {}
+  for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens']) {
+    const value = usage[key]
+    if (value === undefined && key !== 'inputTokens' && key !== 'outputTokens') continue
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return undefined
+    copied[key] = value
+  }
+  return snapshot({ eventId: id, turn: data.turn!, step: data.step, provider: source.provider, model: source.model, usage: copied })
+}
+
 export function normalizeDshEvent(frame: DshFollowEvent): AgentEvent | null {
   if (!nonEmpty(frame.sessionId)) return null
   if (frame.type === 'question/requested') {
@@ -256,7 +268,7 @@ export function normalizeDshEvent(frame: DshFollowEvent): AgentEvent | null {
   if (frame.type === 'stream/error') {
     const errorCode = frame.error && nonEmpty(frame.error.code) ? frame.error.code : 'unknown'
     const id = nonEmpty(frame.eventId) ? frame.eventId : `stream/error:${errorCode}`
-    const data: JsonObject = frame.error && nonEmpty(frame.error.code) ? { code: frame.error.code } : {}
+    const data: JsonObject = { terminal: true, ...(frame.error && nonEmpty(frame.error.code) ? { code: frame.error.code } : {}) }
     return snapshot({
       id,
       sessionId: frame.sessionId,
@@ -266,16 +278,7 @@ export function normalizeDshEvent(frame: DshFollowEvent): AgentEvent | null {
   }
   const id = sessionEventId(frame)
   if (id === null) return null
-  if (frame.event.type === 'assistant/message') {
-    const content = eventContent(frame.event.data)
-    return snapshot({
-      id,
-      sessionId: frame.sessionId,
-      type: 'message',
-      ...(content === undefined ? {} : { content }),
-      ...(frame.event.data === undefined ? {} : { data: snapshot(frame.event.data) }),
-    })
-  }
+  if (frame.event.type === 'assistant/message') return null
   if (frame.event.type === 'turn/end') {
     const data = snapshot(frame.event.data ?? {})
     const reason = jsonRecord(data.reason)
@@ -546,14 +549,68 @@ export function createDshAdapter(client: DshClientPort): AgentAdapter {
     },
 
     async follow(request) {
+      let pending: { turn: JsonValue; message: AgentEvent } | undefined
+      let usageTurn: JsonValue | undefined
+      let usageComplete = false
+      let usageSteps: JsonObject[] = []
+      const usageIds = new Set<string>()
       try {
         const stop = await client.follow({
           sessionId: request.sessionId,
           signal: request.signal,
           async onEvent(frame) {
             if (frame.sessionId !== request.sessionId) return
+            if (frame.type === 'session/event') {
+              if (frame.event.type === 'turn/start' || frame.event.type === 'step/start') pending = undefined
+              if (frame.event.type === 'turn/start') {
+                usageTurn = frame.event.data?.turn
+                usageComplete = usageTurn !== undefined
+                usageSteps = []
+                usageIds.clear()
+              }
+              if (frame.event.type === 'assistant/message') {
+                pending = undefined
+                const data = frame.event.data
+                const turn = data?.turn
+                if (usageTurn === undefined) usageTurn = turn
+                const step = usageStep(frame)
+                if (turn !== usageTurn || !step || usageSteps.length >= 256) usageComplete = false
+                else if (!usageIds.has(String(step.eventId))) {
+                  usageIds.add(String(step.eventId))
+                  usageSteps.push(step)
+                }
+                const source = jsonRecord(data?.message)
+                const content = eventContent(data)
+                const id = sessionEventId(frame)
+                if (id !== null && content && (nonEmpty(turn) || typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 0)
+                  && data?.interrupted === undefined && (source?.role === undefined || source.role === 'assistant')
+                  && data?.visibility === undefined && data?.channel === undefined && source?.visibility === undefined && source?.channel === undefined) {
+                  pending = { turn, message: snapshot({ id, sessionId: frame.sessionId, type: 'message', content,
+                    data: { turn, ...(nonEmpty(source?.id) ? { message: { id: source.id } } : {}) } }) }
+                }
+                return
+              }
+              if (frame.event.type === 'turn/end') {
+                const candidate = pending
+                pending = undefined
+                if (candidate && candidate.turn === frame.event.data?.turn
+                  && jsonRecord(frame.event.data?.reason)?.kind === 'completed') await request.onEvent(candidate.message)
+              }
+              if (frame.event.type === 'turn/error' || frame.event.type === 'session/error') pending = undefined
+            } else if (frame.type === 'stream/error') pending = undefined
             const event = normalizeDshEvent(frame)
-            if (event !== null) await request.onEvent(event)
+            if (event !== null) {
+              if (frame.type === 'session/event' && (frame.event.type === 'turn/end' || frame.event.type === 'turn/error')) {
+                await request.onEvent(snapshot({ ...event, data: { ...event.data,
+                  usageSteps: frame.event.data?.turn === usageTurn ? usageSteps : [],
+                  usageComplete: usageComplete && usageSteps.length > 0 && frame.event.data?.turn === usageTurn,
+                } }))
+                usageTurn = undefined
+                usageComplete = false
+                usageSteps = []
+                usageIds.clear()
+              } else await request.onEvent(event)
+            }
           },
         })
         if (typeof stop !== 'function') {

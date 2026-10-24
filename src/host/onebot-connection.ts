@@ -1,4 +1,4 @@
-import { createOneBotWebSocketClient } from '../adapters/onebot-websocket.ts'
+import { createOneBotWebSocketClient, type OneBotWebSocketOptions } from '../adapters/onebot-websocket.ts'
 import {
   validateAdapterConfiguration,
   type AdapterConnectionStatus,
@@ -51,6 +51,7 @@ async function closeClient(client: ReturnType<typeof createOneBotWebSocketClient
 
 export function createOneBotConnectionManager(options: {
   readonly createClient?: typeof createOneBotWebSocketClient
+  readonly onEvent?: OneBotWebSocketOptions['onEvent']
 } = {}): OneBotConnectionManager {
   const createClient = options.createClient ?? createOneBotWebSocketClient
   let client: ReturnType<typeof createOneBotWebSocketClient> | undefined
@@ -119,6 +120,7 @@ export function createOneBotConnectionManager(options: {
           lifecycle = controller
           client = createClient({
             endpoint: selected.onebotWs.endpoint,
+            ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
             ...(selected.onebotWs.secret === '' ? {} : { accessToken: selected.onebotWs.secret }),
             connectTimeoutMs: 5_000, maxReconnectAttempts: 8
           })

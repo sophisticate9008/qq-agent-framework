@@ -5,6 +5,8 @@ import { isIP } from 'node:net';
 import { dirname, isAbsolute, normalize, resolve, sep, win32 } from 'node:path';
 
 import { AdminRequestError, type AdminRoute } from './server.ts';
+import { withConfigurationWriteLock } from './configuration-lock.ts';
+import { createAdminOriginPolicy, isLoopbackAddress, validatePublicOrigin } from './public-origin.ts';
 import { loadOneBotGatewayConfiguration } from '../host/onebot-gateway.ts';
 import {
   CONFIGURATION_SCHEMA,
@@ -41,8 +43,6 @@ interface SourceDescriptor {
   readonly maxBytes: number;
   readonly groups: readonly ConfigurationGroupDefinition[];
 }
-
-const writeTails = new Map<string, Promise<void>>();
 
 function requestError(statusCode: number, code: string): never {
   throw new AdminRequestError(statusCode, code);
@@ -321,6 +321,9 @@ function normalizeFieldValue(field: ConfigurationFieldDefinition, input: unknown
     requestError(400, 'invalid_configuration');
   }
   if (field.allowUnset === false && input.length === 0) requestError(400, 'invalid_configuration');
+  if (field.validation === 'public-origin') {
+    try { validatePublicOrigin(input); } catch { requestError(400, 'invalid_configuration'); }
+  }
   if (field.validation === 'reference' && !validReference(input)
     || field.validation === 'optional-path' && !validNormalizedPath(input)
     || field.validation === 'loopback-http-url' && !validLoopbackUrl(input)) {
@@ -330,6 +333,14 @@ function normalizeFieldValue(field: ConfigurationFieldDefinition, input: unknown
 }
 
 function validateRelations(source: ConfigurationSource, configuration: Record<string, unknown>): void {
+  if (source === 'admin') {
+    try {
+      createAdminOriginPolicy({ publicOrigin: configuration.publicOrigin as string | undefined,
+        trustedLoopbackProxy: configuration.trustedLoopbackProxy as boolean | undefined });
+      if (configuration.trustedLoopbackProxy === true && (typeof configuration.host !== 'string'
+        || !isLoopbackAddress(configuration.host))) requestError(400, 'invalid_configuration');
+    } catch { requestError(400, 'invalid_configuration'); }
+  }
   if (source === 'gateway') {
     const port = ownValue(configuration, ['port']);
     const endpoint = ownValue(configuration, ['upstreamEndpoint']);
@@ -355,27 +366,12 @@ function validateSourceCandidate(descriptor: SourceDescriptor, filename: string)
   }
 }
 
-async function serializeWrite<Value>(filename: string, operation: () => Promise<Value>): Promise<Value> {
-  const previous = writeTails.get(filename) ?? Promise.resolve();
-  let release: (() => void) | undefined;
-  const current = new Promise<void>(resolvePromise => { release = resolvePromise; });
-  const tail = previous.catch(() => undefined).then(() => current);
-  writeTails.set(filename, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release?.();
-    if (writeTails.get(filename) === tail) writeTails.delete(filename);
-  }
-}
-
 async function atomicReplace(
   descriptor: SourceDescriptor,
   expectedRevision: string,
   update: (configuration: Record<string, unknown>) => { readonly changed: boolean; readonly authorizationChanged: boolean }
 ): Promise<{ readonly revision: string; readonly authorizationChanged: boolean }> {
-  return serializeWrite(descriptor.filename, async () => {
+  return withConfigurationWriteLock(descriptor.filename, async () => {
     const current = await readConfiguration(descriptor);
     if (current.revision !== expectedRevision) requestError(409, 'configuration_conflict');
     const result = update(current.values);
@@ -390,6 +386,7 @@ async function atomicReplace(
     if (content.byteLength > descriptor.maxBytes) requestError(413, 'configuration_file_too_large');
     const temporary = `${descriptor.filename}.configuration-${process.pid}-${randomUUID()}.tmp`;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let renamed = false;
     try {
       handle = await open(temporary,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -402,6 +399,7 @@ async function atomicReplace(
       const latest = await readConfiguration(descriptor);
       if (latest.revision !== expectedRevision) requestError(409, 'configuration_conflict');
       await rename(temporary, descriptor.filename);
+      renamed = true;
       let directoryHandle: Awaited<ReturnType<typeof open>> | undefined;
       try {
         directoryHandle = await open(dirname(descriptor.filename), constants.O_RDONLY);
@@ -409,8 +407,11 @@ async function atomicReplace(
       } finally {
         await directoryHandle?.close().catch(() => undefined);
       }
+      const written = await readConfiguration(descriptor);
+      if (written.revision !== sha256(content)) requestError(500, 'configuration_write_unknown');
       return { revision: sha256(content), authorizationChanged: result.authorizationChanged };
     } catch (error: unknown) {
+      if (renamed) requestError(500, 'configuration_write_unknown');
       if (error instanceof AdminRequestError) throw error;
       requestError(500, 'configuration_write_failed');
     } finally {

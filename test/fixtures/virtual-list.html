@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>隔离虚拟列表性能夹具</title>
+    <style>
+      body { font: 14px system-ui; margin: 16px; }
+      label { display: inline-block; margin: 8px; }
+      .viewport { height: 384px; overflow: auto; border: 1px solid #888; margin: 16px 0; padding: 8px; overflow-anchor: none; }
+      table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+      thead { position: sticky; top: 0; background: #eee; z-index: 1; }
+      th, td { padding: 8px; border-bottom: 1px solid #ccc; text-align: left; }
+      .list-item { padding-bottom: 12px; }
+      .list-item > div { border: 1px solid #ccc; padding: 8px; }
+      input:focus, button:focus { outline: 2px solid #257; }
+    </style>
+  </head>
+  <body><div id="root"></div><script type="module" src="/web/components/virtual-list.fixture.tsx"></script></body>
+</html>

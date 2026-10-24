@@ -203,7 +203,7 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 
 已有成熟 DSH SDK 时，先用 `createDshSdkPort({ client, subscribe, createSessionRequest?, cancel? })` 桥接其 sessions、事件订阅和 mux 边界，再把返回 port 交给 `createDshAdapter`；该组合不重新实现底层客户端。
 
-需要直接网络接入时可使用 `createDshJsonRpcPort`。它只连接显式端点，使用有限请求/跟随、明确认证和未知结果语义，不发现其他项目配置。当前 DSH 网络协议不支持直接覆盖 system 指令：必须有完整匹配的可信部署 preset 绑定，否则在联网前拒绝；不把人设和指令偷渡成用户消息。该 port 不代表 CLI 已装配聊天宿主，限制与部署副作用见 [DSH 网络适配器](DSH_ADAPTER.md)。
+需要直接网络接入时可使用 `createDshJsonRpcPort`。它只连接显式端点，使用有限请求/跟随、明确认证和未知结果语义，不发现其他项目配置。当前 DSH 网络协议不支持直接覆盖 system 指令：必须有完整匹配的可信部署 preset 绑定，否则在联网前拒绝；不把人设和指令偷渡成用户消息。该 port 的导出不等于运行时已启动；CLI 已有显式手动装配，限制与部署副作用见 [DSH 网络适配器](DSH_ADAPTER.md) 和 [适配器管理](ADAPTERS.md)。
 
 需要统一限速时，可把 transport 包装为 `createThrottledTransport({ transport, minIntervalMs?, maxPending? })`；它提供有限全局 FIFO 与协作停机，队列溢出、排队取消和停机取消返回 `rejected`，`unknown` 不会自动重试。
 
@@ -221,7 +221,11 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 
 ### 管理路由
 
-`createAdminServer` 可接收最多 64 个唯一 `AdminRoute`，每项声明 `GET` 或 `POST`、`/api/...` 路径和 `handle({ query, body, signal })`。扩展不能覆盖内建路由，共用管理认证；POST 另需同源 JSON 且请求体不超过 32 KiB。响应默认不超过 256 KiB，可信宿主可逐路由声明 `maxResponseBytes`（1024–4194304 的安全整数），按序列化后 UTF-8 字节数检查，超限返回 `413 / response_too_large`，不改变其他路由的限制。客户端断开会触发 `signal`。handler 默认期限为 10 秒，可在 10–300000 毫秒内调整；GET 超时返回 `504 / handler_timeout`，POST 超时返回 `504 / operation_unknown`，不会自动重试。`dispatchDemo` 可选，未提供时不开放演示事件处理。
+`createAdminServer` 可接收最多 64 个唯一 `AdminRoute`，每项声明 `GET` 或 `POST`、`/api/...` 路径和 `handle({ query, body, signal })`。扩展不能覆盖内建路由，共用管理认证；POST 另需同源 JSON，请求体默认不超过 32 KiB。可信宿主可为 POST 声明 `maxRequestBytes`（1024–1048576 的安全整数）；先认证再按 UTF-8 字节数检查，包括流式上传，超限返回 `413 / request_too_large`。原生配置文档路由使用 128 KiB 请求上限以容纳 revision、凭据占位与 JSON 转义，持久文档仍限 64 KiB，不改变其他路由限制。
+
+响应默认不超过 256 KiB，可信宿主可逐路由声明 `maxResponseBytes`（1024–4194304 的安全整数），按序列化后 UTF-8 字节数检查，超限返回 `413 / response_too_large`。客户端断开会触发 `signal`。handler 默认期限为 10 秒，可在 10–300000 毫秒内调整；处理期间 socket 空闲期限覆盖 handler 期限及响应余量，不延长收取请求头和正文的期限。GET 超时返回 `504 / handler_timeout`，POST 超时返回 `504 / operation_unknown`，不会自动重试。`dispatchDemo` 可选，未提供时不开放演示事件处理。
+
+配置目录与基本设置 API 对同一规范化文件共用写队列与私有排他锁，持有到 revision 检查、替换与目录同步结束。冲突不会合并旧快照；其他进程持锁返回 `configuration_write_busy`。进程崩溃遗留的 `.<配置文件名>.admin-write.lock` 不自动删除：运维须确认所有使用该配置的管理进程已经停止并核对文件后再移除，不能仅凭锁的年龄判断可重试。
 
 `createHostAdminRoutes(host)` 提供只读 metrics、storage、sessions、tasks、outbox 和 replies 路由。集合列表使用 `limit`（默认 100，最大 1000）与可选 `after`，返回 `{ items, next }`；只暴露现有管理元数据，不返回消息正文，也不提供授权或其他写操作。`GET /api/host/storage` 返回 store.stats 的统计形状；存储未实现 stats 时为 null。它不会清理过期记录、删除 unknown、对账或重试。replies 项仅包含 id、会话/session、generation、request id、期限、状态、更新时间和 cursor。
 
@@ -238,3 +242,23 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 保存方案不等于外部 DSH 部署或已有会话已更新；工具权限与偏好不进入人设。CAS 冲突、写入未知和未装配应分别处理，不自动重试。
 
 方案的 `contextLimits.group` 与 `contextLimits.private` 分别表示群聊、私聊 token 上限；不表示外部引擎已经执行裁剪，也不能绕过实际模型窗口约束。
+
+### 原生运行时与真实用量
+
+`createNativeChatRuntime({ directory, loadConfiguration, resolveDeployment })` 构造不联网或启动宿主，显式 `start(revisions, signal)` / `stop()` / `status()` / `close()` 控制其生命周期。默认 CLI 管理服务实际挂载该工厂及可信 DSH 文件/网络核验 callback，不是仅导出未接线的能力。内部创建 SQLite、bridge host、sessions/outbox/history/tasks/persistent policy、OneBot normalizer/transport 与 DSH port/adapter。
+
+启动 API `POST /api/chat/runtime/start` 的 body 为 `{revisions:{plans,personas,access,adapters,providers,authorization,deployment}}`，七键均为当前内容 hash，不接受自动读取旧值后重试。stop 接收 `{}`。status 分开报告 protocolConnected 与 chatReady；configurationIssues/canStart 用于准备阶段，missingReasons 还包含未启动等运行诊断。modelExecutionVerified 始终 false，不能把配置/身份核验当成付费推理验收。HTTP 启动身份响应必须与共享 OneBot 分类一致：只有 `status:ok` 且 `retcode:0` 及匹配的已验证 self id 才成功。
+
+`GET/POST /api/chat/authorization` 为独立 revision 文档，记录 version 与每会话 submitUses/sendUses/绝对 expiresAt；每次调用仍走 agent-relay 的 agent.submit/messaging.send policy。允许名单和 owner 不能创建 grant。version 使用后同版内容变更冲突，重启不续额、不续期。已有 session 定义或绑定变化时拒绝，不自动重置；unknown 不重放。内部 core persona 的 hash 映射不改变原生目录标识或权限作用域。
+
+`GET/POST /api/chat/deployment` 管理明确 target（profilePath、credentialsPath、可选有序 layerPaths、schemaVersion）、modelSettings 与 namespace；不接受 operator 自报 loaded 的 snapshot。prepare/reconcile 接收同一七键 revisions；apply **额外且仅额外**要求前次预览的 targetRevision 64 位 hash。真实文件 CAS、备份、配置/官方 file 凭据来源和只读加载核验成功才生成配置就绪 binding，pending_reload 不等于 ready；没有自动连接、模型调用、加载代码或服务重启。官方只读 API 没有实际所用密钥值身份回执，因此运行时明确 credentialValueIdentityVerified:false，不把本地值相符制造成外部运行时密钥相等的证据。
+
+`stream/error` 通过 failed.data.terminal=true 标识终止流，宿主立即使缓存 follow 失效并取消旧订阅。下一条新消息须成功建立新 follow 后才能 submit；不重新提交旧 prompt，迟到旧流不能发消息。authorizeIncoming 只有字面 true 才通过，非法 truthy 在 history/session/agent/transport 之前拒绝。
+
+`createNativeUsage({store,clock?,maxScan?})` 在 native-usage 命名空间持久化已观察终态 turn 的逐步 token、覆盖状态及价格快照，按 conversation/session/generation/turn/step 去重；同标识不同数据冲突。input 是未命中缓存输入，cacheRead/cacheWrite 单列，reasoning 只是 output 中可选子项，不重复相加；缺失 total/cost 不推算，不补零。单次扫描默认 10000，饱和明确 partial，不能把扫描页当总账。
+
+完整页面 HTTP 投影由 `createNativeUsageProjection` 提供并标记 native:true：usage 汇总、series?hours&buckets 走势、turns?key 会话逐轮、recent 最近流水与固定价目。保留成熟页面结构，未知字段为 null，knownTokens/missingTokens/knownCosts 单列；多币种不相加，高峰/空闲不凭空推断，固定价目为 flat。会话 API 同时提供页面 sessions/revision 和原生 items/next；未装配时仍 503，不伪造空成功。
+
+用量价目 GET/POST `/api/chat/usage/pricing` 为 `{revision:number|null,prices:[{provider,model,currency,inputPerMillion,outputPerMillion,cacheReadPerMillion,cacheWritePerMillion}]}`，使用 SQLite 自身 CAS；旧记录不随调价追溯重算。价格只来自 operator，不发现生产凭据或查询付费服务。冲突返回409 usage_pricing_revision_conflict，未知写入返回500 usage_pricing_operation_unknown，禁止自动重试。当前 session/usage reset 为禁用，不删除 unknown。
+
+这些统计只覆盖 observed-terminal-turns-only，不代表服务商全部账单；进程失联前尚未收到终态的模型工作不能被补成零。当前执行等待仍为原生外部请求5秒、宿主边界6秒、回复watchdog30秒且关闭通知；watchdog不取消外部工作，stop也不证明已经接受的模型工作被取消。可配置默认60秒 turn 策略、通知、协作取消、未知隔离和迟到归因属于下一阶段，现有七键 API 尚未增加第八个 execution revision。替身测试和流恢复修复不构成该长期卡住问题已经彻底解决的证据。

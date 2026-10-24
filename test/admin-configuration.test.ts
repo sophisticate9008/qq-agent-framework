@@ -149,6 +149,32 @@ test('saves preserve unrelated fields, rotate authorization, and keep files priv
   assert.equal(statSync(files.gateway).mode & 0o777, 0o600);
 });
 
+test('public HTTPS proxy settings are visible and saved together only for an explicit loopback listener', async context => {
+  const files = fixture(context);
+  const items = routes(files);
+  const result = object(await invoke(items, 'GET', '/api/configuration'));
+  const fields = fieldMap(result, 'admin');
+  assert.equal(fields.get('publicOrigin')?.type, 'text');
+  assert.equal(fields.get('trustedLoopbackProxy')?.type, 'boolean');
+  for (const changes of [
+    { publicOrigin: 'https://console.example.test' },
+    { trustedLoopbackProxy: true },
+    { publicOrigin: 'http://console.example.test', trustedLoopbackProxy: true },
+    { publicOrigin: 'https://console.example.test/path', trustedLoopbackProxy: true }
+  ]) await rejectsCode(invoke(items, 'POST', '/api/configuration', {
+    source: 'admin', revision: hash(files.admin), changes
+  }), 400, 'invalid_configuration');
+  await invoke(items, 'POST', '/api/configuration', {
+    source: 'admin', revision: hash(files.admin), changes: { publicOrigin: 'https://console.example.test', trustedLoopbackProxy: true }
+  });
+  assert.equal(json(files.admin).publicOrigin, 'https://console.example.test');
+  assert.equal(json(files.admin).trustedLoopbackProxy, true);
+  writeFileSync(files.admin, `${JSON.stringify({ ...json(files.admin), host: '0.0.0.0' })}\n`, { mode: 0o600 });
+  await rejectsCode(invoke(items, 'POST', '/api/configuration', {
+    source: 'admin', revision: hash(files.admin), changes: { publicOrigin: 'https://other.example.test', trustedLoopbackProxy: true }
+  }), 400, 'invalid_configuration');
+});
+
 test('saves reject removed sources, unknown fields, prototype keys, unsafe paths, URLs, and stale writes', async context => {
   const files = fixture(context);
   const items = routes(files);

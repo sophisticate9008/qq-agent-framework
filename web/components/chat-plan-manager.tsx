@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, CircleAlert, LoaderCircle, Plus, RefreshCw, Save, Server, ServerOff } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
+import { catalogIdentifierDescription, isCatalogIdentifier } from '../lib/catalog-identifier.ts';
 import type { PageProps } from '../lib/types.ts';
 import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill } from './management.tsx';
 import { Badge } from './ui/badge.tsx';
@@ -326,8 +327,8 @@ export function ChatPlanManager({ api, connected, connect, setDirty, navigate }:
       setFieldError('内部标识、名称、关联人设、模型提供方、模型和思考强度必须填写。');
       return;
     }
-    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(normalized.id)) {
-      setFieldError('内部标识只能使用字母、数字、点、下划线和短横线，且不能超过 128 个字符。');
+    if (!isCatalogIdentifier(normalized.id)) {
+      setFieldError(catalogIdentifierDescription);
       return;
     }
     if (planIdConflict) {

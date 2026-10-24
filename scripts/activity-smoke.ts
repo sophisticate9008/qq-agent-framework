@@ -193,7 +193,7 @@ function createFixtureRoutes(state: SmokeState): readonly AdminRoute[] {
       method: 'GET', pathname: sessionsPath, handle: ({ query }) => {
         state.fixtureRequests.push(`GET ${sessionsPath}?${query.toString()}`);
         if (state.unavailable) throw new AdminRequestError(503, 'runtime_not_connected');
-        return { sessions: state.sessions, revision: sessionsRevision(state.sessions) };
+        return { sessions: state.sessions, revision: sessionsRevision(state.sessions), resetAvailable: true, next: null };
       },
     },
     {
@@ -457,7 +457,9 @@ async function run(): Promise<void> {
     assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 1);
     await resetDialog.getByRole('button', { name: '关闭并刷新', exact: true }).click();
     await resetDialog.waitFor({ state: 'hidden' });
-    await page.getByText('已读取 3 条当前绑定。', { exact: true }).waitFor();
+    await page.getByText('已加载 3 条绑定；本次分页读取结束。', { exact: true }).waitFor();
+    assert.equal(await page.locator('[data-session-key]').count(), 3);
+    assert.equal(await page.locator('#session-load-more').count(), 0);
 
     state.resetOutcome = 'unknown';
     const refreshedRevision = sessionsRevision(state.sessions);
@@ -487,7 +489,9 @@ async function run(): Promise<void> {
     await resetDialog.locator('#session-reset-confirm').fill(resetKey);
     await resetDialog.locator('#session-reset-submit').click();
     await resetDialog.waitFor({ state: 'hidden' });
-    await page.getByText('已读取 2 条当前绑定。', { exact: true }).waitFor();
+    await page.getByText('已加载 2 条绑定；本次分页读取结束。', { exact: true }).waitFor();
+    assert.equal(await page.locator('[data-session-key]').count(), 2);
+    assert.equal(await page.locator('#session-load-more').count(), 0);
     assert.equal(await page.locator(`[data-session-key="${resetKey}"]`).count(), 0);
     assert.equal(state.resetBodies.length, 2);
     assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 3);

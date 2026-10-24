@@ -5,10 +5,22 @@ import type { PageProps } from '../lib/types.ts';
 import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
+import { VirtualList, type VirtualListHandle } from './virtual-list.tsx';
 
 export interface ProviderModel {
   readonly id: string;
   readonly name: string;
+}
+
+const modelRowKeys = new WeakMap<ProviderModel, number>();
+let nextModelRowKey = 0;
+
+function modelRowKey(model: ProviderModel): number {
+  const existing = modelRowKeys.get(model);
+  if (existing !== undefined) return existing;
+  const key = nextModelRowKey++;
+  modelRowKeys.set(model, key);
+  return key;
 }
 
 interface ProviderDraft {
@@ -127,6 +139,8 @@ export function ProviderManager({ api, connected, connect, setDirty }: PageProps
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [reloadVersion, setReloadVersion] = useState(0);
   const keyInput = useRef<HTMLInputElement>(null);
+  const modelList = useRef<VirtualListHandle>(null);
+  const revealNewModel = useRef(false);
   const lifecycle = useRef<AbortController | null>(null);
   const writeController = useRef<AbortController | null>(null);
   const connection = useRef({ connected, api });
@@ -138,6 +152,12 @@ export function ProviderManager({ api, connected, connect, setDirty }: PageProps
     || (draft !== null && selected !== null && JSON.stringify(draft) !== JSON.stringify(editable(selected)));
   const blocked = saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown';
   const locked = loading || saving || blocked;
+
+  useEffect(() => {
+    if (!revealNewModel.current || !draft) return;
+    revealNewModel.current = false;
+    modelList.current?.scrollToIndex(draft.models.length - 1);
+  }, [draft]);
 
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
@@ -328,7 +348,12 @@ export function ProviderManager({ api, connected, connect, setDirty }: PageProps
 
   function updateModel(index: number, key: keyof ProviderModel, value: string): void {
     if (!draft) return;
-    update('models', draft.models.map((model, modelIndex) => modelIndex === index ? { ...model, [key]: value } : model));
+    update('models', draft.models.map((model, modelIndex) => {
+      if (modelIndex !== index) return model;
+      const changed = { ...model, [key]: value };
+      modelRowKeys.set(changed, modelRowKey(model));
+      return changed;
+    }));
   }
 
   if (!connected) return <ConnectPrompt connect={connect} />;
@@ -349,9 +374,9 @@ export function ProviderManager({ api, connected, connect, setDirty }: PageProps
         : <div className="grid items-start gap-5 lg:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
           <Section scrollable title="提供方目录" description="按显示名称选择接口并维护其模型。最多 128 个提供方。" actions={<Button size="sm" disabled={dirty || locked || catalog.providers.length >= 128} onClick={create}><Plus className="size-3.5" />新建提供方</Button>}>
             {catalog.providers.length === 0 ? <EmptyState title="还没有模型提供方" description="添加提供方，填写名称、接口类型和基础地址；需要认证时填写密钥。录入服务商的 API 模型 ID 并保存后，即可在聊天方案中选择。" action={<Button size="sm" disabled={dirty || locked} onClick={create}><Plus className="size-3.5" />添加提供方</Button>} />
-              : <div className="grid gap-1.5">{catalog.providers.map(provider => <Button key={provider.id} variant={!creating && selectedId === provider.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-3 text-left whitespace-normal" disabled={dirty || locked} onClick={() => choose(provider)} aria-pressed={!creating && selectedId === provider.id}>
+              : <VirtualList items={catalog.providers} getItemKey={provider => provider.id} estimateSize={74} itemClassName="pb-1.5">{provider => <Button key={provider.id} variant={!creating && selectedId === provider.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-3 text-left whitespace-normal" disabled={dirty || locked} onClick={() => choose(provider)} aria-pressed={!creating && selectedId === provider.id}>
                 <Server className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{provider.name}</strong><span className="mt-1 block truncate text-[10px] text-muted-foreground">{provider.type === 'openai' ? 'OpenAI 兼容' : 'Anthropic'} · {provider.models.length} 个模型</span></span><StatusPill tone={provider.enabled ? 'success' : 'neutral'}>{provider.enabled ? '启用' : '停用'}</StatusPill>
-              </Button>)}</div>}
+              </Button>}</VirtualList>}
           </Section>
           <Section scrollable title={creating ? '新建提供方' : selected?.name || '提供方设置'} description="接口配置与模型名称分别维护；密钥仅写入，不会回显。" actions={draft ? <StatusPill tone={dirty ? 'warning' : 'neutral'}>{dirty ? '尚未保存' : '已载入'}</StatusPill> : undefined} footer={draft ? <>
             {confirmDelete && <div className="flex w-full flex-wrap items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs" role="alert"><span className="mr-auto min-w-0 flex-1 basis-48 break-words">确认从目录删除「{selected?.name}」？此操作会同时移除其模型和已保存密钥；若被聊天方案引用，服务可能拒绝删除。</span><Button variant="ghost" disabled={locked} onClick={() => setConfirmDelete(false)}>取消</Button><Button variant="destructive" disabled={dirty || locked} onClick={remove}>确认删除</Button></div>}
@@ -374,13 +399,13 @@ export function ProviderManager({ api, connected, connect, setDirty }: PageProps
                 {!creating && selected?.apiKeyConfigured && <ToggleField label="清除已保存密钥" description="仅在明确打开此选项并保存时清除；留空不会清除。" checked={clearApiKey} disabled={locked} onChange={value => { if (locked) return; clearKeyInput(); setClearApiKey(value); clearFeedback(); }} />}
               </div>
               <div className="grid min-w-0 gap-3">
-                <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-xs font-medium">模型列表 <span className="text-muted-foreground">({draft.models.length}/128)</span></h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">API 模型 ID 按服务商填写一次；显示名称可选，留空时使用 API ID。</p></div><Button size="sm" variant="outline" disabled={locked || draft.models.length >= 128} onClick={() => update('models', [...draft.models, { id: '', name: '' }])}><Plus className="size-3.5" />添加模型</Button></div>
+                <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-xs font-medium">模型列表 <span className="text-muted-foreground">({draft.models.length}/128)</span></h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">API 模型 ID 按服务商填写一次；显示名称可选，留空时使用 API ID。</p></div><Button size="sm" variant="outline" disabled={locked || draft.models.length >= 128} onClick={() => { revealNewModel.current = true; update('models', [...draft.models, { id: '', name: '' }]); }}><Plus className="size-3.5" />添加模型</Button></div>
                 <div className="h-60 min-h-0 overflow-auto overscroll-contain rounded-lg border p-3" role="group" aria-label="可用模型列表">
                   {draft.models.length === 0 ? <div className="flex h-full items-center justify-center px-4 text-center text-xs leading-6 text-muted-foreground">还没有模型。添加后，聊天方案才能从此提供方选择模型。</div>
-                    : <div className="grid gap-3">{draft.models.map((model, index) => <div key={index} className="grid gap-3 rounded-lg border bg-background p-3">
+                    : <VirtualList items={draft.models} getItemKey={modelRowKey} estimateSize={142} listRef={modelList} itemClassName="pb-3">{(model, index) => <div className="grid gap-3 rounded-lg border bg-background p-3">
                       <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium text-muted-foreground">模型 {index + 1}</span><Button size="icon-xs" variant="ghost" disabled={locked} aria-label={`删除模型 ${index + 1}`} onClick={() => update('models', draft.models.filter((_, modelIndex) => modelIndex !== index))}><Trash2 className="size-3.5" /></Button></div>
                       <div className="grid gap-3 sm:grid-cols-2"><Field label="API 模型 ID"><Input id={`provider-model-id-${index}`} value={model.id} maxLength={128} disabled={locked} placeholder="服务商要求的模型标识" onChange={event => updateModel(index, 'id', event.target.value)} /></Field><Field label="模型显示名称（可选）"><Input id={`provider-model-name-${index}`} value={model.name} maxLength={128} disabled={locked} placeholder="留空使用 API 模型 ID" onChange={event => updateModel(index, 'name', event.target.value)} /></Field></div>
-                    </div>)}</div>}
+                    </div>}</VirtualList>}
                 </div>
               </div>
               <details key={selectedId ?? 'new-provider'} className="rounded-lg border bg-muted/20 p-4">

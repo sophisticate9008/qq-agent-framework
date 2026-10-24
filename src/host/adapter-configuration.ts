@@ -63,7 +63,7 @@ export interface AdapterConnectionStatus {
   readonly lastError: string | null
   readonly received: number
   readonly dropped: number
-  readonly chatReady: false
+  readonly chatReady: boolean
 }
 
 const LEGACY_ADAPTER_IDS = ['onebotHttp', 'dshAgent', 'onebotWebhook'] as const

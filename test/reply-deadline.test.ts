@@ -160,7 +160,7 @@ test('accepted prompt without an agent message sends one neutral timeout notice'
 test('first confirmed assistant message clears the reply watchdog', async testContext => {
   const notice = 'Must not be sent after a confirmed reply.';
   const { host, agent, transport } = fixture(testContext, {
-    replyTimeoutMs: 60,
+    replyTimeoutMs: 1000,
     replyTimeoutNotice: notice
   });
   grant(host);
@@ -174,6 +174,7 @@ test('first confirmed assistant message clears the reply watchdog', async testCo
   });
   await waitFor(() => transport.requests.length === 1, 'Confirmed assistant reply was not sent.');
   assert.deepEqual(transport.requests[0]?.content, [{ type: 'text', text: 'confirmed assistant reply' }]);
+  await waitFor(() => host.replies.list()[0]?.status === 'responded', 'Confirmed reply was not recorded by the watchdog.');
   await delay(90);
   assert.equal(transport.requests.length, 1);
   assert.equal(host.metrics().replies.expired, 0);

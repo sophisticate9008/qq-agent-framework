@@ -1,4 +1,4 @@
-import { FrameworkError, assert, errorCode } from '../core/values.ts';
+import { FrameworkError, assert, errorCode, snapshot } from '../core/values.ts';
 import type { TransportAdapter } from '../core/types.ts';
 import type { AgentAdapter } from './types.ts';
 
@@ -175,7 +175,9 @@ export function createBoundedTransport({ transport, timeoutMs, onFault = () => {
   { transport: TransportAdapter; timeoutMs: number; onFault?(code: string): void;
     maxPendingOperations?: number }): TransportAdapter {
   const operations = createOperationLimiter(maxPendingOperations, 'TRANSPORT_BACKPRESSURE_UNKNOWN');
-  return Object.freeze({ async send(request) {
+  return Object.freeze({
+    ...(transport.capabilities === undefined ? {} : { capabilities: () => snapshot(transport.capabilities!()) }),
+    async send(request) {
     try {
       return await withDeadline({ signal: request.signal, timeoutMs, code: 'TRANSPORT_TIMEOUT_UNKNOWN',
         run: signal => operations.run(() => transport.send({ ...request, signal })) });

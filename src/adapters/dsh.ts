@@ -1,4 +1,5 @@
 import { snapshot } from '../core/values.ts'
+import { normalizeContent } from '../core/content.ts'
 import type { JsonObject, JsonValue, MessageContent } from '../core/types.ts'
 import type { AgentAdapter, AgentEvent } from '../host/types.ts'
 
@@ -164,6 +165,7 @@ function copyContent(content: readonly MessageContent[]): readonly MessageConten
     if (block.type === 'file') return { type: block.type, assetId: block.assetId, name: block.name }
     if (block.type === 'mention') return { type: block.type, userId: block.userId }
     if (block.type === 'reply') return { type: block.type, messageId: block.messageId }
+    if (block.type === 'forward') return normalizeContent([block])[0]
     return { type: block.type, assetId: block.assetId }
   }))
 }
@@ -188,6 +190,8 @@ function eventContent(data: JsonObject | undefined): readonly MessageContent[] |
       content.push({ type: 'mention', userId: block.userId })
     } else if (block.type === 'reply' && nonEmpty(block.messageId)) {
       content.push({ type: 'reply', messageId: block.messageId })
+    } else if (block.type === 'forward') {
+      try { content.push(...normalizeContent([block])) } catch { return undefined }
     }
   }
   return content.length === 0 ? undefined : snapshot(content)

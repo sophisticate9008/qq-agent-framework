@@ -36,9 +36,11 @@ npm run test:built
 - 同会话顺序处理、跨会话并行、有限队列和协作式事件循环让出。
 - 人设、配置、偏好、功能状态与权限分离。
 - 按功能、会话和 capability 授权，支持有限尝试预算、暂停、过期与撤销。
-- 宿主可注册事件校验器和 effect adapter；功能只通过受控 SDK 发起副作用。
-- 文本、资源引用、提及和回复消息块的统一类型契约。
-- SQLite 持久存储、generation 化会话注册、持久出站、有限任务队列和受审批资源目录。
+- 可信宿主注入自定义事件、effect、model 和审计 observer，不能覆盖框架内置入口。
+- 可解释的入站路由与响应归属，保留事件广播和旁观功能。
+- 文本、资源、引用回复与受独立授权的合并转发；可选文档表达服务准备 Markdown 图片或选择输出形式。
+- SQLite 持久存储、generation 化会话、带人格版本作用域的出站与受审批资源目录。
+- 有限任务队列，以及需显式驱动、带时区/DST 与漏触发策略的 daily/weekly 日历触发服务。
 - OneBot HTTP 收发适配器与可注入成熟 client 的 DSH agent adapter。
 - `createBridgeHost` 组装持久 policy/state、会话、follow、任务和出站恢复。
 - 本地演示 transport、model、功能包和只读管理快照。
@@ -51,6 +53,8 @@ npm run test:built
 - 持久组件能保存状态和标记中断结果，但不会把 `unknown` 自动重放为成功或失败。
 - `confirmed`、`rejected` 与 `unknown` 必须分开处理；结果未知不能直接视为失败并盲目重发。
 - 资源块只携带资源标识，不代表任意本机路径或 URL 可被访问。
+- 文档图片需要注入浏览器、受控发布器及本地字体；准备或批准图片不等于获得发送权限。
+- 候选版本发布/回滚、业务状态迁移、可恢复长工作管理与全局保留清理策略尚未形成完整流程。
 - 尚未经过对应集成与故障恢复测试的适配器，不应标记为生产可用。
 
 ## 项目结构
@@ -59,6 +63,7 @@ npm run test:built
 src/core/       功能 SDK、调度、上下文与权限
 src/host/       宿主持久化、会话和恢复基础件
 src/adapters/   外部协议与 agent 适配器
+src/rendering/  可选的离线 Markdown 渲染
 src/features/   可独立装配的功能包
 src/admin/      本地管理接口
 web/            演示管理页
@@ -73,6 +78,7 @@ docs/           公共设计与使用文档
 - [架构](docs/ARCHITECTURE.md)
 - [公共契约](docs/CONTRACTS.md)
 - [扩展功能](docs/EXTENDING.md)
+- [文档表达与最小装配](docs/PRESENTATION.md)
 - [安全边界](docs/SECURITY.md)
 - [性能方法](docs/PERFORMANCE.md)
 - [架构决策](docs/decisions/0001-independent-engine.md)

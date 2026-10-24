@@ -208,6 +208,12 @@ test('host admin routes paginate metadata without exposing stored bodies', async
   const metrics = await rawRequest(fixture.origin, '/api/host/metrics', { headers: authorized });
   assert.equal(metrics.status, 200);
   exposedResponses.push(metrics.text);
+  const storage = await rawRequest(fixture.origin, '/api/host/storage?limit=1', { headers: authorized });
+  assert.equal(storage.status, 200);
+  const storageData = parseObject(storage.text);
+  assert.equal(typeof storageData.totalRecords, 'number');
+  assert(Array.isArray(storageData.namespaces) && storageData.namespaces.length === 1);
+  exposedResponses.push(storage.text);
   const exposed = exposedResponses.join('\n');
   assert.doesNotMatch(exposed, /private-task-payload-must-not-leak/);
   assert.doesNotMatch(exposed, /private-outbox-content-must-not-leak/);

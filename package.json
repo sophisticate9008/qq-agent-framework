@@ -14,6 +14,7 @@
     "test": "npm run build && node --test test/*.test.ts",
     "test:built": "npm run build && node --test dist/test/*.test.js",
     "test:browser": "npm run build && node scripts/browser-smoke.ts",
+    "test:markdown-smoke": "npm run build && node scripts/markdown-smoke.ts",
     "demo": "npm run build && node src/demo.ts",
     "check": "npm run typecheck && node scripts/check.ts",
     "bench:core": "node --expose-gc scripts/bench-core.ts",
@@ -24,8 +25,12 @@
     "bench:soak": "node --expose-gc scripts/bench-soak.ts"
   },
   "devDependencies": {
+    "@types/markdown-it": "14.2.0",
     "@types/node": "24.19.2",
     "playwright": "1.61.1",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "markdown-it": "15.0.3"
   }
 }

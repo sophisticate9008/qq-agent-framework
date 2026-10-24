@@ -26,7 +26,11 @@ agent / transport / 其他 effect adapter
 | 会话 | `createSessionRegistry` | 会话创建意图、绑定、generation 和未知结果 |
 | 出站 | `createDurableTransport` | 持久幂等键、发送状态、恢复与人工对账 |
 | 任务 | `createTaskQueue` | 有限扫描、到期执行、取消、显式重试和恢复 |
+| 日历 | `createCalendarTriggerService` | daily/weekly、显式时区/DST、有限窗口及漏触发处理 |
+| 归属 | `createMessageRouter` / `withMessageRoute` | 可信入站决策、响应处理器过滤，保留旁观者广播 |
 | 资源 | `createResourceRegistry` | 版本、scope、来源、审批、撤销与解析 |
+| 表达 | `createPresentationService` | 可选 selector、引用决策与 text/markdown-image/forward 内容准备 |
+| 渲染 | `createMarkdownRenderer` / `createRenderedAssetPublisher` | 离线 PNG 与可选受控本地发布，不直接发送 |
 | QQ | `createOneBotTransport` / `createOneBotReceiver` | OneBot HTTP 消息块转换、HMAC 入站和回执映射 |
 | agent | `createDshAdapter` | 注入 client port，创建/提交/跟随/取消并规范化事件 |
 | 宿主 | `createBridgeHost` | 入站授权、agent relay、持久去重、follow 恢复和停机排空 |
@@ -54,7 +58,21 @@ policy 的授权键至少包含功能、会话和 capability。每项授权有�
 
 ## 消息与资源
 
-消息由有序 `MessageContent[]` 表示，可包含文本、图片/音频/文件资源引用、提及和回复。资源块只携带 `assetId`；资源元数据、内容访问和清理由宿主资源目录负责。协议适配器决定哪些组合可发送，并必须对不支持的内容返回明确结果。
+消息由有序 `MessageContent[]` 表示，可包含文本、图片/音频/文件资源引用、提及和回复。forward 必须独立发送，不能嵌套、混发或携带模型自报发送者；它额外受 messaging.forward 授权与 OneBot group/private 扩展开关约束。固定节点身份来自 operator 的可信配置。
+
+资源块只携带 assetId，不能解释成路径。引擎从实际人格版本产生 OutboundScope，经 effect、durable outbox 到 OneBot resolver 传递；资源登记与解析比较完整人格键及按需绑定的 session/generation，expectedVersion 可额外锁定资源版本。历史资源可不绑 session，旧无 scope 请求仍兼容，不能据此宣称旧记录已自动获得身份隔离。资源 get/list 只暴露治理元数据，resolve 才解析受控来源。
+
+表达链路分为选择/准备、渲染、受控发布、实际发送：prepare 返回规范内容，renderer 不下载 Markdown 图片、网络或字体，publisher 只审批这个可信文档 renderer 的 PNG，最终仍由功能 execution.send 经 policy 和出站完成发送。select 是受约束挂载点，没有硬编码人格或自动读取聊天推断意图；selectAgentMessage 另为同步 agent 输出过滤，默认 relay 不自动调用表达服务。
+
+标准 relay 可显式配置 agentMessagePreparation，在引擎内用额外 capability 的 invoke/generate 做异步准备，再沿用原 send/outbox。hook 不拿 send/store，额外声明不等于授权；返回 null 跳过发送，普通格式可原样保留。只有启用 hook 才传递原始 metadata 到 event.data.agentData，由上层映射 DSH 元数据而非核心硬编码 Markdown 或自动识别意图。
+
+renderer 依赖调用方注入 browser 及部署本地中文字体；本地 publisher 是依赖目录 fd（Linux 下 /proc/self/fd）的可选 Linux 适配器，而非整个框架的平台前提。其他平台可注入自己的受控发布器。完整装配与边界见 [文档表达](PRESENTATION.md)。
+
+## 路由与触发
+
+routeIncoming 位于 host 入站授权之后、历史写入与一次事件广播之前。规则只产生冻结的归属事实，不产生 grant。withMessageRoute 仅过滤包装功能的 message.received，其他订阅照常执行；未包装观察者不受影响。相同最高优先级冲突、selector 异常或异步结果均拒绝，不依赖安装顺序；这不是 NLU 或模型意图识别服务。
+
+calendar 与持久 task queue 分离，必须由应用恢复并 tick；bridge 自带任务 timer 不会启动它。只支持 daily/weekly 与明确 IANA 时区、DST overlap/nonexistent 规则；窗口外跳过，窗口内只执行最新机会，coalesce 报告合并次数，不进行无界补发。callback 映射成普通事件后仍经过 policy。中断 occurrence 标 unknown、不自动重放；其终态 TTL 不是整个系统的保留治理。
 
 ## 会话与恢复
 
@@ -76,11 +94,13 @@ policy 的授权键至少包含功能、会话和 capability。每项授权有�
 
 ## 扩展边界
 
-宿主可以在创建引擎时注册新的事件校验器和 effect adapter。注册表创建后固定；扩展不能覆盖内置事件或 capability。功能只能订阅 manifest 中声明的事件，并只能调用 manifest 与 policy 同时允许的 capability。
+可信装配根可通过 createBridgeHost 直接注入 eventValidators、effectAdapters、model 与 observer，无须绕开标准持久宿主。注册表创建后固定；扩展不能覆盖内置事件或 capability，host 还保留全部 agent.* 名称。功能只能订阅 manifest 声明的事件，并只能调用 manifest 与 policy 同时允许的 capability；observer 是脱敏诊断，不是授权关口。
 
 ## 运维视图
 
 高频健康检查应读取轻量状态和计数，不应反复构造完整快照。完整管理视图可能包含大量功能、授权、审计和出站记录，只适合受认证的低频查询。
+
+SQLite stats 使用只读事务，使一次返回的容量总数与 namespace 分页一致；host.storageStats 与 GET /api/host/storage 只转交这些脱敏统计，不返回正文。统计不回收配额、不删除 unknown、不对账、不重试；过期数据清理和记录保留仍是显式运维操作。
 
 ## 已知限制
 
@@ -91,4 +111,8 @@ policy 的授权键至少包含功能、会话和 capability。每项授权有�
 - 有界队列提供背压，不保证调用方已经持久接纳被拒绝的输入。
 - 不同 transport 对顺序、并发、限速和回执的语义不同，必须单独验收。
 - 当前演示应用不是远程多用户生产控制台。
+- 尚无完整候选 release 分阶段切换/失败回滚与业务状态 schema 迁移；功能 setup 事务不等于版本发布事务。
+- prompt accepted、首回复 watchdog 与有限任务队列不等于可恢复长 job 管理；远程进度、请求关联、取消确认与恢复控制面仍有缺口，不重建 DSH。
+- storage stats、日历 TTL 和 publisher 文件上限不等于跨组件 retention、未知结果保全与容量自动治理已完成。
+- 浏览器渲染或离线装配验证不代表真实 QQ 发送、DSH 集成、长时间运行和故障恢复已经验收。
 - `createBridgeHost.receive()` 只接受协议层已认证和规范化的消息；宿主仍会调用 `authorizeIncoming` 做业务身份与会话授权。

@@ -24,6 +24,7 @@ export function createHostAdminRoutes(host: ReturnType<typeof createBridgeHost>)
   ];
   return Object.freeze([
     { method: 'GET', pathname: '/api/host/metrics', handle: () => host.metrics() },
+    { method: 'GET', pathname: '/api/host/storage', handle: ({ query }) => host.storageStats(page(query)) },
     ...collections.map(collection => ({
       method: 'GET' as const, pathname: `/api/host/${collection.name}`,
       handle({ query }: { query: URLSearchParams }) {

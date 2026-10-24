@@ -4,6 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createContextStore, createFeatureState } from './context.ts';
 import { createPolicy } from './policy.ts';
 import { normalizeContent } from './content.ts';
+import { normalizeOutboundScope } from './scope.ts';
 import { FrameworkError, assert, errorCode, identifier, isRecord, reference, snapshot } from './values.ts';
 import type { AuditEntry, AuditRecord, Clock, DeliveryReceipt, EffectAdapter, EventReport, FeatureDefinition,
   FeatureExecution, FeatureHandler, FeatureManifest, FeatureOutcome, FeatureSetup, FrameworkEvent, JsonObject,
@@ -67,7 +68,7 @@ interface EventDeadline {
 interface Execution { view: FeatureExecution; finish(): Promise<void>; timeoutCode(): string }
 
 const eventTypes = new Set(['message.received', 'trigger.fired']);
-const capabilityTypes = new Set(['messaging.send', 'model.respond']);
+const capabilityTypes = new Set(['messaging.send', 'messaging.forward', 'model.respond']);
 
 function digest(value: unknown): string {
   const normalized = JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
@@ -346,6 +347,12 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
   function executionFor(record: FeatureRecord, event: FrameworkEvent, deadline: EventDeadline): Execution {
     const featureId = record.definition.id;
     const base = { eventId: event.id, conversationId: event.conversationId, featureId, version: record.definition.version };
+    const resolved = context.resolve({ persona, conversationId: event.conversationId, userId: event.userId,
+      sessionId: event.sessionId, taskId: event.taskId });
+    const outboundScope = normalizeOutboundScope({ persona: { id: resolved.persona.id, version: resolved.persona.version },
+      ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+      ...(event.sessionId !== undefined && Number.isSafeInteger(event.data.generation) && Number(event.data.generation) > 0
+        ? { generation: event.data.generation } : {}) });
     let ordinal = 0;
     let open = true;
     const pendingEffects = new Set<Promise<unknown>>();
@@ -426,7 +433,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       try {
         releaseRaw = rawEffectSlot();
         authorize(capability);
-        const operation = Promise.resolve(execute(Object.freeze({ input: request, scope: snapshot(base), signal: executionSignal })));
+        const operation = Promise.resolve(execute(Object.freeze({ input: request, scope: snapshot({ ...base, ...outboundScope }), signal: executionSignal })));
         rawTracked = true;
         operation.then(releaseRaw, releaseRaw);
         activeExternalEffects++;
@@ -474,7 +481,10 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
           acquired = true;
           accessible();
           releaseRaw = rawEffectSlot();
-          try { authorize('messaging.send'); }
+          try {
+            if (message.some(block => block.type === 'forward')) authorize('messaging.forward');
+            authorize('messaging.send');
+          }
           catch (error) {
             entry.view.status = 'denied';
             entry.view.errorCode = errorCode(error, 'EFFECT_DENIED');
@@ -485,7 +495,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
           let result: DeliveryReceipt;
           try {
             const operation = Promise.resolve(transport.send({ conversationId: event.conversationId, content: message,
-              idempotencyKey: effectId, signal: executionSignal }));
+              idempotencyKey: effectId, signal: executionSignal, scope: outboundScope }));
             rawTracked = true;
             operation.then(releaseRaw, releaseRaw);
             activeExternalEffects++;
@@ -528,13 +538,10 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       return track(task);
     }
 
-    const selection: { persona: string; conversationId: string; userId?: string; sessionId?: string; taskId?: string }
-      = { persona, conversationId: event.conversationId };
-    for (const key of ['userId', 'sessionId', 'taskId'] as const) if (event[key] !== undefined) selection[key] = event[key];
     let storage: FeatureStateScope | undefined;
     const privateStorage = () => storage ??= state.scope(featureId, event.conversationId);
     return Object.freeze({
-      view: Object.freeze({ context: context.resolve(selection), state: Object.freeze({
+      view: Object.freeze({ context: resolved, state: Object.freeze({
         get(key: string, fallback?: JsonValue) { accessible(); return privateStorage().get(key, fallback); },
         set(key: string, value: JsonValue) { accessible(); return privateStorage().set(key, value); },
         delete(key: string) { accessible(); return privateStorage().delete(key); },

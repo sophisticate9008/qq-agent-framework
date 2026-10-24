@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import { normalizeContent } from '../core/content.ts';
+import { normalizeOutboundScope } from '../core/scope.ts';
 import { assert, reference, snapshot } from '../core/values.ts';
 import type { DeliveryReceipt, SendRequest, TransportAdapter } from '../core/types.ts';
 
@@ -53,6 +54,7 @@ export function createThrottledTransport({ transport, minIntervalMs = 0, maxPend
   }
 
   return Object.freeze({
+    ...(transport.capabilities === undefined ? {} : { capabilities: () => snapshot(transport.capabilities!()) }),
     send(input: SendRequest): Promise<DeliveryReceipt> {
       assert(reference(input.conversationId) && reference(input.idempotencyKey) && input.signal instanceof AbortSignal,
         'INVALID_REQUEST', 'A scoped transport request is required.');
@@ -73,6 +75,7 @@ export function createThrottledTransport({ transport, minIntervalMs = 0, maxPend
         };
         const job: PendingSend = {
           request: { conversationId: input.conversationId, idempotencyKey: input.idempotencyKey, content,
+            ...(input.scope === undefined ? {} : { scope: normalizeOutboundScope(input.scope) }),
             signal: AbortSignal.any([input.signal, controller.signal]) },
           controller, resolve, detach: () => input.signal.removeEventListener('abort', aborted),
         };

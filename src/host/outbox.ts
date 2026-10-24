@@ -1,4 +1,5 @@
 import { normalizeContent } from '../core/content.ts';
+import { normalizeOutboundScope } from '../core/scope.ts';
 import { FrameworkError, assert, errorCode, reference, snapshot } from '../core/values.ts';
 import type { Clock, DeliveryReceipt, SendRequest, TransportAdapter } from '../core/types.ts';
 import type { DurableStore, StoredRecord } from './types.ts';
@@ -45,7 +46,8 @@ export function createDurableTransport({ store, transport, clock = Date.now }:
     let current: StoredRecord;
     try {
       current = store.write(namespace, key, json({ id: request.idempotencyKey, conversationId: request.conversationId,
-        content: request.content, fingerprint, status: 'prepared', at: clock() }), { expectedRevision: null });
+        content: request.content, ...(request.scope === undefined ? {} : { scope: request.scope }),
+        fingerprint, status: 'prepared', at: clock() }), { expectedRevision: null });
     } catch (error) {
       if (!(error instanceof FrameworkError && error.code === 'STORE_CONFLICT')) throw error;
       const prior = store.read(namespace, key);
@@ -74,11 +76,14 @@ export function createDurableTransport({ store, transport, clock = Date.now }:
   }
 
   return Object.freeze({
+    ...(transport.capabilities === undefined ? {} : { capabilities: () => snapshot(transport.capabilities!()) }),
     send(input: SendRequest): Promise<DeliveryReceipt> {
       assert(reference(input.conversationId) && reference(input.idempotencyKey) && input.signal instanceof AbortSignal,
         'INVALID_REQUEST', 'A scoped message and idempotency key are required.');
-      const request = { ...input, content: normalizeContent(input.content) };
-      const fingerprint = digest({ conversationId: request.conversationId, content: request.content });
+      const request = { ...input, content: normalizeContent(input.content),
+        ...(input.scope === undefined ? {} : { scope: normalizeOutboundScope(input.scope) }) };
+      const fingerprint = digest({ conversationId: request.conversationId, content: request.content,
+        ...(request.scope === undefined ? {} : { scope: request.scope }) });
       const pending = inflight.get(input.idempotencyKey);
       if (pending) {
         assert(pending.fingerprint === fingerprint, 'EFFECT_CONFLICT', 'The effect has different content.');

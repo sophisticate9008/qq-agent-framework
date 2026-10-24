@@ -7,12 +7,21 @@ export function normalizeContent(input: unknown): readonly MessageContent[] {
     'INVALID_CONTENT', 'A bounded, nonempty message is required.');
   for (const block of blocks) {
     assert(isRecord(block), 'INVALID_CONTENT', 'Message segments must be objects.');
-    const allowed = block.type === 'text' ? ['type', 'text']
+    const allowed = block.type === 'forward' ? ['type', 'nodes'] : block.type === 'text' ? ['type', 'text']
       : block.type === 'file' ? ['type', 'assetId', 'name']
       : block.type === 'mention' ? ['type', 'userId']
       : block.type === 'reply' ? ['type', 'messageId'] : ['type', 'assetId'];
     assert(Object.keys(block).every(key => allowed.includes(key)), 'INVALID_CONTENT', 'Unexpected message fields.');
-    if (block.type === 'text') {
+    if (block.type === 'forward') {
+      assert(blocks.length === 1 && Array.isArray(block.nodes) && block.nodes.length > 0 && block.nodes.length <= 32,
+        'INVALID_CONTENT', 'A forward must contain bounded nodes and be sent separately.');
+      for (const node of block.nodes) {
+        assert(isRecord(node) && Object.keys(node).length === 1 && Array.isArray(node.content)
+          && node.content.every(item => isRecord(item) && item.type !== 'forward'),
+        'INVALID_CONTENT', 'Forward nodes contain only basic content and no sender impersonation.');
+        normalizeContent(node.content);
+      }
+    } else if (block.type === 'text') {
       assert(typeof block.text === 'string' && block.text.length > 0 && block.text.length <= 8000,
         'INVALID_CONTENT', 'Text must be nonempty and bounded.');
     } else if (block.type === 'image' || block.type === 'audio' || block.type === 'file') {

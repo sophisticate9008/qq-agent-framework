@@ -6,8 +6,10 @@ import type {
   MessageContent,
   SendRequest,
   TransportAdapter,
+  BasicMessageContent,
 } from '../core/types.ts'
 import { normalizeContent } from '../core/content.ts'
+import { normalizeOutboundScope, personaKey } from '../core/scope.ts'
 import type { InboundMessage } from '../host/types.ts'
 
 type MaybePromise<Value> = Value | Promise<Value>
@@ -17,6 +19,8 @@ export interface OneBotAssetResolutionRequest {
   type: 'image' | 'audio'
   conversationId: string
   persona?: string
+  sessionId?: string
+  generation?: number
   signal: AbortSignal
 }
 
@@ -32,6 +36,7 @@ export interface OneBotTransportOptions {
   persona?: string
   fetch?: typeof globalThis.fetch
   timeoutMs?: number
+  forward?: { senderId: string; senderName: string; group?: boolean; private?: boolean }
 }
 
 export interface OneBotIncomingAssetSource {
@@ -158,9 +163,9 @@ function waitWithSignal<Value>(value: MaybePromise<Value>, signal: AbortSignal):
 }
 
 async function outboundSegments(
-  content: readonly MessageContent[],
+  content: readonly BasicMessageContent[],
   resolveAsset: OneBotAssetResolver | undefined,
-  context: { conversationId: string; persona?: string },
+  context: { conversationId: string; persona?: string; sessionId?: string; generation?: number },
   signal: AbortSignal,
 ): Promise<OneBotSegment[] | null> {
   if (content.length === 0 || content.some(block => block.type === 'file')) return null
@@ -194,6 +199,8 @@ async function outboundSegments(
             type: block.type,
             conversationId: context.conversationId,
             ...(context.persona === undefined ? {} : { persona: context.persona }),
+            ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+            ...(context.generation === undefined ? {} : { generation: context.generation }),
             signal,
           }),
           signal,
@@ -252,6 +259,8 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
 export function createOneBotTransport(options: OneBotTransportOptions): TransportAdapter {
   const sendPrivateUrl = actionUrl(options.endpoint, 'send_private_msg')
   const sendGroupUrl = actionUrl(options.endpoint, 'send_group_msg')
+  const sendPrivateForwardUrl = actionUrl(options.endpoint, 'send_private_forward_msg')
+  const sendGroupForwardUrl = actionUrl(options.endpoint, 'send_group_forward_msg')
   const fetchImplementation = options.fetch ?? globalThis.fetch
   const timeoutMs = options.timeoutMs ?? 15_000
   if (typeof fetchImplementation !== 'function') throw new TypeError('OneBot transport requires fetch.')
@@ -259,26 +268,63 @@ export function createOneBotTransport(options: OneBotTransportOptions): Transpor
     throw new TypeError('OneBot timeout must be a bounded positive integer.')
   }
   const accessToken = options.accessToken
+  const forward = options.forward === undefined ? undefined : Object.freeze({ ...options.forward })
+  if (forward && (positiveIdentifier(forward.senderId) === null || !safeString(forward.senderName, 100)
+    || ['group', 'private'].some(key => forward[key as 'group' | 'private'] !== undefined
+      && typeof forward[key as 'group' | 'private'] !== 'boolean'))) {
+    throw new TypeError('Forward messages require an explicit sender and supported target kinds.')
+  }
 
   return Object.freeze({
+    capabilities() {
+      const contentTypes: MessageContent['type'][] = ['text', 'mention', 'reply']
+      if (options.resolveAsset) contentTypes.push('image', 'audio')
+      if (forward?.group || forward?.private) contentTypes.push('forward')
+      return Object.freeze({ contentTypes: Object.freeze(contentTypes), ...(contentTypes.includes('forward') ? { maxForwardNodes: 32 } : {}) })
+    },
     async send(request: SendRequest): Promise<DeliveryReceipt> {
       const target = conversationTarget(request.conversationId)
       if (target === null) return { status: 'rejected' }
+      let content: readonly MessageContent[]
+      let selection: { conversationId: string; persona?: string; sessionId?: string; generation?: number }
+      try {
+        content = normalizeContent(request.content)
+        const scope = request.scope === undefined ? undefined : normalizeOutboundScope(request.scope)
+        const persona = scope === undefined ? options.persona : personaKey(scope)
+        if (scope && options.persona !== undefined && options.persona !== persona) return { status: 'rejected' }
+        selection = { conversationId: request.conversationId, ...(persona === undefined ? {} : { persona }),
+          ...(scope?.sessionId === undefined ? {} : { sessionId: scope.sessionId }),
+          ...(scope?.generation === undefined ? {} : { generation: scope.generation }) }
+      } catch { return { status: 'rejected' } }
+      if (request.signal.aborted) return { status: 'rejected' }
       const signal = AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)])
-      const segments = await outboundSegments(request.content, options.resolveAsset, {
-        conversationId: request.conversationId,
-        ...(options.persona === undefined ? {} : { persona: options.persona }),
-      }, signal)
-      if (segments === null) return signal.aborted ? { status: 'unknown' } : { status: 'rejected' }
+      let url = target.action === 'send_private_msg' ? sendPrivateUrl : sendGroupUrl
+      let payload: Record<string, unknown>
+      const first = content[0]
+      if (first.type === 'forward') {
+        if (!forward || !(target.action === 'send_private_msg' ? forward.private : forward.group)) return { status: 'rejected' }
+        const nodes: unknown[] = []
+        for (const node of first.nodes) {
+          const segments = await outboundSegments(node.content, options.resolveAsset, selection, signal)
+          if (segments === null) return { status: 'rejected' }
+          nodes.push({ type: 'node', data: { user_id: forward.senderId, nickname: forward.senderName, content: segments } })
+        }
+        url = target.action === 'send_private_msg' ? sendPrivateForwardUrl : sendGroupForwardUrl
+        payload = { [target.key]: target.value, messages: nodes }
+      } else {
+        const segments = await outboundSegments(content as readonly BasicMessageContent[], options.resolveAsset, selection, signal)
+        if (segments === null) return signal.aborted ? { status: 'unknown' } : { status: 'rejected' }
+        payload = { [target.key]: target.value, message: segments }
+      }
       const headers = new Headers({ 'content-type': 'application/json' })
       if (accessToken) headers.set('authorization', `Bearer ${accessToken}`)
       try {
         const response = await fetchImplementation(
-          target.action === 'send_private_msg' ? sendPrivateUrl : sendGroupUrl,
+          url,
           {
             method: 'POST',
             headers,
-            body: JSON.stringify({ [target.key]: target.value, message: segments }),
+            body: JSON.stringify(payload),
             signal,
           },
         )

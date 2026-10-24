@@ -3,8 +3,9 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { normalizeContent } from '../core/content.ts';
 import { createContextStore } from '../core/context.ts';
 import { createEngine } from '../core/engine.ts';
+import type { EngineOptions } from '../core/engine.ts';
 import { FrameworkError, assert, errorCode, reference, snapshot } from '../core/values.ts';
-import type { Clock, FrameworkEvent, JsonObject, MessageContent, TransportAdapter } from '../core/types.ts';
+import type { Clock, FeatureExecution, FrameworkEvent, JsonObject, MessageContent, TransportAdapter } from '../core/types.ts';
 import { createPersistentPolicy } from '../storage/policy.ts';
 import { createPersistentFeatureState } from '../storage/state.ts';
 import { createSessionRegistry } from './sessions.ts';
@@ -12,9 +13,19 @@ import { createDurableTransport } from './outbox.ts';
 import { createTaskQueue } from './tasks.ts';
 import { createConversationHistory } from './history.ts';
 import { digest, json, object, records } from './data.ts';
-import type { AgentAdapter, AgentEvent, DurableStore, InboundMessage, SessionBinding, StoredRecord } from './types.ts';
+import type { AgentAdapter, AgentEvent, DurableStore, DurableStoreStatsOptions, InboundMessage, SessionBinding, StoredRecord } from './types.ts';
 import { bridgeTimeouts, createBoundedAgent, createBoundedTransport, withDeadline, type BridgeTimeouts } from './deadlines.ts';
 import { createReplyWatchdog } from './replies.ts';
+import { createRoutedMessageEvent, routedMessageRelaysToAgent, type MessageRouter } from './routing.ts';
+
+type HostEventValidators = NonNullable<EngineOptions['eventValidators']>;
+type HostEffectAdapters = NonNullable<EngineOptions['effectAdapters']>;
+
+export interface AgentMessagePreparation {
+  capabilities: readonly string[];
+  prepare(execution: Pick<FeatureExecution, 'context' | 'signal' | 'invoke' | 'generate'>, event: FrameworkEvent):
+    readonly MessageContent[] | null | Promise<readonly MessageContent[] | null>;
+}
 
 export interface BridgeHostOptions {
   store: DurableStore;
@@ -23,6 +34,12 @@ export interface BridgeHostOptions {
   context: ReturnType<typeof createContextStore>;
   persona: string;
   authorizeIncoming(message: InboundMessage): boolean | Promise<boolean>;
+  routeIncoming?: MessageRouter;
+  agentMessagePreparation?: AgentMessagePreparation;
+  model?: EngineOptions['model'];
+  observer?: EngineOptions['observer'];
+  eventValidators?: HostEventValidators;
+  effectAdapters?: HostEffectAdapters;
   clock?: Clock;
   taskTickMs?: number;
   maxConcurrentSends?: number;
@@ -36,6 +53,17 @@ export interface BridgeHostOptions {
 export interface InboundReceipt { status: 'accepted' | 'rejected' | 'unknown'; eventId: string; errorCode?: string }
 const inboxNamespace = 'host.inbox';
 const agentEventNamespace = 'host.agent-events';
+const coreEventTypes = new Set(['message.received', 'trigger.fired']);
+const coreCapabilityTypes = new Set(['messaging.send', 'messaging.forward', 'model.respond']);
+
+function assertExtensionNames(eventValidators: HostEventValidators, effectAdapters: HostEffectAdapters) {
+  assert(eventValidators && typeof eventValidators === 'object' && !Array.isArray(eventValidators)
+    && effectAdapters && typeof effectAdapters === 'object' && !Array.isArray(effectAdapters),
+  'INVALID_EXTENSION', 'Host extension registries must be objects.');
+  assert(Object.keys(eventValidators).every(type => !type.startsWith('agent.') && !coreEventTypes.has(type))
+    && Object.keys(effectAdapters).every(capability => !capability.startsWith('agent.') && !coreCapabilityTypes.has(capability)),
+  'INVALID_EXTENSION', 'Host extensions cannot replace framework or agent bridge registrations.');
+}
 
 function storedReceipt(record: StoredRecord): InboundReceipt {
   const value = object(record.value);
@@ -47,7 +75,8 @@ function storedReceipt(record: StoredRecord): InboundReceipt {
 export function createBridgeHost({ store, agent: sourceAgent, transport: sourceTransport, context, persona, authorizeIncoming, clock = Date.now,
   taskTickMs = 250, maxConcurrentSends = 1, eventTimeoutMs = 30000, timeouts: timeoutInput,
   replyTimeoutMs = 30000, replyTimeoutNotice = '请求已提交，但尚未收到回复。结果尚未确认，未自动重复提交。',
-  selectAgentMessage, onFault = () => {} }: BridgeHostOptions) {
+  selectAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
+  agentMessagePreparation }: BridgeHostOptions) {
   assert(typeof authorizeIncoming === 'function' && Number.isSafeInteger(taskTickMs) && taskTickMs >= 10 && taskTickMs <= 60000,
     'INVALID_HOST', 'Explicit ingress authorization and a bounded task tick are required.');
   context.resolve({ persona });
@@ -56,6 +85,17 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   assert(selectAgentMessage === undefined || typeof selectAgentMessage === 'function'
     && !['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(selectAgentMessage.constructor.name),
   'INVALID_HOST', 'Agent output selection must be synchronous.');
+  assertExtensionNames(eventValidators, effectAdapters);
+  assert(routeIncoming === undefined || typeof routeIncoming === 'function'
+    && !['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(routeIncoming.constructor.name),
+  'INVALID_ROUTER', 'Incoming routing must be a trusted synchronous decision.');
+  assert(agentMessagePreparation === undefined || agentMessagePreparation && typeof agentMessagePreparation.prepare === 'function'
+    && Array.isArray(agentMessagePreparation.capabilities)
+    && agentMessagePreparation.capabilities.length <= 32
+    && agentMessagePreparation.capabilities.every(capability => typeof capability === 'string')
+    && new Set(agentMessagePreparation.capabilities).size === agentMessagePreparation.capabilities.length,
+  'INVALID_HOST', 'Agent message preparation requires bounded declared capabilities.');
+  const prepareAgentMessage = agentMessagePreparation?.prepare;
   const timeouts = bridgeTimeouts(timeoutInput);
   const boundaryFault = (code: string) => fault(new FrameworkError(code, 'An external operation is unresolved.'));
   const agent = createBoundedAgent({ agent: sourceAgent, timeouts, onFault: boundaryFault });
@@ -96,12 +136,12 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     try { onFault(code); } catch {}
   }
 
-  const engine = createEngine({ persona, context, policy, state, transport: outbox, clock, maxConcurrentSends, eventTimeoutMs,
-    eventValidators: { 'agent.message': data => {
+  const engine = createEngine({ persona, context, policy, state, transport: outbox, model, observer, clock, maxConcurrentSends, eventTimeoutMs,
+    eventValidators: { ...eventValidators, 'agent.message': data => {
       try { normalizeContent(data.content); return true; } catch { return false; }
     }, 'agent.completed': () => true, 'agent.failed': () => true, 'agent.question': () => true, 'agent.approval': () => true,
     'agent.reply-timeout': data => reference(data.requestId) && Number.isSafeInteger(data.generation) && Number.isFinite(data.deadlineAt) },
-    effectAdapters: { 'agent.submit': { async execute(request) {
+    effectAdapters: { ...effectAdapters, 'agent.submit': { async execute(request) {
       const content = normalizeContent(object(request.input).content);
       const binding = await sessions.resolve(request.scope.conversationId, request.signal);
       await ensureFollow(binding);
@@ -112,10 +152,12 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     } } } });
 
   engine.install({ id: 'agent-relay', version: '1.0.0', apiVersion: 1,
-    capabilities: ['agent.submit', 'messaging.send'], subscriptions: ['message.received', 'agent.message', 'agent.reply-timeout'],
+    capabilities: [...new Set(['agent.submit', 'messaging.send', 'messaging.forward', ...(agentMessagePreparation?.capabilities ?? [])])],
+    subscriptions: ['message.received', 'agent.message', 'agent.reply-timeout'],
     setup(services) {
       services.on('message.received', async (execution, event) => {
         if (event.data.directed !== true || event.data.isSelf === true) return;
+        if (event.data.routing !== undefined && !routedMessageRelaysToAgent(event)) return;
         const result = object(await execution.invoke('agent.submit', { content: json(normalizeContent(event.data.content)) }));
         assert(result.status === 'accepted', result.status === 'rejected' ? 'AGENT_REJECTED' : 'AGENT_UNKNOWN',
           'The agent did not confirm prompt acceptance.');
@@ -128,7 +170,10 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         }
       });
       services.on('agent.message', async (execution, event) => {
-        const content = normalizeContent(event.data.content);
+        const prepared = prepareAgentMessage ? await prepareAgentMessage(Object.freeze({ context: execution.context,
+          signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), event) : event.data.content;
+        if (prepared === null) return;
+        const content = normalizeContent(prepared);
         const result = await execution.send(content);
         assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
           'The transport did not confirm delivery.');
@@ -207,7 +252,8 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     const selected = event.type === 'message' ? selectAgentMessage
       ? selectAgentMessage(snapshot(event) as unknown as AgentEvent, snapshot(current)) : normalizeContent(event.content) : null;
     if (event.type === 'message' && selected === null) return;
-    const data: JsonObject = event.type === 'message' ? { content: json(normalizeContent(selected)), generation: current.generation }
+    const data: JsonObject = event.type === 'message' ? { content: json(normalizeContent(selected)), generation: current.generation,
+      ...(prepareAgentMessage ? { agentData: event.data ?? {} } : {}) }
       : { data: event.data ?? {} };
     const receipt = await processEvent({ id: digest([current.generation, event.id, event.type]),
       conversationId: current.conversationId, sessionId: current.sessionId, type, data }, task.signal);
@@ -314,9 +360,10 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
 
   return Object.freeze({
     engine, policy, sessions, outbox, tasks, history, replies,
+    storageStats(options?: DurableStoreStatsOptions) { return store.stats?.(options) ?? null; },
     async receive(input: InboundMessage): Promise<InboundReceipt> {
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
-      const message = { ...snapshot(input), content: normalizeContent(input.content) };
+      const message = snapshot({ ...snapshot(input), content: normalizeContent(input.content) });
       assert(reference(message.id) && reference(message.conversationId) && reference(message.userId)
         && Number.isFinite(message.receivedAt) && typeof message.directed === 'boolean' && typeof message.isSelf === 'boolean',
       'INVALID_INBOUND', 'A normalized authenticated message is required.');
@@ -342,8 +389,13 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       }
       if (!allowed) return snapshot({ status: 'rejected', eventId: message.id, errorCode: 'INBOUND_DENIED' });
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
+      let routed: FrameworkEvent | undefined;
+      if (routeIncoming) {
+        try { routed = createRoutedMessageEvent(message, routeIncoming(message)); }
+        catch (error) { return snapshot({ status: 'rejected', eventId: message.id, errorCode: errorCode(error, 'INBOUND_ROUTING_FAILED') }); }
+      }
       history.append(message.conversationId, { id: message.id, actor: message.userId, content: message.content, receivedAt: message.receivedAt });
-      return processEvent({ id: message.id, type: 'message.received', conversationId: message.conversationId, userId: message.userId,
+      return processEvent(routed ?? { id: message.id, type: 'message.received', conversationId: message.conversationId, userId: message.userId,
         data: { content: json(message.content), text: message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
           directed: message.directed, isSelf: message.isSelf } });
     },

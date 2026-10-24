@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer';
 
 import type { Clock, JsonValue } from '../core/types.ts';
 import { FrameworkError, snapshot } from '../core/values.ts';
-import type { DurableStore, StoredRecord, WriteOptions } from '../host/types.ts';
+import type { DurableStore, DurableStoreStats, DurableStoreStatsOptions, StoredRecord, WriteOptions } from '../host/types.ts';
 
 const DEFAULT_MAX_RECORDS = 100_000;
 const DEFAULT_MAX_VALUE_BYTES = 1_048_576;
@@ -30,7 +30,14 @@ interface StoreStatements {
   deleteRecordAtRevision: StatementSync;
   listRecords: StatementSync;
   listRecordsAfter: StatementSync;
+  statsTotals: StatementSync;
+  statsNamespaces: StatementSync;
+  statsNamespacesAfter: StatementSync;
   purgeExpired: StatementSync;
+}
+
+export interface SqliteStore extends DurableStore {
+  stats(options?: DurableStoreStatsOptions): DurableStoreStats;
 }
 
 interface ExistingRow {
@@ -171,6 +178,26 @@ function prepareStatements(database: DatabaseSync): StoreStatements {
       WHERE namespace = ? AND key > ? AND (expires_at IS NULL OR expires_at > ?)
       ORDER BY key LIMIT ?
     `),
+    statsTotals: database.prepare(`
+      SELECT COUNT(*) AS totalRecords,
+        COUNT(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 END) AS expiredRecords
+      FROM durable_records
+    `),
+    statsNamespaces: database.prepare(`
+      SELECT namespace, COUNT(*) AS totalRecords,
+        COUNT(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 END) AS expiredRecords,
+        MIN(updated_at) AS oldestUpdatedAt
+      FROM durable_records
+      GROUP BY namespace ORDER BY namespace LIMIT ?
+    `),
+    statsNamespacesAfter: database.prepare(`
+      SELECT namespace, COUNT(*) AS totalRecords,
+        COUNT(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 END) AS expiredRecords,
+        MIN(updated_at) AS oldestUpdatedAt
+      FROM durable_records
+      WHERE namespace > ?
+      GROUP BY namespace ORDER BY namespace LIMIT ?
+    `),
     purgeExpired: database.prepare(`
       DELETE FROM durable_records WHERE rowid IN (
         SELECT rowid FROM durable_records
@@ -181,7 +208,7 @@ function prepareStatements(database: DatabaseSync): StoreStatements {
   };
 }
 
-export function createSqliteStore(options: SqliteStoreOptions): DurableStore {
+export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
   if (!options || typeof options !== 'object') fail('STORE_INVALID_OPTIONS', 'Expected durable store options.');
   const { filename, clock = Date.now, maxRecords = DEFAULT_MAX_RECORDS,
     maxValueBytes = DEFAULT_MAX_VALUE_BYTES } = options;
@@ -399,6 +426,48 @@ export function createSqliteStore(options: SqliteStoreOptions): DurableStore {
     }
   }
 
+  function stats(statsOptions: DurableStoreStatsOptions = {}): DurableStoreStats {
+    assertOpen();
+    if (!statsOptions || typeof statsOptions !== 'object' || Array.isArray(statsOptions)) {
+      fail('STORE_INVALID_ARGUMENT', 'Expected valid stats options.');
+    }
+    const limit = statsOptions.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_PAGE_SIZE) {
+      fail('STORE_INVALID_ARGUMENT', 'Expected a stats limit between 1 and 1000.');
+    }
+    if (statsOptions.after !== undefined) assertReference(statsOptions.after, 'cursor', true);
+    const currentTime = now();
+    try {
+      database.exec('BEGIN');
+      const totals = statements.statsTotals.get(currentTime);
+      if (!totals) fail('STORE_CORRUPT', 'Durable store contains invalid metadata.');
+      const totalRecords = integerField(totals, 'totalRecords');
+      const rows = statsOptions.after === undefined
+        ? statements.statsNamespaces.all(currentTime, limit + 1)
+        : statements.statsNamespacesAfter.all(currentTime, statsOptions.after, limit + 1);
+      const page = rows.slice(0, limit);
+      const namespaces = page.map(row => ({
+        namespace: textField(row, 'namespace'),
+        totalRecords: integerField(row, 'totalRecords'),
+        expiredRecords: integerField(row, 'expiredRecords'),
+        oldestUpdatedAt: integerField(row, 'oldestUpdatedAt'),
+      }));
+      const result = snapshot({
+        maxRecords,
+        totalRecords,
+        expiredRecords: integerField(totals, 'expiredRecords'),
+        remainingRecords: Math.max(0, maxRecords - totalRecords),
+        namespaces,
+        next: rows.length > limit ? namespaces[namespaces.length - 1].namespace : null,
+      });
+      database.exec('COMMIT');
+      return result;
+    } catch (error: unknown) {
+      try { if (database.isTransaction) database.exec('ROLLBACK'); } catch {}
+      redact(error);
+    }
+  }
+
   function close(): void {
     if (closed) return;
     closed = true;
@@ -409,5 +478,5 @@ export function createSqliteStore(options: SqliteStoreOptions): DurableStore {
     }
   }
 
-  return { read, write, delete: deleteRecord, list, purgeExpired, close };
+  return { read, write, delete: deleteRecord, list, purgeExpired, stats, close };
 }

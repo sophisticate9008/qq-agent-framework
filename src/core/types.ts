@@ -21,7 +21,16 @@ export interface AudioContent { type: 'audio'; assetId: string }
 export interface FileContent { type: 'file'; assetId: string; name: string }
 export interface MentionContent { type: 'mention'; userId: string }
 export interface ReplyContent { type: 'reply'; messageId: string }
-export type MessageContent = TextContent | ImageContent | AudioContent | FileContent | MentionContent | ReplyContent;
+export type BasicMessageContent = TextContent | ImageContent | AudioContent | FileContent | MentionContent | ReplyContent;
+export interface ForwardNode { content: readonly BasicMessageContent[] }
+export interface ForwardContent { type: 'forward'; nodes: readonly ForwardNode[] }
+export type MessageContent = BasicMessageContent | ForwardContent;
+export interface PersonaScope { id: string; version: string }
+export interface OutboundScope {
+  persona: Readonly<PersonaScope>;
+  sessionId?: string;
+  generation?: number;
+}
 export type DeliveryReceipt = { status: 'confirmed'; messageId: string }
   | { status: 'unknown' | 'rejected' };
 export interface SendRequest {
@@ -29,11 +38,24 @@ export interface SendRequest {
   content: readonly MessageContent[];
   idempotencyKey: string;
   signal: AbortSignal;
+  scope?: Readonly<OutboundScope>;
 }
-export interface TransportAdapter { send(request: SendRequest): Promise<DeliveryReceipt> | DeliveryReceipt }
+export interface TransportCapabilities { contentTypes: readonly MessageContent['type'][]; maxForwardNodes?: number }
+export interface TransportAdapter {
+  send(request: SendRequest): Promise<DeliveryReceipt> | DeliveryReceipt;
+  capabilities?(): Readonly<TransportCapabilities>;
+}
 export interface ModelRequest { prompt: JsonValue; signal: AbortSignal }
 export interface ModelAdapter { generate(request: ModelRequest): Promise<{ text: string }> | { text: string } }
-export interface EffectScope { eventId: string; conversationId: string; featureId: string; version: string }
+export interface EffectScope {
+  eventId: string;
+  conversationId: string;
+  featureId: string;
+  version: string;
+  persona?: Readonly<PersonaScope>;
+  sessionId?: string;
+  generation?: number;
+}
 export interface EffectRequest { input: JsonValue; scope: Readonly<EffectScope>; signal: AbortSignal }
 export interface EffectAdapter { execute(request: EffectRequest): Promise<JsonValue> | JsonValue }
 

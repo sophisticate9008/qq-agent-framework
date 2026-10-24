@@ -15,6 +15,8 @@ export interface ResourceInput {
   version: string;
   source: ResourceSource;
   expiresAt?: number | null;
+  sessionId?: string;
+  generation?: number;
 }
 
 const namespace = 'resources';
@@ -69,17 +71,32 @@ export function createResourceRegistry({ store, clock = Date.now, rootDirectory,
     return source.id;
   }
 
+  function metadata(record: StoredRecord) {
+    const value = resource(record);
+    return { cursor: record.key, id: value.id, type: value.type, scope: value.scope, persona: value.persona,
+      version: value.version, status: value.status, expiresAt: value.expiresAt,
+      sessionId: value.sessionId ?? null, generation: value.generation ?? null };
+  }
+
   return Object.freeze({
+    get(id: string) {
+      assert(reference(id), 'INVALID_RESOURCE', 'A resource reference is required.');
+      const record = store.read(namespace, id);
+      return record === null ? null : snapshot(metadata(record));
+    },
     register(input: ResourceInput) {
       const value = snapshot(input);
       assert(reference(value.id) && reference(value.scope) && reference(value.version)
-        && ['image', 'audio', 'file'].includes(value.type) && (value.persona === undefined || reference(value.persona)),
+        && ['image', 'audio', 'file'].includes(value.type) && (value.persona === undefined || reference(value.persona))
+        && (value.sessionId === undefined || reference(value.sessionId))
+        && (value.generation === undefined || reference(value.sessionId) && Number.isSafeInteger(value.generation) && value.generation > 0),
       'INVALID_RESOURCE', 'A scoped, versioned resource is required.');
       const expiresAt = value.expiresAt ?? null;
       assert(expiresAt === null || Number.isFinite(expiresAt) && expiresAt > clock(), 'INVALID_RESOURCE', 'Resource expiry must be in the future.');
       location(value.source);
       store.write(namespace, value.id, json({ id: value.id, type: value.type, scope: value.scope, version: value.version,
-        persona: value.persona ?? null, source: value.source, status: 'pending', expiresAt }), { expectedRevision: null });
+        persona: value.persona ?? null, source: value.source, status: 'pending', expiresAt,
+        sessionId: value.sessionId ?? null, generation: value.generation ?? null }), { expectedRevision: null });
       return value.id;
     },
     approve(id: string) {
@@ -93,22 +110,23 @@ export function createResourceRegistry({ store, clock = Date.now, rootDirectory,
       store.write(namespace, id, json({ ...resource(record), status: 'revoked' }), { expectedRevision: record.revision });
       return true;
     },
-    resolve({ assetId, type, conversationId, persona }: { assetId: string; type: ResourceType; conversationId: string; persona?: string }) {
+    resolve({ assetId, type, conversationId, persona, expectedVersion, sessionId, generation }:
+      { assetId: string; type: ResourceType; conversationId: string; persona?: string; expectedVersion?: string;
+        sessionId?: string; generation?: number }) {
       const record = store.read(namespace, assetId);
       assert(record, 'RESOURCE_UNAVAILABLE', 'The resource is unavailable.');
       const value = resource(record);
       assert(value.status === 'approved' && value.type === type && (value.scope === 'global' || value.scope === conversationId)
         && (value.persona === null || value.persona === persona)
+        && (expectedVersion === undefined || value.version === expectedVersion)
+        && (value.sessionId === undefined || value.sessionId === null || value.sessionId === sessionId)
+        && (value.generation === undefined || value.generation === null || value.generation === generation)
         && (value.expiresAt === null || typeof value.expiresAt === 'number' && value.expiresAt > clock()),
       'RESOURCE_UNAVAILABLE', 'The resource is not approved for this context.');
       return location(value.source);
     },
     list({ limit = 100, after }: { limit?: number; after?: string } = {}) {
-      return snapshot(store.list(namespace, after === undefined ? { limit } : { limit, after }).map(record => {
-        const value = resource(record);
-        return { cursor: record.key, id: value.id, type: value.type, scope: value.scope, persona: value.persona,
-          version: value.version, status: value.status, expiresAt: value.expiresAt };
-      }));
+      return snapshot(store.list(namespace, after === undefined ? { limit } : { limit, after }).map(metadata));
     },
   });
 }

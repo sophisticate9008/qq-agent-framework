@@ -28,6 +28,7 @@ const BROWSER_SMOKES = Object.freeze([
   'scripts/browser-smoke.ts',
   'scripts/management-smoke.ts',
   'scripts/page-navigation-smoke.ts',
+  'scripts/activity-smoke.ts',
   'scripts/markdown-smoke.ts',
   'scripts/presentation-smoke.ts'
 ]);

@@ -109,10 +109,10 @@
 }
 
 @layer components {
-  .page-stack { @apply grid gap-6; }
+  .page-stack { @apply grid min-w-0 grid-cols-1 gap-6; }
   .page-title { @apply text-[27px] font-semibold tracking-tight leading-tight sm:text-[30px]; }
   .page-description { @apply mt-2 text-sm leading-relaxed text-muted-foreground; }
-  .panel { @apply rounded-2xl border bg-card shadow-xs; }
+  .panel { @apply min-w-0 rounded-2xl border bg-card shadow-xs; }
   .panel-header { @apply flex items-start justify-between gap-4 px-6 pt-5; }
   .panel-title { @apply text-[15px] font-semibold tracking-tight; }
   .panel-description { @apply mt-1 text-xs leading-relaxed text-muted-foreground; }

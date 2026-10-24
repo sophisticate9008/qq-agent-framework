@@ -9,7 +9,7 @@ export function OverviewPage({ connected, snapshot, refresh, navigate, connect, 
   const [legacyStatus, setLegacyStatus] = useState<Record<string, unknown> | null>(null);
   useEffect(() => {
     setLegacyStatus(null);
-    if (!connected || snapshot.mode !== 'gateway-live') return;
+    if (!connected || snapshot.mode !== 'gateway-live' || asRecord(snapshot.integrations).chatManagement === false) return;
     const controller = new AbortController();
     void api.get('/api/legacy/status', controller.signal).then(value => {
       if (!controller.signal.aborted) setLegacyStatus(asRecord(value));
@@ -33,7 +33,7 @@ export function OverviewPage({ connected, snapshot, refresh, navigate, connect, 
   const services = [
     { name: 'QQ 消息连接', hint: '当前账号在线状态', ready: connected && typeof overview.online === 'boolean' ? online : null, icon: MessagesSquare },
     { name: '消息发送服务', hint: '负责文字、图片和转发', ready: connected ? healthy : null, icon: Activity },
-    ...(connected && snapshot.mode === 'gateway-live' ? [
+    ...(connected && snapshot.mode === 'gateway-live' && asRecord(snapshot.integrations).chatManagement !== false ? [
       { name: '聊天引擎', hint: 'DSH 的当前就绪状态', ready: typeof legacyStatus?.dshReady === 'boolean' ? legacyStatus.dshReady : null, icon: Sparkles },
       { name: '聊天接收服务', hint: 'QQ 协议连接的当前状态', ready: typeof asRecord(legacyStatus?.snowluma).connected === 'boolean' ? asRecord(legacyStatus?.snowluma).connected === true : null, icon: MessagesSquare },
     ] : []),
@@ -43,9 +43,11 @@ export function OverviewPage({ connected, snapshot, refresh, navigate, connect, 
     { label: 'QQ 连接', value: connected ? online ? '在线' : overview.mode === 'demo' ? '演示中' : '待检查' : '待连接', caption: connected ? '当前账号连接状态' : '登录后自动获取状态', icon: MessagesSquare },
     { label: '发送请求', value: hasMetrics ? String(metrics.writes) : '—', caption: '本次网关运行收到的发送请求', icon: ArrowUpRight },
     { label: '等待处理', value: connected && typeof metrics.pending === 'number' ? String(metrics.pending) : '—', caption: '正在排队或执行的请求', icon: Clock3 },
-    { label: '用量限制', value: connected ? budget : '—', caption: '随时调整预算开关与额度', icon: ShieldCheck },
+    { label: '发送预算', value: connected ? budget : '—', caption: '发送授权额度，不是模型 token 用量', icon: ShieldCheck },
   ];
   const shortcuts = [
+    { id: 'sessions' as const, label: '会话管理', description: '查看并管理群聊与私聊会话', icon: MessagesSquare },
+    { id: 'usage' as const, label: '用量统计', description: 'Token 用量与估算费用', icon: Activity },
     { id: 'persona' as const, label: '人设与形象', description: '管理性格、表达与身份', icon: UserRound },
     { id: 'features' as const, label: '功能与触发', description: '按需开启伙伴的能力', icon: Sparkles },
     { id: 'access' as const, label: '访问范围', description: '管理群聊、好友与权限', icon: ShieldCheck },

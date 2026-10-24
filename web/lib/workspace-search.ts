@@ -35,6 +35,8 @@ interface SearchConfigurationGroup extends VisibilityGroup {
 
 const pageDefinitions: readonly { readonly id: PageId; readonly title: string }[] = [
   { id: 'overview', title: '概览' },
+  { id: 'sessions', title: '会话管理' },
+  { id: 'usage', title: '用量统计' },
   { id: 'persona', title: '人设与形象' },
   { id: 'features', title: '功能与触发' },
   { id: 'access', title: '访问范围' },
@@ -202,7 +204,9 @@ export function normalizeWorkspaceSearchQuery(query: string): readonly string[] 
 }
 
 function searchableText(target: WorkspaceSearchTarget): string {
-  return [workspacePageTitle(target.page), target.sectionTitle, target.title]
+  const aliases = target.kind === 'page' && target.page === 'usage' ? 'token tokens 费用 花费 用量'
+    : target.kind === 'page' && target.page === 'sessions' ? 'session sessions 群聊 私聊 会话' : '';
+  return [workspacePageTitle(target.page), target.sectionTitle, target.title, aliases]
     .filter((part): part is string => typeof part === 'string')
     .join(' ')
     .normalize('NFKC')

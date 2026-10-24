@@ -37,9 +37,9 @@ const settings = {
   admin: { values: { host: '127.0.0.1', port: 8787 } },
 };
 
-test('empty search returns exactly the six page shortcuts', () => {
+test('empty search returns exactly the eight page shortcuts', () => {
   const results = searchWorkspaceTargets(workspacePageTargets, '  ');
-  assert.equal(results.length, 6);
+  assert.equal(results.length, 8);
   assert(results.every(target => target.kind === 'page'));
 });
 
@@ -51,6 +51,12 @@ test('search matches normalized case-insensitive words across the Chinese path',
   });
   assert.deepEqual(searchWorkspaceTargets(targets, 'ｄＳＨ 提供').map(target => target.title), ['模型提供方']);
   assert.deepEqual(searchWorkspaceTargets(targets, '模型 访问').map(target => target.title), ['模型访问令牌']);
+});
+
+test('activity page aliases find sessions and token usage without indexing records', () => {
+  assert.deepEqual(searchWorkspaceTargets(workspacePageTargets, 'TOKEN 费用').map(target => target.page), ['usage']);
+  assert.deepEqual(searchWorkspaceTargets(workspacePageTargets, 'session 私聊').map(target => target.page), ['sessions']);
+  assert.equal(searchWorkspaceTargets(workspacePageTargets, 'private:12345').length, 0);
 });
 
 test('configuration values are never indexed and visibility follows real mode and parent switches', () => {

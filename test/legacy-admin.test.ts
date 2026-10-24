@@ -22,6 +22,8 @@ interface Fixture {
   readonly directory: string;
   readonly legacyRoot: string;
   readonly requests: LegacyRequest[];
+  sessions: Array<{ key: string; sessionId: string; owner: boolean }>;
+  usage: Record<string, unknown>;
   access: LegacyAccess;
   model: {
     provider: string;
@@ -63,6 +65,44 @@ async function fixture(
     directory,
     legacyRoot,
     requests: [],
+    sessions: [{ key: 'group:456', sessionId: 'session-secret-id', owner: false }],
+    usage: {
+      ok: true,
+      generatedAt: 1_700_000_000_000,
+      currency: 'CNY',
+      symbol: '¥',
+      priceTable: { privateRates: 'must not escape' },
+      ledger: { file: '/private/token-usage.jsonl', raw: 'must not escape' },
+      totals: {
+        buckets: { cacheMiss: 100, cacheHit: 20, cacheWrite: 5, output: 40, reasoning: 10 },
+        totalTokens: 165,
+        inputTokens: 125,
+        cost: 0.25,
+        estimated: true,
+        conversations: 2,
+        turns: 3,
+        steps: 5,
+        unattributedCost: 0.01,
+        attributedCost: 0.24,
+        byTier: { peak: 0.1, off: 0.15 }
+      },
+      conversations: [
+        {
+          key: '未归属:abcd1234', sessions: 2,
+          buckets: { cacheMiss: 20, cacheHit: 0, cacheWrite: 5, output: 10, reasoning: 5 },
+          cost: 0.05, estimated: false, turns: 1, steps: 2,
+          lastAt: 1_699_999_999_000, models: ['deepseek-chat'],
+          sessionIds: ['private-session-secret'], provider: 'private-provider'
+        },
+        {
+          key: 'group:456', sessions: 1,
+          buckets: { cacheMiss: 80, cacheHit: 20, cacheWrite: 0, output: 30, reasoning: 5 },
+          cost: 0.2, estimated: true, turns: 2, steps: 3,
+          lastAt: 1_700_000_000_000, models: ['deepseek-reasoner'],
+          sessionIds: ['group-session-secret'], provider: 'private-provider'
+        }
+      ]
+    },
     access: { allow: { groups: [456], private: [123] }, deny: { groups: [], private: [] }, ownerQQ: 123 },
     model: {
       provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: 'medium',
@@ -104,7 +144,19 @@ async function fixture(
       return;
     }
     if (request.method === 'GET' && url.pathname === '/api/sessions') {
-      json(response, { sessions: [{ key: 'group:456', sessionId: 'session-secret-id', owner: false }] });
+      json(response, { sessions: state.sessions, diagnostics: { token: CONFIG_TOKEN } });
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/session/reset') {
+      const key = String(requestBody?.key ?? '');
+      const binding = state.sessions.find(entry => entry.key === key);
+      if (binding === undefined) { json(response, { ok: false }, 404); return; }
+      state.sessions = state.sessions.filter(entry => entry.key !== key);
+      json(response, { ok: true, key, archived: binding.sessionId, dshStopped: true });
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/api/tokens/summary') {
+      json(response, state.usage);
       return;
     }
     if (request.method === 'GET' && url.pathname === '/api/whitelist') {
@@ -194,7 +246,11 @@ function call(
   query = new URLSearchParams(),
   signal = new AbortController().signal
 ): Promise<unknown> {
-  return Promise.resolve(selected.handle({ query, body: bodyValue, signal }));
+  try {
+    return Promise.resolve(selected.handle({ query, body: bodyValue, signal }));
+  } catch (error: unknown) {
+    return Promise.reject(error);
+  }
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -210,6 +266,8 @@ test('uses the configured loopback port and only exposes bounded status and sess
     'GET /api/legacy/mode',
     'POST /api/legacy/mode',
     'GET /api/legacy/sessions',
+    'POST /api/legacy/session/reset',
+    'GET /api/legacy/usage',
     'GET /api/legacy/access',
     'POST /api/legacy/access',
     'GET /api/legacy/model',
@@ -231,10 +289,179 @@ test('uses the configured loopback port and only exposes bounded status and sess
   assert.equal(mode.mode, 'reserved2');
   assert.match(String(mode.revision), /^[a-f0-9]{64}$/);
   assert.deepEqual(mode.supported, { reserved: true, reserved2: true });
-  assert.deepEqual(await call(route(routes, 'GET', '/api/legacy/sessions')), {
-    sessions: [{ key: 'group:456', sessionId: 'session-secret-id', owner: false }]
-  });
+  const sessions = object(await call(route(routes, 'GET', '/api/legacy/sessions')));
+  assert.deepEqual(sessions.sessions, [{ key: 'group:456', sessionId: 'session-secret-id', owner: false }]);
+  assert.match(String(sessions.revision), /^[a-f0-9]{64}$/);
   assert(source.requests.every(request => request.token === CONFIG_TOKEN));
+});
+
+test('usage exposes only normalized totals and ranked conversations with strict limits', async testContext => {
+  const source = await fixture(testContext);
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+  const usage = await call(route(routes, 'GET', '/api/legacy/usage'));
+  assert.deepEqual(usage, {
+    source: 'chat-ledger',
+    generatedAt: 1_700_000_000_000,
+    currency: 'CNY',
+    symbol: '¥',
+    totals: {
+      totalTokens: 165,
+      inputTokens: 125,
+      outputTokens: 40,
+      cacheHitTokens: 20,
+      cacheMissTokens: 100,
+      cacheWriteTokens: 5,
+      reasoningTokens: 10,
+      cost: 0.25,
+      estimated: true,
+      conversations: 2,
+      turns: 3,
+      steps: 5,
+      unattributedCost: 0.01
+    },
+    conversations: [
+      {
+        key: 'group:456', sessionCount: 1, totalTokens: 130, inputTokens: 100, outputTokens: 30,
+        cacheHitTokens: 20, cost: 0.2, estimated: true, turns: 2, steps: 3, lastAt: 1_700_000_000_000,
+        models: ['deepseek-reasoner']
+      },
+      {
+        key: '未归属:abcd1234', sessionCount: 2, totalTokens: 35, inputTokens: 25, outputTokens: 10,
+        cacheHitTokens: 0, cost: 0.05, estimated: false, turns: 1, steps: 2, lastAt: 1_699_999_999_000,
+        models: ['deepseek-chat']
+      }
+    ],
+    limit: 100,
+    limited: false
+  });
+  assert.doesNotMatch(JSON.stringify(usage), /"priceTable"|"ledger"|token-usage|sessionIds|provider|privateRates|"raw"/i);
+  assert.equal(source.requests.at(-1)?.url, '/api/tokens/summary?limit=100');
+
+  await call(route(routes, 'GET', '/api/legacy/usage'), null, new URLSearchParams({ limit: '200' }));
+  assert.equal(source.requests.at(-1)?.url, '/api/tokens/summary?limit=200');
+  const upstreamConversations = source.usage.conversations;
+  assert(Array.isArray(upstreamConversations));
+  source.usage.conversations = [upstreamConversations[1]];
+  const limited = object(await call(route(routes, 'GET', '/api/legacy/usage'), null,
+    new URLSearchParams({ limit: '1' })));
+  assert.equal(limited.limited, true);
+  assert.equal((limited.conversations as unknown[]).length, 1);
+  const requestCount = source.requests.length;
+  for (const query of [
+    new URLSearchParams({ limit: '0' }),
+    new URLSearchParams({ limit: '201' }),
+    new URLSearchParams({ limit: 'NaN' }),
+    new URLSearchParams({ limit: '1.5' }),
+    new URLSearchParams({ limit: '01' }),
+    new URLSearchParams({ extra: '1' })
+  ]) {
+    await assert.rejects(call(route(routes, 'GET', '/api/legacy/usage'), null, query), {
+      code: 'invalid_query', statusCode: 400
+    });
+  }
+  const duplicate = new URLSearchParams({ limit: '10' });
+  duplicate.append('limit', '20');
+  await assert.rejects(call(route(routes, 'GET', '/api/legacy/usage'), null, duplicate), {
+    code: 'invalid_query', statusCode: 400
+  });
+  assert.equal(source.requests.length, requestCount);
+});
+
+test('usage rejects missing or non-finite critical numbers instead of inventing zeroes', async testContext => {
+  const source = await fixture(testContext);
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+  const totals = object(source.usage.totals);
+  totals.cost = Number.NaN;
+  await assert.rejects(call(route(routes, 'GET', '/api/legacy/usage')), {
+    code: 'legacy_invalid_response', statusCode: 502
+  });
+  totals.cost = 0.25;
+  delete object(totals.buckets).reasoning;
+  await assert.rejects(call(route(routes, 'GET', '/api/legacy/usage')), {
+    code: 'legacy_invalid_response', statusCode: 502
+  });
+});
+
+test('session reset requires confirmation and uses revision plus binding CAS', async testContext => {
+  const source = await fixture(testContext);
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+  const initial = object(await call(route(routes, 'GET', '/api/legacy/sessions')));
+  const request = {
+    key: 'group:456',
+    sessionId: 'session-secret-id',
+    revision: initial.revision,
+    confirm: true
+  };
+  for (const invalid of [
+    { ...request, confirm: false },
+    { key: request.key, sessionId: request.sessionId, revision: request.revision },
+    { key: request.key, sid: request.sessionId, revision: request.revision, confirm: true }
+  ]) {
+    await assert.rejects(call(route(routes, 'POST', '/api/legacy/session/reset'), invalid), {
+      code: 'invalid_request', statusCode: 400
+    });
+  }
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/session/reset'), request,
+    new URLSearchParams({ force: 'true' })), { code: 'invalid_query', statusCode: 400 });
+  assert.equal(source.requests.filter(entry => entry.method === 'POST').length, 0);
+
+  source.sessions = [{ key: 'group:456', sessionId: 'replacement-session-id', owner: false }];
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/session/reset'), request), {
+    code: 'revision_conflict', statusCode: 409
+  });
+  assert.equal(source.sessions[0]?.sessionId, 'replacement-session-id');
+  assert.equal(source.requests.filter(entry => entry.url === '/api/session/reset').length, 0);
+
+  const replacement = object(await call(route(routes, 'GET', '/api/legacy/sessions')));
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/session/reset'), {
+    ...request,
+    revision: replacement.revision
+  }), { code: 'session_binding_conflict', statusCode: 409 });
+  assert.equal(source.requests.filter(entry => entry.url === '/api/session/reset').length, 0);
+
+  const reset = await call(route(routes, 'POST', '/api/legacy/session/reset'), {
+    key: 'group:456',
+    sessionId: 'replacement-session-id',
+    revision: replacement.revision,
+    confirm: true
+  });
+  assert.deepEqual(reset, {
+    ok: true,
+    key: 'group:456',
+    previousSessionId: 'replacement-session-id',
+    bridgeBindingRemoved: true,
+    externalWorkStopped: 'unverified'
+  });
+  assert.deepEqual(source.requests.filter(entry => entry.url === '/api/session/reset').map(entry => entry.body), [
+    { key: 'group:456' }
+  ]);
+  assert.equal(source.requests.at(-1)?.url, '/api/sessions');
+  assert.deepEqual(source.sessions, []);
+  assert.doesNotMatch(JSON.stringify(reset), /archived|dshStopped/i);
+});
+
+test('session revisions are stable across upstream order and aborted resets start no new action', async testContext => {
+  const source = await fixture(testContext);
+  source.sessions = [
+    { key: 'private:123', sessionId: 'private-session', owner: true },
+    { key: 'group:456', sessionId: 'group-session', owner: false }
+  ];
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+  await assert.rejects(call(route(routes, 'GET', '/api/legacy/sessions'), null,
+    new URLSearchParams({ limit: '1' })), { code: 'invalid_query', statusCode: 400 });
+  const first = object(await call(route(routes, 'GET', '/api/legacy/sessions')));
+  source.sessions.reverse();
+  const second = object(await call(route(routes, 'GET', '/api/legacy/sessions')));
+  assert.deepEqual(second.sessions, first.sessions);
+  assert.equal(second.revision, first.revision);
+
+  const controller = new AbortController();
+  controller.abort();
+  const requestCount = source.requests.length;
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/session/reset'), {
+    key: 'group:456', sessionId: 'group-session', revision: first.revision, confirm: true
+  }, new URLSearchParams(), controller.signal), { code: 'session_reset_unknown', statusCode: 504 });
+  assert.equal(source.requests.length, requestCount);
 });
 
 test('mode writes use strict CAS and the fixed legacy mode endpoint without changing feature switches', async testContext => {
@@ -514,6 +741,38 @@ test('write timeout is operation_unknown and is not retried', async () => {
       code: 'operation_unknown', statusCode: 504
     });
     assert.equal(calls, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('session reset timeout is session_reset_unknown and never retries the legacy write', async () => {
+  let posts = 0;
+  let requests = 0;
+  const directory = mkdtempSync(join(tmpdir(), 'legacy-session-reset-timeout-'));
+  mkdirSync(join(directory, 'state'));
+  writeFileSync(join(directory, 'config.json'), JSON.stringify({ consolePort: 3100, consoleToken: CONFIG_TOKEN }));
+  const timeoutRoutes = createLegacyAdminRoutes({
+    legacyRoot: directory,
+    timeoutMs: 10,
+    fetch: async (_input, init) => {
+      requests++;
+      if (init?.method === 'GET') {
+        return Response.json({ sessions: [{ key: 'group:456', sessionId: 'session-id', owner: false }] });
+      }
+      posts++;
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    }
+  });
+  try {
+    const current = object(await call(route(timeoutRoutes, 'GET', '/api/legacy/sessions')));
+    await assert.rejects(call(route(timeoutRoutes, 'POST', '/api/legacy/session/reset'), {
+      key: 'group:456', sessionId: 'session-id', revision: current.revision, confirm: true
+    }), { code: 'session_reset_unknown', statusCode: 504 });
+    assert.equal(posts, 1);
+    assert.equal(requests, 3);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

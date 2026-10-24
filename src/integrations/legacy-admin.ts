@@ -14,9 +14,11 @@ const MAX_WRITE_BODY_BYTES = 32 * 1024;
 const MAX_ROLE_CONTENT_BYTES = 30 * 1024;
 const MAX_COLLECTION_ITEMS = 256;
 const MAX_ACCESS_IDENTIFIERS = 1_000;
+const MAX_USAGE_LIMIT = 200;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
 const ROLE_NAME_PATTERN = /^[A-Za-z0-9_\u4e00-\u9fff-]+$/;
+const POSITIVE_INTEGER_PATTERN = /^[1-9]\d*$/;
 const LEGACY_MODES = ['chat', 'reserved', 'reserved2', 'closed-agent'] as const;
 
 type LegacyMode = typeof LEGACY_MODES[number];
@@ -48,6 +50,20 @@ interface LegacyConnection {
   readonly endpoint: string;
   readonly token: string;
   readonly supported: LegacyModeSupport;
+}
+
+interface LegacySession {
+  readonly key: string;
+  readonly sessionId: string;
+  readonly owner: boolean;
+}
+
+interface UsageBuckets {
+  readonly cacheMiss: number;
+  readonly cacheHit: number;
+  readonly cacheWrite: number;
+  readonly output: number;
+  readonly reasoning: number;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -110,6 +126,157 @@ function boundedString(value: unknown, maximum: number): string {
     fail(502, 'legacy_invalid_response');
   }
   return value;
+}
+
+function boundedRequestString(value: unknown, maximum: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maximum) {
+    fail(400, 'invalid_request');
+  }
+  return value;
+}
+
+function nonnegativeInteger(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    fail(502, 'legacy_invalid_response');
+  }
+  return value;
+}
+
+function nonnegativeNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    fail(502, 'legacy_invalid_response');
+  }
+  return value;
+}
+
+function usageBuckets(value: unknown): UsageBuckets {
+  if (!record(value)) fail(502, 'legacy_invalid_response');
+  return {
+    cacheMiss: nonnegativeInteger(value.cacheMiss),
+    cacheHit: nonnegativeInteger(value.cacheHit),
+    cacheWrite: nonnegativeInteger(value.cacheWrite),
+    output: nonnegativeInteger(value.output),
+    reasoning: nonnegativeInteger(value.reasoning)
+  };
+}
+
+function usageCounts(value: Record<string, unknown>, declared = false) {
+  const buckets = usageBuckets(value.buckets);
+  const inputTokens = buckets.cacheMiss + buckets.cacheHit + buckets.cacheWrite;
+  const totalTokens = inputTokens + buckets.output;
+  if (!Number.isSafeInteger(inputTokens) || !Number.isSafeInteger(totalTokens)) {
+    fail(502, 'legacy_invalid_response');
+  }
+  if (declared && (nonnegativeInteger(value.inputTokens) !== inputTokens
+    || nonnegativeInteger(value.totalTokens) !== totalTokens)) fail(502, 'legacy_invalid_response');
+  return {
+    totalTokens,
+    inputTokens,
+    outputTokens: buckets.output,
+    cacheHitTokens: buckets.cacheHit,
+    cacheMissTokens: buckets.cacheMiss,
+    cacheWriteTokens: buckets.cacheWrite,
+    reasoningTokens: buckets.reasoning
+  };
+}
+
+function limitedQuery(query: URLSearchParams, defaultValue: number, maximum: number): number {
+  if ([...query.keys()].some(key => key !== 'limit') || query.getAll('limit').length > 1) {
+    fail(400, 'invalid_query');
+  }
+  const raw = query.get('limit');
+  if (raw === null) return defaultValue;
+  if (!POSITIVE_INTEGER_PATTERN.test(raw)) fail(400, 'invalid_query');
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed > maximum) fail(400, 'invalid_query');
+  return parsed;
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function sessionsFromLegacy(value: unknown): LegacySession[] {
+  if (!record(value) || !Array.isArray(value.sessions) || value.sessions.length > MAX_COLLECTION_ITEMS) {
+    fail(502, 'legacy_invalid_response');
+  }
+  const sessions = value.sessions.map(entry => {
+    if (!record(entry) || typeof entry.owner !== 'boolean') fail(502, 'legacy_invalid_response');
+    return {
+      key: boundedString(entry.key, 128),
+      sessionId: boundedString(entry.sessionId, 256),
+      owner: entry.owner
+    };
+  });
+  sessions.sort((left, right) => compareText(left.key, right.key)
+    || compareText(left.sessionId, right.sessionId)
+    || Number(left.owner) - Number(right.owner));
+  if (new Set(sessions.map(entry => entry.key)).size !== sessions.length) {
+    fail(502, 'legacy_invalid_response');
+  }
+  return sessions;
+}
+
+function sessionsResponse(sessions: LegacySession[]) {
+  return { sessions, revision: revision(sessions) };
+}
+
+function usageFromLegacy(value: unknown, limit: number) {
+  if (!record(value) || value.ok !== true || !record(value.totals) || !Array.isArray(value.conversations)
+    || value.conversations.length > limit) fail(502, 'legacy_invalid_response');
+  const totalsValue = value.totals;
+  const totalsCounts = usageCounts(totalsValue, true);
+  if (typeof totalsValue.estimated !== 'boolean') fail(502, 'legacy_invalid_response');
+  const totalConversations = nonnegativeInteger(totalsValue.conversations);
+  const totals = {
+    ...totalsCounts,
+    cost: nonnegativeNumber(totalsValue.cost),
+    estimated: totalsValue.estimated,
+    conversations: totalConversations,
+    turns: nonnegativeInteger(totalsValue.turns),
+    steps: nonnegativeInteger(totalsValue.steps),
+    unattributedCost: nonnegativeNumber(totalsValue.unattributedCost)
+  };
+  if (totals.unattributedCost > totals.cost) fail(502, 'legacy_invalid_response');
+
+  const conversations = value.conversations.map(entry => {
+    if (!record(entry) || typeof entry.estimated !== 'boolean' || !Array.isArray(entry.models)
+      || entry.models.length > 64) fail(502, 'legacy_invalid_response');
+    const models = entry.models.map(model => boundedString(model, 256)).sort(compareText);
+    if (new Set(models).size !== models.length) fail(502, 'legacy_invalid_response');
+    const counts = usageCounts(entry);
+    return {
+      key: boundedString(entry.key, 128),
+      sessionCount: nonnegativeInteger(entry.sessions),
+      totalTokens: counts.totalTokens,
+      inputTokens: counts.inputTokens,
+      outputTokens: counts.outputTokens,
+      cacheHitTokens: counts.cacheHitTokens,
+      cost: nonnegativeNumber(entry.cost),
+      estimated: entry.estimated,
+      turns: nonnegativeInteger(entry.turns),
+      steps: nonnegativeInteger(entry.steps),
+      lastAt: nonnegativeInteger(entry.lastAt),
+      models
+    };
+  });
+  if (conversations.length > totalConversations
+    || new Set(conversations.map(entry => entry.key)).size !== conversations.length) {
+    fail(502, 'legacy_invalid_response');
+  }
+  conversations.sort((left, right) => right.cost - left.cost
+    || right.totalTokens - left.totalTokens
+    || compareText(left.key, right.key));
+  return {
+    source: 'chat-ledger' as const,
+    generatedAt: nonnegativeInteger(value.generatedAt),
+    currency: boundedString(value.currency, 16),
+    symbol: boundedString(value.symbol, 16),
+    totals,
+    conversations,
+    limit,
+    limited: conversations.length < totalConversations
+  };
 }
 
 function qqIdentifier(value: unknown): number {
@@ -321,6 +488,10 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
     return modeResponse(legacyMode(value.mode, true), target.supported);
   }
 
+  async function readSessions(signal: AbortSignal) {
+    return sessionsResponse(sessionsFromLegacy(await requestLegacy('/api/sessions', 'GET', undefined, signal)));
+  }
+
   function modelFromLegacy(value: unknown) {
     if (!record(value) || !Array.isArray(value.options) || value.options.length === 0 || value.options.length > 32
       || !record(value.labels)) fail(502, 'legacy_invalid_response');
@@ -438,19 +609,58 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
     {
       method: 'GET', pathname: '/api/legacy/sessions', async handle({ query, signal }) {
         noQuery(query);
-        const value = await requestLegacy('/api/sessions', 'GET', undefined, signal);
-        if (!record(value) || !Array.isArray(value.sessions) || value.sessions.length > MAX_COLLECTION_ITEMS) {
-          fail(502, 'legacy_invalid_response');
-        }
-        const sessions = value.sessions.map(entry => {
-          if (!record(entry) || typeof entry.owner !== 'boolean') fail(502, 'legacy_invalid_response');
-          return {
-            key: boundedString(entry.key, 128),
-            sessionId: boundedString(entry.sessionId, 256),
-            owner: entry.owner
-          };
+        return readSessions(signal);
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/legacy/session/reset', handle({ query, body, signal }) {
+        noQuery(query);
+        const request = requiredBody(body);
+        exactKeys(request, ['confirm', 'key', 'revision', 'sessionId']);
+        const key = boundedRequestString(request.key, 128);
+        const sessionId = boundedRequestString(request.sessionId, 256);
+        const expectedRevision = parseRevision(request.revision);
+        if (request.confirm !== true) fail(400, 'invalid_request');
+        return serializeWrite(async () => {
+          if (signal.aborted) fail(504, 'session_reset_unknown');
+          let current: Awaited<ReturnType<typeof readSessions>>;
+          try {
+            current = await readSessions(signal);
+          } catch (error: unknown) {
+            if (signal.aborted) fail(504, 'session_reset_unknown');
+            throw error;
+          }
+          if (signal.aborted) fail(504, 'session_reset_unknown');
+          if (current.revision !== expectedRevision) fail(409, 'revision_conflict');
+          if (!current.sessions.some(entry => entry.key === key && entry.sessionId === sessionId)) {
+            fail(409, 'session_binding_conflict');
+          }
+          try {
+            const result = await requestLegacy('/api/session/reset', 'POST', { key }, signal);
+            if (signal.aborted || !record(result) || result.ok !== true || result.key !== key
+              || result.archived !== sessionId) fail(504, 'session_reset_unknown');
+            const next = await readSessions(signal);
+            if (signal.aborted || next.sessions.some(entry => entry.key === key && entry.sessionId === sessionId)) {
+              fail(504, 'session_reset_unknown');
+            }
+            return {
+              ok: true,
+              key,
+              previousSessionId: sessionId,
+              bridgeBindingRemoved: true,
+              externalWorkStopped: 'unverified'
+            };
+          } catch {
+            fail(504, 'session_reset_unknown');
+          }
         });
-        return { sessions };
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/legacy/usage', async handle({ query, signal }) {
+        const limit = limitedQuery(query, 100, MAX_USAGE_LIMIT);
+        const value = await requestLegacy(`/api/tokens/summary?limit=${limit}`, 'GET', undefined, signal);
+        return usageFromLegacy(value, limit);
       }
     },
     {

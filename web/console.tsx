@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type CSSProperties, type FormEvent } from 'react';
-import { Bot, ChevronRight, CircleHelp, LayoutDashboard, LoaderCircle, LogOut, Monitor, Moon, Settings2, ShieldCheck, Sparkles, Sun, UserRound, Waves } from 'lucide-react';
+import { Activity, Bot, ChevronRight, CircleHelp, LayoutDashboard, LoaderCircle, LogOut, MessagesSquare, Monitor, Moon, Settings2, ShieldCheck, Sparkles, Sun, UserRound, Waves } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { Button } from './components/ui/button.tsx';
 import { Input } from './components/ui/input.tsx';
@@ -19,9 +19,13 @@ import { FeaturesPage } from './pages/features.tsx';
 import { AccessPage } from './pages/access.tsx';
 import { ModelPage } from './pages/model.tsx';
 import { SettingsPage } from './pages/settings.tsx';
+import { SessionsPage } from './pages/sessions.tsx';
+import { UsagePage } from './pages/usage.tsx';
 
 const pages = [
   { id: 'overview', label: '概览', icon: LayoutDashboard, description: '伙伴的运行近况和常用入口' },
+  { id: 'sessions', label: '会话管理', icon: MessagesSquare, description: '查看群聊与私聊的会话关联，明确确认后管理' },
+  { id: 'usage', label: '用量统计', icon: Activity, description: '查看真实 token 用量与按价目表估算的费用' },
   { id: 'persona', label: '人设与形象', icon: UserRound, description: '管理伙伴的人设、表达和固定形象' },
   { id: 'features', label: '功能与触发', icon: Sparkles, description: '管理能力、触发条件与表达方式' },
   { id: 'access', label: '访问范围', icon: ShieldCheck, description: '设置可对话的群、好友与管理员' },
@@ -41,6 +45,7 @@ function routeFromLocation(): PageId {
 
 const pageComponents: Readonly<Record<PageId, ComponentType<PageProps>>> = {
   overview: OverviewPage, persona: PersonaPage, features: FeaturesPage, access: AccessPage, model: ModelPage, settings: SettingsPage,
+  sessions: SessionsPage, usage: UsagePage,
 };
 
 function invalidAuthentication(error: unknown): error is ApiError {

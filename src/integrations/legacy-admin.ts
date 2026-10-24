@@ -10,11 +10,24 @@ const MAX_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_TOKEN_BYTES = 1024;
 const MAX_UPSTREAM_BODY_BYTES = 256 * 1024;
+const MAX_USAGE_SUMMARY_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_USAGE_SERIES_BODY_BYTES = 1024 * 1024;
+const MAX_USAGE_TURNS_BODY_BYTES = 4 * 1024 * 1024;
+const MAX_USAGE_RECENT_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_WRITE_BODY_BYTES = 32 * 1024;
 const MAX_ROLE_CONTENT_BYTES = 30 * 1024;
 const MAX_COLLECTION_ITEMS = 256;
 const MAX_ACCESS_IDENTIFIERS = 1_000;
-const MAX_USAGE_LIMIT = 200;
+const MAX_USAGE_LIMIT = 500;
+const MAX_USAGE_TURN_LIMIT = 1_000;
+const MAX_USAGE_RECENT_LIMIT = 500;
+const MAX_USAGE_SERIES_HOURS = 24 * 90;
+const MAX_USAGE_SERIES_BUCKETS = 120;
+const MAX_USAGE_SESSION_IDS = 2_000;
+const MAX_USAGE_MODELS = 256;
+const MAX_USAGE_KEYS_PER_BUCKET = 500;
+const MAX_PRICE_WINDOWS = 16;
+const MAX_PRICE_MODELS = 256;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
 const ROLE_NAME_PATTERN = /^[A-Za-z0-9_\u4e00-\u9fff-]+$/;
@@ -65,6 +78,16 @@ interface UsageBuckets {
   readonly output: number;
   readonly reasoning: number;
 }
+
+interface UsageByTier {
+  readonly peak: number;
+  readonly off: number;
+}
+
+type UsageTier = 'peak' | 'off';
+type AggregateUsageTier = UsageTier | 'mixed';
+
+const LEGACY_NOT_FOUND = Symbol('legacy-not-found');
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -149,6 +172,49 @@ function nonnegativeNumber(value: unknown): number {
   return value;
 }
 
+function positiveNumber(value: unknown): number {
+  const parsed = nonnegativeNumber(value);
+  if (parsed === 0) fail(502, 'legacy_invalid_response');
+  return parsed;
+}
+
+function booleanValue(value: unknown): boolean {
+  if (typeof value !== 'boolean') fail(502, 'legacy_invalid_response');
+  return value;
+}
+
+function usageTier(value: unknown): UsageTier {
+  if (value === 'peak' || value === 'off') return value;
+  fail(502, 'legacy_invalid_response');
+}
+
+function aggregateUsageTier(value: unknown): AggregateUsageTier {
+  if (value === 'mixed') return value;
+  return usageTier(value);
+}
+
+function usageByTier(value: unknown): UsageByTier {
+  if (!record(value)) fail(502, 'legacy_invalid_response');
+  return { peak: nonnegativeNumber(value.peak), off: nonnegativeNumber(value.off) };
+}
+
+function usageRate(value: unknown): number {
+  const parsed = nonnegativeNumber(value);
+  if (parsed > 1) fail(502, 'legacy_invalid_response');
+  return parsed;
+}
+
+function approximatelyEqual(left: number, right: number): boolean {
+  return Math.abs(left - right) <= Math.max(1, Math.abs(left), Math.abs(right)) * 1e-9;
+}
+
+function stringArray(value: unknown, maximumItems: number, maximumLength: number): string[] {
+  if (!Array.isArray(value) || value.length > maximumItems) fail(502, 'legacy_invalid_response');
+  const entries = value.map(entry => boundedString(entry, maximumLength));
+  if (new Set(entries).size !== entries.length) fail(502, 'legacy_invalid_response');
+  return entries;
+}
+
 function usageBuckets(value: unknown): UsageBuckets {
   if (!record(value)) fail(502, 'legacy_invalid_response');
   return {
@@ -180,6 +246,152 @@ function usageCounts(value: Record<string, unknown>, declared = false) {
   };
 }
 
+function usageSummaryTotals(value: unknown) {
+  if (!record(value)) fail(502, 'legacy_invalid_response');
+  const counts = usageCounts(value, true);
+  const buckets = usageBuckets(value.buckets);
+  const cost = nonnegativeNumber(value.cost);
+  const attributedCost = nonnegativeNumber(value.attributedCost);
+  const unattributedCost = nonnegativeNumber(value.unattributedCost);
+  const turns = nonnegativeInteger(value.turns);
+  const steps = nonnegativeInteger(value.steps);
+  const byTier = usageByTier(value.byTier);
+  const cacheHitRate = usageRate(value.cacheHitRate);
+  const avgCostPerTurn = nonnegativeNumber(value.avgCostPerTurn);
+  const avgCostPerStep = nonnegativeNumber(value.avgCostPerStep);
+  if (!approximatelyEqual(byTier.peak + byTier.off, cost)
+    || !approximatelyEqual(cacheHitRate, counts.inputTokens === 0 ? 0 : buckets.cacheHit / counts.inputTokens)
+    || !approximatelyEqual(avgCostPerTurn, turns === 0 ? 0 : cost / turns)
+    || !approximatelyEqual(avgCostPerStep, steps === 0 ? 0 : cost / steps)) {
+    fail(502, 'legacy_invalid_response');
+  }
+  return {
+    ...counts,
+    buckets,
+    cost,
+    attributedCost,
+    unattributedCost,
+    byTier,
+    estimated: booleanValue(value.estimated),
+    conversations: nonnegativeInteger(value.conversations),
+    turns,
+    steps,
+    cacheHitRate,
+    avgCostPerTurn,
+    avgCostPerStep
+  };
+}
+
+function usageSummaryConversation(value: unknown) {
+  if (!record(value)) fail(502, 'legacy_invalid_response');
+  const counts = usageCounts(value);
+  const buckets = usageBuckets(value.buckets);
+  const cost = nonnegativeNumber(value.cost);
+  const attributedCost = nonnegativeNumber(value.attributedCost);
+  const unattributedCost = nonnegativeNumber(value.unattributedCost);
+  const byTier = usageByTier(value.byTier);
+  if (!approximatelyEqual(byTier.peak + byTier.off, cost)) {
+    fail(502, 'legacy_invalid_response');
+  }
+  return {
+    key: boundedString(value.key, 128),
+    sessionCount: nonnegativeInteger(value.sessions),
+    ...counts,
+    buckets,
+    cost,
+    attributedCost,
+    unattributedCost,
+    byTier,
+    cacheHitRate: counts.inputTokens === 0 ? 0 : buckets.cacheHit / counts.inputTokens,
+    estimated: booleanValue(value.estimated),
+    turns: nonnegativeInteger(value.turns),
+    steps: nonnegativeInteger(value.steps),
+    firstAt: nonnegativeInteger(value.firstAt),
+    lastAt: nonnegativeInteger(value.lastAt),
+    models: stringArray(value.models, MAX_USAGE_MODELS, 256).sort(compareText)
+  };
+}
+
+function usageNowTier(value: unknown) {
+  if (!record(value)) fail(502, 'legacy_invalid_response');
+  return {
+    model: boundedString(value.model, 256),
+    label: boundedString(value.label, 256),
+    tier: usageTier(value.tier),
+    tierLabel: boundedString(value.tierLabel, 64),
+    currency: boundedString(value.currency, 16),
+    symbol: boundedString(value.symbol, 16),
+    unit: positiveNumber(value.unit),
+    estimated: booleanValue(value.estimated),
+    cacheHit: nonnegativeNumber(value.cacheHit),
+    cacheMiss: nonnegativeNumber(value.cacheMiss),
+    cacheWrite: nonnegativeNumber(value.cacheWrite),
+    output: nonnegativeNumber(value.output)
+  };
+}
+
+function usagePriceTable(value: unknown) {
+  if (!record(value) || !Array.isArray(value.peakWindows) || value.peakWindows.length > MAX_PRICE_WINDOWS
+    || !Array.isArray(value.peakWeekdays) || value.peakWeekdays.length > 7 || !record(value.models)
+    || Object.keys(value.models).length > MAX_PRICE_MODELS) fail(502, 'legacy_invalid_response');
+  const peakWindows = value.peakWindows.map(window => {
+    if (!Array.isArray(window) || window.length !== 2) fail(502, 'legacy_invalid_response');
+    const start = nonnegativeNumber(window[0]);
+    const end = nonnegativeNumber(window[1]);
+    if (start >= end || end > 24) fail(502, 'legacy_invalid_response');
+    return [start, end] as const;
+  });
+  const peakWeekdays = value.peakWeekdays.map(day => {
+    const parsed = nonnegativeInteger(day);
+    if (parsed < 1 || parsed > 7) fail(502, 'legacy_invalid_response');
+    return parsed;
+  });
+  if (new Set(peakWeekdays).size !== peakWeekdays.length) fail(502, 'legacy_invalid_response');
+  const modelEntries: Array<[string, { label: string; off: {
+    cacheHit: number; cacheMiss: number; cacheWrite: number; output: number;
+  } }]> = [];
+  for (const [name, entry] of Object.entries(value.models)) {
+    if (name.length === 0 || name.length > 256 || !record(entry) || !record(entry.off)) {
+      fail(502, 'legacy_invalid_response');
+    }
+    modelEntries.push([name, {
+      label: boundedString(entry.label, 256),
+      off: {
+        cacheHit: nonnegativeNumber(entry.off.cacheHit),
+        cacheMiss: nonnegativeNumber(entry.off.cacheMiss),
+        cacheWrite: nonnegativeNumber(entry.off.cacheWrite),
+        output: nonnegativeNumber(entry.off.output)
+      }
+    }]);
+  }
+  modelEntries.sort(([left], [right]) => compareText(left, right));
+  return {
+    version: boundedString(value.version, 128),
+    currency: boundedString(value.currency, 16),
+    symbol: boundedString(value.symbol, 16),
+    unit: positiveNumber(value.unit),
+    peakMultiplier: positiveNumber(value.peakMultiplier),
+    peakWindows,
+    peakWeekdays,
+    holidayCount: nonnegativeInteger(value.holidayCount),
+    models: Object.fromEntries(modelEntries)
+  };
+}
+
+function usageLedger(value: unknown) {
+  if (!record(value)) fail(502, 'legacy_invalid_response');
+  return {
+    journalLines: nonnegativeInteger(value.journalLines),
+    maxLines: nonnegativeInteger(value.maxLines),
+    droppedLines: nonnegativeInteger(value.droppedLines),
+    sessions: nonnegativeInteger(value.sessions),
+    baselines: nonnegativeInteger(value.baselines),
+    samples: nonnegativeInteger(value.samples),
+    lastIngestAt: nonnegativeInteger(value.lastIngestAt),
+    lastCompactedAt: nonnegativeInteger(value.lastCompactedAt)
+  };
+}
+
 function limitedQuery(query: URLSearchParams, defaultValue: number, maximum: number): number {
   if ([...query.keys()].some(key => key !== 'limit') || query.getAll('limit').length > 1) {
     fail(400, 'invalid_query');
@@ -189,6 +401,18 @@ function limitedQuery(query: URLSearchParams, defaultValue: number, maximum: num
   if (!POSITIVE_INTEGER_PATTERN.test(raw)) fail(400, 'invalid_query');
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed > maximum) fail(400, 'invalid_query');
+  return parsed;
+}
+
+function boundedQueryInteger(query: URLSearchParams, name: string, defaultValue: number,
+  minimum: number, maximum: number): number {
+  const values = query.getAll(name);
+  if (values.length > 1) fail(400, 'invalid_query');
+  if (values.length === 0) return defaultValue;
+  const raw = values[0]!;
+  if (!POSITIVE_INTEGER_PATTERN.test(raw)) fail(400, 'invalid_query');
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) fail(400, 'invalid_query');
   return parsed;
 }
 
@@ -224,59 +448,258 @@ function sessionsResponse(sessions: LegacySession[]) {
 function usageFromLegacy(value: unknown, limit: number) {
   if (!record(value) || value.ok !== true || !record(value.totals) || !Array.isArray(value.conversations)
     || value.conversations.length > limit) fail(502, 'legacy_invalid_response');
-  const totalsValue = value.totals;
-  const totalsCounts = usageCounts(totalsValue, true);
-  if (typeof totalsValue.estimated !== 'boolean') fail(502, 'legacy_invalid_response');
-  const totalConversations = nonnegativeInteger(totalsValue.conversations);
-  const totals = {
-    ...totalsCounts,
-    cost: nonnegativeNumber(totalsValue.cost),
-    estimated: totalsValue.estimated,
-    conversations: totalConversations,
-    turns: nonnegativeInteger(totalsValue.turns),
-    steps: nonnegativeInteger(totalsValue.steps),
-    unattributedCost: nonnegativeNumber(totalsValue.unattributedCost)
-  };
-  if (totals.unattributedCost > totals.cost) fail(502, 'legacy_invalid_response');
-
-  const conversations = value.conversations.map(entry => {
-    if (!record(entry) || typeof entry.estimated !== 'boolean' || !Array.isArray(entry.models)
-      || entry.models.length > 64) fail(502, 'legacy_invalid_response');
-    const models = entry.models.map(model => boundedString(model, 256)).sort(compareText);
-    if (new Set(models).size !== models.length) fail(502, 'legacy_invalid_response');
-    const counts = usageCounts(entry);
-    return {
-      key: boundedString(entry.key, 128),
-      sessionCount: nonnegativeInteger(entry.sessions),
-      totalTokens: counts.totalTokens,
-      inputTokens: counts.inputTokens,
-      outputTokens: counts.outputTokens,
-      cacheHitTokens: counts.cacheHitTokens,
-      cost: nonnegativeNumber(entry.cost),
-      estimated: entry.estimated,
-      turns: nonnegativeInteger(entry.turns),
-      steps: nonnegativeInteger(entry.steps),
-      lastAt: nonnegativeInteger(entry.lastAt),
-      models
-    };
-  });
-  if (conversations.length > totalConversations
+  const currency = boundedString(value.currency, 16);
+  const symbol = boundedString(value.symbol, 16);
+  const totals = usageSummaryTotals(value.totals);
+  const conversations = value.conversations.map(usageSummaryConversation);
+  if (conversations.length > totals.conversations
     || new Set(conversations.map(entry => entry.key)).size !== conversations.length) {
     fail(502, 'legacy_invalid_response');
   }
   conversations.sort((left, right) => right.cost - left.cost
     || right.totalTokens - left.totalTokens
     || compareText(left.key, right.key));
-  return {
+  const unavailable: Array<'pricing' | 'ledger'> = [];
+  const hasPriceVersion = Object.hasOwn(value, 'priceVersion');
+  const hasNowTier = Object.hasOwn(value, 'nowTier');
+  const hasPriceTable = Object.hasOwn(value, 'priceTable');
+  let pricing: { priceVersion: string; nowTier: ReturnType<typeof usageNowTier>;
+    priceTable: ReturnType<typeof usagePriceTable> } | undefined;
+  if (!hasPriceVersion && !hasNowTier && !hasPriceTable) {
+    unavailable.push('pricing');
+  } else {
+    if (!hasPriceVersion || !hasNowTier || !hasPriceTable) fail(502, 'legacy_invalid_response');
+    const priceVersion = boundedString(value.priceVersion, 128);
+    const nowTier = usageNowTier(value.nowTier);
+    const priceTable = usagePriceTable(value.priceTable);
+    if (priceVersion !== priceTable.version || priceTable.currency !== currency
+      || priceTable.symbol !== symbol || nowTier.currency !== currency
+      || nowTier.symbol !== symbol || nowTier.unit !== priceTable.unit) {
+      fail(502, 'legacy_invalid_response');
+    }
+    pricing = { priceVersion, nowTier, priceTable };
+  }
+  let ledger: ReturnType<typeof usageLedger> | undefined;
+  if (!Object.hasOwn(value, 'ledger')) unavailable.push('ledger');
+  else ledger = usageLedger(value.ledger);
+  const stableRevision = revision({
+    source: 'chat-ledger',
+    currency,
+    symbol,
+    unavailable,
+    ...(pricing === undefined ? {} : { priceVersion: pricing.priceVersion, priceTable: pricing.priceTable }),
+    ...(ledger === undefined ? {} : { ledger }),
+    totals
+  });
+  const state = {
     source: 'chat-ledger' as const,
-    generatedAt: nonnegativeInteger(value.generatedAt),
-    currency: boundedString(value.currency, 16),
-    symbol: boundedString(value.symbol, 16),
+    currency,
+    symbol,
+    unavailable,
+    ...(pricing === undefined ? {} : { priceVersion: pricing.priceVersion, priceTable: pricing.priceTable }),
+    ...(ledger === undefined ? {} : { ledger }),
     totals,
     conversations,
     limit,
-    limited: conversations.length < totalConversations
+    limited: conversations.length < totals.conversations
   };
+  return {
+    ...state,
+    revision: stableRevision,
+    generatedAt: nonnegativeInteger(value.generatedAt),
+    ...(pricing === undefined ? {} : { nowTier: pricing.nowTier })
+  };
+}
+
+function usageSeriesFromLegacy(value: unknown, hours: number, maxBuckets: number) {
+  if (!record(value) || value.ok !== true || !Array.isArray(value.buckets)
+    || value.buckets.length === 0 || value.buckets.length > maxBuckets || !record(value.totals)) {
+    fail(502, 'legacy_invalid_response');
+  }
+  const generatedAt = nonnegativeInteger(value.generatedAt);
+  const returnedHours = nonnegativeInteger(value.hours);
+  const bucketMs = nonnegativeInteger(value.bucketMs);
+  const from = nonnegativeInteger(value.from);
+  const to = nonnegativeInteger(value.to);
+  if (returnedHours !== hours || bucketMs === 0 || from >= to || (to - from) % bucketMs !== 0
+    || value.buckets.length !== (to - from) / bucketMs
+    || to - from < hours * 60 * 60 * 1_000
+    || to - from >= hours * 60 * 60 * 1_000 + bucketMs) fail(502, 'legacy_invalid_response');
+  const buckets = value.buckets.map((entry, index) => {
+    if (!record(entry)) fail(502, 'legacy_invalid_response');
+    const keys = stringArray(entry.keys, MAX_USAGE_KEYS_PER_BUCKET, 128);
+    const t = nonnegativeInteger(entry.t);
+    const tokens = nonnegativeInteger(entry.tokens);
+    const cacheMiss = nonnegativeInteger(entry.cacheMiss);
+    const cacheHit = nonnegativeInteger(entry.cacheHit);
+    const cacheWrite = nonnegativeInteger(entry.cacheWrite);
+    const output = nonnegativeInteger(entry.output);
+    const computedTokens = cacheMiss + cacheHit + cacheWrite + output;
+    if (t !== from + index * bucketMs) fail(502, 'legacy_invalid_response');
+    if (!Number.isSafeInteger(computedTokens) || tokens !== computedTokens) fail(502, 'legacy_invalid_response');
+    return {
+      t,
+      cost: nonnegativeNumber(entry.cost),
+      tokens,
+      cacheMiss,
+      cacheHit,
+      cacheWrite,
+      output,
+      turns: nonnegativeInteger(entry.turns),
+      steps: nonnegativeInteger(entry.steps),
+      tier: aggregateUsageTier(entry.tier),
+      keys
+    };
+  });
+  const totals = {
+    cost: nonnegativeNumber(value.totals.cost),
+    tokens: nonnegativeInteger(value.totals.tokens),
+    turns: nonnegativeInteger(value.totals.turns),
+    steps: nonnegativeInteger(value.totals.steps)
+  };
+  const bucketCost = buckets.reduce((sum, entry) => sum + entry.cost, 0);
+  const bucketTokens = buckets.reduce((sum, entry) => sum + entry.tokens, 0);
+  const bucketTurns = buckets.reduce((sum, entry) => sum + entry.turns, 0);
+  const bucketSteps = buckets.reduce((sum, entry) => sum + entry.steps, 0);
+  if (!approximatelyEqual(bucketCost, totals.cost) || bucketTokens !== totals.tokens
+    || totals.turns > bucketTurns || bucketSteps !== totals.steps) fail(502, 'legacy_invalid_response');
+  let busiest: { t: number; cost: number; tokens: number } | null = null;
+  if (value.busiest !== null) {
+    if (!record(value.busiest)) fail(502, 'legacy_invalid_response');
+    busiest = {
+      t: nonnegativeInteger(value.busiest.t),
+      cost: nonnegativeNumber(value.busiest.cost),
+      tokens: nonnegativeInteger(value.busiest.tokens)
+    };
+    if (!buckets.some(entry => entry.t === busiest!.t && entry.cost === busiest!.cost
+      && entry.tokens === busiest!.tokens)) fail(502, 'legacy_invalid_response');
+  }
+  const countedSamples = nonnegativeInteger(value.countedSamples);
+  if (countedSamples !== totals.steps) fail(502, 'legacy_invalid_response');
+  return {
+    ok: true as const,
+    generatedAt,
+    currency: boundedString(value.currency, 16),
+    symbol: boundedString(value.symbol, 16),
+    hours: returnedHours,
+    bucketMs,
+    from,
+    to,
+    buckets,
+    totals,
+    busiest,
+    estimated: booleanValue(value.estimated),
+    countedSamples,
+    offChartCost: nonnegativeNumber(value.offChartCost),
+    offChartTokens: nonnegativeInteger(value.offChartTokens)
+  };
+}
+
+function optionalNullableString(value: Record<string, unknown>, key: string, maximum: number): string | null {
+  if (!Object.hasOwn(value, key) || value[key] === undefined || value[key] === null) return null;
+  return boundedString(value[key], maximum);
+}
+
+function usageConversationFromLegacy(value: unknown, requestedKey: string, turnLimit: number) {
+  if (!record(value) || value.ok !== true || !Array.isArray(value.sessionIds)
+    || value.sessionIds.length > MAX_USAGE_SESSION_IDS || !Array.isArray(value.turns)
+    || value.turns.length > turnLimit) fail(502, 'legacy_invalid_response');
+  const key = boundedString(value.key, 128);
+  if (key !== requestedKey) fail(502, 'legacy_invalid_response');
+  const sessionIds = stringArray(value.sessionIds, MAX_USAGE_SESSION_IDS, 256);
+  const declaredSessions = nonnegativeInteger(value.sessions);
+  const returnedTurnLimit = nonnegativeInteger(value.turnLimit);
+  if (declaredSessions !== sessionIds.length || returnedTurnLimit !== turnLimit) {
+    fail(502, 'legacy_invalid_response');
+  }
+  const turns = value.turns.map(entry => {
+    if (!record(entry)) fail(502, 'legacy_invalid_response');
+    const sessionId = boundedString(entry.sessionId, 256);
+    if (!sessionIds.includes(sessionId)) fail(502, 'legacy_invalid_response');
+    const startedAt = nonnegativeInteger(entry.startedAt);
+    const endedAt = nonnegativeInteger(entry.endedAt);
+    if (endedAt < startedAt) fail(502, 'legacy_invalid_response');
+    let turnKey: string | undefined;
+    if (Object.hasOwn(entry, 'key') && entry.key !== undefined && entry.key !== null) {
+      turnKey = boundedString(entry.key, 128);
+    }
+    return {
+      sessionId,
+      ...(turnKey === undefined ? {} : { key: turnKey }),
+      turn: nonnegativeInteger(entry.turn),
+      steps: nonnegativeInteger(entry.steps),
+      attempts: nonnegativeInteger(entry.attempts),
+      startedAt,
+      endedAt,
+      model: optionalNullableString(entry, 'model', 256),
+      provider: optionalNullableString(entry, 'provider', 256),
+      buckets: usageBuckets(entry.buckets),
+      cost: nonnegativeNumber(entry.cost),
+      tier: aggregateUsageTier(entry.tier)
+    };
+  });
+  const uniqueTurns = new Set(turns.map(entry => `${entry.sessionId}\u0000${entry.turn}`));
+  if (uniqueTurns.size !== turns.length) fail(502, 'legacy_invalid_response');
+  const result = {
+    key,
+    generatedAt: nonnegativeInteger(value.generatedAt),
+    currency: boundedString(value.currency, 16),
+    symbol: boundedString(value.symbol, 16),
+    sessionIds,
+    sessionCount: sessionIds.length,
+    buckets: usageBuckets(value.buckets),
+    cost: nonnegativeNumber(value.cost),
+    attributedCost: nonnegativeNumber(value.attributedCost),
+    unattributedCost: nonnegativeNumber(value.unattributedCost),
+    byTier: usageByTier(value.byTier),
+    estimated: booleanValue(value.estimated),
+    firstAt: nonnegativeInteger(value.firstAt),
+    lastAt: nonnegativeInteger(value.lastAt),
+    models: stringArray(value.models, MAX_USAGE_MODELS, 256),
+    turnLimit: returnedTurnLimit,
+    turns
+  };
+  if (!approximatelyEqual(result.byTier.peak + result.byTier.off, result.cost)) {
+    fail(502, 'legacy_invalid_response');
+  }
+  if (!Object.hasOwn(value, 'limited')) return result;
+  return { ...result, limited: booleanValue(value.limited) };
+}
+
+function usageRecentFromLegacy(value: unknown, limit: number) {
+  if (!record(value) || value.ok !== true || !Array.isArray(value.entries) || value.entries.length > limit) {
+    fail(502, 'legacy_invalid_response');
+  }
+  const entries = value.entries.map(entry => {
+    if (!record(entry)) fail(502, 'legacy_invalid_response');
+    let key: string | null = null;
+    if (Object.hasOwn(entry, 'key') && entry.key !== undefined && entry.key !== null) {
+      key = boundedString(entry.key, 128);
+    }
+    const buckets = usageBuckets(entry);
+    const tokens = nonnegativeInteger(entry.tokens);
+    const computedTokens = buckets.cacheMiss + buckets.cacheHit + buckets.cacheWrite + buckets.output;
+    if (!Number.isSafeInteger(computedTokens) || tokens !== computedTokens) fail(502, 'legacy_invalid_response');
+    return {
+      time: nonnegativeInteger(entry.time),
+      key,
+      sid: boundedString(entry.sessionId, 256),
+      turn: nonnegativeInteger(entry.turn),
+      step: nonnegativeInteger(entry.step),
+      retry: nonnegativeInteger(entry.retry),
+      model: optionalNullableString(entry, 'model', 256),
+      tokens,
+      cacheMiss: buckets.cacheMiss,
+      cacheHit: buckets.cacheHit,
+      cacheWrite: buckets.cacheWrite,
+      output: buckets.output,
+      reasoning: buckets.reasoning,
+      cost: nonnegativeNumber(entry.cost),
+      tier: usageTier(entry.tier),
+      estimated: booleanValue(entry.estimated)
+    };
+  });
+  return { symbol: boundedString(value.symbol, 16), entries };
 }
 
 function qqIdentifier(value: unknown): number {
@@ -369,11 +792,11 @@ async function boundedFile(filename: string, maximum: number): Promise<string> {
   }
 }
 
-async function readJsonResponse(response: Response): Promise<unknown> {
+async function readJsonResponse(response: Response, maximumBytes: number): Promise<unknown> {
   const declared = response.headers.get('content-length');
   if (declared !== null) {
     const bytes = Number(declared);
-    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_UPSTREAM_BODY_BYTES) {
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > maximumBytes) {
       fail(502, 'legacy_invalid_response');
     }
   }
@@ -385,7 +808,7 @@ async function readJsonResponse(response: Response): Promise<unknown> {
     const chunk = await reader.read();
     if (chunk.done) break;
     size += chunk.value.byteLength;
-    if (size > MAX_UPSTREAM_BODY_BYTES) {
+    if (size > maximumBytes) {
       await reader.cancel();
       fail(502, 'legacy_invalid_response');
     }
@@ -446,7 +869,9 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
     method: 'GET' | 'POST',
     body: unknown,
     signal: AbortSignal,
-    existingConnection?: LegacyConnection
+    existingConnection?: LegacyConnection,
+    maximumResponseBytes = MAX_UPSTREAM_BODY_BYTES,
+    allowNotFound = false
   ): Promise<unknown> {
     const target = existingConnection ?? await connection();
     const serialized = method === 'POST' ? JSON.stringify(body) : undefined;
@@ -456,6 +881,7 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
     try {
+      combinedSignal.throwIfAborted();
       const response = await fetchImplementation(`${target.endpoint}${pathname}`, {
         method,
         headers: {
@@ -467,7 +893,18 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
         redirect: 'error',
         signal: combinedSignal
       });
-      const value = await readJsonResponse(response);
+      if (combinedSignal.aborted) {
+        void response.body?.cancel().catch(() => {});
+        combinedSignal.throwIfAborted();
+      }
+      if (allowNotFound && response.status === 404) {
+        try {
+          await response.body?.cancel();
+        } catch {}
+        return LEGACY_NOT_FOUND;
+      }
+      const value = await readJsonResponse(response, maximumResponseBytes);
+      combinedSignal.throwIfAborted();
       if (!response.ok) fail(502, method === 'POST' ? 'legacy_write_rejected' : 'legacy_read_failed');
       return value;
     } catch (error: unknown) {
@@ -490,6 +927,12 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
 
   async function readSessions(signal: AbortSignal) {
     return sessionsResponse(sessionsFromLegacy(await requestLegacy('/api/sessions', 'GET', undefined, signal)));
+  }
+
+  async function readUsage(limit: number, signal: AbortSignal) {
+    const value = await requestLegacy(`/api/tokens/summary?limit=${limit}`, 'GET', undefined, signal, undefined,
+      MAX_USAGE_SUMMARY_BODY_BYTES);
+    return usageFromLegacy(value, limit);
   }
 
   function modelFromLegacy(value: unknown) {
@@ -657,10 +1100,66 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
       }
     },
     {
-      method: 'GET', pathname: '/api/legacy/usage', async handle({ query, signal }) {
-        const limit = limitedQuery(query, 100, MAX_USAGE_LIMIT);
-        const value = await requestLegacy(`/api/tokens/summary?limit=${limit}`, 'GET', undefined, signal);
-        return usageFromLegacy(value, limit);
+      method: 'GET', pathname: '/api/legacy/usage', maxResponseBytes: MAX_USAGE_SUMMARY_BODY_BYTES,
+      async handle({ query, signal }) {
+        const limit = limitedQuery(query, 200, MAX_USAGE_LIMIT);
+        return readUsage(limit, signal);
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/legacy/usage/series', maxResponseBytes: MAX_USAGE_SERIES_BODY_BYTES,
+      async handle({ query, signal }) {
+        if ([...query.keys()].some(key => key !== 'hours' && key !== 'buckets')) fail(400, 'invalid_query');
+        const hours = boundedQueryInteger(query, 'hours', 24, 1, MAX_USAGE_SERIES_HOURS);
+        const buckets = boundedQueryInteger(query, 'buckets', 48, 6, MAX_USAGE_SERIES_BUCKETS);
+        const value = await requestLegacy(`/api/tokens/series?hours=${hours}&buckets=${buckets}`, 'GET', undefined,
+          signal, undefined, MAX_USAGE_SERIES_BODY_BYTES);
+        return usageSeriesFromLegacy(value, hours, buckets);
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/legacy/usage/turns', maxResponseBytes: MAX_USAGE_TURNS_BODY_BYTES,
+      async handle({ query, signal }) {
+        if ([...query.keys()].some(key => key !== 'key' && key !== 'limit') || query.getAll('key').length !== 1) {
+          fail(400, 'invalid_query');
+        }
+        const key = boundedRequestString(query.get('key'), 128);
+        const limit = boundedQueryInteger(query, 'limit', 200, 1, MAX_USAGE_TURN_LIMIT);
+        const value = await requestLegacy(`/api/tokens/turns?key=${encodeURIComponent(key)}&limit=${limit}`, 'GET',
+          undefined, signal, undefined, MAX_USAGE_TURNS_BODY_BYTES, true);
+        if (value === LEGACY_NOT_FOUND) fail(404, 'usage_conversation_not_found');
+        return usageConversationFromLegacy(value, key, limit);
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/legacy/usage/recent', maxResponseBytes: MAX_USAGE_RECENT_BODY_BYTES,
+      async handle({ query, signal }) {
+        const limit = limitedQuery(query, 40, MAX_USAGE_RECENT_LIMIT);
+        const value = await requestLegacy(`/api/tokens/recent?limit=${limit}`, 'GET', undefined, signal, undefined,
+          MAX_USAGE_RECENT_BODY_BYTES);
+        return usageRecentFromLegacy(value, limit);
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/legacy/usage/reset', handle({ query, body, signal }) {
+        noQuery(query);
+        const request = requiredBody(body);
+        exactKeys(request, ['confirm', 'revision']);
+        const expectedRevision = parseRevision(request.revision);
+        if (request.confirm !== '清空用量账本') fail(400, 'invalid_request');
+        return serializeWrite(async () => {
+          if (signal.aborted) fail(504, 'usage_reset_unknown');
+          const current = await readUsage(200, signal);
+          if (signal.aborted) fail(504, 'usage_reset_unknown');
+          if (current.revision !== expectedRevision) fail(409, 'revision_conflict');
+          try {
+            const result = await requestLegacy('/api/tokens/reset', 'POST', {}, signal);
+            if (signal.aborted || !record(result) || result.ok !== true) fail(504, 'usage_reset_unknown');
+            return { ok: true, resetAccepted: true };
+          } catch {
+            fail(504, 'usage_reset_unknown');
+          }
+        });
       }
     },
     {

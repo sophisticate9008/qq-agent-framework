@@ -72,6 +72,21 @@ test('configuration values are never indexed and visibility follows real mode an
   assert.deepEqual(searchWorkspaceTargets(targets, '启用 定时 主动').map(target => target.title), ['启用定时主动话题']);
 });
 
+test('usage sections are searchable across pages only when a chat backend is connected', () => {
+  const sources = { configuration, settings, legacyMode: { mode: 'reserved' } };
+  const targets = buildWorkspaceSearchTargets(sources);
+  for (const title of ['消耗走势', '逐轮花费', '最近调用流水', '当前生效价目表', '账本管理']) {
+    assert.deepEqual(searchWorkspaceTargets(targets, title), [{
+      page: 'usage', title, sectionTitle: title, kind: 'section',
+    }]);
+  }
+  const disconnected = buildWorkspaceSearchTargets({ ...sources, legacyMode: null });
+  assert.equal(searchWorkspaceTargets(disconnected, '逐轮花费').length, 0);
+  assert.equal(searchWorkspaceTargets(disconnected, '用量统计').length, 1);
+  const hidden = buildWorkspaceSearchTargets({ ...sources, currentPage: 'usage', visibleEntries: [] });
+  assert.equal(searchWorkspaceTargets(hidden, '逐轮花费').length, 0);
+});
+
 test('disabled budgets hide numeric fields while retaining the switch and basic settings', () => {
   const targets = buildWorkspaceSearchTargets({
     configuration,

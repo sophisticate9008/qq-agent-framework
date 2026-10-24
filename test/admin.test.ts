@@ -550,6 +550,37 @@ test('mounted admin routes reuse authentication, write guards and stable errors'
   assert.equal((await rawRequest(fixture.origin, '/api/plugins/large', { headers })).status, 413)
 })
 
+test('admin response limits are bounded per route and count UTF-8 bytes', async t => {
+  const fixture = await start({ routes: [
+    { method: 'GET', pathname: '/api/large', maxResponseBytes: 512 * 1024,
+      handle: () => ({ value: 'x'.repeat(300 * 1024) }) },
+    { method: 'GET', pathname: '/api/overflow', maxResponseBytes: 512 * 1024,
+      handle: () => ({ value: 'x'.repeat(512 * 1024) }) },
+    { method: 'GET', pathname: '/api/default', handle: () => ({ value: 'x'.repeat(300 * 1024) }) },
+    { method: 'GET', pathname: '/api/unicode', maxResponseBytes: 1024,
+      handle: () => ({ value: '图'.repeat(400) }) },
+  ] })
+  t.after(async () => stop(fixture.server))
+  const headers = { Authorization: `Bearer ${TOKEN}` }
+  assert.equal((await rawRequest(fixture.origin, '/api/large')).status, 401)
+  const allowed = await rawRequest(fixture.origin, '/api/large', { headers })
+  assert.equal(allowed.status, 200)
+  assert(Buffer.byteLength(allowed.text) > 256 * 1024)
+  for (const pathname of ['/api/overflow', '/api/default', '/api/unicode']) {
+    const rejected = await rawRequest(fixture.origin, pathname, { headers })
+    assert.equal(rejected.status, 413)
+    assert.deepEqual(parseJson(rejected.text), { error: 'response_too_large' })
+  }
+})
+
+test('admin response limit configuration rejects invalid values', () => {
+  for (const maxResponseBytes of [0, 1023, 1024.5, NaN, Infinity, 4 * 1024 * 1024 + 1]) {
+    assert.throws(() => createAdminServer({ token: TOKEN, snapshot: () => ({}), routes: [
+      { method: 'GET', pathname: '/api/example', maxResponseBytes, handle: () => ({}) },
+    ] }), /maxResponseBytes/)
+  }
+})
+
 test('admin route registration rejects collisions and demo dispatch is optional', () => {
   const base = { token: TOKEN, snapshot: () => ({}) }
   const route: AdminRoute = { method: 'GET', pathname: '/api/example', handle: () => ({}) }

@@ -51,6 +51,7 @@ export interface AdminServerOptions {
 export interface AdminRoute {
   readonly method: 'GET' | 'POST'
   readonly pathname: string
+  readonly maxResponseBytes?: number
   readonly handle: (request: {
     query: URLSearchParams
     body: Record<string, unknown> | null
@@ -374,6 +375,10 @@ export function createAdminServer({
       || route.pathname === '/api/auth' || route.pathname.startsWith(AUTH_ROUTE_PREFIX)
       || !['GET', 'POST'].includes(route.method) || typeof route.handle !== 'function'
       || extensions.has(`${route.method} ${route.pathname}`)) throw new TypeError('Invalid or duplicate admin route')
+    if (route.maxResponseBytes !== undefined && (!Number.isSafeInteger(route.maxResponseBytes)
+      || route.maxResponseBytes < 1024 || route.maxResponseBytes > 4 * 1024 * 1024)) {
+      throw new TypeError('Admin route maxResponseBytes must be an integer between 1024 and 4194304')
+    }
     extensions.set(`${route.method} ${route.pathname}`, Object.freeze({ ...route }))
     methods.set(route.pathname, [...(methods.get(route.pathname) ?? []), route.method])
   }
@@ -549,7 +554,9 @@ export function createAdminServer({
           })
         })
         const payload = JSON.stringify(result ?? { ok: true })
-        if (Buffer.byteLength(payload) > 256 * 1024) throw new RequestError(413, 'response_too_large')
+        if (Buffer.byteLength(payload) > (route.maxResponseBytes ?? 256 * 1024)) {
+          throw new RequestError(413, 'response_too_large')
+        }
         send(response, 200, payload)
         return
       }

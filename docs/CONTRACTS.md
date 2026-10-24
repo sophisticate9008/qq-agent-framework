@@ -225,11 +225,23 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 
 ### 管理路由
 
-`createAdminServer` 可接收最多 64 个唯一 `AdminRoute`，每项声明 `GET` 或 `POST`、`/api/...` 路径和 `handle({ query, body, signal })`。扩展不能覆盖内建路由，共用 Bearer 认证；POST 另需同源 JSON 且请求体不超过 32 KiB，响应不超过 256 KiB，客户端断开会触发 `signal`。handler 默认期限为 10 秒，可在 10–300000 毫秒内调整；GET 超时返回 `504 / handler_timeout`，POST 超时返回 `504 / operation_unknown`，不会自动重试。`dispatchDemo` 可选，未提供时不开放演示事件处理。
+`createAdminServer` 可接收最多 64 个唯一 `AdminRoute`，每项声明 `GET` 或 `POST`、`/api/...` 路径和 `handle({ query, body, signal })`。扩展不能覆盖内建路由，共用管理认证；POST 另需同源 JSON 且请求体不超过 32 KiB。响应默认不超过 256 KiB，可信宿主可逐路由声明 `maxResponseBytes`（1024–4194304 的安全整数），按序列化后 UTF-8 字节数检查，超限返回 `413 / response_too_large`，不改变其他路由的限制。客户端断开会触发 `signal`。handler 默认期限为 10 秒，可在 10–300000 毫秒内调整；GET 超时返回 `504 / handler_timeout`，POST 超时返回 `504 / operation_unknown`，不会自动重试。`dispatchDemo` 可选，未提供时不开放演示事件处理。
 
 `createHostAdminRoutes(host)` 提供只读 metrics、storage、sessions、tasks、outbox 和 replies 路由。集合列表使用 `limit`（默认 100，最大 1000）与可选 `after`，返回 `{ items, next }`；只暴露现有管理元数据，不返回消息正文，也不提供授权或其他写操作。`GET /api/host/storage` 返回 store.stats 的统计形状；存储未实现 stats 时为 null。它不会清理过期记录、删除 unknown、对账或重试。replies 项仅包含 id、会话/session、generation、request id、期限、状态、更新时间和 cursor。
 
-`startGatewayAdmin(configuration)` 提供真实 HTTP 兼容网关的只读管理 UI。私有配置的 `host`、`port`、`tokenFile`、`gatewayConfiguration` 分别控制监听、独立认证和数据源，不从浏览器输入建立权限。它通过精确 revision 的 authenticated gateway health 与只读 get_status 获取状态，不打开生产 SQLite、不创建演示会话，也不提供发送或授权写操作。UI 使用同源相对 API，令牌仅驻留页面内存；正式网关模式隐藏演示控件。监听非回环地址必须由部署方显式配置，HTTP 不提供链路加密。初始化与令牌轮换见 [管理界面教程](GATEWAY_ADMIN.md)。
+显式接入聊天后端的 `createLegacyAdminRoutes({ legacyRoot, fetch?, timeoutMs?, beforeAccessSave? })` 使用固定回环管理端点，不接受浏览器提供上游地址或凭据。用量接口均受管理认证保护，查询参数拒绝重复键和未知键，响应按白名单解析，不返回账本文件路径或凭据：
+
+| 路由 | 查询 / 请求体 | 响应范围 |
+| --- | --- | --- |
+| `GET /api/legacy/usage` | `limit=200`，1–500 | 全局累计、会话汇总、revision、可选价目与账本统计；最多 2 MiB。 |
+| `GET /api/legacy/usage/series` | `hours=24`，1–2160；`buckets=48`，6–120 | 实际时间桶、窗口总量与图外历史；最多 1 MiB。buckets 是桶数上限，不保证恰好返回该数量。 |
+| `GET /api/legacy/usage/turns` | 必填 `key`；`limit=200`，1–1000 | 指定会话的累计与可追溯轮次；最多 4 MiB。无对应会话返回 404。 |
+| `GET /api/legacy/usage/recent` | `limit=40`，1–500 | 保留的最近调用样本；最多 2 MiB。 |
+| `POST /api/legacy/usage/reset` | `{ revision, confirm: '清空用量账本' }` | 发起前版本预检；受理后返回 `{ ok: true, resetAccepted: true }`。 |
+
+summary 缺少整块价目或账本元数据时，`unavailable` 标明 `pricing` / `ledger`，不补造配置；部分提供但不合法的块拒绝。`revision` 覆盖全局累计、价目配置和可用账本统计，不包含分页列表、生成时间或当前价档。累计投影与保留样本不一定可加和，不能要求逐轮已归属费用与仅累计历史之和恰好等于权威累计。所有费用均为价目表估算，不是平台账单。reset 预检不能提供跨进程原子删除保证，预检后的并发记录仍可能被清空；冲突不调用清空，写入结果不明返回 `usage_reset_unknown`，不自动重试。受理不证明旧后端文件持久截断成功。
+
+`startGatewayAdmin(configuration)` 提供真实 HTTP 网关的管理 UI。私有配置的 `host`、`port`、`tokenFile`、`gatewayConfiguration` 分别控制监听、独立认证和数据源。它通过精确 revision 的 authenticated gateway health 与只读 get_status 获取状态，不打开生产 SQLite、不创建演示会话，不提供消息发送或授权创建操作；配置管理和可选聊天后端管理通过受控路由接入。UI 使用同源相对 API，管理员凭据只用于登录，访问会话由有限有效期的 HttpOnly cookie 保持，退出撤销；正式网关模式隐藏演示控件。监听非回环地址必须由部署方显式配置，HTTP 不提供链路加密。初始化、令牌与各管理操作的边界见 [管理界面教程](GATEWAY_ADMIN.md)。
 
 ### Bridge host
 

@@ -1,6 +1,7 @@
 import { asRecord, isRecord } from './api.ts';
 import { resolveConfigurationVisibility, type VisibilityGroup } from './configuration-visibility.ts';
 import type { PageId } from './types.ts';
+import { usageSectionLabels } from './usage-details.ts';
 
 export interface WorkspaceSearchTarget {
   readonly page: PageId;
@@ -192,6 +193,9 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     ...workspacePageTargets,
     ...configurationTargets,
     ...settingsTargets(sources.settings),
+    ...(activeMode === null ? [] : Object.values(usageSectionLabels).map(title => ({
+      page: 'usage' as const, title, sectionTitle: title, kind: 'section' as const,
+    }))),
   ]);
   if (sources.currentPage && sources.visibleEntries) {
     targets = applyCurrentPageVisibility(targets, sources.currentPage, sources.visibleEntries);

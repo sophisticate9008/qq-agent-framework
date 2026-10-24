@@ -1,8 +1,8 @@
 export interface ConversationIdentity {
   readonly key: string;
-  readonly kind: 'group' | 'private' | 'unattributed' | 'other';
+  readonly kind: 'group' | 'private' | 'internal' | 'unattributed' | 'other';
   readonly identifier: string;
-  readonly label: '群聊' | '私聊' | '未归属' | '历史';
+  readonly label: '群聊' | '私聊' | '内部' | '未归属' | '历史';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -32,6 +32,10 @@ function timestamp(value: unknown): string | null {
 export function describeConversationKey(key: string): ConversationIdentity {
   const match = /^(group|private):([1-9]\d{0,15})$/.exec(key);
   if (!match) {
+    const internalPrefix = 'internal:';
+    if (key.startsWith(internalPrefix) && key.length > internalPrefix.length) {
+      return { key, kind: 'internal', identifier: key.slice(internalPrefix.length), label: '内部' };
+    }
     const prefix = '未归属:';
     return key.startsWith(prefix) && key.length > prefix.length
       ? { key, kind: 'unattributed', identifier: key.slice(prefix.length), label: '未归属' }
@@ -103,6 +107,73 @@ export interface UsageTotals {
   readonly turns: number;
   readonly steps: number;
   readonly unattributedCost: number;
+  readonly attributedCost: number | null;
+  readonly buckets: UsageBuckets | null;
+  readonly byTier: UsageByTier | null;
+  readonly cacheHitRate: number | null;
+  readonly avgCostPerTurn: number | null;
+  readonly avgCostPerStep: number | null;
+}
+
+export interface UsageBuckets {
+  readonly cacheMiss: number;
+  readonly cacheHit: number;
+  readonly cacheWrite: number;
+  readonly output: number;
+  readonly reasoning: number;
+}
+
+export interface UsageByTier {
+  readonly peak: number;
+  readonly off: number;
+}
+
+export interface UsageNowTier {
+  readonly model: string;
+  readonly label: string;
+  readonly tier: 'peak' | 'off';
+  readonly tierLabel: string;
+  readonly currency: string;
+  readonly symbol: string;
+  readonly unit: number;
+  readonly estimated: boolean;
+  readonly cacheHit: number;
+  readonly cacheMiss: number;
+  readonly cacheWrite: number;
+  readonly output: number;
+}
+
+export interface UsagePriceModel {
+  readonly label: string;
+  readonly off: {
+    readonly cacheHit: number;
+    readonly cacheMiss: number;
+    readonly cacheWrite: number;
+    readonly output: number;
+  };
+}
+
+export interface UsagePriceTable {
+  readonly version: string;
+  readonly currency: string;
+  readonly symbol: string;
+  readonly unit: number;
+  readonly peakMultiplier: number;
+  readonly peakWindows: readonly (readonly [number, number])[];
+  readonly peakWeekdays: readonly number[];
+  readonly holidayCount: number;
+  readonly models: Readonly<Record<string, UsagePriceModel>>;
+}
+
+export interface UsageLedgerStats {
+  readonly journalLines: number;
+  readonly maxLines: number;
+  readonly droppedLines: number;
+  readonly sessions: number;
+  readonly baselines: number;
+  readonly samples: number;
+  readonly lastIngestAt: number;
+  readonly lastCompactedAt: number;
 }
 
 export interface ConversationUsage {
@@ -118,10 +189,17 @@ export interface ConversationUsage {
   readonly steps: number;
   readonly lastAt: string | null;
   readonly models: readonly string[];
+  readonly buckets: UsageBuckets | null;
+  readonly attributedCost: number | null;
+  readonly unattributedCost: number | null;
+  readonly byTier: UsageByTier | null;
+  readonly cacheHitRate: number | null;
+  readonly firstAt: string | null;
 }
 
 export interface UsageSnapshot {
   readonly source: 'chat-ledger';
+  readonly revision: string | null;
   readonly generatedAt: string;
   readonly currency: string;
   readonly symbol: string;
@@ -129,6 +207,33 @@ export interface UsageSnapshot {
   readonly conversations: readonly ConversationUsage[];
   readonly limit: number;
   readonly limited: boolean;
+  readonly unavailable: readonly ('pricing' | 'ledger')[];
+  readonly priceVersion: string | null;
+  readonly nowTier: UsageNowTier | null;
+  readonly priceTable: UsagePriceTable | null;
+  readonly ledger: UsageLedgerStats | null;
+}
+
+function parseBuckets(value: unknown): UsageBuckets | null {
+  if (!isRecord(value)) return null;
+  const cacheMiss = nonNegativeInteger(value.cacheMiss);
+  const cacheHit = nonNegativeInteger(value.cacheHit);
+  const cacheWrite = nonNegativeInteger(value.cacheWrite);
+  const output = nonNegativeInteger(value.output);
+  const reasoning = nonNegativeInteger(value.reasoning);
+  if ([cacheMiss, cacheHit, cacheWrite, output, reasoning].some(item => item === null)) return null;
+  return { cacheMiss: cacheMiss!, cacheHit: cacheHit!, cacheWrite: cacheWrite!, output: output!, reasoning: reasoning! };
+}
+
+function parseByTier(value: unknown): UsageByTier | null {
+  if (!isRecord(value)) return null;
+  const peak = nonNegativeNumber(value.peak);
+  const off = nonNegativeNumber(value.off);
+  return peak === null || off === null ? null : { peak, off };
+}
+
+function optionalNonNegativeNumber(value: unknown): number | null {
+  return value === undefined ? null : nonNegativeNumber(value);
 }
 
 function parseTotals(value: unknown): UsageTotals | null {
@@ -145,18 +250,31 @@ function parseTotals(value: unknown): UsageTotals | null {
   const turns = nonNegativeInteger(value.turns);
   const steps = nonNegativeInteger(value.steps);
   const unattributedCost = nonNegativeNumber(value.unattributedCost);
+  const enhancedValues = [value.attributedCost, value.buckets, value.byTier, value.cacheHitRate,
+    value.avgCostPerTurn, value.avgCostPerStep];
+  const hasEnhancedValues = enhancedValues.some(item => item !== undefined);
+  if (hasEnhancedValues && enhancedValues.some(item => item === undefined)) return null;
+  const attributedCost = optionalNonNegativeNumber(value.attributedCost);
+  const buckets = value.buckets === undefined ? null : parseBuckets(value.buckets);
+  const byTier = value.byTier === undefined ? null : parseByTier(value.byTier);
+  const cacheHitRate = optionalNonNegativeNumber(value.cacheHitRate);
+  const avgCostPerTurn = optionalNonNegativeNumber(value.avgCostPerTurn);
+  const avgCostPerStep = optionalNonNegativeNumber(value.avgCostPerStep);
   if ([totalTokens, inputTokens, outputTokens, cacheHitTokens, cacheMissTokens, cacheWriteTokens, reasoningTokens,
-    cost, conversations, turns, steps, unattributedCost].some(item => item === null)) return null;
+    cost, conversations, turns, steps, unattributedCost].some(item => item === null)
+    || hasEnhancedValues && (attributedCost === null || buckets === null || byTier === null || cacheHitRate === null
+      || avgCostPerTurn === null || avgCostPerStep === null || cacheHitRate > 1)) return null;
   return {
     totalTokens: totalTokens!, inputTokens: inputTokens!, outputTokens: outputTokens!,
     cacheHitTokens: cacheHitTokens!, cacheMissTokens: cacheMissTokens!, cacheWriteTokens: cacheWriteTokens!,
     reasoningTokens: reasoningTokens!, cost: cost!, estimated: value.estimated,
     conversations: conversations!, turns: turns!, steps: steps!, unattributedCost: unattributedCost!,
+    attributedCost, buckets, byTier, cacheHitRate, avgCostPerTurn, avgCostPerStep,
   };
 }
 
 function parseConversationUsage(value: unknown): ConversationUsage | null {
-  if (!isRecord(value) || typeof value.estimated !== 'boolean' || !Array.isArray(value.models) || value.models.length > 64) return null;
+  if (!isRecord(value) || typeof value.estimated !== 'boolean' || !Array.isArray(value.models) || value.models.length > 256) return null;
   const key = boundedText(value.key, 128);
   const sessionCount = nonNegativeInteger(value.sessionCount);
   const totalTokens = nonNegativeInteger(value.totalTokens);
@@ -168,13 +286,98 @@ function parseConversationUsage(value: unknown): ConversationUsage | null {
   const steps = nonNegativeInteger(value.steps);
   const lastAt = value.lastAt === 0 ? null : timestamp(value.lastAt);
   const models = value.models.map(model => boundedText(model, 256));
+  const enhancedValues = [value.buckets, value.attributedCost, value.unattributedCost, value.byTier,
+    value.cacheHitRate, value.firstAt];
+  const hasEnhancedValues = enhancedValues.some(item => item !== undefined);
+  if (hasEnhancedValues && enhancedValues.some(item => item === undefined)) return null;
+  const buckets = value.buckets === undefined ? null : parseBuckets(value.buckets);
+  const attributedCost = optionalNonNegativeNumber(value.attributedCost);
+  const unattributedCost = optionalNonNegativeNumber(value.unattributedCost);
+  const byTier = value.byTier === undefined ? null : parseByTier(value.byTier);
+  const cacheHitRate = optionalNonNegativeNumber(value.cacheHitRate);
+  const firstAt = value.firstAt === undefined || value.firstAt === 0 ? null : timestamp(value.firstAt);
   if (!key || sessionCount === null || totalTokens === null || inputTokens === null
     || outputTokens === null || cacheHitTokens === null || cost === null || turns === null || steps === null
-    || lastAt === null && value.lastAt !== 0 || models.some(model => model === null) || new Set(models).size !== models.length) return null;
+    || lastAt === null && value.lastAt !== 0 || models.some(model => model === null) || new Set(models).size !== models.length
+    || hasEnhancedValues && (buckets === null || attributedCost === null || unattributedCost === null || byTier === null
+      || cacheHitRate === null || cacheHitRate > 1 || firstAt === null && value.firstAt !== 0)) return null;
   return {
     key, sessionCount, totalTokens, inputTokens, outputTokens, cacheHitTokens, cost,
-    estimated: value.estimated, turns, steps, lastAt, models: models as string[],
+    estimated: value.estimated, turns, steps, lastAt, models: models as string[], buckets,
+    attributedCost, unattributedCost, byTier, cacheHitRate, firstAt,
   };
+}
+
+function parseNowTier(value: unknown): UsageNowTier | null {
+  if (!isRecord(value) || typeof value.estimated !== 'boolean' || value.tier !== 'peak' && value.tier !== 'off') return null;
+  const model = boundedText(value.model, 256);
+  const label = boundedText(value.label, 256);
+  const tierLabel = boundedText(value.tierLabel, 64);
+  const currency = boundedText(value.currency, 16);
+  const symbol = boundedText(value.symbol, 16);
+  const unit = nonNegativeNumber(value.unit);
+  const cacheHit = nonNegativeNumber(value.cacheHit);
+  const cacheMiss = nonNegativeNumber(value.cacheMiss);
+  const cacheWrite = nonNegativeNumber(value.cacheWrite);
+  const output = nonNegativeNumber(value.output);
+  if (!model || !label || !tierLabel || !currency || !symbol || unit === null || unit < 1
+    || cacheHit === null || cacheMiss === null || cacheWrite === null || output === null) return null;
+  return { model, label, tier: value.tier, tierLabel, currency: currency.toUpperCase(), symbol, unit,
+    estimated: value.estimated, cacheHit, cacheMiss, cacheWrite, output };
+}
+
+function parsePriceTable(value: unknown): UsagePriceTable | null {
+  if (!isRecord(value) || !Array.isArray(value.peakWindows) || !Array.isArray(value.peakWeekdays)
+    || !isRecord(value.models) || Object.keys(value.models).length > 256) return null;
+  const version = boundedText(value.version, 256);
+  const currency = boundedText(value.currency, 16);
+  const symbol = boundedText(value.symbol, 16);
+  const unit = nonNegativeNumber(value.unit);
+  const peakMultiplier = nonNegativeNumber(value.peakMultiplier);
+  const holidayCount = nonNegativeInteger(value.holidayCount);
+  if (!version || !currency || !symbol || unit === null || unit < 1 || peakMultiplier === null || peakMultiplier <= 0
+    || holidayCount === null || value.peakWindows.length > 24 || value.peakWeekdays.length > 7) return null;
+  const peakWindows: Array<readonly [number, number]> = [];
+  for (const window of value.peakWindows) {
+    if (!Array.isArray(window) || window.length !== 2) return null;
+    const start = nonNegativeNumber(window[0]);
+    const end = nonNegativeNumber(window[1]);
+    if (start === null || end === null || start >= end || end > 24) return null;
+    peakWindows.push([start, end]);
+  }
+  const peakWeekdays = value.peakWeekdays.map(nonNegativeInteger);
+  if (peakWeekdays.some(day => day === null || day < 1 || day > 7)
+    || new Set(peakWeekdays).size !== peakWeekdays.length) return null;
+  const models: Record<string, UsagePriceModel> = {};
+  for (const [name, modelValue] of Object.entries(value.models)) {
+    const safeName = boundedText(name, 256);
+    if (!safeName || !isRecord(modelValue) || !isRecord(modelValue.off)) return null;
+    const label = boundedText(modelValue.label, 256);
+    const cacheHit = nonNegativeNumber(modelValue.off.cacheHit);
+    const cacheMiss = nonNegativeNumber(modelValue.off.cacheMiss);
+    const cacheWrite = nonNegativeNumber(modelValue.off.cacheWrite);
+    const output = nonNegativeNumber(modelValue.off.output);
+    if (!label || cacheHit === null || cacheMiss === null || cacheWrite === null || output === null) return null;
+    models[safeName] = { label, off: { cacheHit, cacheMiss, cacheWrite, output } };
+  }
+  return { version, currency: currency.toUpperCase(), symbol, unit, peakMultiplier,
+    peakWindows, peakWeekdays: peakWeekdays as number[], holidayCount, models };
+}
+
+function parseLedger(value: unknown): UsageLedgerStats | null {
+  if (!isRecord(value)) return null;
+  const journalLines = nonNegativeInteger(value.journalLines);
+  const maxLines = nonNegativeInteger(value.maxLines);
+  const droppedLines = nonNegativeInteger(value.droppedLines);
+  const sessions = nonNegativeInteger(value.sessions);
+  const baselines = nonNegativeInteger(value.baselines);
+  const samples = nonNegativeInteger(value.samples);
+  const lastIngestAt = nonNegativeInteger(value.lastIngestAt);
+  const lastCompactedAt = nonNegativeInteger(value.lastCompactedAt);
+  if ([journalLines, maxLines, droppedLines, sessions, baselines, samples, lastIngestAt, lastCompactedAt]
+    .some(item => item === null) || maxLines === 0 || timestamp(lastIngestAt) === null || timestamp(lastCompactedAt) === null) return null;
+  return { journalLines: journalLines!, maxLines: maxLines!, droppedLines: droppedLines!, sessions: sessions!,
+    baselines: baselines!, samples: samples!, lastIngestAt: lastIngestAt!, lastCompactedAt: lastCompactedAt! };
 }
 
 export function parseUsageSnapshot(value: unknown): UsageSnapshot | null {
@@ -185,8 +388,10 @@ export function parseUsageSnapshot(value: unknown): UsageSnapshot | null {
   const symbol = boundedText(value.symbol, 16);
   const totals = parseTotals(value.totals);
   const limit = nonNegativeInteger(value.limit);
-  if (!generatedAt || !currency || !symbol || !totals || totals.unattributedCost > totals.cost
-    || limit === null || limit < 1 || limit > 200 || value.conversations.length > limit) return null;
+  const revision = value.revision === undefined ? null : boundedText(value.revision, 256);
+  if (!generatedAt || !currency || !symbol || !totals
+    || value.revision !== undefined && !revision || limit === null || limit < 1 || limit > 500
+    || value.conversations.length > limit) return null;
   const conversations: ConversationUsage[] = [];
   const keys = new Set<string>();
   for (const item of value.conversations) {
@@ -195,9 +400,28 @@ export function parseUsageSnapshot(value: unknown): UsageSnapshot | null {
     keys.add(conversation.key);
     conversations.push(conversation);
   }
+  const pricingValues = [value.priceVersion, value.nowTier, value.priceTable];
+  const pricingPresent = pricingValues.some(item => item !== undefined);
+  if (pricingPresent && pricingValues.some(item => item === undefined)) return null;
+  const priceVersion = value.priceVersion === undefined ? null : boundedText(value.priceVersion, 256);
+  const nowTier = value.nowTier === undefined ? null : parseNowTier(value.nowTier);
+  const priceTable = value.priceTable === undefined ? null : parsePriceTable(value.priceTable);
+  const ledger = value.ledger === undefined ? null : parseLedger(value.ledger);
+  if (pricingPresent && (!priceVersion || !nowTier || !priceTable) || value.ledger !== undefined && !ledger) return null;
+  let unavailable: Array<'pricing' | 'ledger'>;
+  if (value.unavailable === undefined) {
+    unavailable = [...(!pricingPresent ? ['pricing' as const] : []), ...(!ledger ? ['ledger' as const] : [])];
+  } else {
+    const unavailableValues = value.unavailable;
+    if (!Array.isArray(unavailableValues) || unavailableValues.length > 2
+      || unavailableValues.some(item => item !== 'pricing' && item !== 'ledger')
+      || new Set(unavailableValues).size !== unavailableValues.length) return null;
+    unavailable = ['pricing', 'ledger'].filter(item => unavailableValues.includes(item)) as Array<'pricing' | 'ledger'>;
+    if (unavailable.includes('pricing') === pricingPresent || unavailable.includes('ledger') === Boolean(ledger)) return null;
+  }
   return {
-    source: 'chat-ledger', generatedAt, currency: currency.toUpperCase(), symbol, totals,
-    conversations, limit, limited: value.limited,
+    source: 'chat-ledger', revision, generatedAt, currency: currency.toUpperCase(), symbol, totals,
+    conversations, limit, limited: value.limited, unavailable, priceVersion, nowTier, priceTable, ledger,
   };
 }
 
@@ -208,12 +432,6 @@ export function formatActivityCount(value: number): string {
   return countFormatter.format(value);
 }
 
-export function formatActivityCost(value: number, currency: string, symbol: string): string {
-  try {
-    return new Intl.NumberFormat('zh-CN', {
-      style: 'currency', currency, currencyDisplay: 'narrowSymbol', minimumFractionDigits: 2, maximumFractionDigits: 6,
-    }).format(value);
-  } catch {
-    return `${symbol}${decimalFormatter.format(value)}`;
-  }
+export function formatActivityCost(value: number, _currency: string, symbol: string): string {
+  return `${symbol}${decimalFormatter.format(value)}`;
 }

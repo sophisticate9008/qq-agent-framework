@@ -84,11 +84,16 @@ function usageFixture(): unknown {
       inputTokens: 41_000,
       totalTokens: 45_678,
       cost: 1.234567,
+      attributedCost: 1.111111,
       estimated: true,
       conversations: 2,
       turns: 12,
       steps: 21,
       unattributedCost: 0.123456,
+      byTier: { peak: 0.4, off: 0.834567 },
+      cacheHitRate: 10_000 / 41_000,
+      avgCostPerTurn: 1.234567 / 12,
+      avgCostPerStep: 1.234567 / 21,
     },
     conversations: [
       {
@@ -98,9 +103,14 @@ function usageFixture(): unknown {
         inputTokens: 28_500,
         totalTokens: 31_500,
         cost: 0.987654,
+        attributedCost: 0.9,
+        unattributedCost: 0.087654,
+        byTier: { peak: 0.3, off: 0.687654 },
+        cacheHitRate: 8_000 / 28_500,
         estimated: true,
         turns: 8,
         steps: 14,
+        firstAt: Date.UTC(2026, 9, 24, 7, 29, 0),
         lastAt: Date.UTC(2026, 9, 24, 8, 29, 0),
         models: ['fixture-chat-model', xssText],
       },
@@ -111,13 +121,57 @@ function usageFixture(): unknown {
         inputTokens: 12_500,
         totalTokens: 14_178,
         cost: 0.123457,
+        attributedCost: 0.111111,
+        unattributedCost: 0.012346,
+        byTier: { peak: 0.1, off: 0.023457 },
+        cacheHitRate: 2_000 / 12_500,
         estimated: true,
         turns: 4,
         steps: 7,
+        firstAt: Date.UTC(2026, 9, 24, 7, 28, 0),
         lastAt: Date.UTC(2026, 9, 24, 8, 28, 0),
         models: ['fixture-chat-model'],
       },
     ],
+  };
+}
+
+function usageTurnsFixture(key: string): unknown {
+  const sessionId = key === filteredKey ? 'fixture-session-private-420002' : resetSessionId;
+  const turnBuckets = { cacheMiss: 900, cacheHit: 3_200, cacheWrite: 30, output: 420, reasoning: 40 };
+  return {
+    ok: true,
+    generatedAt: Date.UTC(2026, 9, 24, 8, 30, 0),
+    currency: 'USD',
+    symbol: '$',
+    key,
+    sessionIds: [sessionId],
+    sessions: 1,
+    buckets: turnBuckets,
+    cost: 0.01,
+    attributedCost: 0.01,
+    unattributedCost: 0,
+    byTier: { peak: 0, off: 0.01 },
+    estimated: true,
+    firstAt: Date.UTC(2026, 9, 24, 8, 20, 0),
+    lastAt: Date.UTC(2026, 9, 24, 8, 29, 0),
+    models: ['fixture-chat-model'],
+    turnLimit: 200,
+    limited: false,
+    turns: [{
+      sessionId,
+      key,
+      turn: 1,
+      steps: 1,
+      attempts: 1,
+      startedAt: Date.UTC(2026, 9, 24, 8, 28, 0),
+      endedAt: Date.UTC(2026, 9, 24, 8, 29, 0),
+      model: 'fixture-chat-model',
+      provider: 'fixture-provider',
+      buckets: turnBuckets,
+      cost: 0.01,
+      tier: 'off',
+    }],
   };
 }
 
@@ -128,7 +182,6 @@ function createFixtureFetch(state: SmokeState): typeof fetch {
     assert.equal(url.hostname, '127.0.0.1');
     assert.equal(request.headers.get('x-console-token'), legacyToken);
     state.legacyRequests.push(`${request.method} ${url.pathname}${url.search}`);
-    if (url.pathname.includes('turn')) return jsonResponse({ ok: false }, 404);
     if (state.unavailable && (url.pathname === '/api/sessions' || url.pathname === '/api/tokens/summary')) {
       throw new TypeError('fixture legacy API disconnected');
     }
@@ -136,8 +189,12 @@ function createFixtureFetch(state: SmokeState): typeof fetch {
       return jsonResponse({ sessions: state.sessions });
     }
     if (request.method === 'GET' && url.pathname === '/api/tokens/summary') {
-      assert.equal(url.searchParams.get('limit'), '100');
+      assert.equal(url.searchParams.get('limit'), '200');
       return jsonResponse(usageFixture());
+    }
+    if (request.method === 'GET' && url.pathname === '/api/tokens/turns') {
+      assert.equal(url.searchParams.get('limit'), '200');
+      return jsonResponse(usageTurnsFixture(url.searchParams.get('key') ?? resetKey));
     }
     if (request.method === 'POST' && url.pathname === '/api/session/reset') {
       const body = await request.json() as unknown;
@@ -424,10 +481,11 @@ async function run(): Promise<void> {
     await page.locator(`[data-usage-key="${resetKey}"]`).getByText(/0\.987654/).waitFor();
     await page.getByText(xssText, { exact: true }).waitFor();
     await page.getByText(/无法拆到具体轮次的历史估算费用/).waitFor();
+    await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
     for (const title of ['账本汇总', 'Token 构成', '按会话汇总']) {
       assert.equal(await visibleNavigator(page).getByRole('button', { name: title, exact: true }).count(), 1);
     }
-    assert(!state.legacyRequests.some(request => request.includes('turn')));
+    assert(state.legacyRequests.some(request => request.includes('/api/tokens/turns')));
 
     await page.setViewportSize({ width: 390, height: 844 });
     for (const theme of ['light', 'dark'] as const) {
@@ -502,7 +560,7 @@ async function run(): Promise<void> {
       resetSuccessOnlyConfirmsBindingRemoved: true,
       usageTotalsAndConversationDetails: true,
       estimatedCostIsNonzero: true,
-      perTurnEndpointRequired: false,
+      perTurnEndpointRequired: true,
       disconnectedApiIsUnavailable: true,
       unconnectedChatHostPrompt: true,
       workspaceSearch: true,

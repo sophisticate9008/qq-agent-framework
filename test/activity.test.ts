@@ -31,6 +31,9 @@ test('session snapshots expose only validated group and private bindings', () =>
   assert.deepEqual(describeConversationKey('private:90001'), {
     key: 'private:90001', kind: 'private', identifier: '90001', label: '私聊',
   });
+  assert.deepEqual(describeConversationKey('internal:usage-maintenance'), {
+    key: 'internal:usage-maintenance', kind: 'internal', identifier: 'usage-maintenance', label: '内部',
+  });
 });
 
 test('session parsing rejects missing revisions, empty keys and duplicate bindings', () => {
@@ -85,6 +88,49 @@ test('usage snapshots validate ledger totals and conversation summaries', () => 
   assert.equal(result.currency, 'USD');
   assert.equal(result.totals.totalTokens, 12345);
   assert.equal(result.conversations[0]?.models[0], 'gpt-5');
+  assert.equal(result.revision, null);
+  assert.deepEqual(result.unavailable, ['pricing', 'ledger']);
+});
+
+test('usage snapshots parse complete pricing, ledger and enhanced statistics without exposing extras', () => {
+  const result = parseUsageSnapshot({
+    source: 'chat-ledger', revision: 'revision-full', generatedAt: 1_798_014_600_000,
+    currency: 'cny', symbol: '¥', unavailable: [], priceVersion: 'price-v2',
+    nowTier: {
+      model: 'reference-model', label: '参考模型', tier: 'peak', tierLabel: '高峰', currency: 'CNY',
+      symbol: '¥', unit: 10_000, estimated: true, cacheHit: 0.1, cacheMiss: 1, cacheWrite: 1.2, output: 4,
+    },
+    priceTable: {
+      version: 'price-v2', currency: 'CNY', symbol: '¥', unit: 10_000, peakMultiplier: 1.75,
+      peakWindows: [[8, 11], [15.5, 19]], peakWeekdays: [1, 2, 3, 4], holidayCount: 18,
+      models: { '<model>': { label: '<script>alert(1)</script>', off: { cacheHit: 0.1, cacheMiss: 1, cacheWrite: 1.2, output: 4 } } },
+    },
+    ledger: {
+      journalLines: 12, maxLines: 20_000, droppedLines: 2, sessions: 3, baselines: 2, samples: 9,
+      lastIngestAt: 1_798_014_590_000, lastCompactedAt: 0,
+    },
+    totals: {
+      totalTokens: 160, inputTokens: 130, outputTokens: 30, cacheHitTokens: 20, cacheMissTokens: 100,
+      cacheWriteTokens: 10, reasoningTokens: 4, buckets: { cacheMiss: 100, cacheHit: 20, cacheWrite: 10, output: 30, reasoning: 4 },
+      cost: 0.4, attributedCost: 0.5, unattributedCost: 0, byTier: { peak: 0.3, off: 0.1 }, estimated: true,
+      conversations: 1, turns: 2, steps: 3, cacheHitRate: 20 / 130, avgCostPerTurn: 0.2, avgCostPerStep: 0.4 / 3,
+    },
+    conversations: [{
+      key: 'internal:usage-maintenance', sessionCount: 1, totalTokens: 160, inputTokens: 130,
+      outputTokens: 30, cacheHitTokens: 20, cacheMissTokens: 100, cacheWriteTokens: 10, reasoningTokens: 4,
+      buckets: { cacheMiss: 100, cacheHit: 20, cacheWrite: 10, output: 30, reasoning: 4 },
+      cost: 0.4, attributedCost: 0.5, unattributedCost: 0, byTier: { peak: 0.3, off: 0.1 },
+      cacheHitRate: 20 / 130, estimated: true, turns: 2, steps: 3, firstAt: 1_798_014_500_000,
+      lastAt: 1_798_014_590_000, models: ['<model>'],
+    }],
+    limit: 200, limited: false,
+  });
+  assert(result);
+  assert.equal(result.revision, 'revision-full');
+  assert.equal(result.priceTable?.peakMultiplier, 1.75);
+  assert.equal(result.priceTable?.models['<model>']?.label, '<script>alert(1)</script>');
+  assert.equal(result.ledger?.lastCompactedAt, 0);
+  assert.equal(result.conversations[0]?.attributedCost, 0.5);
 });
 
 test('usage accepts bounded historical keys and treats zero lastAt as unrecorded', () => {
@@ -121,13 +167,18 @@ test('usage parsing rejects malformed, negative and non-ledger statistics', () =
   assert.equal(parseUsageSnapshot({ ...base, source: 'platform-bill' }), null);
   assert.equal(parseUsageSnapshot({ ...base, generatedAt: Number.MAX_SAFE_INTEGER }), null);
   assert.equal(parseUsageSnapshot({ ...base, totals: { ...base.totals, cost: -1 } }), null);
-  assert.equal(parseUsageSnapshot({ ...base, limit: 201 }), null);
-  assert.equal(parseUsageSnapshot({ ...base, totals: { ...base.totals, cost: 0, unattributedCost: 0.01 } }), null);
+  assert.equal(parseUsageSnapshot({ ...base, limit: 501 }), null);
+  assert(parseUsageSnapshot({ ...base, totals: { ...base.totals, cost: 0, unattributedCost: 0.01 } }));
+  assert.equal(parseUsageSnapshot({ ...base, unavailable: ['pricing'], ledger: {
+    journalLines: 0, maxLines: 20_000, droppedLines: 0, sessions: 0, baselines: 0, samples: 0,
+    lastIngestAt: 0, lastCompactedAt: Number.MAX_SAFE_INTEGER,
+  } }), null);
 });
 
 test('activity formatters use locale counts and fall back to the provided currency symbol', () => {
   assert.equal(formatActivityCount(12345), '12,345');
-  assert.match(formatActivityCost(1.25, 'USD', '$'), /1\.25/);
+  assert.equal(formatActivityCost(1.25, 'USD', 'US$'), 'US$1.25');
+  assert.equal(formatActivityCost(1.25, 'USD', '$'), '$1.25');
   assert.equal(formatActivityCost(1.25, 'invalid-currency', '¤'), '¤1.25');
   assert.equal(formatActivityCost(1.25, 'invalid-currency', '<b>'), '<b>1.25');
 });

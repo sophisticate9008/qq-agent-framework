@@ -1,83 +1,98 @@
-# TypeScript 功能开发与挂载点
+# 扩展功能
 
-本文以当前源码为准。所有相对程序导入使用 `.ts`，编译时改写成 JavaScript 扩展名。
-公共类型见 `src/core/types.ts`；数据服务见 `src/core/context.ts`；内核见 `src/core/engine.ts`。
+功能包通过 manifest 声明订阅和 capability，并在同步 `setup` 中注册处理器。
 
-## 一个独立功能
+## 最小功能
 
 ```ts
 import type { FeatureDefinition } from '../core/types.ts';
 
-export const exampleFeature: FeatureDefinition = {
-  id: 'example',
+export const noticeFeature: FeatureDefinition = {
+  id: 'notice',
   version: '1.0.0',
   apiVersion: 1,
   capabilities: ['messaging.send'],
   subscriptions: ['trigger.fired'],
   setup(context) {
     context.on('trigger.fired', async (execution, event) => {
-      if (event.data.kind !== 'example') return;
-      const receipt = await execution.send([{ type: 'text', text: '示例' }]);
-      if (receipt.status === 'confirmed') execution.state.set('lastEventId', event.id);
+      if (event.data.kind !== 'notice') return;
+      await execution.send([{ type: 'text', text: '通知已触发' }]);
     });
   },
 };
 ```
 
-宿主还必须 `engine.install(exampleFeature)` 并通过 policy 授予精确会话范围的
-`messaging.send` 和有限预算。功能 manifest 声明、偏好里的 allow 字段或模型的自称均不构成授权。
-示例只说明 API，不代表应启用真实主动行为。现有示例见 `src/features/`。
+宿主还需要安装功能，并为该功能、目标会话和 `messaging.send` 创建有限授权。代码声明、配置字段和消息内容都不能替代授权。
 
-## 新增事件与能力，不修改核心
+## 自定义事件和 capability
 
-宿主构建引擎时可以提供显式扩展。以下为只读本地校验示例，不含真实图片调用：
+宿主在创建引擎时注册扩展：
 
 ```ts
-import type { EngineOptions } from './src/core/engine.ts';
-
-const extensions: Pick<EngineOptions, 'eventValidators' | 'effectAdapters'> = {
+const engine = createEngine({
+  transport,
+  persona,
   eventValidators: {
-    'artifact.ready': data => typeof data.assetId === 'string',
+    'asset.ready': data => typeof data.assetId === 'string',
   },
   effectAdapters: {
-    'artifact.inspect': {
-      execute({ input, scope, signal }) {
+    'asset.inspect': {
+      execute({ input, signal }) {
         if (signal.aborted) throw new Error('cancelled');
-        return { acceptable: true, conversationId: scope.conversationId, inspected: input };
+        return { accepted: true, input };
       },
     },
   },
-};
+});
 ```
 
-将 `extensions` 展开到显式宿主的 `createEngine` 参数中。功能 manifest 声明对应事件和能力，
-处理器用 `execution.invoke('artifact.inspect', { assetId: 'fixture' })`，宿主另外授权该能力。
-扩展同样经过声明检查、作用域授权、预算、暂停/撤销、排队上限、取消和脱敏结果记录。
-校验器必须同步且显式返回 true；返回 false 或抛异常都会拒绝事件。宿主扩展表在引擎创建时固定。
-不可同名覆盖内置事件或内置模型/发送路径；普通事件、UI 或偏好没有注册接口。
+功能必须在 manifest 中声明 `asset.ready` 和 `asset.inspect`，并通过 `execution.invoke` 调用。扩展与内置副作用一样经过输入冻结、队列上限、取消、授权和审计。
 
-适配器只接收冻结的 JSON 输入、必要 scope 与 AbortSignal，不自动取得人设、完整配置或密钥。
-真实适配器所需凭据只由宿主显式提供，不得暴露给功能 SDK、审计或管理快照。
-通用能力没有自动幂等或重试：若涉及付费生成，必须先补明确的任务/预算/恢复协议。
+事件校验器必须同步返回 `true`。effect adapter 只得到冻结输入、最小 scope 和 `AbortSignal`；凭据、完整配置和存储句柄不会自动暴露给功能。
 
-## SDK 与生命周期
+## 管理挂载点
 
-- `context` 是分离的 persona、configuration、preferences 和 provenance 快照。
-- `state` 仅访问本功能和本会话；值必须是 JSON 数据，读取后需按业务类型校验。
-- `generate` 只走 model.respond；`send` 只走 messaging.send；`invoke` 只走已挂载自定义能力。
-- `setup` 同步；`on` 注册已声明事件；`defer` 和返回函数登记同步清理，逆序执行。
-- 卸载先置 stopping 并 abort，再等待已开始执行和副作用结束，之后清理。
-- 处理器应 await 每个副作用；即便遗漏，内核仍排空已经发起的 Promise，不能把拒绝的动作记成完成。
-- 处理器结束后保存的 execution 不可再操作状态或发起副作用。取消是协作式，不能抢占恶意/卡死 JS。
-- 不要在自己的处理器里 await 自己的 uninstall/stop，否则会等待自身排空；生命周期由宿主控制。
+宿主可把受限管理路由显式交给管理服务器：
 
-## 开发、验收、发布
+```ts
+const server = createAdminServer({
+  token,
+  snapshot,
+  routes: createHostAdminRoutes(host),
+});
+```
 
-1. 把主人需求记录为工程目标与验收，先判断哪些是固定定义、配置、偏好、状态或权限。
-2. 在独立功能模块中实现，只有通用基础件缺失时才改核心；接口变更记录版本与兼容范围。
-3. 先做替身单测，再用真实内核组合；覆盖拒绝、超时/未知、重复、撤销与卸载。
-4. 运行 `npm run check`、`npm test`、`npm run test:built`；涉及页面再跑浏览器冒烟。
-5. 把外部验收单独标注：旧/新目标会话、真实注入、序列化、网关确认各有证据，不能互相替代。
-6. 功能安装和生产部署不是一次聊天推断能决定的动作；先核对当前显式授权并保留恢复资料。
+自定义 `AdminRoute` 仅支持 `GET` / `POST` 的 `/api/...` 路径，不能覆盖内建入口。处理器接收解析后的 query、POST JSON body 和断连取消信号；认证、同源检查、请求/响应大小限制由服务器统一执行。`createHostAdminRoutes` 只读返回宿主计数及 sessions/tasks/outbox/replies 分页元数据，不提供权限变更或原始消息内容。
 
-当前 UI 只能手动运行隔离演示，不是代码上传、审批、任务开发或生产部署入口。
+## Agent 消息筛选
+
+不同 SDK 的 `assistant/message` 可能包含中间工作文本，并不天然等于 turn 完成或可公开回复。宿主可配置同步 `selectAgentMessage(event, binding)`，读取事件原始 `data` 后返回允许发送的消息块，或以 `null` 跳过出站和发送预算；未配置时保留普通 relay。具体筛选策略由 operator 按外部协议定义，不应把旧业务人格或工具隐藏规则硬编码进框架。
+
+## 资源消息
+
+功能发送图片、音频或文件时只提交已经登记的 `assetId`。功能不应传递任意绝对路径、读取资源内容或猜测 transport 支持情况。资源目录与 transport 负责解析、类型校验、大小限制和生命周期。
+
+## 生命周期规则
+
+- `setup` 和清理函数保持同步；异步准备工作放在宿主装配阶段完成。
+- 处理器应 `await` 每个副作用并处理 `confirmed`、`rejected`、`unknown`。
+- 收到 `signal.aborted` 后尽快停止本地工作，但不要假定外部动作已撤销。
+- 处理器返回后不要保存并复用 `FeatureExecution`。
+- 不要从自己的处理器等待自身卸载或引擎停止。
+- 状态值必须是 JSON 数据，并在读取后按业务 schema 校验。
+
+## 开发流程
+
+1. 明确输入、输出、状态、资源、授权和失败终态。
+2. 优先写独立功能；只有多个功能共同需要时才扩展宿主或核心。
+3. 用替身测试功能，再用真实引擎验证授权拒绝、背压、取消、重复与卸载。
+4. 外部适配器分别验证认证、序列化、限速、回执和恢复。
+5. 运行：
+
+```sh
+npm run check
+npm test
+npm run test:built
+```
+
+管理演示页不是代码上传、授权审批或生产部署入口。

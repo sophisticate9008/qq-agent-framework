@@ -136,9 +136,12 @@ test('parallel mode preserves same-conversation send order', async () => {
   const entered = deferred(); const release = deferred();
   const calls: string[] = [];
   const { engine, install, allow } = fixture({ maxConcurrentSends: 4, transport: { async send(request) {
-    calls.push(request.content[0].text);
-    if (request.content[0].text === 'first') { entered.resolve(); await release.promise; }
-    return { status: 'confirmed', messageId: request.content[0].text };
+    const block = request.content[0];
+    assert.equal(block.type, 'text');
+    assert(block.type === 'text');
+    calls.push(block.text);
+    if (block.text === 'first') { entered.resolve(); await release.promise; }
+    return { status: 'confirmed', messageId: block.text };
   } } });
   allow('perf:room');
   install(async execution => {

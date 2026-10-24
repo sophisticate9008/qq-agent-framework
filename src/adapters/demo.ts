@@ -1,4 +1,5 @@
 import { FrameworkError, assert, snapshot } from '../core/values.ts'
+import { normalizeContent } from '../core/content.ts'
 import type {
   DeliveryReceipt,
   JsonObject,
@@ -6,7 +7,7 @@ import type {
   ModelAdapter,
   ModelRequest,
   SendRequest,
-  TextContent,
+  MessageContent,
   TransportAdapter,
 } from '../core/types.ts'
 
@@ -14,7 +15,7 @@ type ConfirmedReceipt = Extract<DeliveryReceipt, { status: 'confirmed' }>
 
 export interface DemoMessage {
   readonly conversationId: string
-  readonly content: readonly TextContent[]
+  readonly content: readonly MessageContent[]
   readonly idempotencyKey: string
   readonly status: 'confirmed'
   readonly messageId: string
@@ -43,8 +44,8 @@ function stableValue(value: JsonValue): JsonValue {
   return value
 }
 
-function stableStringify(value: JsonValue): string {
-  const serialized = JSON.stringify(stableValue(value))
+function stableStringify(value: unknown): string {
+  const serialized = JSON.stringify(stableValue(snapshot(value) as JsonValue))
   if (serialized === undefined) {
     throw new FrameworkError('INVALID_DATA', 'Expected JSON data.')
   }
@@ -76,7 +77,7 @@ export function createDemoTransport(): DemoTransport {
       throwIfAborted(request.signal)
       const storedRequest = snapshot({
         conversationId: request.conversationId,
-        content: request.content.map((block) => ({ type: block.type, text: block.text })),
+        content: normalizeContent(request.content),
         idempotencyKey: request.idempotencyKey,
       })
       const fingerprint = stableStringify({

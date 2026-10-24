@@ -16,11 +16,17 @@ export interface FrameworkEvent {
 }
 
 export interface TextContent { type: 'text'; text: string }
+export interface ImageContent { type: 'image'; assetId: string }
+export interface AudioContent { type: 'audio'; assetId: string }
+export interface FileContent { type: 'file'; assetId: string; name: string }
+export interface MentionContent { type: 'mention'; userId: string }
+export interface ReplyContent { type: 'reply'; messageId: string }
+export type MessageContent = TextContent | ImageContent | AudioContent | FileContent | MentionContent | ReplyContent;
 export type DeliveryReceipt = { status: 'confirmed'; messageId: string }
   | { status: 'unknown' | 'rejected' };
 export interface SendRequest {
   conversationId: string;
-  content: readonly TextContent[];
+  content: readonly MessageContent[];
   idempotencyKey: string;
   signal: AbortSignal;
 }
@@ -36,7 +42,7 @@ export interface FeatureExecution {
   readonly state: FeatureStateScope;
   readonly signal: AbortSignal;
   generate(prompt: JsonValue): Promise<{ text: string }>;
-  send(content: readonly TextContent[]): Promise<DeliveryReceipt>;
+  send(content: readonly MessageContent[]): Promise<DeliveryReceipt>;
   invoke(capability: string, input: JsonValue): Promise<JsonValue>;
 }
 export type FeatureHandler = (execution: FeatureExecution, event: FrameworkEvent) => unknown | Promise<unknown>;

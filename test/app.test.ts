@@ -19,8 +19,11 @@ test('demo assembly uses real core and both features while remaining isolated', 
     const after = app.snapshot();
     assert.equal(after.outbox.length, 2);
     assert(after.outbox.every(entry => entry.status === 'confirmed'));
-    assert.match(after.outbox[0].content[0].text, /^\[演示\]/);
-    assert.match(after.outbox[1].content[0].text, /轻轻提醒/);
+    const reply = after.outbox[0].content[0];
+    const reminder = after.outbox[1].content[0];
+    assert(reply.type === 'text' && reminder.type === 'text');
+    assert.match(reply.text, /^\[演示\]/);
+    assert.match(reminder.text, /轻轻提醒/);
     assert.deepEqual(after.context.persona, before.context.persona);
   } finally { await app.stop(); }
 });

@@ -14,7 +14,7 @@ import type {
   JsonObject,
   JsonValue,
   SendRequest,
-  TextContent,
+  MessageContent,
 } from '../src/core/types.ts'
 
 interface Registration {
@@ -35,7 +35,7 @@ interface ExecutionOptions {
 interface ExecutionFixture {
   execution: FeatureExecution
   prompts: JsonValue[]
-  sent: TextContent[][]
+  sent: MessageContent[][]
   state: TestState
 }
 
@@ -89,7 +89,7 @@ function createExecution({
   receiptStatus = 'confirmed',
 }: ExecutionOptions = {}): ExecutionFixture {
   const prompts: JsonValue[] = []
-  const sent: TextContent[][] = []
+  const sent: MessageContent[][] = []
   const state = createState()
   const context: ResolvedContext = {
     persona: {
@@ -168,7 +168,8 @@ test('demo transport stores in-memory snapshots and deduplicates sends', async (
     signal,
   }
   const first = await transport.send(request)
-  request.content[0]!.text = 'mutated later'
+  assert.equal(request.content[0]!.type, 'text')
+  if (request.content[0]!.type === 'text') request.content[0]!.text = 'mutated later'
   const duplicate = await transport.send({
     conversationId: 'conversation-1',
     content: [{ type: 'text', text: 'hello' }],

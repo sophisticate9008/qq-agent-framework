@@ -14,6 +14,9 @@ const MAX_CACHED_ASSET_BYTES = 256 * 1024
 const REQUEST_TIMEOUT_MS = 15 * 1000
 const HEADERS_TIMEOUT_MS = 10 * 1000
 const SOCKET_TIMEOUT_MS = 20 * 1000
+const DEFAULT_HANDLER_TIMEOUT_MS = 10 * 1000
+const MIN_HANDLER_TIMEOUT_MS = 10
+const MAX_HANDLER_TIMEOUT_MS = 5 * 60 * 1000
 const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const WEB_ROOT = new URL('../../web/', import.meta.url)
 const APP_URL = import.meta.url.endsWith('.ts')
@@ -27,8 +30,20 @@ interface StaticAsset {
 
 export interface AdminServerOptions {
   token: string
-  snapshot: () => unknown | Promise<unknown>
-  dispatchDemo: (body: Record<string, unknown>) => unknown | Promise<unknown>
+  snapshot: (signal?: AbortSignal) => unknown | Promise<unknown>
+  dispatchDemo?: (body: Record<string, unknown>, signal?: AbortSignal) => unknown | Promise<unknown>
+  routes?: readonly AdminRoute[]
+  handlerTimeoutMs?: number
+}
+
+export interface AdminRoute {
+  readonly method: 'GET' | 'POST'
+  readonly pathname: string
+  readonly handle: (request: {
+    query: URLSearchParams
+    body: Record<string, unknown> | null
+    signal: AbortSignal
+  }) => unknown | Promise<unknown>
 }
 
 const STATIC_ROUTES = new Map<string, StaticAsset>([
@@ -160,7 +175,7 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
   return value
 }
 
-class RequestError extends Error {
+export class AdminRequestError extends Error {
   readonly statusCode: number
   readonly code: string
 
@@ -169,6 +184,73 @@ class RequestError extends Error {
     this.statusCode = statusCode
     this.code = code
   }
+}
+
+const RequestError = AdminRequestError
+
+class ClientDisconnectedError extends Error {}
+
+interface HandlerDeadlineOptions<Value> {
+  readonly request: IncomingMessage
+  readonly response: ServerResponse
+  readonly timeoutMs: number
+  readonly write: boolean
+  readonly handle: (signal: AbortSignal) => Value | Promise<Value>
+}
+
+function waitForHandler<Value>({
+  request,
+  response,
+  timeoutMs,
+  write,
+  handle
+}: HandlerDeadlineOptions<Value>): Promise<Value> {
+  const controller = new AbortController()
+  return new Promise<Value>((resolvePromise, rejectPromise) => {
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout> | undefined
+
+    const cleanup = (): void => {
+      if (timeout !== undefined) clearTimeout(timeout)
+      request.off('aborted', disconnect)
+      response.off('close', disconnect)
+    }
+    const resolve = (value: Value): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolvePromise(value)
+    }
+    const reject = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      rejectPromise(error)
+    }
+    const disconnect = (): void => {
+      if (settled) return
+      const error = new ClientDisconnectedError('client disconnected')
+      controller.abort(error)
+      reject(error)
+    }
+
+    request.once('aborted', disconnect)
+    response.once('close', disconnect)
+    timeout = setTimeout(() => {
+      const error = new RequestError(504, write ? 'operation_unknown' : 'handler_timeout')
+      controller.abort(error)
+      reject(error)
+    }, timeoutMs)
+
+    if (request.aborted || response.destroyed || response.closed) {
+      disconnect()
+      return
+    }
+
+    Promise.resolve()
+      .then(() => handle(controller.signal))
+      .then(resolve, reject)
+  })
 }
 
 async function serveStatic(
@@ -200,12 +282,35 @@ async function serveStatic(
   }
 }
 
-export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServerOptions): Server {
+export function createAdminServer({
+  token,
+  snapshot,
+  dispatchDemo,
+  routes = [],
+  handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS
+}: AdminServerOptions): Server {
   if (typeof token !== 'string' || token.length < 24) {
     throw new TypeError('token must contain at least 24 characters')
   }
-  if (typeof snapshot !== 'function' || typeof dispatchDemo !== 'function') {
+  if (typeof snapshot !== 'function' || dispatchDemo !== undefined && typeof dispatchDemo !== 'function') {
     throw new TypeError('snapshot and dispatchDemo must be functions')
+  }
+  if (!Number.isInteger(handlerTimeoutMs)
+    || handlerTimeoutMs < MIN_HANDLER_TIMEOUT_MS
+    || handlerTimeoutMs > MAX_HANDLER_TIMEOUT_MS) {
+    throw new TypeError('handlerTimeoutMs must be an integer between 10 and 300000')
+  }
+
+  if (!Array.isArray(routes) || routes.length > 64) throw new TypeError('routes must be a bounded array')
+  const extensions = new Map<string, AdminRoute>()
+  const methods = new Map<string, string[]>()
+  for (const route of routes) {
+    if (!/^\/api\/[a-z][a-z0-9/-]{0,127}$/.test(route.pathname) || route.pathname.includes('//')
+      || route.pathname === '/api/snapshot' || route.pathname === '/api/demo/events'
+      || !['GET', 'POST'].includes(route.method) || typeof route.handle !== 'function'
+      || extensions.has(`${route.method} ${route.pathname}`)) throw new TypeError('Invalid or duplicate admin route')
+    extensions.set(`${route.method} ${route.pathname}`, Object.freeze({ ...route }))
+    methods.set(route.pathname, [...(methods.get(route.pathname) ?? []), route.method])
   }
 
   const tokenBuffer = Buffer.from(token)
@@ -223,7 +328,7 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
       const pathname = queryIndex === -1 ? requestTarget : requestTarget.slice(0, queryIndex)
 
       if (request.method === 'GET' && pathname === '/health') {
-        sendJson(response, 200, { ok: true, mode: 'demo' })
+        sendJson(response, 200, { ok: true, mode: dispatchDemo ? 'demo' : 'framework' })
         return
       }
 
@@ -232,11 +337,18 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }
-        sendJson(response, 200, await snapshot())
+        const result = await waitForHandler({
+          request,
+          response,
+          timeoutMs: handlerTimeoutMs,
+          write: false,
+          handle: signal => snapshot(signal)
+        })
+        sendJson(response, 200, result)
         return
       }
 
-      if (request.method === 'POST' && pathname === '/api/demo/events') {
+      if (dispatchDemo && request.method === 'POST' && pathname === '/api/demo/events') {
         if (!hasValidBearer(request, tokenBuffer)) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
@@ -250,8 +362,47 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
           return
         }
         const body = await readJsonBody(request)
-        const result = await dispatchDemo(body)
+        const result = await waitForHandler({
+          request,
+          response,
+          timeoutMs: handlerTimeoutMs,
+          write: true,
+          handle: signal => dispatchDemo(body, signal)
+        })
         sendJson(response, 200, result ?? { ok: true })
+        return
+      }
+
+      const route = extensions.get(`${request.method} ${pathname}`)
+      if (route) {
+        if (!hasValidBearer(request, tokenBuffer)) {
+          sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
+          return
+        }
+        let body: Record<string, unknown> | null = null
+        if (route.method === 'POST') {
+          if (!hasSameOrigin(request)) { sendError(response, 403, 'origin_forbidden'); return }
+          if (!hasJsonContentType(request)) { sendError(response, 415, 'unsupported_media_type'); return }
+          body = await readJsonBody(request)
+        }
+        const result = await waitForHandler({
+          request,
+          response,
+          timeoutMs: handlerTimeoutMs,
+          write: route.method === 'POST',
+          handle: signal => route.handle({
+            query: new URLSearchParams(queryIndex < 0 ? '' : requestTarget.slice(queryIndex + 1)),
+            body,
+            signal
+          })
+        })
+        const payload = JSON.stringify(result ?? { ok: true })
+        if (Buffer.byteLength(payload) > 256 * 1024) throw new RequestError(413, 'response_too_large')
+        send(response, 200, payload)
+        return
+      }
+      if (methods.has(pathname)) {
+        sendError(response, 405, 'method_not_allowed', { Allow: methods.get(pathname)!.join(', ') })
         return
       }
 
@@ -263,7 +414,7 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
       if (
         pathname === '/health'
         || pathname === '/api/snapshot'
-        || pathname === '/api/demo/events'
+        || dispatchDemo && pathname === '/api/demo/events'
         || STATIC_ROUTES.has(pathname)
       ) {
         sendError(response, 405, 'method_not_allowed', { Allow: pathname === '/api/demo/events' ? 'POST' : 'GET' })
@@ -272,6 +423,8 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
 
       sendError(response, 404, 'not_found')
     } catch (error: unknown) {
+      if (error instanceof ClientDisconnectedError) return
+      if (response.destroyed || response.writableEnded || response.closed) return
       if (error instanceof RequestError) {
         sendError(response, error.statusCode, error.code)
         return

@@ -10,13 +10,14 @@ import { syncBuiltinESMExports } from 'node:module'
 import { createConnection } from 'node:net'
 import test from 'node:test'
 
-import { createAdminServer, type AdminServerOptions } from '../src/admin/server.ts'
+import { createAdminServer, AdminRequestError, type AdminServerOptions, type AdminRoute } from '../src/admin/server.ts'
 
 const TOKEN = 'admin-test-token-1234567890'
 
 interface StartOptions {
   snapshot?: () => unknown | Promise<unknown>
   dispatchDemo?: (body: Record<string, unknown>) => unknown | Promise<unknown>
+  routes?: readonly AdminRoute[]
 }
 
 interface Fixture {
@@ -40,6 +41,7 @@ async function start(options: StartOptions = {}): Promise<Fixture> {
   const calls: Array<Record<string, unknown>> = []
   const server = createAdminServer({
     token: TOKEN,
+    routes: options.routes,
     snapshot: options.snapshot ?? (() => ({ overview: { mode: 'demo' }, features: [] })),
     dispatchDemo: options.dispatchDemo ?? (body => {
       calls.push(body)
@@ -497,4 +499,48 @@ test('frontend keeps token ephemeral and renders dynamic values as text', async 
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML/)
   assert.match(source, /textContent/)
   assert.doesNotMatch(source, /setInterval|setTimeout/)
+})
+
+test('mounted admin routes reuse authentication, write guards and stable errors', async t => {
+  let calls = 0
+  const fixture = await start({ routes: [
+    { method: 'GET', pathname: '/api/plugins/example', handle({ query, body }) {
+      calls++
+      assert.equal(body, null)
+      return { after: query.get('after') }
+    } },
+    { method: 'POST', pathname: '/api/plugins/example', handle({ body }) { calls++; return body } },
+    { method: 'GET', pathname: '/api/plugins/failure', handle() { throw new Error('private failure') } },
+    { method: 'GET', pathname: '/api/plugins/invalid', handle() { throw new AdminRequestError(400, 'invalid_query') } },
+    { method: 'GET', pathname: '/api/plugins/large', handle() { return { value: 'x'.repeat(256 * 1024) } } },
+  ] })
+  t.after(async () => stop(fixture.server))
+  const headers = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }
+  assert.equal((await rawRequest(fixture.origin, '/api/plugins/example')).status, 401)
+  const read = await rawRequest(fixture.origin, '/api/plugins/example?after=room%3A1', { headers })
+  assert.deepEqual(parseJson(read.text), { after: 'room:1' })
+  assert.equal((await rawRequest(fixture.origin, '/api/plugins/example', { method: 'POST', headers, body: '{}' })).status, 403)
+  assert.equal((await rawRequest(fixture.origin, '/api/plugins/example', { method: 'POST',
+    headers: { ...headers, Origin: fixture.origin }, body: '{"__proto__":{}}' })).status, 400)
+  const write = await rawRequest(fixture.origin, '/api/plugins/example', { method: 'POST',
+    headers: { ...headers, Origin: fixture.origin }, body: '{"value":1}' })
+  assert.deepEqual(parseJson(write.text), { value: 1 })
+  assert.equal(calls, 2)
+  assert.equal((await rawRequest(fixture.origin, '/api/plugins/example', { method: 'DELETE', headers })).status, 405)
+  const failure = await rawRequest(fixture.origin, '/api/plugins/failure', { headers })
+  assert.equal(failure.status, 500)
+  assert(!failure.text.includes('private'))
+  assert.equal((await rawRequest(fixture.origin, '/api/plugins/invalid', { headers })).status, 400)
+  assert.equal((await rawRequest(fixture.origin, '/api/plugins/large', { headers })).status, 413)
+})
+
+test('admin route registration rejects collisions and demo dispatch is optional', () => {
+  const base = { token: TOKEN, snapshot: () => ({}) }
+  const route: AdminRoute = { method: 'GET', pathname: '/api/example', handle: () => ({}) }
+  assert.throws(() => createAdminServer({ ...base, routes: [route, route] }), /route/)
+  for (const pathname of ['/api/snapshot', '/api/demo/events', '/api/../private', '/api//private', '/other']) {
+    assert.throws(() => createAdminServer({ ...base, routes: [{ ...route, pathname }] }), /route/)
+  }
+  const server = createAdminServer({ ...base, routes: [route] })
+  assert.equal(server.listening, false)
 })

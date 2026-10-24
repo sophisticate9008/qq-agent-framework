@@ -6,7 +6,7 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.12.0"
   },
   "scripts": {
     "build": "node scripts/build.ts",
@@ -20,6 +20,7 @@
     "bench:context": "node scripts/bench-context.ts",
     "bench:policy": "node scripts/bench-policy.ts",
     "bench:admin": "node scripts/bench-admin.ts",
+    "bench:host": "node scripts/bench-host.ts",
     "bench:soak": "node --expose-gc scripts/bench-soak.ts"
   },
   "devDependencies": {

@@ -3,10 +3,11 @@ import { performance } from 'node:perf_hooks';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createContextStore, createFeatureState } from './context.ts';
 import { createPolicy } from './policy.ts';
+import { normalizeContent } from './content.ts';
 import { FrameworkError, assert, errorCode, identifier, isRecord, reference, snapshot } from './values.ts';
 import type { AuditEntry, AuditRecord, Clock, DeliveryReceipt, EffectAdapter, EventReport, FeatureDefinition,
   FeatureExecution, FeatureHandler, FeatureManifest, FeatureOutcome, FeatureSetup, FrameworkEvent, JsonObject,
-  JsonValue, ModelAdapter, TextContent, TransportAdapter } from './types.ts';
+  JsonValue, ModelAdapter, MessageContent, TransportAdapter } from './types.ts';
 import type { FeatureStateScope } from './context.ts';
 
 export interface EngineOptions {
@@ -24,8 +25,13 @@ export interface EngineOptions {
   yieldEvery?: number;
   yieldAfterMs?: number;
   maxConcurrentSends?: number;
+  eventTimeoutMs?: number;
   eventValidators?: Record<string, (data: JsonObject) => boolean>;
   effectAdapters?: Record<string, EffectAdapter>;
+}
+export interface EmitOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 interface FeatureRecord {
   definition: FeatureManifest;
@@ -51,7 +57,14 @@ interface OutboxEntry {
 }
 interface EffectRecord { fingerprint: string; settled: boolean; view: OutboxEntry; promise: Promise<DeliveryReceipt> }
 interface EventRecord { fingerprint: string; settled: boolean; promise: Promise<EventReport> }
-interface Execution { view: FeatureExecution; finish(): Promise<void> }
+interface EventDeadline {
+  signal: AbortSignal;
+  reached: Promise<void>;
+  expired(): boolean;
+  failureCode(uncertain?: boolean): string;
+  dispose(): void;
+}
+interface Execution { view: FeatureExecution; finish(): Promise<void>; timeoutCode(): string }
 
 const eventTypes = new Set(['message.received', 'trigger.fired']);
 const capabilityTypes = new Set(['messaging.send', 'model.respond']);
@@ -73,6 +86,55 @@ function noPromise(value: unknown) {
   }
 }
 
+function createEventDeadline(timeoutMs: number, parentSignal?: AbortSignal): EventDeadline {
+  const controller = new AbortController();
+  const expiresAt = performance.now() + timeoutMs;
+  let expired = false;
+  let endedBy: 'EVENT_TIMEOUT' | 'EVENT_ABORTED' = 'EVENT_TIMEOUT';
+  let reach!: () => void;
+  const reached = new Promise<void>(resolve => { reach = resolve; });
+  const expire = (code: 'EVENT_TIMEOUT' | 'EVENT_ABORTED') => {
+    if (expired) return;
+    expired = true;
+    endedBy = code;
+    controller.abort(new FrameworkError(code, 'The event execution ended.'));
+    reach();
+  };
+  const abort = () => expire('EVENT_ABORTED');
+  if (parentSignal?.aborted) abort();
+  else parentSignal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => expire('EVENT_TIMEOUT'), timeoutMs);
+  return Object.freeze({
+    signal: controller.signal,
+    reached,
+    expired() {
+      if (!expired && performance.now() >= expiresAt) expire('EVENT_TIMEOUT');
+      return expired;
+    },
+    failureCode(uncertain = false) { return uncertain ? `${endedBy}_UNKNOWN` : endedBy; },
+    dispose() {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abort);
+    },
+  });
+}
+
+async function beforeDeadline<Result>(operation: PromiseLike<Result> | Result, deadline: EventDeadline,
+  uncertain = false): Promise<Result> {
+  const observed = Promise.resolve(operation).then(value => ({ status: 'fulfilled' as const, value }),
+    (reason: unknown) => ({ status: 'rejected' as const, reason }));
+  if (deadline.expired()) throw new FrameworkError(deadline.failureCode(uncertain), 'The event execution ended.');
+  const outcome = await Promise.race([
+    observed,
+    deadline.reached.then(() => ({ status: 'timeout' as const })),
+  ]);
+  if (outcome.status === 'timeout' || deadline.expired()) {
+    throw new FrameworkError(deadline.failureCode(uncertain), 'The event execution ended.');
+  }
+  if (outcome.status === 'rejected') throw outcome.reason;
+  return outcome.value;
+}
+
 function featureDefinition(feature: FeatureDefinition, supportedEvents: Set<string>, supportedCapabilities: Set<string>): FeatureManifest {
   assert(feature && identifier(feature.id) && !feature.id.includes('.')
     && typeof feature.version === 'string' && /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(feature.version)
@@ -88,13 +150,15 @@ function featureDefinition(feature: FeatureDefinition, supportedEvents: Set<stri
 export function createEngine({ clock = Date.now, transport, model, context = createContextStore({ clock }), state = createFeatureState(),
   policy = createPolicy({ clock }), persona, observer = () => {}, historyLimit = 500,
   maxPendingEvents = 256, maxPendingEffects = 512, yieldEvery = 64, yieldAfterMs = 8, maxConcurrentSends = 1,
-  eventValidators = {}, effectAdapters = {} }: EngineOptions) {
+  eventTimeoutMs = 30000, eventValidators = {}, effectAdapters = {} }: EngineOptions) {
   assert(transport && typeof transport.send === 'function', 'INVALID_ADAPTER', 'A transport adapter is required.');
   assert(reference(persona) && Number.isSafeInteger(historyLimit) && historyLimit > 0,
     'INVALID_ENGINE', 'A persona reference and a positive history limit are required.');
   assert([maxPendingEvents, maxPendingEffects, yieldEvery, maxConcurrentSends].every(value => Number.isSafeInteger(value) && value > 0),
     'INVALID_ENGINE', 'Pending operation limits must be positive integers.');
   assert(Number.isFinite(yieldAfterMs) && yieldAfterMs > 0, 'INVALID_ENGINE', 'The scheduling time budget must be positive.');
+  assert(Number.isSafeInteger(eventTimeoutMs) && eventTimeoutMs >= 10 && eventTimeoutMs <= 300000,
+    'INVALID_ENGINE', 'The event timeout must be an integer between 10 and 300000 milliseconds.');
   assert(eventValidators && typeof eventValidators === 'object' && !Array.isArray(eventValidators)
     && effectAdapters && typeof effectAdapters === 'object' && !Array.isArray(effectAdapters),
   'INVALID_EXTENSION', 'Host extension registries must be objects.');
@@ -107,7 +171,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
   const supportedCapabilities = new Set([...capabilityTypes, ...adapters.keys()]);
   const features = new Map<string, FeatureRecord>();
   const subscriptions = new Map<string, Set<FeatureRecord>>();
-  const conversationTails = new Map<string, Promise<EventReport>>();
+  const conversationTails = new Map<string, Promise<void>>();
   const events = new Map<string, EventRecord>();
   const effects = new Map<string, EffectRecord>();
   const audit: AuditRecord[] = [];
@@ -122,6 +186,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
   let activeSends = 0;
   let pendingEventCount = 0;
   let pendingEffectCount = 0;
+  let rawPendingEffectCount = 0;
   let dispatchesSinceYield = 0;
   let yieldGate: Promise<void> | null = null;
   let turnStartedAt = performance.now();
@@ -136,15 +201,43 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     if (yieldGate === gate) { yieldGate = null; turnStartedAt = performance.now(); }
   }
 
-  async function acquireSendSlot() {
+  async function acquireSendSlot(deadline: EventDeadline) {
+    assert(!deadline.expired(), deadline.failureCode(), 'The event execution ended before sending.');
     if (activeSends < maxConcurrentSends) { activeSends++; return; }
-    await new Promise<void>(resolve => sendWaiters.push(resolve));
+    let acquired = false;
+    let resume!: () => void;
+    const waiting = new Promise<void>(resolve => { resume = resolve; });
+    const waiter = () => { acquired = true; resume(); };
+    sendWaiters.push(waiter);
+    try {
+      await beforeDeadline(waiting, deadline);
+      assert(!deadline.expired(), deadline.failureCode(), 'The event execution ended before sending.');
+    } catch (error) {
+      if (acquired) releaseSendSlot();
+      else {
+        const index = sendWaiters.indexOf(waiter);
+        if (index >= 0) sendWaiters.splice(index, 1);
+      }
+      throw error;
+    }
   }
 
   function releaseSendSlot() {
     const waiting = sendWaiters.shift();
     if (waiting) waiting();
     else activeSends--;
+  }
+
+  function rawEffectSlot() {
+    assert(rawPendingEffectCount < maxPendingEffects,
+      'EFFECT_BACKPRESSURE', 'The raw effect limit is full.');
+    rawPendingEffectCount++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      rawPendingEffectCount--;
+    };
   }
 
   function observe(entry: AuditEntry) {
@@ -250,15 +343,23 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     return record.stopPromise;
   }
 
-  function executionFor(record: FeatureRecord, event: FrameworkEvent): Execution {
+  function executionFor(record: FeatureRecord, event: FrameworkEvent, deadline: EventDeadline): Execution {
     const featureId = record.definition.id;
     const base = { eventId: event.id, conversationId: event.conversationId, featureId, version: record.definition.version };
     let ordinal = 0;
     let open = true;
     const pendingEffects = new Set<Promise<unknown>>();
     let effectFailed = false;
+    let activeExternalEffects = 0;
+    let uncertain = false;
+    const executionSignal = AbortSignal.any([record.controller.signal, deadline.signal]);
+    deadline.signal.addEventListener('abort', () => {
+      open = false;
+      if (activeExternalEffects > 0) uncertain = true;
+    }, { once: true });
 
     function accessible() {
+      assert(!deadline.expired(), deadline.failureCode(), 'The event execution ended.');
       assert(open, 'EXECUTION_CLOSED', 'The event execution has finished.');
       current(record);
     }
@@ -277,7 +378,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     }
 
     function authorize(capability: string) {
-      current(record);
+      accessible();
       assert(record.definition.capabilities.includes(capability), 'UNDECLARED_CAPABILITY', 'The feature did not declare this effect.');
       const reservation = policy.reserve({ featureId, conversationId: event.conversationId, capability });
       policy.begin(reservation);
@@ -287,12 +388,20 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       const request = snapshot(prompt);
       assert(model && typeof model.generate === 'function', 'MODEL_UNAVAILABLE', 'No model adapter is installed.');
       const release = effectSlot();
+      let releaseRaw: (() => void) | undefined;
+      let rawTracked = false;
       try {
+        releaseRaw = rawEffectSlot();
         authorize('model.respond');
-        const operation = model.generate({ prompt: request, signal: record.controller.signal });
+        const operation = Promise.resolve(model.generate({ prompt: request, signal: executionSignal }));
+        rawTracked = true;
+        operation.then(releaseRaw, releaseRaw);
+        activeExternalEffects++;
         observe({ ...base, stage: 'model', status: 'started' });
-        const result = await operation;
-        current(record);
+        let result: { text: string };
+        try { result = await beforeDeadline(operation, deadline, true); }
+        finally { activeExternalEffects--; }
+        accessible();
         assert(result && typeof result.text === 'string' && result.text.length <= 64000,
           'INVALID_MODEL_RESULT', 'The model returned an invalid text result.');
         observe({ ...base, stage: 'model', status: 'completed' });
@@ -301,7 +410,10 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
         const code = errorCode(error, 'MODEL_FAILED');
         observe({ ...base, stage: 'model', status: 'failed', errorCode: code });
         throw new FrameworkError(code, 'The model operation did not complete.');
-      } finally { release(); }
+      } finally {
+        if (releaseRaw && !rawTracked) releaseRaw();
+        release();
+      }
     }
 
     async function invokeEffect(capability: string, input: JsonValue): Promise<JsonValue> {
@@ -309,27 +421,36 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       assert(execute, 'CAPABILITY_UNAVAILABLE', 'No custom adapter is installed for this capability.');
       const request = snapshot(input);
       const release = effectSlot();
+      let releaseRaw: (() => void) | undefined;
+      let rawTracked = false;
       try {
+        releaseRaw = rawEffectSlot();
         authorize(capability);
-        const operation = execute(Object.freeze({ input: request, scope: snapshot(base), signal: record.controller.signal }));
+        const operation = Promise.resolve(execute(Object.freeze({ input: request, scope: snapshot(base), signal: executionSignal })));
+        rawTracked = true;
+        operation.then(releaseRaw, releaseRaw);
+        activeExternalEffects++;
         observe({ ...base, stage: 'effect', capability, status: 'started' });
-        const result = snapshot(await operation);
-        current(record);
+        let output: JsonValue;
+        try { output = await beforeDeadline(operation, deadline, true); }
+        finally { activeExternalEffects--; }
+        const result = snapshot(output);
+        accessible();
         observe({ ...base, stage: 'effect', capability, status: 'completed' });
         return result;
       } catch (error) {
         const code = errorCode(error, 'ADAPTER_FAILED');
         observe({ ...base, stage: 'effect', capability, status: 'failed', errorCode: code });
         throw new FrameworkError(code, 'The custom effect did not complete.');
-      } finally { release(); }
+      } finally {
+        if (releaseRaw && !rawTracked) releaseRaw();
+        release();
+      }
     }
 
-    function send(content: readonly TextContent[]): Promise<DeliveryReceipt> {
+    function send(content: readonly MessageContent[]): Promise<DeliveryReceipt> {
       accessible();
-      const message = snapshot(content);
-      assert(Array.isArray(message) && message.length > 0 && message.length <= 8
-        && message.every(block => block.type === 'text' && typeof block.text === 'string'
-          && block.text.length > 0 && block.text.length <= 8000), 'INVALID_CONTENT', 'Only bounded text messages are supported.');
+      const message = normalizeContent(content);
       const effectId = digest([event.conversationId, event.id, featureId, ordinal++]);
       const fingerprint = digest(message);
       const prior = effects.get(effectId);
@@ -341,9 +462,18 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       const entry: EffectRecord = { fingerprint, settled: false, view: { id: effectId, ...base,
         status: 'queued', contentTypes: message.map(block => block.type) }, promise: Promise.resolve({ status: 'unknown' }) };
       const outboundKey = maxConcurrentSends === 1 ? 'global' : event.conversationId;
-      const task = (outboundTails.get(outboundKey) ?? Promise.resolve()).catch(() => {}).then(async () => {
-        await acquireSendSlot();
+      const previous = outboundTails.get(outboundKey) ?? Promise.resolve<DeliveryReceipt>({ status: 'unknown' });
+      const task = (async (): Promise<DeliveryReceipt> => {
+        let acquired = false;
+        let releaseRaw: (() => void) | undefined;
+        let rawTracked = false;
         try {
+          await beforeDeadline(previous.catch(() => ({ status: 'unknown' as const })), deadline);
+          accessible();
+          await acquireSendSlot(deadline);
+          acquired = true;
+          accessible();
+          releaseRaw = rawEffectSlot();
           try { authorize('messaging.send'); }
           catch (error) {
             entry.view.status = 'denied';
@@ -354,19 +484,39 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
           entry.view.status = 'sending';
           let result: DeliveryReceipt;
           try {
-            const operation = transport.send({ conversationId: event.conversationId, content: message,
-              idempotencyKey: effectId, signal: record.controller.signal });
+            const operation = Promise.resolve(transport.send({ conversationId: event.conversationId, content: message,
+              idempotencyKey: effectId, signal: executionSignal }));
+            rawTracked = true;
+            operation.then(releaseRaw, releaseRaw);
+            activeExternalEffects++;
             observe({ ...base, stage: 'send', status: 'started' });
-            const receipt = await operation;
+            let receipt: DeliveryReceipt;
+            try { receipt = await beforeDeadline(operation, deadline, true); }
+            finally { activeExternalEffects--; }
             result = receipt?.status === 'confirmed' && reference(receipt.messageId)
               ? { status: 'confirmed', messageId: receipt.messageId }
               : receipt?.status === 'rejected' ? { status: 'rejected' } : { status: 'unknown' };
-          } catch { result = { status: 'unknown' }; }
+          } catch (error) {
+            result = { status: 'unknown' };
+            const code = errorCode(error, 'SEND_UNKNOWN');
+            if (code === 'EVENT_TIMEOUT_UNKNOWN' || code === 'EVENT_ABORTED_UNKNOWN') entry.view.errorCode = code;
+          }
           Object.assign(entry.view, result);
           observe({ ...base, stage: 'send', status: result.status });
           return snapshot(result);
-        } finally { releaseSendSlot(); }
-      });
+        } catch (error) {
+          const code = errorCode(error, 'EFFECT_DENIED');
+          if (entry.view.status === 'queued') {
+            entry.view.status = 'denied';
+            entry.view.errorCode = code;
+            observe({ ...base, stage: 'send', status: 'denied', errorCode: code });
+          }
+          throw error;
+        } finally {
+          if (releaseRaw && !rawTracked) releaseRaw();
+          if (acquired) releaseSendSlot();
+        }
+      })();
       entry.promise = task;
       effects.set(effectId, entry);
       const settled = () => {
@@ -388,20 +538,31 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
         get(key: string, fallback?: JsonValue) { accessible(); return privateStorage().get(key, fallback); },
         set(key: string, value: JsonValue) { accessible(); return privateStorage().set(key, value); },
         delete(key: string) { accessible(); return privateStorage().delete(key); },
-      }), signal: record.controller.signal,
+      }), signal: executionSignal,
       generate(prompt: JsonValue) { accessible(); return track(generateEffect(prompt)); },
       invoke(capability: string, input: JsonValue) { accessible(); return track(invokeEffect(capability, input)); }, send }),
       async finish() {
         open = false;
-        const results = await Promise.allSettled([...pendingEffects]);
+        const results = await beforeDeadline(Promise.allSettled([...pendingEffects]), deadline, uncertain);
         assert(!effectFailed && results.every(result => result.status === 'fulfilled'), 'EFFECT_FAILED', 'An initiated effect did not complete.');
       },
+      timeoutCode() { return deadline.failureCode(uncertain); },
     });
   }
 
-  async function dispatch(event: FrameworkEvent): Promise<EventReport> {
+  function interruptedReport(event: FrameworkEvent, code: string): EventReport {
+    const outcomes = [...(subscriptions.get(event.type) ?? [])]
+      .filter(record => record.status === 'active' && record.handlers.has(event.type))
+      .map(record => ({ featureId: record.definition.id, status: 'failed' as const, errorCode: code }));
+    observe({ stage: 'event', eventId: event.id, conversationId: event.conversationId,
+      status: 'failed', errorCode: code });
+    return snapshot({ eventId: event.id, conversationId: event.conversationId, outcomes });
+  }
+
+  async function dispatch(event: FrameworkEvent, deadline: EventDeadline): Promise<EventReport> {
     await cooperate();
     assert(!stopped, 'ENGINE_STOPPED', 'The engine has stopped.');
+    if (deadline.expired()) return interruptedReport(event, deadline.failureCode());
     const outcomes: FeatureOutcome[] = [];
     observe({ stage: 'event', eventId: event.id, conversationId: event.conversationId, status: 'accepted' });
     let handled = 0;
@@ -409,19 +570,24 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       if (handled++ > 0) await cooperate();
       const handler = record.handlers.get(event.type);
       if (record.status !== 'active' || !handler) continue;
+      if (deadline.expired()) {
+        outcomes.push({ featureId: record.definition.id, status: 'failed', errorCode: deadline.failureCode() });
+        continue;
+      }
       const run = Promise.resolve().then(async (): Promise<FeatureOutcome> => {
         let execution: Execution | undefined;
         let failure: string | null = null;
         try {
-          execution = executionFor(record, event);
+          execution = executionFor(record, event, deadline);
           current(record);
-          await handler(execution.view, event);
+          await beforeDeadline(Promise.resolve().then(() => handler(execution!.view, event)), deadline);
         } catch (error) {
           failure = errorCode(error, 'FEATURE_FAILED');
         }
         if (execution) {
           try { await execution.finish(); }
           catch (error) { failure ??= errorCode(error, 'FEATURE_FAILED'); }
+          if (deadline.expired()) failure = execution.timeoutCode();
         }
         return failure ? { featureId: record.definition.id, status: 'failed', errorCode: failure }
           : { featureId: record.definition.id, status: 'completed' };
@@ -436,8 +602,13 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     return snapshot({ eventId: event.id, conversationId: event.conversationId, outcomes });
   }
 
-  function emit(input: unknown): Promise<EventReport> {
+  function emit(input: unknown, options: EmitOptions = {}): Promise<EventReport> {
     assert(!stopped && !lifecycleBusy, 'ENGINE_STOPPED', 'The engine is stopped or changing lifecycle.');
+    assert(options !== null && typeof options === 'object' && !Array.isArray(options)
+      && (options.signal === undefined || options.signal instanceof AbortSignal)
+      && (options.timeoutMs === undefined || (Number.isSafeInteger(options.timeoutMs)
+        && options.timeoutMs >= 10 && options.timeoutMs <= eventTimeoutMs)),
+    'INVALID_EVENT_OPTIONS', 'Event options require a valid signal and bounded timeout.');
     const value = snapshot(input);
     assert(isRecord(value) && reference(value.id) && reference(value.conversationId) && typeof value.type === 'string'
       && supportedEvents.has(value.type) && isRecord(value.data),
@@ -460,14 +631,37 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     }
     assert(pendingEventCount < maxPendingEvents, 'EVENT_BACKPRESSURE', 'The event queue is full.');
     pendingEventCount++;
-    const task = (conversationTails.get(event.conversationId) ?? Promise.resolve()).catch(() => {}).then(() => dispatch(event));
+    const deadline = createEventDeadline(options.timeoutMs ?? eventTimeoutMs, options.signal);
+    const priorTail = conversationTails.get(event.conversationId) ?? Promise.resolve();
+    let releaseTail!: () => void;
+    const tail = new Promise<void>(resolve => { releaseTail = resolve; });
+    let dispatchStarted = false;
+    const task = (async () => {
+      try {
+        await beforeDeadline(priorTail, deadline);
+      }
+      catch (error) {
+        const code = errorCode(error, deadline.failureCode());
+        if (code === 'EVENT_TIMEOUT' || code === 'EVENT_ABORTED') return interruptedReport(event, code);
+        throw error;
+      }
+      if (deadline.expired()) return interruptedReport(event, deadline.failureCode());
+      dispatchStarted = true;
+      return dispatch(event, deadline);
+    })();
     const entry: EventRecord = { fingerprint, settled: false, promise: task };
     events.set(key, entry);
-    conversationTails.set(event.conversationId, task);
+    conversationTails.set(event.conversationId, tail);
     const settled = () => {
       pendingEventCount--;
+      deadline.dispose();
       entry.settled = true;
-      if (conversationTails.get(event.conversationId) === task) conversationTails.delete(event.conversationId);
+      const release = () => {
+        releaseTail();
+        if (conversationTails.get(event.conversationId) === tail) conversationTails.delete(event.conversationId);
+      };
+      if (dispatchStarted) release();
+      else priorTail.then(release, release);
       trim(events);
     };
     task.then(settled, settled);
@@ -478,7 +672,8 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     install, uninstall, emit,
     metrics() {
       return snapshot({ status: lifecycle,
-        queues: { pendingEvents: pendingEventCount, pendingEffects: pendingEffectCount, maxPendingEvents, maxPendingEffects },
+        queues: { pendingEvents: pendingEventCount, pendingEffects: pendingEffectCount,
+          rawPendingEffects: rawPendingEffectCount, maxPendingEvents, maxPendingEffects },
         retention: { events: events.size, effects: effects.size, audit: audit.length },
         scheduling: { yieldEvery, yieldAfterMs, maxConcurrentSends, activeSends, waitingSends: sendWaiters.length },
       });
@@ -486,7 +681,8 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     describe() {
       return snapshot({ status: lifecycle, apiVersion: 1,
         contracts: { eventTypes: [...supportedEvents], capabilities: [...supportedCapabilities] },
-        queues: { pendingEvents: pendingEventCount, pendingEffects: pendingEffectCount, maxPendingEvents, maxPendingEffects },
+        queues: { pendingEvents: pendingEventCount, pendingEffects: pendingEffectCount,
+          rawPendingEffects: rawPendingEffectCount, maxPendingEvents, maxPendingEffects },
         features: [...features.values()].map(record => ({ ...record.definition, generation: record.generation,
           status: record.status, faultCodes: record.faultCodes })),
         outbox: [...effects.values()].map(entry => entry.view), audit });

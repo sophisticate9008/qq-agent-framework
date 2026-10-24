@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createContextStore, createFeatureState } from './context.ts';
 import { createPolicy } from './policy.ts';
 import { FrameworkError, assert, errorCode, identifier, isRecord, reference, snapshot } from './values.ts';
 import type { AuditEntry, AuditRecord, Clock, DeliveryReceipt, EffectAdapter, EventReport, FeatureDefinition,
   FeatureExecution, FeatureHandler, FeatureManifest, FeatureOutcome, FeatureSetup, FrameworkEvent, JsonObject,
   JsonValue, ModelAdapter, TextContent, TransportAdapter } from './types.ts';
+import type { FeatureStateScope } from './context.ts';
 
 export interface EngineOptions {
   clock?: Clock;
@@ -18,6 +21,9 @@ export interface EngineOptions {
   historyLimit?: number;
   maxPendingEvents?: number;
   maxPendingEffects?: number;
+  yieldEvery?: number;
+  yieldAfterMs?: number;
+  maxConcurrentSends?: number;
   eventValidators?: Record<string, (data: JsonObject) => boolean>;
   effectAdapters?: Record<string, EffectAdapter>;
 }
@@ -81,12 +87,14 @@ function featureDefinition(feature: FeatureDefinition, supportedEvents: Set<stri
 
 export function createEngine({ clock = Date.now, transport, model, context = createContextStore({ clock }), state = createFeatureState(),
   policy = createPolicy({ clock }), persona, observer = () => {}, historyLimit = 500,
-  maxPendingEvents = 256, maxPendingEffects = 512, eventValidators = {}, effectAdapters = {} }: EngineOptions) {
+  maxPendingEvents = 256, maxPendingEffects = 512, yieldEvery = 64, yieldAfterMs = 8, maxConcurrentSends = 1,
+  eventValidators = {}, effectAdapters = {} }: EngineOptions) {
   assert(transport && typeof transport.send === 'function', 'INVALID_ADAPTER', 'A transport adapter is required.');
   assert(reference(persona) && Number.isSafeInteger(historyLimit) && historyLimit > 0,
     'INVALID_ENGINE', 'A persona reference and a positive history limit are required.');
-  assert([maxPendingEvents, maxPendingEffects].every(value => Number.isSafeInteger(value) && value > 0),
+  assert([maxPendingEvents, maxPendingEffects, yieldEvery, maxConcurrentSends].every(value => Number.isSafeInteger(value) && value > 0),
     'INVALID_ENGINE', 'Pending operation limits must be positive integers.');
+  assert(Number.isFinite(yieldAfterMs) && yieldAfterMs > 0, 'INVALID_ENGINE', 'The scheduling time budget must be positive.');
   assert(eventValidators && typeof eventValidators === 'object' && !Array.isArray(eventValidators)
     && effectAdapters && typeof effectAdapters === 'object' && !Array.isArray(effectAdapters),
   'INVALID_EXTENSION', 'Host extension registries must be objects.');
@@ -98,6 +106,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
   const supportedEvents = new Set([...eventTypes, ...validators.keys()]);
   const supportedCapabilities = new Set([...capabilityTypes, ...adapters.keys()]);
   const features = new Map<string, FeatureRecord>();
+  const subscriptions = new Map<string, Set<FeatureRecord>>();
   const conversationTails = new Map<string, Promise<EventReport>>();
   const events = new Map<string, EventRecord>();
   const effects = new Map<string, EffectRecord>();
@@ -108,9 +117,35 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
   let lifecycle = 'running';
   let stopPromise: Promise<void> | null = null;
   let lifecycleBusy = false;
-  let outbound: Promise<unknown> = Promise.resolve();
+  const outboundTails = new Map<string, Promise<DeliveryReceipt>>();
+  const sendWaiters: Array<() => void> = [];
+  let activeSends = 0;
   let pendingEventCount = 0;
   let pendingEffectCount = 0;
+  let dispatchesSinceYield = 0;
+  let yieldGate: Promise<void> | null = null;
+  let turnStartedAt = performance.now();
+
+  async function cooperate() {
+    if (yieldGate) await yieldGate;
+    if (++dispatchesSinceYield < yieldEvery && performance.now() - turnStartedAt < yieldAfterMs) return;
+    dispatchesSinceYield = 0;
+    const gate = nextTurn();
+    yieldGate = gate;
+    await gate;
+    if (yieldGate === gate) { yieldGate = null; turnStartedAt = performance.now(); }
+  }
+
+  async function acquireSendSlot() {
+    if (activeSends < maxConcurrentSends) { activeSends++; return; }
+    await new Promise<void>(resolve => sendWaiters.push(resolve));
+  }
+
+  function releaseSendSlot() {
+    const waiting = sendWaiters.shift();
+    if (waiting) waiting();
+    else activeSends--;
+  }
 
   function observe(entry: AuditEntry) {
     const record = snapshot({ sequence: ++sequence, at: clock(), ...entry });
@@ -138,6 +173,11 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     let failed = false;
     for (const dispose of record.cleanups.splice(0).reverse()) {
       try { noPromise(dispose()); } catch { failed = true; }
+    }
+    for (const type of record.handlers.keys()) {
+      const subscribers = subscriptions.get(type);
+      subscribers?.delete(record);
+      if (subscribers?.size === 0) subscriptions.delete(type);
     }
     record.handlers.clear();
     if (failed) record.faultCodes.push('CLEANUP_FAILED');
@@ -175,6 +215,11 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       if (dispose !== undefined) setupContext.defer(dispose);
       assert(record.handlers.size === definition.subscriptions.length, 'MISSING_HANDLER', 'All declared event handlers must be registered.');
       record.status = 'active';
+      for (const type of record.handlers.keys()) {
+        let subscribers = subscriptions.get(type);
+        if (!subscribers) { subscribers = new Set(); subscriptions.set(type, subscribers); }
+        subscribers.add(record);
+      }
       observe({ stage: 'feature.install', featureId: definition.id, version: definition.version, status: 'active' });
       return definition;
     } catch (error) {
@@ -211,6 +256,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     let ordinal = 0;
     let open = true;
     const pendingEffects = new Set<Promise<unknown>>();
+    let effectFailed = false;
 
     function accessible() {
       assert(open, 'EXECUTION_CLOSED', 'The event execution has finished.');
@@ -219,7 +265,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
 
     function track<Result>(task: Promise<Result>): Promise<Result> {
       pendingEffects.add(task);
-      task.catch(() => {});
+      task.then(() => pendingEffects.delete(task), () => { effectFailed = true; pendingEffects.delete(task); });
       return task;
     }
 
@@ -294,62 +340,73 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       const release = effectSlot();
       const entry: EffectRecord = { fingerprint, settled: false, view: { id: effectId, ...base,
         status: 'queued', contentTypes: message.map(block => block.type) }, promise: Promise.resolve({ status: 'unknown' }) };
-      const task = outbound.catch(() => {}).then(async () => {
-        try { authorize('messaging.send'); }
-        catch (error) {
-          entry.view.status = 'denied';
-          entry.view.errorCode = errorCode(error, 'EFFECT_DENIED');
-          observe({ ...base, stage: 'send', status: 'denied', errorCode: entry.view.errorCode });
-          throw new FrameworkError(entry.view.errorCode, 'The outbound effect was denied.');
-        }
-        entry.view.status = 'sending';
-        let result: DeliveryReceipt;
+      const outboundKey = maxConcurrentSends === 1 ? 'global' : event.conversationId;
+      const task = (outboundTails.get(outboundKey) ?? Promise.resolve()).catch(() => {}).then(async () => {
+        await acquireSendSlot();
         try {
-          const operation = transport.send({ conversationId: event.conversationId, content: message,
-            idempotencyKey: effectId, signal: record.controller.signal });
-          observe({ ...base, stage: 'send', status: 'started' });
-          const receipt = await operation;
-          result = receipt?.status === 'confirmed' && reference(receipt.messageId)
-            ? { status: 'confirmed', messageId: receipt.messageId }
-            : receipt?.status === 'rejected' ? { status: 'rejected' } : { status: 'unknown' };
-        } catch { result = { status: 'unknown' }; }
-        Object.assign(entry.view, result);
-        observe({ ...base, stage: 'send', status: result.status });
-        return snapshot(result);
+          try { authorize('messaging.send'); }
+          catch (error) {
+            entry.view.status = 'denied';
+            entry.view.errorCode = errorCode(error, 'EFFECT_DENIED');
+            observe({ ...base, stage: 'send', status: 'denied', errorCode: entry.view.errorCode });
+            throw new FrameworkError(entry.view.errorCode, 'The outbound effect was denied.');
+          }
+          entry.view.status = 'sending';
+          let result: DeliveryReceipt;
+          try {
+            const operation = transport.send({ conversationId: event.conversationId, content: message,
+              idempotencyKey: effectId, signal: record.controller.signal });
+            observe({ ...base, stage: 'send', status: 'started' });
+            const receipt = await operation;
+            result = receipt?.status === 'confirmed' && reference(receipt.messageId)
+              ? { status: 'confirmed', messageId: receipt.messageId }
+              : receipt?.status === 'rejected' ? { status: 'rejected' } : { status: 'unknown' };
+          } catch { result = { status: 'unknown' }; }
+          Object.assign(entry.view, result);
+          observe({ ...base, stage: 'send', status: result.status });
+          return snapshot(result);
+        } finally { releaseSendSlot(); }
       });
       entry.promise = task;
       effects.set(effectId, entry);
-      const settled = () => { release(); entry.settled = true; trim(effects); };
+      const settled = () => {
+        release(); entry.settled = true; trim(effects);
+        if (outboundTails.get(outboundKey) === task) outboundTails.delete(outboundKey);
+      };
       task.then(settled, settled);
-      outbound = task;
+      outboundTails.set(outboundKey, task);
       return track(task);
     }
 
     const selection: { persona: string; conversationId: string; userId?: string; sessionId?: string; taskId?: string }
       = { persona, conversationId: event.conversationId };
     for (const key of ['userId', 'sessionId', 'taskId'] as const) if (event[key] !== undefined) selection[key] = event[key];
-    const storage = state.scope(featureId, event.conversationId);
+    let storage: FeatureStateScope | undefined;
+    const privateStorage = () => storage ??= state.scope(featureId, event.conversationId);
     return Object.freeze({
       view: Object.freeze({ context: context.resolve(selection), state: Object.freeze({
-        get(key: string, fallback?: JsonValue) { accessible(); return storage.get(key, fallback); },
-        set(key: string, value: JsonValue) { accessible(); return storage.set(key, value); },
-        delete(key: string) { accessible(); return storage.delete(key); },
+        get(key: string, fallback?: JsonValue) { accessible(); return privateStorage().get(key, fallback); },
+        set(key: string, value: JsonValue) { accessible(); return privateStorage().set(key, value); },
+        delete(key: string) { accessible(); return privateStorage().delete(key); },
       }), signal: record.controller.signal,
       generate(prompt: JsonValue) { accessible(); return track(generateEffect(prompt)); },
       invoke(capability: string, input: JsonValue) { accessible(); return track(invokeEffect(capability, input)); }, send }),
       async finish() {
         open = false;
         const results = await Promise.allSettled([...pendingEffects]);
-        assert(results.every(result => result.status === 'fulfilled'), 'EFFECT_FAILED', 'An initiated effect did not complete.');
+        assert(!effectFailed && results.every(result => result.status === 'fulfilled'), 'EFFECT_FAILED', 'An initiated effect did not complete.');
       },
     });
   }
 
   async function dispatch(event: FrameworkEvent): Promise<EventReport> {
+    await cooperate();
     assert(!stopped, 'ENGINE_STOPPED', 'The engine has stopped.');
     const outcomes: FeatureOutcome[] = [];
     observe({ stage: 'event', eventId: event.id, conversationId: event.conversationId, status: 'accepted' });
-    for (const record of [...features.values()]) {
+    let handled = 0;
+    for (const record of [...(subscriptions.get(event.type) ?? [])]) {
+      if (handled++ > 0) await cooperate();
       const handler = record.handlers.get(event.type);
       if (record.status !== 'active' || !handler) continue;
       const run = Promise.resolve().then(async (): Promise<FeatureOutcome> => {
@@ -419,6 +476,13 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
 
   return Object.freeze({
     install, uninstall, emit,
+    metrics() {
+      return snapshot({ status: lifecycle,
+        queues: { pendingEvents: pendingEventCount, pendingEffects: pendingEffectCount, maxPendingEvents, maxPendingEffects },
+        retention: { events: events.size, effects: effects.size, audit: audit.length },
+        scheduling: { yieldEvery, yieldAfterMs, maxConcurrentSends, activeSends, waitingSends: sendWaiters.length },
+      });
+    },
     describe() {
       return snapshot({ status: lifecycle, apiVersion: 1,
         contracts: { eventTypes: [...supportedEvents], capabilities: [...supportedCapabilities] },
@@ -433,7 +497,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       lifecycle = 'stopping';
       stopPromise = (async () => {
         const results = await Promise.allSettled([...features.keys()].map(id => uninstall(id)));
-        await Promise.allSettled([...conversationTails.values(), outbound]);
+        await Promise.allSettled([...conversationTails.values(), ...outboundTails.values()]);
         const clean = results.every(result => result.status === 'fulfilled');
         lifecycle = clean ? 'stopped' : 'failed';
         assert(clean, 'CLEANUP_FAILED', 'Some features did not clean up.');

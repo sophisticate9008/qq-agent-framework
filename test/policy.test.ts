@@ -30,6 +30,36 @@ test('budgets reserve synchronously and scopes never broaden', () => {
   assert.equal(policy.describe().grants[0].used['messaging.send'], 1);
 });
 
+test('authorization requires an exact feature conversation capability index match', () => {
+  const { policy, request } = fixture();
+  for (const [id, featureId, conversationId, capability] of [
+    ['feature-mismatch', 'other', request.conversationId, request.capability],
+    ['conversation-mismatch', request.featureId, 'demo:other', request.capability],
+    ['capability-mismatch', request.featureId, request.conversationId, 'model.respond'],
+  ]) {
+    policy.grant({ id, featureId, conversationId, capabilities: [capability], maxUses: { [capability]: 1 } });
+  }
+  assert.throws(() => policy.reserve(request), { code: 'POLICY_DENIED' });
+});
+
+test('duplicate grant budgets are consumed in grant insertion order', () => {
+  const { policy, grant, request } = fixture();
+  policy.grant({ ...grant, id: 'first', maxUses: { 'messaging.send': 2 } });
+  policy.grant({ ...grant, id: 'second', maxUses: { 'messaging.send': 2 } });
+  for (let index = 0; index < 3; index++) policy.begin(policy.reserve(request));
+  const grants = policy.describe().grants;
+  assert.equal(grants.find(value => value.id === 'first')?.used['messaging.send'], 2);
+  assert.equal(grants.find(value => value.id === 'second')?.used['messaging.send'], 1);
+});
+
+test('reservations authenticate only by their original frozen object', () => {
+  const { policy, grant, request } = fixture();
+  policy.grant(grant);
+  const held = policy.reserve(request);
+  assert.throws(() => policy.begin({ ...held }), { code: 'INVALID_RESERVATION' });
+  policy.begin(held);
+});
+
 test('pause, expiry and revocation are rechecked immediately before effects', () => {
   for (const change of ['pause', 'expire', 'revoke']) {
     const { policy, grant, request, advance } = fixture();

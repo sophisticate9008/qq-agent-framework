@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import filesystem, { readFile } from 'node:fs/promises'
 import {
   request,
   type ClientRequestArgs,
   type IncomingHttpHeaders,
   type Server
 } from 'node:http'
+import { syncBuiltinESMExports } from 'node:module'
+import { createConnection } from 'node:net'
 import test from 'node:test'
 
 import { createAdminServer, type AdminServerOptions } from '../src/admin/server.ts'
@@ -106,6 +108,31 @@ function parseJson(text: string): unknown {
   return JSON.parse(text) as unknown
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let release: (() => void) | undefined
+  const promise = new Promise<void>(resolvePromise => { release = resolvePromise })
+  if (release === undefined) throw new Error('Deferred promise was not initialized')
+  return { promise, resolve: release }
+}
+
+async function incompleteRequest(origin: string, payload: string): Promise<string> {
+  const url = new URL(origin)
+  const socket = createConnection({ host: url.hostname, port: Number(url.port) })
+  try {
+    return await new Promise<string>((resolvePromise, rejectPromise) => {
+      let response = ''
+      socket.setEncoding('utf8')
+      socket.setTimeout(4000, () => socket.destroy(new Error('Slow request was not closed')))
+      socket.once('connect', () => socket.write(payload))
+      socket.on('data', (chunk: string) => { response += chunk })
+      socket.once('end', () => resolvePromise(response))
+      socket.once('error', rejectPromise)
+    })
+  } finally {
+    socket.destroy()
+  }
+}
+
 test('validates construction inputs without binding the server', () => {
   assert.throws(() => createAdminServer({ token: 'short', snapshot() {}, dispatchDemo() {} }), /24/)
   const invalidOptions = { token: TOKEN, snapshot: null, dispatchDemo() {} } as unknown as AdminServerOptions
@@ -146,6 +173,144 @@ test('serves public health and only explicit static assets', async t => {
 
   const typescriptSource = await rawRequest(fixture.origin, '/app.ts')
   assert.equal(typescriptSource.status, 404)
+})
+
+test('coalesces static reads, keeps warm assets in memory and isolates server caches', async t => {
+  const gate = deferred()
+  const reading = deferred()
+  let reads = 0
+  t.mock.method(filesystem, 'readFile', async () => {
+    reads += 1
+    reading.resolve()
+    await gate.promise
+    return Buffer.from('static demo asset')
+  })
+  syncBuiltinESMExports()
+  t.after(() => {
+    gate.resolve()
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  })
+  const fixture = await start()
+  t.after(async () => stop(fixture.server))
+  const pending = Promise.all(Array.from({ length: 16 }, () => rawRequest(fixture.origin, '/style.css')))
+  await reading.promise
+  assert.equal(reads, 1)
+  gate.resolve()
+  for (const response of await pending) {
+    assert.equal(response.status, 200)
+    assert.equal(response.text, 'static demo asset')
+    assert.equal(response.headers['cache-control'], 'no-store')
+  }
+  const warmed = await rawRequest(fixture.origin, '/style.css?ignored=1')
+  assert.equal(warmed.status, 200)
+  assert.equal(reads, 1)
+  for (const path of ['/missing.css', '/web/style.css', '/app.ts']) {
+    assert.equal((await rawRequest(fixture.origin, path)).status, 404)
+  }
+  assert.equal(reads, 1)
+
+  const other = await start()
+  t.after(async () => stop(other.server))
+  assert.equal((await rawRequest(other.origin, '/style.css')).status, 200)
+  assert.equal(reads, 2)
+})
+
+test('serves oversized static assets without retaining them in the cache', async t => {
+  const content = Buffer.alloc(256 * 1024 + 1, 'x')
+  let reads = 0
+  t.mock.method(filesystem, 'readFile', async () => {
+    reads += 1
+    return content
+  })
+  syncBuiltinESMExports()
+  t.after(() => {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  })
+  const fixture = await start()
+  t.after(async () => stop(fixture.server))
+  for (let index = 0; index < 2; index += 1) {
+    const response = await rawRequest(fixture.origin, '/app.js')
+    assert.equal(response.status, 200)
+    assert.equal(Buffer.byteLength(response.text), content.byteLength)
+  }
+  assert.equal(reads, 2)
+})
+
+test('does not cache static failures or disclose their details', async t => {
+  let reads = 0
+  t.mock.method(filesystem, 'readFile', async () => {
+    reads += 1
+    if (reads === 1) throw new Error(`${TOKEN} /private/missing/app.js`)
+    return Buffer.from('recovered asset')
+  })
+  syncBuiltinESMExports()
+  t.after(() => {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  })
+  const fixture = await start()
+  t.after(async () => stop(fixture.server))
+  const failed = await rawRequest(fixture.origin, '/app.js')
+  assert.equal(failed.status, 500)
+  assert.deepEqual(parseJson(failed.text), { error: 'internal_error' })
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal((await rawRequest(fixture.origin, '/app.js')).text, 'recovered asset')
+  }
+  assert.equal(reads, 2)
+})
+
+test('serves concurrent fresh snapshots without blocking health or bypassing authentication', { timeout: 5000 }, async t => {
+  const gate = deferred()
+  const entered = deferred()
+  let snapshots = 0
+  const fixture = await start({
+    async snapshot() {
+      const revision = ++snapshots
+      if (snapshots === 16) entered.resolve()
+      await gate.promise
+      return { overview: { mode: 'demo', revision } }
+    }
+  })
+  t.after(async () => {
+    gate.resolve()
+    fixture.server.closeAllConnections()
+    await stop(fixture.server)
+  })
+  const headers = { Authorization: `Bearer ${TOKEN}` }
+  const pending = Promise.all(Array.from({ length: 16 }, () => rawRequest(fixture.origin, '/api/snapshot', { headers })))
+  await entered.promise
+  assert.equal((await rawRequest(fixture.origin, '/health')).status, 200)
+  assert.equal((await rawRequest(fixture.origin, '/api/snapshot')).status, 401)
+  assert.equal(snapshots, 16)
+  gate.resolve()
+  const responses = await pending
+  assert.equal(new Set(responses.map(response => response.text)).size, 16)
+  assert.ok(responses.every(response => response.status === 200))
+  const latest = await rawRequest(fixture.origin, '/api/snapshot', { headers })
+  assert.deepEqual(parseJson(latest.text), { overview: { mode: 'demo', revision: 17 } })
+})
+
+test('closes incomplete request headers at the native header deadline', { timeout: 5000 }, async t => {
+  const fixture = await start()
+  t.after(async () => stop(fixture.server))
+  fixture.server.headersTimeout = 50
+  fixture.server.requestTimeout = 100
+  const response = await incompleteRequest(fixture.origin, 'GET /health HTTP/1.1\r\nHost: localhost\r\nX-Slow: ')
+  assert.match(response, /^HTTP\/1\.1 408 /)
+})
+
+test('closes incomplete JSON bodies at the native request deadline without dispatch', { timeout: 5000 }, async t => {
+  const fixture = await start()
+  t.after(async () => stop(fixture.server))
+  fixture.server.headersTimeout = 50
+  fixture.server.requestTimeout = 100
+  const host = new URL(fixture.origin).host
+  const response = await incompleteRequest(fixture.origin,
+    `POST /api/demo/events HTTP/1.1\r\nHost: ${host}\r\nAuthorization: Bearer ${TOKEN}\r\nOrigin: ${fixture.origin}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`)
+  assert.match(response, /^HTTP\/1\.1 408 /)
+  assert.equal(fixture.calls.length, 0)
 })
 
 test('limits request header size', async t => {

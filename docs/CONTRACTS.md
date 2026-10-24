@@ -52,6 +52,12 @@ context.persona 是完整版本化人设对象，可读 `.name`。功能不获�
 默认未结束事件上限256、副作用上限512；超出时给出稳定 backpressure 错误，不隐式扩大预算。
 出站回执区分 confirmed/rejected/unknown；功能处理完成并不等于送达成功。
 
+迭代002的 EngineOptions 增加 yieldEvery（默认64）、yieldAfterMs（默认8）与 maxConcurrentSends（默认1，保留全局顺序）。
+计数或累计时间达到任一阈值时在调度边界让出，不是单个插件执行的抢占超时。
+并发数大于1时，发送按会话有序且全局活动数不超过上限；真正取得槽位后再检查功能与授权。
+卸载/停止仍排空发送与待取槽位动作。metrics() 返回队列、历史保留数量、让出周期及发送槽位计数，
+不复制审计正文；完整 describe() 只用于显式管理查询。不使用状态时不创建空状态命名空间。
+
 ## 演示适配器与示例（工作者 C）
 
 - `src/adapters/demo.ts` 导出 `createDemoTransport()`：`send(request)` 返回确认回执；
@@ -76,6 +82,7 @@ context.persona 是完整版本化人设对象，可读 `.name`。功能不获�
 - UI 首轮展示 snapshot 的 overview/features/context/policy/outbox/audit 字段，提供显式手动演示。
 - `web/app.ts` 编译成 `dist/web/app.js`，`/app.js` 只提供编译产物，`/app.ts` 不提供。
 - 管理端不依赖第三方运行库；开发依赖在 package-lock.json 固定。
+- 静态缓存仅三个白名单路由，每条至多256KiB并合并并发读取；需重建server刷新，动态快照不缓存。
 
 ## 主线程装配
 

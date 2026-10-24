@@ -4,7 +4,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { startDemo } from '../src/demo.ts';
 import { chromium, type Browser } from 'playwright';
 
-const directory = new URL('../runtime/iterations/001/', import.meta.url);
+const iteration = process.env.FRAMEWORK_ITERATION ?? '001';
+assert(/^\d{3}$/.test(iteration), 'FRAMEWORK_ITERATION must contain three digits.');
+const directory = new URL(`../runtime/iterations/${iteration}/`, import.meta.url);
 await mkdir(directory, { recursive: true });
 const token = randomBytes(32).toString('hex');
 const demo = await startDemo({ token, port: 0 });

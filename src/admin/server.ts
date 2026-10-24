@@ -10,6 +10,7 @@ import {
 
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_HEADER_BYTES = 16 * 1024
+const MAX_CACHED_ASSET_BYTES = 256 * 1024
 const REQUEST_TIMEOUT_MS = 15 * 1000
 const HEADERS_TIMEOUT_MS = 10 * 1000
 const SOCKET_TIMEOUT_MS = 20 * 1000
@@ -52,7 +53,7 @@ function send(
   contentType = 'application/json; charset=utf-8',
   extraHeaders: OutgoingHttpHeaders = {}
 ): void {
-  const payload = Buffer.from(body)
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(body)
   response.writeHead(statusCode, {
     ...SECURITY_HEADERS,
     ...extraHeaders,
@@ -170,14 +171,29 @@ class RequestError extends Error {
   }
 }
 
-async function serveStatic(pathname: string, response: ServerResponse): Promise<void> {
+async function serveStatic(
+  pathname: string,
+  response: ServerResponse,
+  cache: Map<string, Promise<Buffer>>
+): Promise<void> {
   const asset = STATIC_ROUTES.get(pathname)
   if (asset === undefined) {
     sendError(response, 404, 'not_found')
     return
   }
   try {
-    const content = await readFile(asset.url)
+    let pending = cache.get(pathname)
+    if (pending === undefined) {
+      pending = readFile(asset.url).then(content => {
+        if (content.byteLength > MAX_CACHED_ASSET_BYTES) cache.delete(pathname)
+        return content
+      }, (error: unknown) => {
+        cache.delete(pathname)
+        throw error
+      })
+      cache.set(pathname, pending)
+    }
+    const content = await pending
     send(response, 200, content, asset.type)
   } catch {
     sendError(response, 500, 'internal_error')
@@ -193,6 +209,7 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
   }
 
   const tokenBuffer = Buffer.from(token)
+  const staticCache = new Map<string, Promise<Buffer>>()
   const server = createServer({
     connectionsCheckingInterval: 1000,
     headersTimeout: HEADERS_TIMEOUT_MS,
@@ -239,7 +256,7 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
       }
 
       if (request.method === 'GET' && STATIC_ROUTES.has(pathname)) {
-        await serveStatic(pathname, response)
+        await serveStatic(pathname, response, staticCache)
         return
       }
 
@@ -265,5 +282,6 @@ export function createAdminServer({ token, snapshot, dispatchDemo }: AdminServer
   })
   server.maxHeadersCount = 100
   server.setTimeout(SOCKET_TIMEOUT_MS)
+  server.once('close', () => staticCache.clear())
   return server
 }

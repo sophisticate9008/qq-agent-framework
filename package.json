@@ -15,7 +15,12 @@
     "test:built": "npm run build && node --test dist/test/*.test.js",
     "test:browser": "npm run build && node scripts/browser-smoke.ts",
     "demo": "npm run build && node src/demo.ts",
-    "check": "npm run typecheck && node scripts/check.ts"
+    "check": "npm run typecheck && node scripts/check.ts",
+    "bench:core": "node --expose-gc scripts/bench-core.ts",
+    "bench:context": "node scripts/bench-context.ts",
+    "bench:policy": "node scripts/bench-policy.ts",
+    "bench:admin": "node scripts/bench-admin.ts",
+    "bench:soak": "node --expose-gc scripts/bench-soak.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

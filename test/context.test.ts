@@ -6,6 +6,24 @@ import type { JsonObject, JsonValue } from '../src/core/types.ts'
 
 type ContextStore = ReturnType<typeof createContextStore>
 
+test('final provenance remains deeply frozen and detached when intermediate copies are removed', () => {
+  const store = createContextStore()
+  const persona = registerPersona(store)
+  const scope = { kind: 'conversation', id: 'target' } as const
+  store.setConfiguration({ scope, values: { mode: 'configured' }, source: 'operator' })
+  store.setPreferences({ id: 'first', scope, values: { mode: 'preferred' }, source: 'operator' })
+  const before = store.resolve({ persona, conversationId: 'target' })
+  assert(Object.isFrozen(before.provenance.configuration.mode))
+  assert(Object.isFrozen(before.provenance.configuration.mode.scope))
+  assert(Object.isFrozen(before.provenance.preferences.mode.scope))
+  assert.throws(() => { before.provenance.preferences.mode.scope.kind = 'global' }, TypeError)
+  store.setPreferences({ id: 'second', scope, values: { mode: 'new' }, source: 'confirmed-user' })
+  store.removePreferences('first')
+  assert.equal(before.preferences.mode, 'preferred')
+  assert.equal(before.provenance.preferences.mode.id, 'first')
+  assert.equal(store.resolve({ persona, conversationId: 'target' }).provenance.preferences.mode.id, 'second')
+})
+
 function registerPersona(store: ContextStore, version = '1.0.0'): string {
   return store.registerPersona({
     id: 'snow',
@@ -26,6 +44,196 @@ function objectValue(value: JsonValue): JsonObject {
   assert.equal(Array.isArray(value), false)
   return value as JsonObject
 }
+
+test('preference updates preserve layer priority and latest successful update order', () => {
+  let now = 100
+  const store = createContextStore({ clock: () => now })
+  const persona = registerPersona(store)
+  const scope = { kind: 'conversation', id: 'target' } as const
+  const input = { persona, conversationId: 'target' }
+  const write = (id: string, marker: string, expiresAt: number | null = null): void => {
+    store.setPreferences({ id, scope, values: { marker }, source: 'operator', expiresAt })
+  }
+  const check = (marker: string, id: string): void => {
+    const result = store.resolve(input)
+    assert.equal(result.preferences.marker, marker)
+    assert.equal(result.provenance.preferences.marker.id, id)
+  }
+
+  write('first', 'first-default')
+  write('second', 'second-default')
+  check('second-default', 'second')
+  write('first', 'updated-default')
+  check('updated-default', 'first')
+  write('temporary-one', 'temporary-one', 200)
+  write('temporary-two', 'temporary-two', 300)
+  write('second', 'newest-default')
+  check('temporary-two', 'temporary-two')
+  write('temporary-one', 'updated-temporary', 200)
+  check('updated-temporary', 'temporary-one')
+  now = 200
+  check('temporary-two', 'temporary-two')
+  now = 300
+  check('newest-default', 'second')
+  now = 100
+  check('updated-temporary', 'temporary-one')
+  write('temporary-one', 'converted-default')
+  check('temporary-two', 'temporary-two')
+  write('second', 'converted-temporary', 400)
+  check('converted-temporary', 'second')
+  assert.equal(store.removePreferences('second'), true)
+  check('temporary-two', 'temporary-two')
+  write('second', 'reinserted', 500)
+  check('reinserted', 'second')
+  now = 500
+  check('converted-default', 'temporary-one')
+})
+
+test('failed preference writes leave resolution and management order unchanged', () => {
+  const store = createContextStore()
+  const persona = registerPersona(store)
+  const scope = { kind: 'conversation', id: 'target' } as const
+  for (const id of ['first', 'second']) {
+    store.setPreferences({ id, scope, values: { marker: id }, source: 'operator' })
+  }
+  const before = store.resolve({ persona, conversationId: 'target' })
+  const description = store.describe()
+  const invalid: unknown = { marker: () => 'not-json' }
+  for (const id of ['first', 'unregistered']) {
+    assert.throws(() => store.setPreferences({
+      id, scope, values: invalid as JsonObject, source: 'operator'
+    }), (error: unknown) => hasErrorCode(error, 'CONTEXT_INVALID_VALUES'))
+  }
+  assert.deepEqual(store.resolve({ persona, conversationId: 'target' }), before)
+  assert.deepEqual(store.describe(), description)
+  store.setPreferences({ id: 'first', scope, values: { marker: 'updated' }, source: 'operator' })
+  assert.deepEqual(store.describe().preferences.map((record) => record.id), ['first', 'second'])
+  assert.equal(store.resolve({ persona, conversationId: 'target' }).preferences.marker, 'updated')
+  assert.equal(store.removePreferences('unregistered'), false)
+})
+
+test('scope indexing excludes unrelated scopes and treats prototype names as namespace data', () => {
+  const store = createContextStore({ clock: () => 100 })
+  const persona = registerPersona(store)
+  for (let index = 0; index < 1_000; index += 1) {
+    store.setPreferences({
+      id: `unrelated-${index}`,
+      scope: { kind: 'conversation', id: `unrelated-${index}` },
+      values: { marker: 'unrelated' },
+      source: 'operator'
+    })
+  }
+  store.setPreferences({
+    id: 'prototype-conversation',
+    scope: { kind: 'conversation', id: '__proto__' },
+    values: { conversation: 'selected' }, source: 'operator'
+  })
+  store.setPreferences({
+    id: 'prototype-user',
+    scope: { kind: 'user', id: '__proto__' },
+    values: { user: 'selected' }, source: 'operator'
+  })
+  store.setPreferences({
+    id: 'constructor-task',
+    scope: { kind: 'task', id: 'constructor' },
+    values: { task: 'selected' }, source: 'operator'
+  })
+  assert.deepEqual(store.resolve({
+    persona, conversationId: '__proto__', userId: '__proto__', taskId: 'constructor'
+  }).preferences, { conversation: 'selected', user: 'selected', task: 'selected' })
+  assert.deepEqual(store.resolve({ persona, conversationId: 'constructor' }).preferences, {})
+  assert.equal(store.removePreferences('prototype-conversation'), true)
+  assert.equal(store.removePreferences('prototype-user'), true)
+  assert.equal(store.removePreferences('constructor-task'), true)
+  assert.deepEqual(store.resolve({
+    persona, conversationId: '__proto__', userId: '__proto__', taskId: 'constructor'
+  }).preferences, {})
+  assert.equal((Object.prototype as { marker?: unknown }).marker, undefined)
+})
+
+test('indexed resolution agrees with a flat reference across updates, removal and clock changes', () => {
+  let now = 100
+  const store = createContextStore({ clock: () => now })
+  const persona = registerPersona(store)
+  const otherPersona = registerPersona(store, '2.0.0')
+  type PreferenceInput = Parameters<ContextStore['setPreferences']>[0]
+  type Scope = PreferenceInput['scope']
+  type ReferenceRecord = PreferenceInput & { expiresAt: number | null; sequence: number }
+  const scopes: Scope[] = [
+    { kind: 'global' },
+    { kind: 'persona', id: persona },
+    { kind: 'persona', id: otherPersona },
+    { kind: 'conversation', id: '__proto__' },
+    { kind: 'conversation', id: 'other' },
+    { kind: 'user', id: 'constructor' },
+    { kind: 'session', id: 'session' },
+    { kind: 'task', id: 'task' }
+  ]
+  const key = (scope: Scope): string =>
+    scope.kind === 'global' ? 'global' : `${scope.kind}:${scope.id}`
+  const reference = new Map<string, ReferenceRecord>()
+  const queries = [
+    {
+      persona, conversationId: '__proto__', userId: 'constructor',
+      sessionId: 'session', taskId: 'task'
+    },
+    { persona: otherPersona, conversationId: 'other' },
+    { persona, conversationId: 'absent' }
+  ]
+
+  for (let sequence = 0; sequence < 120; sequence += 1) {
+    now = [100, 300, 50, 200][sequence % 4] ?? 100
+    const selected = sequence % 24
+    const id = `reference-${selected}`
+    if (sequence % 7 === 0) {
+      assert.equal(store.removePreferences(id), reference.delete(id))
+    } else {
+      const scope = scopes[selected % scopes.length]
+      assert(scope)
+      const record: ReferenceRecord = {
+        id, scope,
+        values: { marker: sequence, [`key-${selected % 3}`]: selected },
+        source: sequence % 2 === 0 ? 'operator' : 'confirmed-user',
+        expiresAt: sequence % 3 === 0 ? null : sequence % 3 === 1 ? 200 : 400,
+        sequence
+      }
+      store.setPreferences(record)
+      reference.set(id, record)
+    }
+    for (const input of queries) {
+      const activeScopes: Scope[] = [
+        { kind: 'global' },
+        { kind: 'persona', id: input.persona },
+        { kind: 'conversation', id: input.conversationId }
+      ]
+      if (input.userId) activeScopes.push({ kind: 'user', id: input.userId })
+      if (input.sessionId) activeScopes.push({ kind: 'session', id: input.sessionId })
+      if (input.taskId) activeScopes.push({ kind: 'task', id: input.taskId })
+      const values = new Map<string, JsonValue>()
+      const provenance = new Map<string, JsonValue>()
+      for (const scope of activeScopes) {
+        const records = [...reference.values()]
+          .filter((record) => key(record.scope) === key(scope))
+          .filter((record) => record.expiresAt === null || record.expiresAt > now)
+          .sort((left, right) =>
+            Number(left.expiresAt !== null) - Number(right.expiresAt !== null)
+            || left.sequence - right.sequence)
+        for (const record of records) {
+          for (const [name, value] of Object.entries(record.values)) {
+            values.set(name, value)
+            provenance.set(name, {
+              id: record.id, scope: record.scope,
+              source: record.source, expiresAt: record.expiresAt
+            })
+          }
+        }
+      }
+      const actual = store.resolve(input)
+      assert.deepEqual(actual.preferences, Object.fromEntries(values))
+      assert.deepEqual(actual.provenance.preferences, Object.fromEntries(provenance))
+    }
+  }
+})
 
 test('personas are immutable, versioned definitions', () => {
   const store = createContextStore()

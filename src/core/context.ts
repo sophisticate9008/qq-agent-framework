@@ -64,7 +64,11 @@ interface PreferenceRecord {
   values: JsonObject
   source: PreferenceSource
   expiresAt: number | null
-  order: number
+}
+
+interface PreferenceBucket {
+  persistent: Map<string, PreferenceRecord>
+  temporary: Map<string, PreferenceRecord>
 }
 
 interface PersonaProvenance extends JsonObject {
@@ -286,7 +290,7 @@ export function createContextStore(
   const personas = new Map<string, PersonaDefinition>()
   const configurations = new Map<string, ConfigurationRecord>()
   const preferences = new Map<string, PreferenceRecord>()
-  let preferenceOrder = 0
+  const preferencesByScope = new Map<string, PreferenceBucket>()
 
   function registerPersona({ id, version, name, identity, style }: PersonaInput): string {
     assertIdentifier(id, 'CONTEXT_INVALID_PERSONA', 'Persona id is invalid')
@@ -343,19 +347,44 @@ export function createContextStore(
       'CONTEXT_PREFERENCE_SCOPE_MISMATCH',
       'Preference id is already assigned to another scope'
     )
-    preferenceOrder += 1
-    preferences.set(id, {
+    const record: PreferenceRecord = {
       id,
       scope: normalizedScope,
       values: copyValues(values),
       source,
-      expiresAt,
-      order: preferenceOrder
-    })
+      expiresAt
+    }
+    const key = scopeKey(normalizedScope)
+    let bucket = preferencesByScope.get(key)
+    if (!bucket) {
+      bucket = {
+        persistent: new Map<string, PreferenceRecord>(),
+        temporary: new Map<string, PreferenceRecord>()
+      }
+      preferencesByScope.set(key, bucket)
+    }
+    if (existing) {
+      const previousLayer = existing.expiresAt === null ? bucket.persistent : bucket.temporary
+      previousLayer.delete(id)
+    }
+    const layer = expiresAt === null ? bucket.persistent : bucket.temporary
+    layer.set(id, record)
+    preferences.set(id, record)
   }
 
   function removePreferences(id: string): boolean {
     assertIdentifier(id, 'CONTEXT_INVALID_PREFERENCE', 'Preference id is invalid')
+    const existing = preferences.get(id)
+    if (!existing) return false
+    const key = scopeKey(existing.scope)
+    const bucket = preferencesByScope.get(key)
+    if (bucket) {
+      const layer = existing.expiresAt === null ? bucket.persistent : bucket.temporary
+      layer.delete(id)
+      if (bucket.persistent.size === 0 && bucket.temporary.size === 0) {
+        preferencesByScope.delete(key)
+      }
+    }
     return preferences.delete(id)
   }
 
@@ -379,8 +408,6 @@ export function createContextStore(
     const configurationProvenance = new Map<string, ConfigurationOrigin>()
     const preferenceValues = new Map<string, JsonValue>()
     const preferenceProvenance = new Map<string, PreferenceOrigin>()
-    const records = [...preferences.values()].sort((left, right) => left.order - right.order)
-
     for (const scope of resolutionScopes(personaKey, input)) {
       const key = scopeKey(scope)
       const configuration = configurations.get(key)
@@ -389,35 +416,22 @@ export function createContextStore(
           configurationValues,
           configurationProvenance,
           configuration.values,
-          safeSnapshot<ConfigurationOrigin>(
-            { scope: configuration.scope, source: configuration.source },
-            'CONTEXT_INVALID_VALUES',
-            'Configuration provenance is invalid'
-          )
+          { scope: configuration.scope, source: configuration.source }
         )
       }
 
-      const matching = records.filter((record) => scopeKey(record.scope) === key)
-      const persistent = matching.filter((record) => record.expiresAt === null)
-      const temporary = matching.filter(
-        (record) => record.expiresAt !== null && record.expiresAt > now
-      )
-      for (const record of [...persistent, ...temporary]) {
-        assignValues(
-          preferenceValues,
-          preferenceProvenance,
-          record.values,
-          safeSnapshot<PreferenceOrigin>(
-            {
-              id: record.id,
-              scope: record.scope,
-              source: record.source,
-              expiresAt: record.expiresAt
-            },
-            'CONTEXT_INVALID_VALUES',
-            'Preference provenance is invalid'
+      const bucket = preferencesByScope.get(key)
+      if (!bucket) continue
+      for (const layer of [bucket.persistent, bucket.temporary]) {
+        for (const record of layer.values()) {
+          if (record.expiresAt !== null && record.expiresAt <= now) continue
+          assignValues(
+            preferenceValues,
+            preferenceProvenance,
+            record.values,
+            { id: record.id, scope: record.scope, source: record.source, expiresAt: record.expiresAt }
           )
-        )
+        }
       }
     }
 

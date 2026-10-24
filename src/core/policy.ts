@@ -14,14 +14,38 @@ interface GrantRecord {
 }
 interface EffectAuthorization { featureId: string; conversationId: string; capability: string }
 interface Reservation extends EffectAuthorization { id: string; grantId: string }
+type CapabilityGrants = Map<string, GrantRecord[]>;
+type ConversationGrants = Map<string, CapabilityGrants>;
 
 export function createPolicy({ clock = Date.now }: { clock?: Clock } = {}) {
   const grants = new Map<string, GrantRecord>();
+  const grantsByScope = new Map<string, ConversationGrants>();
   const reservations = new Map<string, Reservation>();
   let paused = false;
 
   function usable(grant: GrantRecord) {
     return grant.active && (grant.expiresAt === null || clock() < grant.expiresAt);
+  }
+
+  function indexGrant(value: GrantRecord) {
+    let conversations = grantsByScope.get(value.featureId);
+    if (!conversations) {
+      conversations = new Map();
+      grantsByScope.set(value.featureId, conversations);
+    }
+    let capabilities = conversations.get(value.conversationId);
+    if (!capabilities) {
+      capabilities = new Map();
+      conversations.set(value.conversationId, capabilities);
+    }
+    for (const capability of value.capabilities) {
+      let matching = capabilities.get(capability);
+      if (!matching) {
+        matching = [];
+        capabilities.set(capability, matching);
+      }
+      matching.push(value);
+    }
   }
 
   function grant(input: unknown) {
@@ -41,18 +65,28 @@ export function createPolicy({ clock = Date.now }: { clock?: Clock } = {}) {
     const expiresAt = value.expiresAt ?? null;
     assert(expiresAt === null || (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > clock()),
       'INVALID_GRANT', 'Grant expiry must be in the future.');
-    grants.set(value.id, { id: value.id, featureId: value.featureId, conversationId: value.conversationId,
+    const record = { id: value.id, featureId: value.featureId, conversationId: value.conversationId,
       capabilities: value.capabilities, maxUses: value.maxUses as Record<string, number>, expiresAt, active: true,
-      used: Object.fromEntries(value.capabilities.map(capability => [capability, 0])) });
+      used: Object.fromEntries(value.capabilities.map(capability => [capability, 0])) };
+    grants.set(value.id, record);
+    indexGrant(record);
     return value.id;
   }
 
   function reserve({ featureId, conversationId, capability }: EffectAuthorization): Reservation {
     assert(!paused, 'POLICY_PAUSED', 'Effects are paused.');
-    const matching = [...grants.values()].filter(value => value.featureId === featureId
-      && value.conversationId === conversationId && value.capabilities.includes(capability) && usable(value));
-    assert(matching.length > 0, 'POLICY_DENIED', 'No active grant authorizes this effect.');
-    const selected = matching.find(value => value.used[capability] < value.maxUses[capability]);
+    const matching = grantsByScope.get(featureId)?.get(conversationId)?.get(capability) ?? [];
+    let authorized = false;
+    let selected: GrantRecord | undefined;
+    for (const value of matching) {
+      if (!usable(value)) continue;
+      authorized = true;
+      if (value.used[capability] < value.maxUses[capability]) {
+        selected = value;
+        break;
+      }
+    }
+    assert(authorized, 'POLICY_DENIED', 'No active grant authorizes this effect.');
     assert(selected, 'BUDGET_EXHAUSTED', 'The effect attempt budget is exhausted.');
     selected.used[capability]++;
     const reservation = snapshot({ id: randomUUID(), grantId: selected.id, featureId, conversationId, capability });

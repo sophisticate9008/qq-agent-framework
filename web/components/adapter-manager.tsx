@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CircleAlert, LoaderCircle, MessagesSquare, Play, RefreshCw, Server, ServerOff, ShieldCheck, Workflow } from 'lucide-react';
+import { CircleAlert, LoaderCircle, MessagesSquare, Plug, RefreshCw, Server, ServerOff, ShieldCheck, Unplug, Workflow } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 import { AdapterCredentialField, AdapterEndpointField, AdapterNumberField, unchangedCredential, type CredentialDraft } from './adapter-connection-fields.tsx';
@@ -8,7 +8,7 @@ import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 
 type OutboundId = 'onebotHttp' | 'dshAgent';
-type AdapterId = OutboundId | 'onebotWebhook';
+type AdapterId = OutboundId | 'onebotWebhook' | 'onebotWs';
 type WriteState = 'idle' | 'saved' | 'error' | 'conflict' | 'busy' | 'unknown';
 
 interface OutboundConfiguration {
@@ -28,7 +28,16 @@ interface WebhookConfiguration {
 interface AdapterSnapshot {
   readonly revision: string;
   readonly outbound: Readonly<Record<OutboundId, OutboundConfiguration>>;
+  readonly websocket: OutboundConfiguration;
   readonly webhook: WebhookConfiguration;
+  readonly connection?: {
+    readonly state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
+    readonly selfId: string | null;
+    readonly lastError: string | null;
+    readonly received: number;
+    readonly dropped: number;
+    readonly chatReady: false;
+  };
   readonly status: {
     readonly assembled: boolean;
     readonly running: boolean;
@@ -52,11 +61,12 @@ interface WebhookDraft {
 
 interface AdapterDraft {
   readonly outbound: Readonly<Record<OutboundId, OutboundDraft>>;
+  readonly websocket: OutboundDraft;
   readonly webhook: WebhookDraft;
 }
 
 const definitions = [
-  { id: 'onebotHttp', title: 'OneBot', description: '填写协议端提供的 HTTP API 地址和密钥，用于发送消息。接收消息另外设置 webhook。', credentialFlag: 'secretConfigured', credentialKey: 'secret', clearKey: 'clearSecret', credentialLabel: '协议端 API 密钥（可选）', credentialDescription: '复制协议端 HTTP 服务设置中的 accessToken。不是本管理后台的管理员令牌或登录会话；协议端未启用认证时可不填。', placeholder: 'http://127.0.0.1:3000', icon: MessagesSquare },
+  { id: 'onebotHttp', title: 'OneBot', description: 'HTTP 用于发送，WebSocket 用于收消息；连接后自动识别机器人账号。', credentialFlag: 'secretConfigured', credentialKey: 'secret', clearKey: 'clearSecret', credentialLabel: '协议端 API 密钥（可选）', credentialDescription: '复制协议端 HTTP 服务设置中的 accessToken。不是本管理后台的管理员令牌或登录会话；协议端未启用认证时可不填。', placeholder: 'http://127.0.0.1:3000', icon: MessagesSquare },
   { id: 'dshAgent', title: 'DSH 聊天引擎', description: '连接 agent 服务，处理会话与回复。', credentialFlag: 'authConfigured', credentialKey: 'auth', clearKey: 'clearAuth', credentialLabel: '引擎访问凭据', credentialDescription: '由 DSH 服务提供，与管理后台登录凭据分开。', placeholder: 'https://agent.example.com', icon: Workflow },
 ] as const;
 
@@ -76,6 +86,22 @@ function parseSnapshot(value: unknown): AdapterSnapshot | null {
     outbound[definition.id] = { enabled: adapter.enabled, endpoint: adapter.endpoint, credentialConfigured };
   }
   const webhook = asRecord(adapters.onebotWebhook);
+  const websocket = adapters.onebotWs === undefined ? { enabled: false, endpoint: '', secretConfigured: false } : asRecord(adapters.onebotWs);
+  if (typeof websocket.enabled !== 'boolean' || typeof websocket.endpoint !== 'string'
+    || typeof websocket.secretConfigured !== 'boolean') return null;
+  let connection: AdapterSnapshot['connection'];
+  if (root.connection !== undefined) {
+    const value = asRecord(root.connection);
+    if (!['disconnected', 'connecting', 'connected', 'reconnecting', 'error'].includes(String(value.state))
+      || value.selfId !== null && typeof value.selfId !== 'string'
+      || value.lastError !== null && typeof value.lastError !== 'string'
+      || typeof value.received !== 'number' || !Number.isSafeInteger(value.received) || value.received < 0
+      || typeof value.dropped !== 'number' || !Number.isSafeInteger(value.dropped) || value.dropped < 0
+      || value.chatReady !== false) return null;
+    connection = { state: value.state as NonNullable<AdapterSnapshot['connection']>['state'],
+      selfId: value.selfId as string | null, lastError: value.lastError as string | null,
+      received: value.received, dropped: value.dropped, chatReady: false };
+  }
   if (typeof webhook.enabled !== 'boolean' || typeof webhook.host !== 'string'
     || typeof webhook.port !== 'number' || !Number.isSafeInteger(webhook.port)
     || webhook.port < 0 || webhook.port > 65535 || typeof webhook.selfId !== 'string'
@@ -83,6 +109,8 @@ function parseSnapshot(value: unknown): AdapterSnapshot | null {
   return {
     revision: root.revision,
     outbound,
+    websocket: { enabled: websocket.enabled, endpoint: websocket.endpoint, credentialConfigured: websocket.secretConfigured },
+    ...(connection === undefined ? {} : { connection }),
     webhook: { enabled: webhook.enabled, host: webhook.host, port: webhook.port, selfId: webhook.selfId, hmacConfigured: webhook.hmacConfigured },
     status: { assembled: status.assembled, running: status.running, applyAvailable: status.applyAvailable },
   };
@@ -96,6 +124,7 @@ function toDraft(snapshot: AdapterSnapshot): AdapterDraft {
   }
   return {
     outbound,
+    websocket: { enabled: snapshot.websocket.enabled, endpoint: snapshot.websocket.endpoint, credential: unchangedCredential },
     webhook: { enabled: snapshot.webhook.enabled, host: snapshot.webhook.host, port: String(snapshot.webhook.port), selfId: snapshot.webhook.selfId, credential: unchangedCredential },
   };
 }
@@ -115,6 +144,7 @@ function clearCredentials(draft: AdapterDraft): AdapterDraft {
       onebotHttp: { ...draft.outbound.onebotHttp, credential: unchangedCredential },
       dshAgent: { ...draft.outbound.dshAgent, credential: unchangedCredential },
     },
+    websocket: { ...draft.websocket, credential: unchangedCredential },
     webhook: { ...draft.webhook, credential: unchangedCredential },
   };
 }
@@ -151,6 +181,15 @@ function credentialError(credential: CredentialDraft, label: string): string | n
 }
 
 function validationError(snapshot: AdapterSnapshot, draft: AdapterDraft): string | null {
+  if (draft.websocket.enabled && draft.webhook.enabled) return 'WebSocket 与 webhook 只能选择一种接收方式。';
+  if (changedOutbound(snapshot.websocket, draft.websocket)) {
+    const endpoint = draft.websocket.endpoint.trim();
+    if (draft.websocket.enabled && endpoint === '' || endpoint !== '' && (!/^wss?:\/\//.test(endpoint) || !validEndpoint(endpoint.replace(/^ws/, 'http')))) {
+      return 'WebSocket 地址需使用本机 ws:// 或远程 wss://，不要包含密钥或查询参数。';
+    }
+    const error = credentialError(draft.websocket.credential, 'WebSocket API 密钥');
+    if (error) return error;
+  }
   for (const definition of definitions) {
     const adapter = draft.outbound[definition.id];
     if (!changedOutbound(snapshot.outbound[definition.id], adapter)) continue;
@@ -205,6 +244,8 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
   const [draft, setDraft] = useState<AdapterDraft | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [controlling, setControlling] = useState(false);
+  const [connectionError, setConnectionError] = useState('');
   const [loadError, setLoadError] = useState('');
   const [formError, setFormError] = useState('');
   const [result, setResult] = useState<WriteState>('idle');
@@ -213,8 +254,8 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
   const reportedDirty = useRef(false);
   const setDirtyRef = useRef(setDirty);
   const blocked = result === 'unknown' || result === 'conflict' || result === 'busy';
-  const disabled = saving || loading || blocked;
-  const dirty = snapshot !== null && draft !== null && (definitions.some(definition => changedOutbound(snapshot.outbound[definition.id], draft.outbound[definition.id])) || changedWebhook(snapshot.webhook, draft.webhook));
+  const disabled = saving || controlling || loading || blocked;
+  const dirty = snapshot !== null && draft !== null && (definitions.some(definition => changedOutbound(snapshot.outbound[definition.id], draft.outbound[definition.id])) || changedWebhook(snapshot.webhook, draft.webhook) || changedOutbound(snapshot.websocket, draft.websocket));
 
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
@@ -232,6 +273,8 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
     setDraft(null);
     setSnapshot(null);
     setSaving(false);
+    setControlling(false);
+    setConnectionError('');
     if (!connected) {
       setLoading(false);
       return () => controller.abort();
@@ -257,6 +300,32 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
     };
   }, [api, connected, reloadVersion]);
 
+  useEffect(() => {
+    if (!connected || !snapshot?.status.applyAvailable || dirty || disabled) return;
+    const controller = new AbortController();
+    let pending = false;
+    const timer = setInterval(() => {
+      if (pending || document.visibilityState === 'hidden') return;
+      pending = true;
+      void api.get('/api/chat/adapters', controller.signal).then(value => {
+        if (controller.signal.aborted) return;
+        const next = parseSnapshot(value);
+        if (!next) return;
+        setSnapshot(next);
+        setDraft(toDraft(next));
+      }).catch(() => undefined).finally(() => { pending = false; });
+    }, 2_500);
+    return () => { clearInterval(timer); controller.abort(); };
+  }, [api, connected, dirty, disabled, snapshot?.status.applyAvailable]);
+
+  function updateWebSocket(patch: Partial<OutboundDraft>): void {
+    if (disabled) return;
+    setDraft(current => current ? { ...current, websocket: { ...current.websocket, ...patch },
+      webhook: patch.enabled === true ? { ...current.webhook, enabled: false } : current.webhook } : current);
+    setResult('idle');
+    setFormError('');
+  }
+
   function updateOutbound(id: OutboundId, patch: Partial<OutboundDraft>): void {
     if (disabled) return;
     setDraft(current => current ? { ...current, outbound: { ...current.outbound, [id]: { ...current.outbound[id], ...patch } } } : current);
@@ -266,13 +335,14 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
 
   function updateWebhook(patch: Partial<WebhookDraft>): void {
     if (disabled) return;
-    setDraft(current => current ? { ...current, webhook: { ...current.webhook, ...patch } } : current);
+    setDraft(current => current ? { ...current, webhook: { ...current.webhook, ...patch },
+      websocket: patch.enabled === true ? { ...current.websocket, enabled: false } : current.websocket } : current);
     setResult('idle');
     setFormError('');
   }
 
   function reload(): void {
-    if (saving || loading) return;
+    if (saving || controlling || loading) return;
     setDraft(null);
     setReloadVersion(version => version + 1);
   }
@@ -292,6 +362,9 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
       return;
     }
     const adapters: Partial<Record<AdapterId, Record<string, string | number | boolean>>> = {};
+    if (changedOutbound(snapshot.websocket, draft.websocket)) {
+      adapters.onebotWs = { enabled: draft.websocket.enabled, endpoint: draft.websocket.endpoint.trim(), ...credentialPatch(draft.websocket.credential, 'secret', 'clearSecret') };
+    }
     for (const definition of definitions) {
       const adapter = draft.outbound[definition.id];
       if (!changedOutbound(snapshot.outbound[definition.id], adapter)) continue;
@@ -330,19 +403,41 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
     }
   }
 
+  async function controlConnection(action: 'connect' | 'disconnect'): Promise<void> {
+    if (!snapshot || disabled || dirty || !snapshot.status.applyAvailable) return;
+    const controller = new AbortController();
+    saveController.current = controller;
+    setControlling(true);
+    setConnectionError('');
+    try {
+      const value = await api.post(`/api/chat/adapters/${action}`, action === 'connect' ? { revision: snapshot.revision } : {}, controller.signal);
+      if (controller.signal.aborted) return;
+      const next = parseSnapshot(value);
+      if (!next) throw new Error('invalid_adapters_response');
+      setSnapshot(next);
+      setDraft(toDraft(next));
+    } catch (error) {
+      if (!controller.signal.aborted) setConnectionError(`未能确认连接操作结果：${errorMessage(error)}。请先重新读取状态；WebSocket 与 HTTP 可能使用不同的密钥。`);
+    } finally {
+      if (!controller.signal.aborted) setControlling(false);
+    }
+  }
+
   const heading = <PageHeading title="适配器" description="设置消息收发和聊天引擎连接。保存参数不代表连接已建立。" actions={connected && <Button variant="outline" disabled={saving || loading || dirty && !blocked} onClick={reload}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>} />;
   if (!connected) return <>{heading}<ConnectPrompt connect={connect} /></>;
   if (loading) return <>{heading}<Section scrollable title="适配器配置"><div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取连接配置</div></Section></>;
   if (!snapshot || !draft) return <>{heading}<Section scrollable title="适配器暂时不可用" description={loadError || '暂时无法读取连接配置。'}><EmptyState locked title="无法读取适配器配置" description="检查管理服务连接后重新读取。" action={<Button variant="outline" onClick={reload}><RefreshCw className="size-3.5" />重试</Button>} /></Section></>;
 
-  const configuredCount = definitions.filter(definition => snapshot.outbound[definition.id].endpoint !== '').length
+  const configuredCount = definitions.filter(definition => snapshot.outbound[definition.id].endpoint !== '').length + (snapshot.websocket.endpoint !== '' ? 1 : 0)
     + (snapshot.webhook.port > 0 && snapshot.webhook.selfId && snapshot.webhook.hmacConfigured ? 1 : 0);
   const RuntimeIcon = snapshot.status.running ? Server : ServerOff;
   return <>
     {heading}
-    <Section scrollable height="sm" id="adapter-runtime" title="运行状态" description="当前页面可保存连接设置；聊天收发服务尚未接入，不能仅靠填写这些参数开始聊天。" actions={<StatusPill tone={snapshot.status.running ? 'success' : snapshot.status.assembled ? 'neutral' : 'warning'}>{snapshot.status.running ? '运行中' : snapshot.status.assembled ? '已接入 · 未运行' : '尚未接入'}</StatusPill>} footer={<><span className="mr-auto text-xs text-muted-foreground">{snapshot.status.running ? '配置更新尚不能自动应用到运行中的服务。' : '当前版本尚未提供聊天服务的启动入口，不是你漏填了配置。'}</span><Button disabled title="当前版本尚未提供聊天服务的启动入口"><Play className="size-3.5" />{snapshot.status.running ? '服务已运行' : '启动聊天服务'}</Button></>}>
-      <dl className="grid grid-cols-3 divide-x text-xs"><div className="pr-3"><dt className="text-muted-foreground">已配置连接</dt><dd className="mt-2 text-lg font-semibold tabular-nums">{configuredCount}<span className="ml-1 text-xs font-normal text-muted-foreground">/ 3</span></dd></div><div className="px-3"><dt className="text-muted-foreground">连接组件</dt><dd className="mt-2 font-medium">{snapshot.status.assembled ? '已接入' : '尚未接入'}</dd></div><div className="pl-3"><dt className="text-muted-foreground">服务状态</dt><dd className="mt-2 font-medium">{snapshot.status.running ? '运行中' : '未运行'}</dd></div></dl>
-      <div className="mt-5 flex items-start gap-3 border-t pt-4"><RuntimeIcon className="mt-1 size-4 shrink-0 text-muted-foreground" /><p className="text-xs leading-6"><strong>{snapshot.status.running ? '连接服务已报告运行。' : snapshot.status.assembled ? '连接组件已接入，服务尚未运行。' : '聊天收发尚未接通。'}</strong><span className="block text-muted-foreground">{snapshot.status.assembled ? '保存只更新设置，不会自动更新运行中的连接。' : '消息接收、聊天引擎和回复发送尚未组成可运行的聊天服务。此处先保存参数，不能据此判断机器人已上线。'}</span></p></div>
+    <Section scrollable height="sm" id="adapter-runtime" title="运行状态" description="WebSocket 负责接收消息，HTTP 负责发送；协议连接与聊天处理分别显示。" actions={<StatusPill tone={snapshot.connection?.state === 'connected' ? 'success' : 'warning'}>{snapshot.connection?.state === 'connected' ? '协议已连接' : snapshot.connection?.state === 'connecting' ? '连接中' : snapshot.connection?.state === 'reconnecting' ? '重连中' : '协议未连接'}</StatusPill>} footer={<><span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置，再执行连接。' : snapshot.status.applyAvailable ? '连接后自动识别账号；修改设置后请重新连接。' : '当前管理实例没有接入协议连接控制。'}</span><Button disabled={disabled || dirty || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接 WebSocket' : '连接 WebSocket'}</Button><Button variant="outline" disabled={disabled || dirty || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开 WebSocket</Button></>}>
+      <dl className="grid grid-cols-3 divide-x text-xs"><div className="pr-3"><dt className="text-muted-foreground">已配置连接</dt><dd className="mt-2 text-lg font-semibold tabular-nums">{configuredCount}<span className="ml-1 text-xs font-normal text-muted-foreground">/ 4</span></dd></div><div className="px-3"><dt className="text-muted-foreground">协议接入</dt><dd className="mt-2 font-medium">{snapshot.connection?.state === 'connected' ? '已连接' : '未连接'}</dd></div><div className="pl-3"><dt className="text-muted-foreground">聊天处理</dt><dd className="mt-2 font-medium">尚未接入</dd></div></dl>
+      <div className="mt-5 flex items-start gap-3 border-t pt-4"><RuntimeIcon className="mt-1 size-4 shrink-0 text-muted-foreground" /><p className="text-xs leading-6"><strong>{snapshot.connection?.state === 'connected' ? '协议已连接，聊天处理尚未接入。' : '聊天收发尚未接通。'}</strong><span className="block text-muted-foreground">WebSocket 已连接不等于聊天模型正在处理消息；未接入处理流程时不会自动生成回复。{snapshot.connection?.selfId && <span className="block">自动识别账号：{snapshot.connection.selfId}</span>}</span></p></div>
+      {connectionError && <p className="mt-3 text-xs leading-5 text-destructive" role="alert">{connectionError}</p>}
+      {snapshot.connection?.lastError && <p className="mt-3 text-xs leading-5 text-destructive" title={snapshot.connection.lastError}>协议连接失败或已中断，请检查 WebSocket 地址与专用密钥，再重新连接。</p>}
     </Section>
     <div className="grid items-start gap-5 xl:grid-cols-2">
       {definitions.map(definition => {
@@ -351,17 +446,29 @@ export function AdapterManager({ api, connected, connect, setDirty }: PageProps)
         const Icon = definition.icon;
         return <Section scrollable key={definition.id} id={`adapter-${definition.id}`} title={definition.title} description={definition.description} actions={<OutboundStatus adapter={saved} />} footer={<span className="flex items-center gap-2 text-xs text-muted-foreground"><Icon className="size-3.5" />{saved.enabled ? '已保存启用选项，不代表已连接。' : '此连接已停用，填写的设置仍会保留。'}</span>}>
           <div className="grid gap-5">
-            <ToggleField label="启用此连接" description="保存启用选项；当前版本不会因此立即建立连接。" checked={adapter.enabled} disabled={disabled} onChange={enabled => updateOutbound(definition.id, { enabled })} />
-            <AdapterEndpointField id={`adapter-${definition.id}-endpoint`} label="服务地址" value={adapter.endpoint} placeholder={definition.placeholder} disabled={disabled} onChange={endpoint => updateOutbound(definition.id, { endpoint })} />
-            <AdapterCredentialField id={`adapter-${definition.id}-credential`} label={definition.credentialLabel} description={definition.credentialDescription} configured={saved.credentialConfigured} draft={adapter.credential} disabled={disabled} onChange={credential => updateOutbound(definition.id, { credential })} />
-            {definition.id === 'onebotHttp' && <div className="grid gap-5 border-t pt-5">
+            {definition.id === 'onebotHttp' && <div className="grid gap-5">
+              <h3 className="text-xs font-medium">WebSocket 收消息</h3>
+              <ToggleField label="启用 WebSocket 收消息" description="连接协议端的正向 WebSocket；账号由登录信息自动识别。" checked={draft.websocket.enabled} disabled={disabled} onChange={enabled => updateWebSocket({ enabled })} />
+              {(draft.websocket.enabled || changedOutbound(snapshot.websocket, draft.websocket)) && <>
+                <AdapterEndpointField id="adapter-onebotWs-endpoint" label="WebSocket 地址" value={draft.websocket.endpoint} placeholder="ws://127.0.0.1:3001" disabled={disabled} onChange={endpoint => updateWebSocket({ endpoint })} />
+                <AdapterCredentialField id="adapter-onebotWs-credential" label="WebSocket API 密钥（可选）" description="填写协议端 WebSocket 服务的 accessToken，它可能与 HTTP 密钥不同；不使用管理后台登录令牌。" configured={snapshot.websocket.credentialConfigured} draft={draft.websocket.credential} disabled={disabled} onChange={credential => updateWebSocket({ credential })} />
+              </>}
+              <details className="min-w-0 border-t pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">其他接收方式（高级）</summary><div className="mt-4 grid gap-5"><p className="text-xs leading-5 text-muted-foreground">HTTP webhook 是协议端主动推送消息的替代方式，不是测试功能。使用 WebSocket 时无需设置；当前实例未启动 webhook 监听。</p>
               <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-medium">webhook 消息收取</h3><StatusPill>{snapshot.webhook.port > 0 && snapshot.webhook.selfId && snapshot.webhook.hmacConfigured ? snapshot.webhook.enabled ? '已配置' : '已配置 · 未启用' : '未配置'}</StatusPill></div>
               <ToggleField label="收取 OneBot 上报" description="可选；需要单独配置机器人账号与签名密钥。" checked={draft.webhook.enabled} disabled={disabled} onChange={enabled => updateWebhook({ enabled })} />
+              {(draft.webhook.enabled || changedWebhook(snapshot.webhook, draft.webhook)) && <>
               <Field label="监听地址" description="只监听本机回环地址。"><Input id="adapter-webhook-host" list="adapter-webhook-hosts" autoComplete="off" spellCheck={false} value={draft.webhook.host} disabled={disabled} placeholder="127.0.0.1" onChange={event => updateWebhook({ host: event.target.value })} /><datalist id="adapter-webhook-hosts"><option value="127.0.0.1" /><option value="::1" /><option value="localhost" /></datalist></Field>
               <AdapterNumberField id="adapter-webhook-port" label="监听端口" value={draft.webhook.port} minimum={draft.webhook.enabled ? 1 : 0} maximum={65535} disabled={disabled} onChange={port => updateWebhook({ port })} />
               <Field label="机器人账号"><Input id="adapter-webhook-self-id" inputMode="numeric" autoComplete="off" maxLength={32} value={draft.webhook.selfId} disabled={disabled} placeholder="机器人 QQ 号" onChange={event => updateWebhook({ selfId: event.target.value })} /></Field>
               <AdapterCredentialField id="adapter-webhook-hmac" label="签名密钥" configured={snapshot.webhook.hmacConfigured} draft={draft.webhook.credential} disabled={disabled} onChange={credential => updateWebhook({ credential })} />
+              </>}
+              </div></details>
             </div>}
+            {definition.id === 'onebotHttp' && <h3 className="border-t pt-5 text-xs font-medium">HTTP 发送</h3>}
+            <ToggleField label="启用此连接" description="保存启用选项；当前版本不会因此立即建立连接。" checked={adapter.enabled} disabled={disabled} onChange={enabled => updateOutbound(definition.id, { enabled })} />
+            <AdapterEndpointField id={`adapter-${definition.id}-endpoint`} label="服务地址" value={adapter.endpoint} placeholder={definition.placeholder} disabled={disabled} onChange={endpoint => updateOutbound(definition.id, { endpoint })} />
+            <AdapterCredentialField id={`adapter-${definition.id}-credential`} label={definition.credentialLabel} description={definition.credentialDescription} configured={saved.credentialConfigured} draft={adapter.credential} disabled={disabled} onChange={credential => updateOutbound(definition.id, { credential })} />
+
           </div>
         </Section>;
       })}

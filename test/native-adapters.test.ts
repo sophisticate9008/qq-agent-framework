@@ -7,6 +7,7 @@ import test, { type TestContext } from 'node:test'
 
 import { createNativeRuntimeRoutes, type NativeRuntimeRouteOptions } from '../src/admin/runtime.ts'
 import { AdminRequestError, type AdminRoute } from '../src/admin/server.ts'
+import { createDefaultAdapterConfiguration, type AdapterConnectionStatus, type NativeAdapterConfiguration } from '../src/host/adapter-configuration.ts'
 
 function fixture(context: TestContext): { directory: string; routes: readonly AdminRoute[] } {
   const root = mkdtempSync(join(tmpdir(), 'native-adapters-'))
@@ -48,7 +49,7 @@ test('adapters default to unassembled resources and saving never calls an extern
   assert.match(String(initial.revision), /^[a-f0-9]{64}$/)
   assert.deepEqual(initial.status, { assembled: false, running: false, applyAvailable: false })
   const adapters = object(initial.adapters)
-  assert.deepEqual(Object.keys(adapters), ['onebotHttp', 'dshAgent', 'onebotWebhook'])
+  assert.deepEqual(Object.keys(adapters), ['onebotHttp', 'onebotWs', 'dshAgent', 'onebotWebhook'])
   for (const value of Object.values(adapters)) assert.equal(object(value).enabled, false)
   const saved = await invoke(setup.routes, 'POST', {
     revision: initial.revision,
@@ -84,7 +85,7 @@ test('adapter credentials survive partial and blank updates and are only cleared
   })
   const stored = object(JSON.parse(readFileSync(join(setup.directory, 'chat-adapters.json'), 'utf8')) as unknown)
   const privateAdapters = object(stored.adapters)
-  assert.deepEqual(Object.keys(privateAdapters), ['onebotHttp', 'dshAgent', 'onebotWebhook'])
+  assert.deepEqual(Object.keys(privateAdapters), ['onebotHttp', 'onebotWs', 'dshAgent', 'onebotWebhook'])
   assert.equal(object(privateAdapters.onebotHttp).secret, 'fixture-onebot-secret')
   assert.equal(object(privateAdapters.dshAgent).auth, 'fixture-dsh-auth')
   assert.equal(object(privateAdapters.onebotWebhook).hmac, 'fixture-hmac')
@@ -279,4 +280,196 @@ test('an explicit host status port reports runtime state independently from save
   assert.throws(() => createNativeRuntimeRoutes({
     directory: setup.directory, adapterRuntime: { status: 'unsafe' }
   } as unknown as NativeRuntimeRouteOptions))
+})
+
+async function control(
+  routes: readonly AdminRoute[],
+  action: 'connect' | 'disconnect',
+  body: Record<string, unknown>,
+  signal = new AbortController().signal
+): Promise<Record<string, unknown>> {
+  const route = routes.find(entry => entry.method === 'POST' && entry.pathname === `/api/chat/adapters/${action}`)
+  assert(route)
+  return object(await route.handle({ query: new URLSearchParams(), body, signal }))
+}
+
+test('old three-adapter documents normalize WS without rewriting HTTP settings or credential files', async context => {
+  const setup = fixture(context)
+  await invoke(setup.routes, 'GET')
+  const { onebotWs: omitted, ...legacy } = createDefaultAdapterConfiguration()
+  void omitted
+  const adapters = { ...legacy, onebotHttp: { enabled: true, endpoint: 'https://http.example.test', secret: 'old-http-secret' } }
+  const filename = join(setup.directory, 'chat-adapters.json')
+  const original = `${JSON.stringify({ schema: 1, adapters }, null, 2)}\n`
+  writeFileSync(filename, original, { mode: 0o600 })
+  const before = statSync(filename)
+  const initial = await invoke(setup.routes, 'GET')
+  assert.deepEqual(object(initial.adapters).onebotWs, { enabled: false, endpoint: '', secretConfigured: false })
+  assert.deepEqual(object(initial.adapters).onebotHttp, { enabled: true, endpoint: 'https://http.example.test', secretConfigured: true })
+  assert.equal(readFileSync(filename, 'utf8'), original)
+  assert.equal(statSync(filename).ino, before.ino)
+  await invoke(setup.routes, 'POST', {
+    revision: initial.revision, adapters: { onebotWs: { enabled: false, endpoint: 'wss://gateway.example.test', secret: 'ws-secret' } }
+  })
+  const stored = object(object(JSON.parse(readFileSync(filename, 'utf8')) as unknown).adapters)
+  assert.deepEqual(stored.onebotHttp, adapters.onebotHttp)
+})
+
+test('adapter controls require a real optional port, strict input and current saved revision', async context => {
+  const setup = fixture(context)
+  const initial = await invoke(setup.routes, 'GET')
+  await rejects(control(setup.routes, 'connect', { revision: initial.revision }), 503, 'adapter_runtime_unavailable')
+  await rejects(control(setup.routes, 'disconnect', {}), 503, 'adapter_runtime_unavailable')
+  const statusOnly = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: { status: () => ({ running: false }) } })
+  await rejects(control(statusOnly, 'connect', { revision: initial.revision }), 503, 'adapter_runtime_unavailable')
+  await rejects(control(statusOnly, 'disconnect', {}), 503, 'adapter_runtime_unavailable')
+  let calls = 0
+  const routes = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: {
+    status: () => ({ running: false }), async connect() { calls += 1 }, async disconnect() { calls += 1 }
+  } })
+  for (const body of [{}, { revision: 'bad' }, { revision: initial.revision, endpoint: 'wss://elsewhere.test' }]) {
+    await rejects(control(routes, 'connect', body), 400, 'invalid_adapter_configuration')
+  }
+  await rejects(control(routes, 'disconnect', { revision: initial.revision }), 400, 'invalid_adapter_configuration')
+  await rejects(control(routes, 'connect', { revision: 'f'.repeat(64) }), 409, 'chat_revision_conflict')
+  assert.equal(calls, 0)
+})
+
+test('explicit controls receive saved private configuration under lock and never rewrite it or claim chat readiness', async context => {
+  const setup = fixture(context)
+  const initial = await invoke(setup.routes, 'GET')
+  const saved = await invoke(setup.routes, 'POST', { revision: initial.revision, adapters: {
+    onebotHttp: { enabled: true, endpoint: 'https://http.example.test', secret: 'existing-http-secret' },
+    onebotWs: { enabled: true, endpoint: 'ws://127.0.0.1:3001', secret: 'private-ws-secret' }
+  } })
+  const filename = join(setup.directory, 'chat-adapters.json')
+  const original = readFileSync(filename)
+  const before = statSync(filename)
+  let connected = false
+  let received: NativeAdapterConfiguration | undefined
+  const routes = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: {
+    status: () => ({ running: connected }),
+    async connect(configuration, signal) {
+      assert.equal(signal.aborted, false)
+      assert.equal(statSync(join(setup.directory, '.chat-runtime.lock')).mode & 0o777, 0o600)
+      received = configuration
+      connected = true
+    },
+    async disconnect() { connected = false },
+    connectionStatus: () => ({ state: connected ? 'connected' : 'disconnected', selfId: connected ? '123' : null,
+      lastError: null, received: 3, dropped: 3, chatReady: false })
+  } })
+  const ready = await control(routes, 'connect', { revision: saved.revision })
+  assert.equal(received?.onebotWs.secret, 'private-ws-secret')
+  assert.equal(received?.onebotHttp.secret, 'existing-http-secret')
+  assert(Object.isFrozen(received))
+  assert.deepEqual(ready.status, { assembled: true, running: true, applyAvailable: true })
+  assert.deepEqual(ready.connection, { state: 'connected', selfId: '123', lastError: null, received: 3, dropped: 3, chatReady: false })
+  assert.equal(ready.revision, saved.revision)
+  const disconnected = await control(routes, 'disconnect', {})
+  assert.deepEqual(disconnected.status, { assembled: true, running: false, applyAvailable: true })
+  assert.equal(object(disconnected.connection).state, 'disconnected')
+  assert.deepEqual(readFileSync(filename), original)
+  assert.equal(statSync(filename).ino, before.ino)
+  assert.equal(statSync(filename).mtimeMs, before.mtimeMs)
+  const chat = routes.find(route => route.pathname === '/api/chat/status')
+  assert(chat)
+  assert.deepEqual(await chat.handle({ query: new URLSearchParams(), body: null, signal: new AbortController().signal }), { runtimeConnected: false })
+  assert.doesNotMatch(JSON.stringify([ready, disconnected]), /private-ws-secret|existing-http-secret|"secret":/)
+})
+
+test('in-flight controls reject concurrent controls and configuration writes without queueing or retry', async context => {
+  const setup = fixture(context)
+  const initial = await invoke(setup.routes, 'GET')
+  let started: (() => void) | undefined
+  const entered = new Promise<void>(resolvePromise => { started = resolvePromise })
+  let release: (() => void) | undefined
+  const pending = new Promise<void>(resolvePromise => { release = resolvePromise })
+  const port = { status: () => ({ running: false }), async connect() { started?.(); await pending }, async disconnect() {} }
+  const routes = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: port })
+  const other = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: port })
+  const first = control(routes, 'connect', { revision: initial.revision })
+  await entered
+  try {
+    await rejects(control(other, 'connect', { revision: initial.revision }), 409, 'adapter_runtime_busy')
+    await rejects(control(other, 'disconnect', {}), 409, 'adapter_runtime_busy')
+    await rejects(invoke(other, 'POST', { revision: initial.revision, adapters: {
+      onebotHttp: { enabled: true, endpoint: 'https://http.example.test' }
+    } }), 409, 'chat_storage_busy')
+  } finally {
+    release?.()
+    await first
+  }
+})
+
+test('control timeout aborts the port at five seconds and retains exclusion until the raw operation settles', async context => {
+  const setup = fixture(context)
+  const initial = await invoke(setup.routes, 'GET')
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let started: (() => void) | undefined
+  const entered = new Promise<void>(resolvePromise => { started = resolvePromise })
+  let release: (() => void) | undefined
+  const pending = new Promise<void>(resolvePromise => { release = resolvePromise })
+  let signal: AbortSignal | undefined
+  const routes = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: {
+    status: () => ({ running: false }), async connect(_configuration, controlSignal) { signal = controlSignal; started?.(); await pending }
+  } })
+  const first = control(routes, 'connect', { revision: initial.revision })
+  const rejection = rejects(first, 504, 'adapter_runtime_timeout')
+  await entered
+  context.mock.timers.tick(5_000)
+  await rejection
+  assert.equal(signal?.aborted, true)
+  await rejects(control(routes, 'connect', { revision: initial.revision }), 409, 'adapter_runtime_busy')
+  release?.()
+})
+
+test('client cancellation reaches controls and raw runtime diagnostics are never returned', async context => {
+  const setup = fixture(context)
+  const initial = await invoke(setup.routes, 'GET')
+  let started: (() => void) | undefined
+  const entered = new Promise<void>(resolvePromise => { started = resolvePromise })
+  let observed: AbortSignal | undefined
+  const routes = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: {
+    status: () => ({ running: false }),
+    async connect(_configuration, signal) {
+      observed = signal
+      started?.()
+      await new Promise<void>(resolvePromise => signal.addEventListener('abort', () => resolvePromise(), { once: true }))
+    },
+    async disconnect() { throw new Error('private-runtime-secret') },
+    connectionStatus: () => ({ state: 'error', selfId: null, lastError: 'private-runtime-secret', received: 0, dropped: 0, chatReady: false })
+  } })
+  const controller = new AbortController()
+  const attempt = control(routes, 'connect', { revision: initial.revision }, controller.signal)
+  const rejection = rejects(attempt, 499, 'request_aborted')
+  await entered
+  controller.abort()
+  await rejection
+  assert.equal(observed?.aborted, true)
+  assert.equal(object((await invoke(routes, 'GET')).connection).lastError, 'adapter_connection_error')
+  const independent = createNativeRuntimeRoutes({ directory: `${setup.directory}-other`, adapterRuntime: {
+    status: () => ({ running: false }), async disconnect() { throw new Error('private-runtime-secret') }
+  } })
+  context.after(() => rmSync(`${setup.directory}-other`, { recursive: true, force: true }))
+  await rejects(control(independent, 'disconnect', {}), 503, 'adapter_connection_failed')
+})
+
+test('malformed optional runtime ports and connection status fail closed', async context => {
+  const setup = fixture(context)
+  for (const field of ['connect', 'disconnect', 'connectionStatus']) {
+    assert.throws(() => createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: {
+      status: () => ({ running: false }), [field]: 'unsafe'
+    } } as unknown as NativeRuntimeRouteOptions))
+  }
+  for (const connection of [
+    { state: 'connected', selfId: '123', lastError: null, received: 1, dropped: 0, chatReady: true },
+    { state: 'connected', selfId: 'private-secret', lastError: null, received: 1, dropped: 0, chatReady: false },
+    { state: 'arbitrary', selfId: null, lastError: null, received: -1, dropped: 0, chatReady: false }
+  ]) {
+    const routes = createNativeRuntimeRoutes({ directory: setup.directory, adapterRuntime: {
+      status: () => ({ running: false }), connectionStatus: () => connection as AdapterConnectionStatus
+    } })
+    await rejects(invoke(routes, 'GET'), 503, 'adapter_runtime_status_unavailable')
+  }
 })

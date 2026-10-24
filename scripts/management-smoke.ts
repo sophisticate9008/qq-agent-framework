@@ -14,6 +14,18 @@ const administratorToken = 'management-smoke-administrator-token-1234567890';
 const runId = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
 const xssText = '<img src="/management-smoke-xss" onerror="globalThis.__managementSmokeXss=true">';
 const fixtureAdapterCredential = 'fixture-only-adapter-value-1234567890';
+const fixtureProviderCredential = 'fixture-only-provider-value-1234567890';
+const fixtureWebSocketCredential = 'fixture-only-websocket-value-1234567890';
+const fixtureProviders = [
+  {
+    id: 'fixture-provider', name: 'Fixture Provider', type: 'openai', baseUrl: 'https://provider.invalid/v1', enabled: true,
+    models: [{ id: 'fixture-model', name: 'Fixture Model' }, { id: 'fixture-model-v2', name: 'Fixture Model V2' }],
+  },
+  {
+    id: 'fixture-provider-v2', name: 'Fixture Provider V2', type: 'anthropic', baseUrl: 'https://provider-v2.invalid', enabled: true,
+    models: [{ id: 'fixture-model-v2', name: 'Fixture Model V2' }],
+  },
+];
 
 interface RequestRecord {
   readonly method: string;
@@ -36,6 +48,17 @@ function assertAdapterCredentialsRedacted(value: unknown): void {
   }
 }
 
+function assertProviderCredentialsRedacted(value: unknown): void {
+  assert(!JSON.stringify(value).includes(fixtureProviderCredential), 'Provider response exposed a fixture credential.');
+  assert(isRecord(value) && Array.isArray(value.providers));
+  for (const provider of value.providers) {
+    assert(isRecord(provider));
+    assert.equal(Object.hasOwn(provider, 'apiKey'), false);
+    assert.equal(Object.hasOwn(provider, 'clearApiKey'), false);
+    assert.equal(typeof provider.apiKeyConfigured, 'boolean');
+  }
+}
+
 async function writePrivateJson(filename: string, value: unknown): Promise<void> {
   await writeFile(filename, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
@@ -44,6 +67,14 @@ async function readJson(filename: string): Promise<Record<string, unknown>> {
   const value: unknown = JSON.parse(await readFile(filename, 'utf8'));
   assert(isRecord(value));
   return value;
+}
+
+async function assertStoredProviderKey(directory: string, providerId: string, expected: string): Promise<void> {
+  const document = await readJson(join(directory, 'chat-providers.json'));
+  assert(Array.isArray(document.providers));
+  const provider: unknown = document.providers.find(candidate => isRecord(candidate) && candidate.id === providerId);
+  assert(isRecord(provider));
+  assert(provider.apiKey === expected, 'Stored provider credential does not match the expected keep/clear action.');
 }
 
 async function listen(server: Server): Promise<AddressInfo> {
@@ -178,25 +209,202 @@ async function tokenIsAbsentFromStorage(page: Page): Promise<boolean> {
   }, administratorToken);
 }
 
+async function exerciseBuiltinDraft(page: Page, runtimeDirectory: string, requests: readonly RequestRecord[], options: {
+  readonly pageId: 'persona' | 'model';
+  readonly pageLabel: string;
+  readonly builtinLabel: string;
+  readonly nameLabel: string;
+  readonly originalName: string;
+  readonly originalId: string;
+  readonly filename: string;
+}): Promise<void> {
+  const savedBefore = await readFile(join(runtimeDirectory, options.filename), 'utf8');
+  const postsBefore = requests.filter(request => request.method === 'POST' && request.pathname.startsWith('/api/chat/')).length;
+  await navigate(page, options.pageLabel, options.pageId, options.pageLabel);
+  await section(page, options.originalName).waitFor();
+  const name = field(page, options.nameLabel).locator('input');
+  const builtin = page.getByRole('button', { name: options.builtinLabel, exact: true });
+  assert.equal(await name.inputValue(), options.originalName);
+  await name.fill('UNSAVED_BUILTIN_GUARD');
+  assert.equal(await builtin.isDisabled(), true);
+  assert.equal(await name.inputValue(), 'UNSAVED_BUILTIN_GUARD');
+  await page.getByRole('button', { name: '撤销更改', exact: true }).click();
+  await builtin.click();
+  const identifier = field(page, '内部标识').locator('input');
+  assert.notEqual(await identifier.inputValue(), options.originalId);
+  assert.notEqual(await name.inputValue(), options.originalName);
+  assert((await name.inputValue()).trim().length > 0);
+  if (options.pageId === 'persona') {
+    assert.equal(await identifier.inputValue(), 'whale-copy');
+    assert.equal(await name.inputValue(), '小鲸鱼');
+    assert((await field(page, '身份定义').locator('textarea').inputValue()).trim().length > 0);
+    assert((await field(page, '表达风格').locator('textarea').inputValue()).trim().length > 0);
+  } else {
+    assert.equal(await identifier.inputValue(), 'daily-chat-copy');
+    assert.equal(await name.inputValue(), '日常聊天方案');
+    for (const label of ['模型提供方', '模型', '关联人设']) {
+      assert.equal(await field(page, label).locator('select').inputValue(), '');
+    }
+    assert.equal(await field(page, '思考强度').locator('select').inputValue(), 'low');
+    for (const label of ['群聊上下文', '私聊上下文']) {
+      assert.equal(await field(page, label).locator('input').inputValue(), '128000');
+    }
+    assert.equal(await page.getByRole('button', { name: '选择为启用方案', exact: true }).isDisabled(), true);
+  }
+  assert.equal(await name.isEditable(), true);
+  assert.equal(await builtin.isDisabled(), true);
+  const draftName = 'Editable Unsaved Builtin Draft';
+  await name.fill(draftName);
+  await page.getByRole('button', { name: '概览', exact: true }).first().click();
+  const leaveGuard = page.getByRole('dialog', { name: '还有未保存的更改', exact: true });
+  await leaveGuard.waitFor();
+  await leaveGuard.getByRole('button', { name: '继续编辑', exact: true }).click();
+  assert.equal(await name.inputValue(), draftName);
+  await page.getByRole('button', { name: '概览', exact: true }).first().click();
+  await leaveGuard.getByRole('button', { name: '舍弃并离开', exact: true }).click();
+  await page.locator('[data-page="overview"]').waitFor();
+  await navigate(page, options.pageLabel, options.pageId, options.pageLabel);
+  await section(page, options.originalName).waitFor();
+  assert.equal(await name.inputValue(), options.originalName);
+  assert.equal(await field(page, '内部标识').locator('input').inputValue(), options.originalId);
+  assert.equal(await readFile(join(runtimeDirectory, options.filename), 'utf8'), savedBefore);
+  assert.equal(requests.filter(request => request.method === 'POST' && request.pathname.startsWith('/api/chat/')).length, postsBefore);
+}
+
+async function exerciseProviderEditor(page: Page, runtimeDirectory: string, requests: readonly RequestRecord[]): Promise<void> {
+  await navigate(page, '模型提供方', 'providers', '模型提供方');
+  const editor = section(page, 'Fixture Provider');
+  await editor.waitFor();
+  assert.equal(await page.locator('[data-page="providers"] [data-bounded-card]').count(), 2);
+  const modelList = page.getByRole('group', { name: '可用模型列表', exact: true });
+  await field(page, '提供方显示名称').locator('input').fill('Fixture Provider Updated');
+  await field(page, '接口基础地址').locator('input').fill('https://provider.invalid/v2');
+  await field(page, '接口类型').locator('select').selectOption('anthropic');
+  await field(page, '填写密钥（可选）').locator('input[type="password"]').fill(fixtureProviderCredential);
+  await page.locator('#provider-model-name-0').fill('Fixture Model Updated');
+  const before = await editor.evaluate(element => ({
+    sectionHeight: element.getBoundingClientRect().height,
+    cardHeight: element.querySelector('[data-bounded-card]')!.getBoundingClientRect().height,
+  }));
+  assert.equal(before.cardHeight, 384);
+  for (let index = 0; index < 16; index += 1) {
+    await page.getByRole('button', { name: '添加模型', exact: true }).click();
+    await modelList.locator('input').nth((index + 2) * 2).fill(`fixture-additional-model-${index + 1}`);
+    if (index < 15) await modelList.locator('input').nth((index + 2) * 2 + 1).fill(`Additional Model ${index + 1}`);
+  }
+  const modelBounds = await modelList.evaluate(element => {
+    element.scrollTop = 96;
+    return { clientHeight: element.clientHeight, scrollHeight: element.scrollHeight, scrollTop: element.scrollTop,
+      overflowY: getComputedStyle(element).overflowY };
+  });
+  assert(modelBounds.scrollHeight > modelBounds.clientHeight && modelBounds.scrollTop > 0
+    && ['auto', 'scroll'].includes(modelBounds.overflowY), 'Provider models do not scroll internally.');
+  const after = await editor.evaluate(element => {
+    const card = element.querySelector('[data-bounded-card]');
+    const footer = element.querySelector('.panel-footer');
+    assertElement(card);
+    assertElement(footer);
+    function assertElement(candidate: Element | null): asserts candidate is HTMLElement {
+      if (!(candidate instanceof HTMLElement)) throw new Error('Provider card or independent footer missing.');
+    }
+    card.scrollTop = 96;
+    return {
+      sectionHeight: element.getBoundingClientRect().height,
+      cardHeight: card.getBoundingClientRect().height,
+      cardScrollTop: card.scrollTop,
+      footerAfterCard: footer.getBoundingClientRect().top >= card.getBoundingClientRect().bottom - 1,
+    };
+  });
+  assert(Math.abs(after.sectionHeight - before.sectionHeight) <= 2 && Math.abs(after.cardHeight - before.cardHeight) <= 2,
+    `Adding provider models changed bounded geometry: ${JSON.stringify({ before, after })}.`);
+  assert(after.cardScrollTop > 0 && after.footerAfterCard);
+  await editor.locator('.panel-footer').waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: '保存提供方', exact: true }).click();
+  await page.getByText('提供方目录已保存；未测试连通性，也未同步外部运行环境。', { exact: true }).waitFor();
+  assert.equal(await page.locator('[data-page="providers"] input[type="password"]').inputValue(), '');
+  await assertStoredProviderKey(runtimeDirectory, 'fixture-provider', fixtureProviderCredential);
+  const saved = await apiJson(page, '/api/chat/providers');
+  assert.equal(saved.status, 200);
+  assertProviderCredentialsRedacted(saved.value);
+  assert(isRecord(saved.value) && Array.isArray(saved.value.providers));
+  const provider: unknown = saved.value.providers.find(candidate => isRecord(candidate) && candidate.id === 'fixture-provider');
+  assert(isRecord(provider));
+  assert.equal(provider.name, 'Fixture Provider Updated');
+  assert.equal(provider.baseUrl, 'https://provider.invalid/v2');
+  assert.equal(provider.type, 'anthropic');
+  assert.equal(provider.apiKeyConfigured, true);
+  assert(Array.isArray(provider.models) && provider.models.length === 18);
+  assert.deepEqual(provider.models[0], { id: 'fixture-model', name: 'Fixture Model Updated' });
+  assert.deepEqual(provider.models[17], { id: 'fixture-additional-model-16', name: 'fixture-additional-model-16' });
+  assert.equal((await page.locator('body').innerText()).includes(fixtureProviderCredential), false);
+  assert.equal(await page.evaluate(value => `${JSON.stringify(localStorage)}${JSON.stringify(sessionStorage)}${document.cookie}${location.href}`.includes(value), fixtureProviderCredential), false);
+  await field(page, '提供方显示名称').locator('input').fill('Fixture Provider Saved');
+  await page.getByRole('button', { name: '保存提供方', exact: true }).click();
+  await page.getByText('提供方目录已保存；未测试连通性，也未同步外部运行环境。', { exact: true }).waitFor();
+  await assertStoredProviderKey(runtimeDirectory, 'fixture-provider', fixtureProviderCredential);
+  await page.getByRole('switch', { name: '清除已保存密钥', exact: true }).click();
+  await page.getByRole('button', { name: '保存提供方', exact: true }).click();
+  await page.getByText('未保存密钥', { exact: true }).waitFor();
+  await assertStoredProviderKey(runtimeDirectory, 'fixture-provider', '');
+  const postsBeforeCancel = requests.filter(request => request.method === 'POST' && request.pathname === '/api/chat/providers').length;
+  await page.getByRole('button', { name: '删除提供方', exact: true }).click();
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  assert.equal(requests.filter(request => request.method === 'POST' && request.pathname === '/api/chat/providers').length, postsBeforeCancel);
+  const referenceRejected = page.waitForResponse(response => response.url().endsWith('/api/chat/providers') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: '删除提供方', exact: true }).click();
+  await page.getByRole('button', { name: '确认删除', exact: true }).click();
+  const rejected = await referenceRejected;
+  assert.equal(rejected.status(), 409);
+  assert.deepEqual(await rejected.json() as unknown, { error: 'provider_model_in_use' });
+  await page.getByRole('alert').waitFor();
+  await page.getByRole('button', { name: '重新载入目录', exact: true }).click();
+  await section(page, 'Fixture Provider Saved').waitFor();
+}
+
 async function run(): Promise<void> {
-  await rm(outputDirectory, { recursive: true, force: true });
   await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
   await chmod(outputDirectory, 0o700);
   const fixtureDirectory = await mkdtemp(join(tmpdir(), 'management-smoke-'));
   const runtimeDirectory = join(fixtureDirectory, 'runtime');
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+  const nativeRoutes = createNativeRuntimeRoutes({ directory: runtimeDirectory });
+  const readProviders = nativeRoutes.find(route => route.method === 'GET' && route.pathname === '/api/chat/providers');
+  const writeProviders = nativeRoutes.find(route => route.method === 'POST' && route.pathname === '/api/chat/providers');
+  assert(readProviders && writeProviders, 'Native provider routes are required for management fixtures.');
+  const providersBefore: unknown = await readProviders.handle({ query: new URLSearchParams(), body: null, signal: new AbortController().signal });
+  assert(isRecord(providersBefore) && typeof providersBefore.revision === 'string');
+  await writeProviders.handle({
+    query: new URLSearchParams(),
+    body: { revision: providersBefore.revision, providers: fixtureProviders },
+    signal: new AbortController().signal,
+  });
   await writePrivateJson(join(runtimeDirectory, 'chat-personas.json'), {
     schema: 1,
-    personas: [{ id: 'fixture-persona', name: 'Fixture Persona', identity: xssText, style: 'Calm and precise.' }],
+    personas: [
+      { id: 'fixture-persona', name: 'Fixture Persona', identity: xssText, style: 'Calm and precise.' },
+      { id: 'whale', name: 'Existing Custom Whale', identity: 'Operator-managed existing identity.', style: 'Preserve this custom style.' },
+    ],
   });
   await writePrivateJson(join(runtimeDirectory, 'chat-plans.json'), {
     schema: 1,
     activePlanId: 'fixture-plan',
-    plans: [{
-      id: 'fixture-plan', name: 'Fixture Plan', description: 'Independent native plan.',
-      instructions: 'Answer concisely.', personaId: 'fixture-persona', provider: 'fixture-provider',
-      model: 'fixture-model', reasoningEffort: 'medium',
-    }],
+    plans: [
+      {
+        id: 'fixture-plan', name: 'Fixture Plan', description: 'Independent native plan.',
+        instructions: 'Answer concisely.', personaId: 'fixture-persona', provider: 'fixture-provider',
+        model: 'fixture-model', reasoningEffort: 'medium',
+      },
+      {
+        id: 'legacy-plan', name: 'Legacy Plan', description: 'Unchanged missing bindings remain editable.',
+        instructions: 'Preserve this inactive legacy plan.', personaId: 'fixture-persona', provider: 'legacy-provider',
+        model: 'legacy-model', reasoningEffort: 'medium',
+      },
+      {
+        id: 'daily-chat', name: 'Existing Custom Daily Plan', description: 'Built-in ID collision fixture.',
+        instructions: 'Preserve this custom plan.', personaId: 'whale', provider: 'fixture-provider',
+        model: 'fixture-model', reasoningEffort: 'medium',
+      },
+    ],
   });
   await writePrivateJson(join(runtimeDirectory, 'chat-access.json'), {
     schema: 1, allow: [], deny: [], owner: null,
@@ -224,7 +432,7 @@ async function run(): Promise<void> {
         },
         fixtureOnly: true,
       }),
-      routes: createNativeRuntimeRoutes({ directory: runtimeDirectory }),
+      routes: nativeRoutes,
       handlerTimeoutMs: 5_000,
     });
     const address = await listen(server);
@@ -256,11 +464,106 @@ async function run(): Promise<void> {
     const cookies = await context.cookies(`${origin}/api/auth/session`);
     assert(cookies.some(cookie => cookie.httpOnly && cookie.sameSite === 'Strict' && cookie.path === '/api'));
 
+    await exerciseBuiltinDraft(page, runtimeDirectory, requests, {
+      pageId: 'persona', pageLabel: '人设与形象', builtinLabel: '使用内置小鲸鱼', nameLabel: '显示名称',
+      originalName: 'Fixture Persona', originalId: 'fixture-persona', filename: 'chat-personas.json',
+    });
+    await exerciseBuiltinDraft(page, runtimeDirectory, requests, {
+      pageId: 'model', pageLabel: '聊天方案', builtinLabel: '使用内置日常方案', nameLabel: '方案名称',
+      originalName: 'Fixture Plan', originalId: 'fixture-plan', filename: 'chat-plans.json',
+    });
+
+    const providerCatalog = await apiJson(page, '/api/chat/providers');
+    assert.equal(providerCatalog.status, 200);
+    assert(isRecord(providerCatalog.value) && typeof providerCatalog.value.revision === 'string');
+    assertProviderCredentialsRedacted(providerCatalog.value);
+    assert.deepEqual(providerCatalog.value.providers, fixtureProviders.map(provider => ({ ...provider, apiKeyConfigured: false })));
+    const providersWithKey = await apiJson(page, '/api/chat/providers', {
+      method: 'POST',
+      body: {
+        revision: providerCatalog.value.revision,
+        providers: fixtureProviders.map(provider => provider.id === 'fixture-provider-v2'
+          ? { ...provider, apiKey: fixtureProviderCredential } : provider),
+      },
+    });
+    assert.equal(providersWithKey.status, 200);
+    assert(isRecord(providersWithKey.value) && typeof providersWithKey.value.revision === 'string');
+    assertProviderCredentialsRedacted(providersWithKey.value);
+    await assertStoredProviderKey(runtimeDirectory, 'fixture-provider-v2', fixtureProviderCredential);
+    const providersKept = await apiJson(page, '/api/chat/providers', {
+      method: 'POST',
+      body: { revision: providersWithKey.value.revision, providers: fixtureProviders },
+    });
+    assert.equal(providersKept.status, 200);
+    assert(isRecord(providersKept.value) && typeof providersKept.value.revision === 'string');
+    assertProviderCredentialsRedacted(providersKept.value);
+    await assertStoredProviderKey(runtimeDirectory, 'fixture-provider-v2', fixtureProviderCredential);
+    const providersKeptEmpty = await apiJson(page, '/api/chat/providers', {
+      method: 'POST',
+      body: {
+        revision: providersKept.value.revision,
+        providers: fixtureProviders.map(provider => ({ ...provider, apiKey: '' })),
+      },
+    });
+    assert.equal(providersKeptEmpty.status, 200);
+    assert(isRecord(providersKeptEmpty.value) && typeof providersKeptEmpty.value.revision === 'string');
+    assertProviderCredentialsRedacted(providersKeptEmpty.value);
+    await assertStoredProviderKey(runtimeDirectory, 'fixture-provider-v2', fixtureProviderCredential);
+    const providersCleared = await apiJson(page, '/api/chat/providers', {
+      method: 'POST',
+      body: {
+        revision: providersKeptEmpty.value.revision,
+        providers: fixtureProviders.map(provider => ({ ...provider, clearApiKey: true })),
+      },
+    });
+    assert.equal(providersCleared.status, 200);
+    assert(isRecord(providersCleared.value) && typeof providersCleared.value.revision === 'string');
+    assertProviderCredentialsRedacted(providersCleared.value);
+    await assertStoredProviderKey(runtimeDirectory, 'fixture-provider-v2', '');
+    const staleProviders = await apiJson(page, '/api/chat/providers', {
+      method: 'POST',
+      body: { revision: providersWithKey.value.revision, providers: fixtureProviders },
+    });
+    assert.deepEqual(staleProviders, { status: 409, value: { error: 'chat_revision_conflict' } });
+    for (const providers of [
+      fixtureProviders.filter(provider => provider.id !== 'fixture-provider'),
+      fixtureProviders.map(provider => provider.id === 'fixture-provider' ? { ...provider, models: [] } : provider),
+      fixtureProviders.map(provider => provider.id === 'fixture-provider' ? { ...provider, enabled: false } : provider),
+    ]) {
+      const rejected = await apiJson(page, '/api/chat/providers', {
+        method: 'POST', body: { revision: providersCleared.value.revision, providers },
+      });
+      assert.deepEqual(rejected, { status: 409, value: { error: 'provider_model_in_use' } });
+    }
+    const providerCatalogAfterRejections = await apiJson(page, '/api/chat/providers');
+    assert.deepEqual(providerCatalogAfterRejections, providersCleared);
+
+    await exerciseProviderEditor(page, runtimeDirectory, requests);
+
     await navigate(page, '聊天方案', 'model', '聊天方案');
     await section(page, 'Fixture Plan').waitFor();
     await page.getByText('原生聊天宿主未接入，已保存方案当前不可用于真实聊天。', { exact: true }).waitFor();
     const planName = field(page, '方案名称').locator('input');
+    const providerSelect = field(page, '模型提供方').locator('select');
+    const modelSelect = field(page, '模型').locator('select');
+    assert.equal(await providerSelect.inputValue(), 'fixture-provider');
+    assert.equal(await modelSelect.inputValue(), 'fixture-model');
+    assert.equal(await providerSelect.locator('option:checked').textContent(), 'Fixture Provider Saved');
+    assert.equal(await modelSelect.locator('option:checked').textContent(), 'Fixture Model Updated');
+    assert.equal(await field(page, '群聊上下文').locator('input').inputValue(), '128000');
+    assert.equal(await field(page, '私聊上下文').locator('input').inputValue(), '128000');
+    await providerSelect.selectOption('fixture-provider-v2');
+    assert.equal(await modelSelect.locator('option[value="fixture-model"]').count(), 0);
+    await modelSelect.selectOption('fixture-model-v2');
+    await field(page, '群聊上下文').locator('input[type="number"]').fill('172000');
+    await field(page, '私聊上下文').locator('input[type="number"]').fill('384000');
     await planName.fill('Fixture Plan Updated');
+    const planPostsBeforeInvalidContext = requests.filter(request => request.method === 'POST' && request.pathname === '/api/chat/plans').length;
+    await field(page, '群聊上下文').locator('input[type="number"]').fill('0');
+    await page.getByRole('button', { name: '保存聊天方案', exact: true }).click();
+    await page.getByRole('alert').getByText('群聊和私聊上下文分别填写 1–16,777,216 之间的整数，单位为 token。', { exact: true }).waitFor();
+    assert.equal(requests.filter(request => request.method === 'POST' && request.pathname === '/api/chat/plans').length, planPostsBeforeInvalidContext);
+    await field(page, '群聊上下文').locator('input[type="number"]').fill('172000');
     await assertBoundedLongText(
       section(page, 'Fixture Plan Updated'),
       field(page, '方案指令').locator('textarea'),
@@ -272,9 +575,43 @@ async function run(): Promise<void> {
     const planResponse = await apiJson(page, '/api/chat/plans');
     assert.equal(planResponse.status, 200);
     assert(isRecord(planResponse.value) && typeof planResponse.value.revision === 'string');
+    assert(Array.isArray(planResponse.value.plans) && isRecord(planResponse.value.plans[0]));
+    assert.equal(planResponse.value.plans[0].provider, 'fixture-provider-v2');
+    assert.equal(planResponse.value.plans[0].model, 'fixture-model-v2');
+    assert.deepEqual(planResponse.value.plans[0].contextLimits, { group: 172000, private: 384000 });
+    await page.getByRole('button', { name: '重新载入目录', exact: true }).click();
+    await page.getByRole('button', { name: '重新载入目录', exact: true }).waitFor();
+    assert.equal(await providerSelect.inputValue(), 'fixture-provider-v2');
+    assert.equal(await modelSelect.inputValue(), 'fixture-model-v2');
+    assert.equal(await field(page, '群聊上下文').locator('input').inputValue(), '172000');
+    assert.equal(await field(page, '私聊上下文').locator('input').inputValue(), '384000');
+    const missingBinding = await apiJson(page, '/api/chat/plans', {
+      method: 'POST',
+      body: {
+        revision: planResponse.value.revision,
+        activePlanId: planResponse.value.activePlanId,
+        plans: planResponse.value.plans.map(plan => {
+          assert(isRecord(plan));
+          return { ...plan, provider: 'missing-provider', model: 'missing-model' };
+        }),
+      },
+    });
+    assert.deepEqual(missingBinding, { status: 409, value: { error: 'provider_model_missing_or_disabled' } });
+    const legacyActivation = await apiJson(page, '/api/chat/plans', {
+      method: 'POST',
+      body: { revision: planResponse.value.revision, activePlanId: 'legacy-plan', plans: planResponse.value.plans },
+    });
+    assert.deepEqual(legacyActivation, { status: 409, value: { error: 'provider_model_missing_or_disabled' } });
+    assert.equal(planResponse.value.plans.some(plan => isRecord(plan) && plan.id === 'legacy-plan'
+      && plan.provider === 'legacy-provider' && plan.model === 'legacy-model'), true);
     const modelBefore = await apiJson(page, '/api/chat/model');
     assert.equal(modelBefore.status, 200);
     assert(isRecord(modelBefore.value) && typeof modelBefore.value.revision === 'string');
+    const missingModelBinding = await apiJson(page, '/api/chat/model', {
+      method: 'POST',
+      body: { revision: modelBefore.value.revision, provider: 'missing-provider', model: 'missing-model', reasoningEffort: 'high' },
+    });
+    assert.deepEqual(missingModelBinding, { status: 409, value: { error: 'provider_model_missing_or_disabled' } });
     const modelSaved = await apiJson(page, '/api/chat/model', {
       method: 'POST',
       body: { revision: modelBefore.value.revision, provider: 'fixture-provider-v2', model: 'fixture-model-v2', reasoningEffort: 'high' },
@@ -290,7 +627,7 @@ async function run(): Promise<void> {
     });
     const staleModel = await apiJson(page, '/api/chat/model', {
       method: 'POST',
-      body: { revision: modelBefore.value.revision, provider: 'stale-provider', model: 'stale-model', reasoningEffort: 'low' },
+      body: { revision: modelBefore.value.revision, provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'low' },
     });
     assert.equal(staleModel.status, 409);
     assert.deepEqual(staleModel.value, { error: 'chat_revision_conflict' });
@@ -324,6 +661,22 @@ async function run(): Promise<void> {
     assert.equal(adaptersBefore.status, 200);
     assert(isRecord(adaptersBefore.value) && typeof adaptersBefore.value.revision === 'string');
     assertAdapterCredentialsRedacted(adaptersBefore.value);
+    assert(isRecord(adaptersBefore.value.adapters) && isRecord(adaptersBefore.value.adapters.onebotWs));
+    assert.deepEqual(Object.keys(adaptersBefore.value.adapters).sort(), ['dshAgent', 'onebotHttp', 'onebotWebhook', 'onebotWs']);
+    assert.equal(adaptersBefore.value.adapters.onebotWs.enabled, false);
+    assert(isRecord(adaptersBefore.value.status));
+    assert.equal(adaptersBefore.value.status.assembled, false);
+    assert.equal(adaptersBefore.value.status.running, false);
+    assert.equal(adaptersBefore.value.status.applyAvailable, false);
+    if (isRecord(adaptersBefore.value.connection)) assert.equal(adaptersBefore.value.connection.chatReady, false);
+    for (const [pathname, body] of [
+      ['/api/chat/adapters/connect', { revision: adaptersBefore.value.revision }],
+      ['/api/chat/adapters/disconnect', {}],
+    ] as const) {
+      const unavailableControl = await apiJson(page, pathname, { method: 'POST', body });
+      assert.deepEqual(unavailableControl, { status: 503, value: { error: 'adapter_runtime_unavailable' } });
+    }
+    assert.deepEqual(await apiJson(page, '/api/chat/adapters'), adaptersBefore);
     const initialAdapterRevision = adaptersBefore.value.revision;
     const adapterEndpoint = 'http://127.0.0.1:3000';
     const adaptersSaved = await apiJson(page, '/api/chat/adapters', {
@@ -338,6 +691,7 @@ async function run(): Promise<void> {
     assertAdapterCredentialsRedacted(adaptersSaved.value);
     const savedAdapters = adaptersSaved.value.adapters;
     assert(isRecord(savedAdapters) && isRecord(savedAdapters.onebotHttp));
+    assert(isRecord(savedAdapters.onebotWs) && savedAdapters.onebotWs.enabled === false);
     assert.deepEqual(savedAdapters.onebotHttp, {
       enabled: true,
       endpoint: adapterEndpoint,
@@ -354,11 +708,39 @@ async function run(): Promise<void> {
     assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 3);
     assert.equal(await page.getByRole('heading', { name: '图片服务', exact: true }).count(), 0);
     assert.equal(await page.getByRole('switch', { name: '启用此连接', exact: true }).count(), 2);
+    assert.equal(await page.getByRole('switch', { name: '收取 OneBot 上报', exact: true, includeHidden: true }).getAttribute('aria-checked'), 'false');
+    assert.equal(await page.locator('#adapter-webhook-self-id').count(), 0);
+    assert.equal(await page.getByPlaceholder('机器人 QQ 号', { exact: true }).count(), 0);
+    assert.equal(await page.locator('#adapter-webhook-host, #adapter-webhook-port, #adapter-webhook-hmac-action').count(), 0);
     await page.getByText('协议端 API 密钥（可选）', { exact: true }).waitFor();
     await page.getByText('复制协议端 HTTP 服务设置中的 accessToken。不是本管理后台的管理员令牌或登录会话；协议端未启用认证时可不填。', { exact: true }).waitFor();
     assert.equal(await page.locator('#adapter-onebotHttp-credential-action').inputValue(), 'keep');
     assert.equal(await page.locator('#adapter-onebotHttp-credential-value').count(), 0);
     assert.equal((await page.locator('body').innerText()).includes(fixtureAdapterCredential), false);
+    await section(page, '运行状态').getByText('尚未接入', { exact: true }).waitFor();
+    await page.getByText('WebSocket 已连接不等于聊天模型正在处理消息；未接入处理流程时不会自动生成回复。', { exact: true }).waitFor();
+    for (const label of ['连接 WebSocket', '断开 WebSocket']) {
+      assert.equal(await page.getByRole('button', { name: label, exact: true }).isDisabled(), true);
+    }
+    const websocketToggle = page.getByRole('switch', { name: '启用 WebSocket 收消息', exact: true });
+    assert.equal(await websocketToggle.getAttribute('aria-checked'), 'false');
+    assert.equal(await page.locator('#adapter-onebotWs-endpoint').count(), 0);
+    const advancedReception = page.locator('details').filter({ has: page.getByText('其他接收方式（高级）', { exact: true }) });
+    assert.equal(await advancedReception.evaluate(element => element instanceof HTMLDetailsElement && element.open), false);
+    const adapterPostsBeforeDraft = requests.filter(request => request.method === 'POST' && request.pathname.startsWith('/api/chat/adapters')).length;
+    const adaptersBeforeDraft = await readFile(join(runtimeDirectory, 'chat-adapters.json'), 'utf8');
+    await websocketToggle.click();
+    await page.locator('#adapter-onebotWs-endpoint').fill('ws://127.0.0.1:3001');
+    await page.locator('#adapter-onebotWs-credential-action').selectOption('replace');
+    await page.locator('#adapter-onebotWs-credential-value').fill(fixtureWebSocketCredential);
+    await websocketToggle.click();
+    assert.equal(await page.locator('#adapter-onebotWs-endpoint').inputValue(), 'ws://127.0.0.1:3001');
+    assert.equal(await page.locator('#adapter-onebotWs-credential-value').inputValue(), fixtureWebSocketCredential);
+    assert.equal(await page.getByRole('button', { name: '连接 WebSocket', exact: true }).isDisabled(), true);
+    await page.getByRole('button', { name: '撤销更改', exact: true }).click();
+    assert.equal(await page.locator('#adapter-onebotWs-endpoint, #adapter-onebotWs-credential-value').count(), 0);
+    assert.equal(await readFile(join(runtimeDirectory, 'chat-adapters.json'), 'utf8'), adaptersBeforeDraft);
+    assert.equal(requests.filter(request => request.method === 'POST' && request.pathname.startsWith('/api/chat/adapters')).length, adapterPostsBeforeDraft);
 
     const adaptersKept = await apiJson(page, '/api/chat/adapters', {
       method: 'POST',
@@ -418,12 +800,13 @@ async function run(): Promise<void> {
     const accessDocument = await readJson(join(runtimeDirectory, 'chat-access.json'));
     assert.equal((plansDocument.plans as Array<Record<string, unknown>>)[0]?.name, 'Fixture Plan Updated');
     assert.equal((plansDocument.plans as Array<Record<string, unknown>>)[0]?.reasoningEffort, 'high');
+    assert.deepEqual((plansDocument.plans as Array<Record<string, unknown>>)[0]?.contextLimits, { group: 172000, private: 384000 });
     assert.equal((personasDocument.personas as Array<Record<string, unknown>>)[0]?.style, personaStyle);
     assert.deepEqual(accessDocument, {
       schema: 1, allow: ['group:456001', 'private:123001'], deny: ['group:999001'], owner: '123001',
     });
     assert.equal((await stat(runtimeDirectory)).mode & 0o777, 0o700);
-    for (const filename of ['chat-plans.json', 'chat-personas.json', 'chat-access.json', 'chat-adapters.json']) {
+    for (const filename of ['chat-plans.json', 'chat-personas.json', 'chat-access.json', 'chat-adapters.json', 'chat-providers.json']) {
       assert.equal((await stat(join(runtimeDirectory, filename))).mode & 0o777, 0o600);
     }
 
@@ -441,6 +824,26 @@ async function run(): Promise<void> {
       checkedAt: new Date().toISOString(),
       nativeRuntimeRoutes: true,
       plansSaved: true,
+      builtinTemplatesCreateOnlyEditableDrafts: true,
+      builtinTemplatesCannotOverwriteUnsavedEdits: true,
+      builtinTemplateIdCollisionsDoNotOverwrite: true,
+      builtinTemplatesDoNotWriteOrActivateAutomatically: true,
+      providerAndModelDropdownsSaved: true,
+      groupAndPrivateContextLimitsSaved: true,
+      invalidContextPreventsWrite: true,
+      invalidPlanBindingRejected: true,
+      unchangedLegacyBindingPreserved: true,
+      missingLegacyBindingCannotActivate: true,
+      providerCredentialsRedacted: true,
+      providerEditorSaved: true,
+      providerCredentialEditorKeepAndClear: true,
+      providerDeleteCancelDoesNotWrite: true,
+      boundedProviderModelList: true,
+      omittedProviderCredentialPreserved: true,
+      emptyProviderCredentialPreserved: true,
+      providerCredentialCleared: true,
+      staleProviderWriteRejected: true,
+      referencedProviderDeleteDisableAndModelRemovalRejected: true,
       personasSaved: true,
       modelUpdatesActivePlan: true,
       staleModelWriteRejected: true,
@@ -448,6 +851,13 @@ async function run(): Promise<void> {
       accessValidationPreventsWrite: true,
       accessSaved: true,
       adapterCredentialsRedacted: true,
+      websocketDefaultsDisabled: true,
+      adapterRuntimeNotFalselyAssembled: true,
+      websocketControlsUnavailableWithoutRuntime: true,
+      websocketDraftRetainedWhileDisabled: true,
+      websocketDraftDoesNotSaveOrConnectAutomatically: true,
+      protocolConnectionDoesNotClaimChatReady: true,
+      disabledUnchangedWebhookFieldsHidden: true,
       emptyAdapterCredentialPreserved: true,
       adapterCredentialCleared: true,
       staleAdapterWriteRejected: true,

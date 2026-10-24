@@ -6,6 +6,11 @@ export interface NativeAdapterConfiguration {
     readonly endpoint: string
     readonly secret: string
   }
+  readonly onebotWs: {
+    readonly enabled: boolean
+    readonly endpoint: string
+    readonly secret: string
+  }
   readonly dshAgent: {
     readonly enabled: boolean
     readonly endpoint: string
@@ -26,6 +31,11 @@ export interface PublicAdapterConfiguration {
     readonly endpoint: string
     readonly secretConfigured: boolean
   }
+  readonly onebotWs: {
+    readonly enabled: boolean
+    readonly endpoint: string
+    readonly secretConfigured: boolean
+  }
   readonly dshAgent: {
     readonly enabled: boolean
     readonly endpoint: string
@@ -42,9 +52,22 @@ export interface PublicAdapterConfiguration {
 
 export interface AdapterRuntimePort {
   status(): { readonly running: boolean } | Promise<{ readonly running: boolean }>
+  connect?(configuration: NativeAdapterConfiguration, signal: AbortSignal): Promise<void>
+  disconnect?(): Promise<void>
+  connectionStatus?(): AdapterConnectionStatus | Promise<AdapterConnectionStatus>
 }
 
-const ADAPTER_IDS = ['onebotHttp', 'dshAgent', 'onebotWebhook'] as const
+export interface AdapterConnectionStatus {
+  readonly state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+  readonly selfId: string | null
+  readonly lastError: string | null
+  readonly received: number
+  readonly dropped: number
+  readonly chatReady: false
+}
+
+const LEGACY_ADAPTER_IDS = ['onebotHttp', 'dshAgent', 'onebotWebhook'] as const
+const ADAPTER_IDS = [...LEGACY_ADAPTER_IDS, 'onebotWs'] as const
 const MAX_ENDPOINT_LENGTH = 2_048
 const MAX_CREDENTIAL_LENGTH = 4_096
 
@@ -89,6 +112,14 @@ export function validateAdapterEndpoint(value: unknown): string {
   return value
 }
 
+export function validateOneBotWebSocketEndpoint(value: unknown): string {
+  if (typeof value !== 'string' || value.length > MAX_ENDPOINT_LENGTH) return invalid()
+  if (value === '') return value
+  if (!/^wss?:\/\//.test(value)) return invalid()
+  validateAdapterEndpoint(value.replace(/^ws/, 'http'))
+  return value
+}
+
 function credential(value: unknown): string {
   if (typeof value !== 'string' || value.length > MAX_CREDENTIAL_LENGTH
     || value !== '' && !/^[\x21-\x7e]+$/.test(value)) return invalid()
@@ -105,14 +136,14 @@ function mergeCredential(current: string, value: Record<string, unknown>, key: s
   return next === '' ? current : next
 }
 
-function outbound(value: unknown, secretKey: string): {
+function outbound(value: unknown, secretKey: string, validateEndpoint = validateAdapterEndpoint): {
   readonly enabled: boolean
   readonly endpoint: string
   readonly credential: string
 } {
   const parsed = keys(value, ['enabled', 'endpoint', secretKey])
   if (typeof parsed.enabled !== 'boolean') return invalid()
-  const endpoint = validateAdapterEndpoint(parsed.endpoint)
+  const endpoint = validateEndpoint(parsed.endpoint)
   if (parsed.enabled && endpoint === '') return invalid()
   return { enabled: parsed.enabled, endpoint, credential: credential(parsed[secretKey]) }
 }
@@ -134,21 +165,28 @@ function webhook(value: unknown): NativeAdapterConfiguration['onebotWebhook'] {
 export function createDefaultAdapterConfiguration(): NativeAdapterConfiguration {
   return Object.freeze({
     onebotHttp: Object.freeze({ enabled: false, endpoint: '', secret: '' }),
+    onebotWs: Object.freeze({ enabled: false, endpoint: '', secret: '' }),
     dshAgent: Object.freeze({ enabled: false, endpoint: '', auth: '' }),
     onebotWebhook: Object.freeze({ enabled: false, host: '127.0.0.1', port: 0, selfId: '', hmac: '' })
   })
 }
 
 export function validateAdapterConfiguration(value: unknown): NativeAdapterConfiguration {
-  const parsed = keys(value, ADAPTER_IDS)
+  const parsed = keys(value, LEGACY_ADAPTER_IDS, ['onebotWs'])
   const onebotHttp = outbound(parsed.onebotHttp, 'secret')
+  const onebotWs = Object.hasOwn(parsed, 'onebotWs')
+    ? outbound(parsed.onebotWs, 'secret', validateOneBotWebSocketEndpoint)
+    : { enabled: false, endpoint: '', credential: '' }
   const dshAgent = outbound(parsed.dshAgent, 'auth')
+  const onebotWebhook = webhook(parsed.onebotWebhook)
+  if (onebotWs.enabled && onebotWebhook.enabled) return invalid()
   return Object.freeze({
     onebotHttp: Object.freeze({
       enabled: onebotHttp.enabled, endpoint: onebotHttp.endpoint, secret: onebotHttp.credential
     }),
+    onebotWs: Object.freeze({ enabled: onebotWs.enabled, endpoint: onebotWs.endpoint, secret: onebotWs.credential }),
     dshAgent: Object.freeze({ enabled: dshAgent.enabled, endpoint: dshAgent.endpoint, auth: dshAgent.credential }),
-    onebotWebhook: webhook(parsed.onebotWebhook)
+    onebotWebhook
   })
 }
 
@@ -182,6 +220,9 @@ export function updateAdapterConfiguration(current: NativeAdapterConfiguration, 
     onebotHttp: Object.hasOwn(updates, 'onebotHttp')
       ? outboundPatch(previous.onebotHttp.secret, updates.onebotHttp, 'secret', 'clearSecret')
       : previous.onebotHttp,
+    onebotWs: Object.hasOwn(updates, 'onebotWs')
+      ? outboundPatch(previous.onebotWs.secret, updates.onebotWs, 'secret', 'clearSecret')
+      : previous.onebotWs,
     dshAgent: Object.hasOwn(updates, 'dshAgent')
       ? outboundPatch(previous.dshAgent.auth, updates.dshAgent, 'auth', 'clearAuth')
       : previous.dshAgent,
@@ -196,6 +237,11 @@ export function publicAdapterConfiguration(value: NativeAdapterConfiguration): P
       enabled: configuration.onebotHttp.enabled,
       endpoint: configuration.onebotHttp.endpoint,
       secretConfigured: configuration.onebotHttp.secret !== ''
+    }),
+    onebotWs: Object.freeze({
+      enabled: configuration.onebotWs.enabled,
+      endpoint: configuration.onebotWs.endpoint,
+      secretConfigured: configuration.onebotWs.secret !== ''
     }),
     dshAgent: Object.freeze({
       enabled: configuration.dshAgent.enabled,

@@ -13,15 +13,17 @@ const settings = {
   admin: { values: { host: '127.0.0.1', port: 3210 } },
 };
 
-test('empty search returns exactly nine page shortcuts', () => {
+test('empty search returns exactly ten page shortcuts', () => {
   const results = searchWorkspaceTargets(workspacePageTargets, '  ');
-  assert.equal(results.length, 9);
+  assert.equal(results.length, 10);
   assert(results.every(target => target.kind === 'page'));
+  assert.equal(new Set(results.map(target => target.page)).size, 10);
+  assert(results.some(target => target.page === 'providers' && target.title === '模型提供方'));
 });
 
 test('search matches normalized metadata without indexing values', () => {
   const targets = buildWorkspaceSearchTargets({ configuration, settings });
-  assert.deepEqual(searchWorkspaceTargets(targets, '模型 提供').map(target => target.title), ['模型提供方']);
+  assert.deepEqual(searchWorkspaceTargets(targets, '模型 提供').filter(target => target.kind === 'field').map(target => target.title), ['模型提供方']);
   for (const value of ['never-index-this-provider', 'never-index-this-secret', '127.0.0.1']) {
     assert.equal(searchWorkspaceTargets(targets, value).length, 0);
   }
@@ -31,13 +33,23 @@ test('native chat plan and persona management remain discoverable without a runn
   const targets = buildWorkspaceSearchTargets({ configuration, settings, runtimeStatus: { runtimeConnected: false } });
   assert.equal(searchWorkspaceTargets(targets, '聊天方案').some(target => target.page === 'model'), true);
   assert.equal(searchWorkspaceTargets(targets, '人设库').some(target => target.page === 'persona'), true);
+  assert.equal(searchWorkspaceTargets(targets, '模型提供方').some(target => target.page === 'providers'), true);
 });
 
 test('adapter providers and renamed chat plans are discoverable from any page', () => {
-  for (const query of ['DSH', 'OneBot', 'webhook', '协议 接入']) {
+  for (const query of ['DSH', 'OneBot', 'WebSocket', 'WSS', 'HTTP', 'webhook', '协议 接入']) {
     assert.deepEqual(searchWorkspaceTargets(workspacePageTargets, query).map(target => target.page), ['adapters']);
   }
   assert.deepEqual(searchWorkspaceTargets(workspacePageTargets, '模型 回复').map(target => target.page), ['model']);
+});
+
+test('central provider aliases and per-conversation context settings find their own pages', () => {
+  for (const query of ['模型 提供方', 'provider', 'OpenAI', 'Anthropic', 'API key', '服务商', '密钥']) {
+    assert.deepEqual(searchWorkspaceTargets(workspacePageTargets, query).map(target => target.page), ['providers']);
+  }
+  for (const query of ['群聊上下文', '私聊上下文']) {
+    assert.deepEqual(searchWorkspaceTargets(workspacePageTargets, query).map(target => target.page), ['model']);
+  }
 });
 
 test('activity aliases find sessions and usage without indexing records', () => {
@@ -69,6 +81,7 @@ test('current visible entries replace hidden page metadata without inspecting fo
   const result = applyCurrentPageVisibility(targets, 'model', [
     { kind: 'section', title: '当前方案', sectionTitle: '当前方案' },
   ]);
-  assert.equal(searchWorkspaceTargets(result, '模型提供方').length, 0);
+  assert.equal(searchWorkspaceTargets(result, '模型提供方').some(target => target.page === 'model'), false);
+  assert.equal(searchWorkspaceTargets(result, '模型提供方').some(target => target.page === 'providers'), true);
   assert.equal(searchWorkspaceTargets(result, '当前方案').length, 1);
 });

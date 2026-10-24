@@ -230,8 +230,11 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 - GET/POST /api/chat/plans：方案目录与 activePlanId；方案包含名称、行为指令、模型路由及人设引用。
 - GET/POST /api/chat/personas：独立身份和表达风格。
 - GET/POST /api/chat/model：当前方案的模型路由，不建立第二份模型配置真源。
+- GET/POST /api/chat/providers：集中提供方与模型目录，密钥只写不回显；方案引用与目录变更在同一目录写锁下校验，见 [模型提供方](MODEL_PROVIDERS.md)。
 - GET/POST /api/chat/access：独立允许、拒绝与所有者策略；默认拒绝。
 - GET /api/chat/status 与 /api/chat/features：报告原生宿主实际装配状态；源码中导出能力不等于 installed。
 - 没有原生宿主时，会话/用量返回 runtime_not_connected，不代理第三方桥接项目，也不以零值表示成功。
 
 保存方案不等于外部 DSH 部署或已有会话已更新；工具权限与偏好不进入人设。CAS 冲突、写入未知和未装配应分别处理，不自动重试。
+
+方案的 `contextLimits.group` 与 `contextLimits.private` 分别表示群聊、私聊 token 上限；不表示外部引擎已经执行裁剪，也不能绕过实际模型窗口约束。

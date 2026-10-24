@@ -6,21 +6,73 @@ import {
   publicAdapterConfiguration,
   updateAdapterConfiguration,
   validateAdapterConfiguration,
-  validateAdapterEndpoint
+  validateAdapterEndpoint,
+  validateOneBotWebSocketEndpoint
 } from '../src/host/adapter-configuration.ts'
 
 test('native adapter defaults are disabled and copied into frozen configuration values', () => {
   const defaults = createDefaultAdapterConfiguration()
-  assert.deepEqual(Object.keys(defaults), ['onebotHttp', 'dshAgent', 'onebotWebhook'])
+  assert.deepEqual(Object.keys(defaults), ['onebotHttp', 'onebotWs', 'dshAgent', 'onebotWebhook'])
   for (const adapter of Object.values(defaults)) assert.equal(adapter.enabled, false)
   assert.deepEqual(validateAdapterConfiguration(defaults), defaults)
   assert(Object.isFrozen(defaults))
   assert(Object.isFrozen(defaults.onebotWebhook))
   assert.deepEqual(publicAdapterConfiguration(defaults), {
     onebotHttp: { enabled: false, endpoint: '', secretConfigured: false },
+    onebotWs: { enabled: false, endpoint: '', secretConfigured: false },
     dshAgent: { enabled: false, endpoint: '', authConfigured: false },
     onebotWebhook: { enabled: false, host: '127.0.0.1', port: 0, selfId: '', hmacConfigured: false }
   })
+})
+
+test('legacy adapter documents normalize missing WS without changing configured HTTP or input', () => {
+  const defaults = createDefaultAdapterConfiguration()
+  const { onebotWs: omitted, ...legacy } = defaults
+  void omitted
+  const value = { ...legacy, onebotHttp: { enabled: true, endpoint: 'https://onebot.example.test', secret: 'http-secret' } }
+  const before = JSON.stringify(value)
+  const normalized = validateAdapterConfiguration(value)
+  assert.deepEqual(normalized.onebotWs, { enabled: false, endpoint: '', secret: '' })
+  assert.deepEqual(normalized.onebotHttp, value.onebotHttp)
+  assert.equal(JSON.stringify(value), before)
+})
+
+test('WS endpoints allow secure remote or literal loopback connections and reject ambiguous addresses', () => {
+  for (const endpoint of ['', 'ws://localhost:3001', 'ws://127.0.0.1:3001/ws', 'ws://[::1]:3001', 'wss://gateway.example.test/onebot']) {
+    assert.equal(validateOneBotWebSocketEndpoint(endpoint), endpoint)
+  }
+  for (const endpoint of [
+    'https://example.test', 'ws://remote.example.test', 'ws://localhost.example.test', 'ws://0.0.0.0',
+    'ws://127.1', 'ws://2130706433', 'ws://127.0.0.01', 'ws://[::]', 'ws://localhost.',
+    'wss://user:secret@example.test', 'wss://@example.test', 'wss://example.test?token=secret',
+    'wss://example.test#', 'wss://example.test?', 'wss://example.test\\private', 'wss://example.test/\n'
+  ]) assert.throws(() => validateOneBotWebSocketEndpoint(endpoint), { message: 'Invalid adapter configuration' })
+})
+
+test('WS credentials retain, replace and explicitly clear while WS and webhook ingress cannot both enable', () => {
+  const defaults = createDefaultAdapterConfiguration()
+  const first = updateAdapterConfiguration(defaults, {
+    onebotHttp: { enabled: true, endpoint: 'https://http.example.test', secret: 'http-secret' },
+    onebotWs: { enabled: true, endpoint: 'ws://127.0.0.1:3001', secret: 'ws-secret' }
+  })
+  for (const patch of [
+    { enabled: true, endpoint: 'wss://gateway.example.test' },
+    { enabled: true, endpoint: 'wss://gateway.example.test', secret: '' }
+  ]) {
+    const retained = updateAdapterConfiguration(first, { onebotWs: patch })
+    assert.equal(retained.onebotWs.secret, 'ws-secret')
+    assert.deepEqual(retained.onebotHttp, first.onebotHttp)
+    assert.equal(publicAdapterConfiguration(retained).onebotWs.secretConfigured, true)
+  }
+  assert.equal(updateAdapterConfiguration(first, { onebotWs: {
+    enabled: false, endpoint: '', clearSecret: true
+  } }).onebotWs.secret, '')
+  for (const patch of [
+    { onebotWs: { enabled: true, endpoint: '' } },
+    { onebotWs: { enabled: false, endpoint: '', secret: 'ws-secret', clearSecret: true } },
+    { onebotWs: { enabled: false, endpoint: '', secretConfigured: true } },
+    { onebotWebhook: { enabled: true, host: '127.0.0.1', port: 3211, selfId: '123', hmac: 'test-hmac' } }
+  ]) assert.throws(() => updateAdapterConfiguration(first, patch), /Invalid adapter configuration/)
 })
 
 test('adapter endpoints require explicit loopback HTTP or HTTPS without URL credentials or suffixes', () => {

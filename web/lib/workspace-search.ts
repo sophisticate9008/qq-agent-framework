@@ -42,6 +42,7 @@ const pageDefinitions: readonly { readonly id: PageId; readonly title: string }[
   { id: 'features', title: '功能与触发' },
   { id: 'access', title: '访问范围' },
   { id: 'model', title: '聊天方案' },
+  { id: 'providers', title: '模型提供方' },
   { id: 'adapters', title: '适配器' },
   { id: 'settings', title: '运行设置' },
 ];
@@ -207,8 +208,9 @@ export function normalizeWorkspaceSearchQuery(query: string): readonly string[] 
 function searchableText(target: WorkspaceSearchTarget): string {
   const aliases = target.kind === 'page' && target.page === 'usage' ? 'token tokens 费用 花费 用量'
     : target.kind === 'page' && target.page === 'sessions' ? 'session sessions 群聊 私聊 会话'
-      : target.kind === 'page' && target.page === 'adapters' ? 'adapter adapters OneBot webhook DSH 协议 接入 服务地址 连接凭据'
-        : target.kind === 'page' && target.page === 'model' ? '模型 回复 prompt 方案 指令' : '';
+      : target.kind === 'page' && target.page === 'adapters' ? 'adapter adapters OneBot WebSocket WS WSS HTTP webhook DSH 协议 接入 服务地址 连接凭据 收消息 发消息'
+        : target.kind === 'page' && target.page === 'providers' ? 'provider providers OpenAI Anthropic API key 服务商 密钥 模型昵称'
+          : target.kind === 'page' && target.page === 'model' ? '模型 回复 prompt 方案 指令 群聊上下文 私聊上下文' : '';
   return [workspacePageTitle(target.page), target.sectionTitle, target.title, aliases]
     .filter((part): part is string => typeof part === 'string')
     .join(' ')

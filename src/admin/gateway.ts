@@ -16,6 +16,7 @@ import { createSettingsRoutes } from './settings.ts';
 import { createManagementOperations } from './operations.ts';
 import { createConfigurationRoutes } from './configuration.ts';
 import { createNativeRuntimeRoutes } from './runtime.ts';
+import { createOneBotConnectionManager } from '../host/onebot-connection.ts';
 
 const FRAMEWORK_VERSION = '0.1.0';
 const PROBE_TIMEOUT_MS = 2_500;
@@ -469,9 +470,10 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     gatewayConfigurationFilename: configuration.gatewayConfiguration,
     serviceManager: configuration.serviceManager
   }) : undefined;
+  const adapterRuntime = createOneBotConnectionManager();
   const routes: AdminRoute[] = [
     healthRoute,
-    ...createNativeRuntimeRoutes({ directory: join(dirname(configuration.tokenFile), 'runtime') })
+    ...createNativeRuntimeRoutes({ directory: join(dirname(configuration.tokenFile), 'runtime'), adapterRuntime })
   ];
   if (options.configurationFilename) {
     const filenames = { adminConfigurationFilename: options.configurationFilename, gatewayConfigurationFilename: configuration.gatewayConfiguration };
@@ -499,6 +501,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       });
     });
   } catch (error: unknown) {
+    await adapterRuntime.close();
     server.closeAllConnections();
     await closeServer(server);
     throw error;
@@ -511,7 +514,13 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     address: address as AddressInfo,
     revision,
     close() {
-      stopping ??= closeServer(server);
+      stopping ??= (async () => {
+        try {
+          await adapterRuntime.close();
+        } finally {
+          await closeServer(server);
+        }
+      })();
       return stopping;
     }
   });

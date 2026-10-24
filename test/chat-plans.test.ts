@@ -37,8 +37,9 @@ test('chat plan validation accepts only bounded whitelist fields', () => {
   assert.equal(isChatPlan({ ...plan, model: 'models/../../private' }), false)
   assert.throws(() => validateChatPlan({ ...plan, instructions: '' }), /Invalid chat plan/)
   const validated = validateChatPlan(plan)
-  assert.deepEqual(validated, plan)
+  assert.deepEqual(validated, { ...plan, contextLimits: { group: 128_000, private: 128_000 } })
   assert(Object.isFrozen(validated))
+  assert(Object.isFrozen(validated.contextLimits))
 })
 
 test('catalog and persona selectors preserve empty and explicit selection semantics', () => {
@@ -77,4 +78,26 @@ test('chat session definition remains framework neutral and rejects privilege pa
   assert(Object.isFrozen(definition.persona))
   assert(Object.isFrozen(definition.model))
   assert.throws(() => buildChatSessionDefinition(plan, { ...persona, id: 'other' }))
+})
+
+test('chat plans normalize legacy context limits and validate independent explicit budgets', () => {
+  for (const contextLimits of [
+    null, undefined, {}, { group: 1 }, { group: 1, private: 2, extra: 3 },
+    { group: 0, private: 2 }, { group: 1, private: -1 },
+    { group: 1.5, private: 2 }, { group: 1, private: 16_777_217 },
+    { group: NaN, private: 2 }, { group: 1, private: Infinity }, { group: '128000', private: 2 }
+  ]) {
+    assert.equal(isChatPlan({ ...plan, contextLimits }), false)
+    assert.throws(() => validateChatPlan({ ...plan, contextLimits }), /Invalid chat plan/)
+  }
+  const contextLimits = { group: 1, private: 16_777_216 }
+  const normalized = validateChatPlan({ ...plan, contextLimits })
+  contextLimits.group = 512
+  assert.deepEqual(normalized.contextLimits, { group: 1, private: 16_777_216 })
+  const definition = buildChatSessionDefinition(normalized, persona)
+  assert.deepEqual(definition.contextLimits, normalized.contextLimits)
+  assert(Object.isFrozen(definition.contextLimits))
+  assert.equal(Object.hasOwn(buildChatSessionDefinition(plan, persona), 'contextLimits'), false)
+  const legacyCatalog = validateChatPlanCatalog({ activePlanId: plan.id, plans: [plan] })
+  assert.deepEqual(selectChatPlan(legacyCatalog)?.contextLimits, { group: 128_000, private: 128_000 })
 })

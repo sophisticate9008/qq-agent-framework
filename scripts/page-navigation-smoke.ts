@@ -16,7 +16,7 @@ const outputDirectory = new URL('../runtime/page-navigation-smoke/', import.meta
 const builtApplication = new URL('../dist/admin-web/app.js', import.meta.url);
 const token = 'page-navigation-fixture-token-1234567890';
 const runId = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
-const nativeResourceFilenames = ['chat-plans.json', 'chat-personas.json', 'chat-access.json', 'chat-adapters.json'] as const;
+const nativeResourceFilenames = ['chat-plans.json', 'chat-personas.json', 'chat-access.json', 'chat-adapters.json', 'chat-providers.json'] as const;
 
 const pages = [
   { id: 'overview', label: '概览', heading: '工作台概览' },
@@ -26,6 +26,7 @@ const pages = [
   { id: 'features', label: '功能与触发', heading: '功能与触发' },
   { id: 'access', label: '访问范围', heading: '访问范围' },
   { id: 'model', label: '聊天方案', heading: '聊天方案' },
+  { id: 'providers', label: '模型提供方', heading: '模型提供方' },
   { id: 'adapters', label: '适配器', heading: '适配器' },
   { id: 'settings', label: '运行设置', heading: '运行设置' },
 ] as const;
@@ -36,6 +37,10 @@ interface SmokeState {
   readonly externalRequests: string[];
   readonly postRequests: string[];
   readonly pageEntryCounts: Record<string, number>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 async function writePrivateJson(filename: string, value: unknown): Promise<void> {
@@ -139,6 +144,23 @@ async function run(): Promise<void> {
   const gatewayFile = join(fixtureDirectory, 'gateway.json');
   const adminFile = join(fixtureDirectory, 'admin.json');
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+  const nativeRoutes = createNativeRuntimeRoutes({ directory: runtimeDirectory });
+  const readProviders = nativeRoutes.find(route => route.method === 'GET' && route.pathname === '/api/chat/providers');
+  const writeProviders = nativeRoutes.find(route => route.method === 'POST' && route.pathname === '/api/chat/providers');
+  assert(readProviders && writeProviders, 'Native provider routes are required for navigation fixtures.');
+  const providersBefore: unknown = await readProviders.handle({ query: new URLSearchParams(), body: null, signal: new AbortController().signal });
+  assert(isRecord(providersBefore) && typeof providersBefore.revision === 'string');
+  await writeProviders.handle({
+    query: new URLSearchParams(),
+    body: {
+      revision: providersBefore.revision,
+      providers: [{
+        id: 'fixture-provider', name: 'Fixture Provider', type: 'openai', baseUrl: 'https://provider.invalid/v1', enabled: true,
+        models: [{ id: 'fixture-model', name: 'Fixture Model' }],
+      }],
+    },
+    signal: new AbortController().signal,
+  });
   await writePrivateJson(join(runtimeDirectory, 'chat-personas.json'), {
     schema: 1,
     personas: [{ id: 'fixture-persona', name: 'Fixture Persona', identity: 'Stable identity.', style: 'Direct style.' }],
@@ -197,7 +219,6 @@ async function run(): Promise<void> {
       adminConfigurationFilename: adminFile,
       apply: () => ({ applied: true }),
     });
-    const nativeRoutes = createNativeRuntimeRoutes({ directory: runtimeDirectory });
     server = createAdminServer({
       token,
       snapshot: () => ({
@@ -246,6 +267,8 @@ async function run(): Promise<void> {
 
     for (const item of pages) {
       await navigate(page, item.id, item.label, item.heading);
+      if (item.id === 'providers') await section(page, 'Fixture Provider').waitFor();
+      if (item.id === 'model') await section(page, 'Fixture Plan').waitFor();
       const navigator = visibleNavigator(page);
       const entryCount = await navigator.getByRole('button').count();
       assert(entryCount > 0, `${item.label} has no page navigation entries.`);
@@ -257,7 +280,17 @@ async function run(): Promise<void> {
           `${item.label} does not index h2 ${heading}.`);
       }
     }
-    assert.equal(Object.keys(state.pageEntryCounts).length, 9);
+    assert.equal(Object.keys(state.pageEntryCounts).length, 10);
+
+    await openWorkspaceSearch(page);
+    assert.equal(await page.getByRole('option').count(), 10);
+    const providersOption = await searchOption(page, '模型 提供方', '模型提供方', '模型提供方');
+    await providersOption.click();
+    await page.locator('[data-page="providers"]').waitFor();
+    await page.getByRole('heading', { name: '模型提供方', exact: true, level: 1 }).waitFor();
+    await section(page, 'Fixture Provider').waitFor();
+    assert.equal(await page.evaluate(() => location.hash), '#providers');
+    assert(await page.locator('[data-page="providers"] [data-bounded-card]').count() >= 2);
 
     await navigate(page, 'adapters', '适配器', '适配器');
     for (const title of ['运行状态', 'OneBot', 'DSH 聊天引擎']) {
@@ -330,6 +363,8 @@ async function run(): Promise<void> {
       nativeRuntimeRoutes: true,
       pageCount: pages.length,
       nativeAdapterPage: true,
+      nativeProvidersPage: true,
+      tenPageSearchShortcuts: true,
       pageEntryCounts: state.pageEntryCounts,
       allVisibleH2Indexed: true,
       workspaceSearchNativeTargets: true,

@@ -75,6 +75,19 @@ const plan = {
   personaId: 'harbor', provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: 'low'
 } as const
 
+async function registerProviders(routes: readonly AdminRoute[]): Promise<void> {
+  const initial = await invoke(routes, 'GET', '/api/chat/providers')
+  await invoke(routes, 'POST', '/api/chat/providers', {
+    revision: initial.revision,
+    providers: [
+      { id: plan.provider, name: 'DeepSeek', type: 'openai', baseUrl: 'https://deepseek.example.test',
+        enabled: true, models: [{ id: plan.model, name: 'Chat' }] },
+      { id: 'native-provider', name: 'Native', type: 'anthropic', baseUrl: 'https://native.example.test',
+        enabled: true, models: [{ id: 'native/model-v2', name: 'Native V2' }] }
+    ]
+  })
+}
+
 test('native runtime exposes empty editable resources without fabricating a connected host', async context => {
   const files = fixture(context)
   const routes = createNativeRuntimeRoutes({ directory: files.directory })
@@ -82,13 +95,15 @@ test('native runtime exposes empty editable resources without fabricating a conn
     'GET /api/chat/plans', 'POST /api/chat/plans',
     'GET /api/chat/personas', 'POST /api/chat/personas',
     'GET /api/chat/model', 'POST /api/chat/model',
+    'GET /api/chat/providers', 'POST /api/chat/providers',
     'GET /api/chat/access', 'POST /api/chat/access',
     'GET /api/chat/status', 'GET /api/chat/features',
     'GET /api/chat/sessions', 'GET /api/chat/usage',
     'POST /api/chat/sessions/reset',
     'GET /api/chat/usage/series', 'GET /api/chat/usage/turns', 'GET /api/chat/usage/recent',
     'POST /api/chat/usage/reset',
-    'GET /api/chat/adapters', 'POST /api/chat/adapters'
+    'GET /api/chat/adapters', 'POST /api/chat/adapters',
+    'POST /api/chat/adapters/connect', 'POST /api/chat/adapters/disconnect'
   ])
   const plans = await invoke(routes, 'GET', '/api/chat/plans')
   const personas = await invoke(routes, 'GET', '/api/chat/personas')
@@ -126,6 +141,7 @@ test('native runtime exposes empty editable resources without fabricating a conn
 test('native catalogs persist with CAS and model writes update only the active plan', async context => {
   const files = fixture(context)
   const routes = createNativeRuntimeRoutes({ directory: files.directory })
+  await registerProviders(routes)
   const initialPersonas = await invoke(routes, 'GET', '/api/chat/personas')
   const savedPersonas = await invoke(routes, 'POST', '/api/chat/personas', {
     revision: initialPersonas.revision,
@@ -155,7 +171,8 @@ test('native catalogs persist with CAS and model writes update only the active p
   const finalPlans = await invoke(routes, 'GET', '/api/chat/plans')
   assert.equal(finalPlans.revision, model.revision)
   assert.deepEqual(finalPlans.plans, [{
-    ...plan, provider: 'native-provider', model: 'native/model-v2', reasoningEffort: 'high'
+    ...plan, provider: 'native-provider', model: 'native/model-v2', reasoningEffort: 'high',
+    contextLimits: { group: 128_000, private: 128_000 }
   }])
   await rejects(invoke(routes, 'POST', '/api/chat/plans', {
     revision: initialPlans.revision, activePlanId: null, plans: []
@@ -171,6 +188,7 @@ test('native catalogs persist with CAS and model writes update only the active p
 test('plan creation and persona deletion serialize reference checks with their commits', async context => {
   const files = fixture(context)
   const routes = createNativeRuntimeRoutes({ directory: files.directory })
+  await registerProviders(routes)
   const initialPersonas = await invoke(routes, 'GET', '/api/chat/personas')
   const savedPersonas = await invoke(routes, 'POST', '/api/chat/personas', {
     revision: initialPersonas.revision,

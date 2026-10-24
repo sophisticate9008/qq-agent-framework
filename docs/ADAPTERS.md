@@ -1,82 +1,70 @@
-# Native Adapter Configuration
+# 适配器配置
 
-`GET /api/chat/adapters` and `POST /api/chat/adapters` manage the framework's own `chat-adapters.json` in the directory supplied to `createNativeRuntimeRoutes`. The directory is private (`0700`), the document is `0600` and at most 64 KiB. Writes use the same directory queue, exclusive `.chat-runtime.lock`, revision checks, atomic rename and directory sync as the native chat catalogs. No configuration or credentials are discovered from another project.
+在“适配器 → OneBot”分别配置 HTTP 发送和 WebSocket 接收。WebSocket 连接成功后自动识别机器人账号，不用手填 QQ 号。HTTP 与 WebSocket 的端口和密钥可能不同。
 
-Saving records desired configuration only. The only native adapters are OneBot HTTP (`onebotHttp`), DSH (`dshAgent`) and the OneBot webhook (`onebotWebhook`); all default to disabled. The current CLI does not mount a native chat host, an adapter manager or an adapter status port. Saving never binds a webhook listener, sends a QQ message, connects an agent or invokes a model.
+默认 CLI 已挂载协议连接控制器：保存后点击“连接 WebSocket”，断开使用独立按钮。保存参数不会自动更新已有连接，修改后需要重新连接。所有连接默认关闭，不发送测试消息或调用模型。
 
-## API
+**协议已连接不等于聊天处理已接入。** 当前控制器没有装配完整聊天流程，没有消息消费者时只累加接收/丢弃数量，不保存正文、不转发模型、不生成回复。界面明确分开显示，`/api/chat/status.runtimeConnected` 仍为 false。
 
-GET and successful POST return:
+## 配置 API
 
-```json
-{
-  "revision": "64 lowercase hexadecimal SHA-256 characters",
-  "adapters": {
-    "onebotHttp": { "enabled": false, "endpoint": "", "secretConfigured": false },
-    "dshAgent": { "enabled": false, "endpoint": "", "authConfigured": false },
-    "onebotWebhook": {
-      "enabled": false, "host": "127.0.0.1", "port": 0, "selfId": "", "hmacConfigured": false
-    }
-  },
-  "status": { "assembled": false, "running": false, "applyAvailable": false }
-}
-```
+`GET /api/chat/adapters` 和 `POST /api/chat/adapters` 管理框架自己的私有 `chat-adapters.json`。目录权限 `0700`、文件权限 `0600`、文档最多 64 KiB；写入共用目录锁、revision 条件更新、原子替换和目录同步，不读取其他项目配置。
 
-POST accepts `{ revision, adapters }`. `adapters` is a nonempty subset of the three fixed IDs. Each supplied outbound adapter requires `enabled` and `endpoint`; webhook requires `enabled`, `host`, `port`, and `selfId`. Unspecified adapters are preserved. Unknown fields, modules, file paths and executable options are rejected. Query parameters are rejected.
+响应为 `{ revision, adapters, status, connection? }`。原生适配器包括：
 
-| Adapter | Write-only credential | Explicit deletion flag |
-| --- | --- | --- |
-| `onebotHttp` | `secret` | `clearSecret` |
-| `dshAgent` | `auth` | `clearAuth` |
-| `onebotWebhook` | `hmac` | `clearHmac` |
+| 标识 | 配置字段 | 只写凭据 | 明确清除 |
+| --- | --- | --- | --- |
+| `onebotHttp` | `enabled, endpoint` | `secret` | `clearSecret` |
+| `onebotWs` | `enabled, endpoint` | `secret` | `clearSecret` |
+| `dshAgent` | `enabled, endpoint` | `auth` | `clearAuth` |
+| `onebotWebhook` | `enabled, host, port, selfId` | `hmac` | `clearHmac` |
 
-Omitting a credential or sending `""` preserves its stored value. `clearX: true` removes it; supplying a nonempty new credential at the same time is rejected. `clearX: false` does not clear. Credential values are bounded to 4096 printable, non-whitespace ASCII characters. GET and POST responses expose only the configured booleans, never credential contents or masked strings. Configured booleans are read-only and must be omitted from POST.
+POST 接收 `{ revision, adapters }`，其中 adapters 是上述标识的非空子集。未指定的适配器保持原值。凭据省略或空字符串保留原值，只有明确清除标记为 true 才删除；清除与非空新值不能同时指定。读取只返回 `secretConfigured/authConfigured/hmacConfigured`，不返回原值或掩码字符串。凭据最多 4096 个非空白可见 ASCII 字符。
 
-Example save:
+只包含原先三个条目的私有文档读取时补充关闭的 WebSocket 默认值，不因读取改写文件。未知字段与标识仍严格拒绝，不自动清除或重置私人扩展配置；需要迁移时先私有备份、协调写入者并重新读取 revision。
 
-```json
-{
-  "revision": "revision from GET",
-  "adapters": {
-    "dshAgent": { "enabled": false, "endpoint": "http://127.0.0.1:3080", "auth": "" }
-  }
-}
-```
+HTTP/DSH 地址只允许本机回环 HTTP 或 HTTPS；WebSocket 地址只允许本机回环 `ws://` 或远程 `wss://`。不接受 URL 内嵌凭据、查询参数、片段、空白、反斜线或超过 2048 字符的地址。启用时必须有非空地址。
 
-Endpoints must be explicit HTTP URLs on literal loopback (`127.x.x.x`, `[::1]`) or `localhost`, or HTTPS URLs. URL credentials, query strings, fragments, whitespace and backslashes are rejected. Endpoint length is at most 2048 characters. Enabled outbound entries require a nonempty endpoint. The external DSH service is selected only by this explicit endpoint; there is no assumed SDK request mapping, preset sync, profile discovery or health probe.
+## 接收方式
 
-Webhook host is limited to loopback or `localhost`. Disabled webhook may use port `0` and empty self ID. Enabling it requires port `1..65535`, a decimal self ID (up to 32 digits) and a configured HMAC. This is configuration validation, not listener assembly or ingress authorization.
+WebSocket 与 webhook 只能启用一种，避免重复收消息。页面默认使用 WebSocket 引导；webhook 收入“其他接收方式（高级）”。
 
-## Custom Extensions and Unsupported Fields
+HTTP webhook 是协议端主动推送事件的替代方式，不是测试功能。配置校验要求本机回环监听地址、1–65535 端口、机器人账号和 HMAC；默认 CLI 当前不挂载此监听器。关闭时可保留端口 0 与空账号。关闭且没有未保存修改时，页面隐藏这些字段，但不会清空已存设置。
 
-Custom capabilities belong to operator-supplied feature/plugin packages, not the native protocol and agent adapter catalog. Trusted host code registers their implementations through the generic `EffectAdapter` extension boundary; features invoke them through capability-checked execution. The framework does not prescribe a service interface, endpoint, credential schema or workflow for these capabilities. Extension configuration remains outside this native adapter document and cannot grant permissions or bypass policy. This API does not install plugins or load executable modules from JSON.
+## 连接控制
 
-Unsupported adapter IDs and fields are rejected with `400 invalid_adapter_configuration`, even when disabled or supplied alongside a valid adapter update. If an existing private `chat-adapters.json` contains unsupported fields, both GET and POST return `500 chat_storage_invalid`; validation does not strip fields, reset defaults or rewrite the file. There is no automatic migration. An operator must coordinate with all writers, securely back up the original document and explicitly migrate unsupported configuration according to their own extension's requirements. Preserve the three native adapter entries and their credentials, retain directory/file permissions of `0700`/`0600`, and GET a fresh revision before resuming conditional writes. Do not delete the document or place private backups or credentials in the repository.
+- `POST /api/chat/adapters/connect` 接收 `{ revision }`：在目录锁下读取并核对已保存配置，等待有界 WebSocket 登录握手。
+- `POST /api/chat/adapters/disconnect` 接收 `{}`：关闭连接生命周期，再读取状态。
+- 两者都要求管理认证与同源 JSON，不修改配置文件。并发控制被拒绝，期限有限；失败或未知时先读状态，不自动重试。
 
-## Host Extension
+`status` 包含 `{ assembled, running, applyAvailable }`。assembled 表示注入了连接管理端口，不表示聊天服务已运行；running 只有真实连接且已识别账号才为 true。applyAvailable 只表示控制可用。
 
-Trusted host code may pass an `adapterRuntime` port to `createNativeRuntimeRoutes`:
+可选 `connection` 包含 `{ state, selfId, lastError, received, dropped, chatReady: false }`。state 为 disconnected、connecting、connected、reconnecting 或 error；错误为稳定脱敏代码，不包含地址、密钥或消息正文。聊天处理未装配时 chatReady 保持 false。
 
-```ts
-createNativeRuntimeRoutes({
-  directory,
-  adapterRuntime: {
-    status: () => ({ running: manager.isRunning() })
-  }
-})
-```
+## 宿主扩展
 
-The optional status-only port is a code-level extension, never JSON configuration. It receives no configuration or credentials. GET and POST read the port's exact `{ running: boolean }` snapshot and then report `assembled: true`. The running snapshot describes the explicitly mounted manager, not whether the latest saved configuration has been applied. POST reads status before committing. Missing port reports unassembled/stopped; a throwing or malformed port returns `503 adapter_runtime_status_unavailable`. There is no apply/start/connect route, and `applyAvailable` remains `false`. The shared `/api/chat/status` still reports the separate chat host as disconnected.
+`createNativeRuntimeRoutes({ directory, adapterRuntime? })` 支持可信代码注入端口，不从 JSON 加载代码：
 
-`src/host/adapter-configuration.ts` exports strict private configuration validation, patch merging, safe endpoint validation and public redaction for future host integration. Runtime consumers must explicitly map these values to their chosen adapter APIs and preserve policy checks before external effects.
+- 原有只读 `status(): { running }` 端口仍可用，但不提供连接控制。
+- 控制端口可提供 `connect(configuration, signal)`、`disconnect()`、`connectionStatus()`。
+- CLI 使用 `createOneBotConnectionManager()`；构造不联网，显式连接才访问配置端点，管理进程关闭时释放连接。
 
-## Failure Semantics
+缺少运行端口时报告未装配，控制返回 `503 adapter_runtime_unavailable`。详情见 [WebSocket 客户端](ONEBOT_WEBSOCKET.md)。
 
-- `400 invalid_adapter_configuration`: malformed envelope, unsupported fields or invalid settings. Error bodies contain no credentials.
-- `400 invalid_query`: query parameters are unsupported.
-- `409 chat_revision_conflict`: refresh before deciding whether to retry.
-- `409 chat_storage_busy`: another writer holds the directory lock. Abandoned locks require operator inspection; the API never steals them.
-- `500 chat_storage_invalid` / `chat_storage_write_failed`: private storage validation or pre-rename write failure.
-- `500 chat_write_unknown`: rename succeeded but durability or verification failed. The value may already be visible. Refresh; do not automatically retry.
+## 业务扩展
 
-Conditional-write guarantees require all writers to honor the lock protocol. HTTP cancellation does not cancel or roll back a started storage transaction. A response deadline or disconnect can leave the result unknown; refresh before another write.
+生图等使用者自补能力不属于默认协议/agent 目录。通过通用 `FeatureDefinition`、`EffectAdapter`、资源与 policy 接入，使用者自行定义服务、凭据和业务流程。配置不能创建权限，也不能直接安装或加载代码。
+
+## 失败语义
+
+- `400 invalid_adapter_configuration`：字段或值不合法；错误不包含凭据。
+- `400 invalid_query`：不支持查询参数。
+- `409 chat_revision_conflict`：重新读取后再决定。
+- `409 chat_storage_busy`：其他写入持锁；废弃锁需人工检查，不自动抢锁。
+- `409 adapter_runtime_busy`：连接控制正在进行。
+- `503 adapter_runtime_unavailable/adapter_connection_failed`：控制不可用或连接失败。
+- `504 adapter_runtime_timeout`：控制超时，先核对实际状态。
+- `500 chat_storage_invalid/chat_storage_write_failed`：存储校验或替换前写入失败。
+- `500 chat_write_unknown`：替换已发生但持久性或验证未知，先读取，不自动重复写入。
+
+条件写保证要求所有写入者遵守锁协议。HTTP 取消不能回滚已经开始的存储事务或外部操作。

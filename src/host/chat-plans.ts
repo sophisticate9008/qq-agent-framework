@@ -2,6 +2,13 @@ export const CHAT_PLAN_REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'max
 
 export type ChatPlanReasoningEffort = typeof CHAT_PLAN_REASONING_EFFORTS[number]
 
+export interface ChatContextLimits {
+  readonly group: number
+  readonly private: number
+}
+
+export const DEFAULT_CHAT_CONTEXT_LIMITS: ChatContextLimits = Object.freeze({ group: 128_000, private: 128_000 })
+
 export interface ChatPlan {
   readonly id: string
   readonly name: string
@@ -11,6 +18,11 @@ export interface ChatPlan {
   readonly provider: string
   readonly model: string
   readonly reasoningEffort: ChatPlanReasoningEffort
+  readonly contextLimits?: ChatContextLimits
+}
+
+export interface NormalizedChatPlan extends ChatPlan {
+  readonly contextLimits: ChatContextLimits
 }
 
 export interface ChatPlanCatalog {
@@ -29,6 +41,7 @@ export interface ChatSessionDefinition {
   readonly planId: string
   readonly personaId: string
   readonly instructions: string
+  readonly contextLimits?: ChatContextLimits
   readonly persona: {
     readonly identity: string
     readonly style: string
@@ -79,9 +92,15 @@ function isReasoningEffort(value: unknown): value is ChatPlanReasoningEffort {
     && (CHAT_PLAN_REASONING_EFFORTS as readonly string[]).includes(value)
 }
 
+function isContextLimits(value: unknown): value is ChatContextLimits {
+  return isRecord(value) && hasExactKeys(value, ['group', 'private'])
+    && [value.group, value.private].every(limit => typeof limit === 'number'
+      && Number.isSafeInteger(limit) && limit >= 1 && limit <= 16_777_216)
+}
+
 export function isChatPlan(value: unknown): value is ChatPlan {
   return isRecord(value)
-    && hasExactKeys(value, PLAN_KEYS)
+    && hasExactKeys(value, Object.hasOwn(value, 'contextLimits') ? [...PLAN_KEYS, 'contextLimits'] : PLAN_KEYS)
     && validIdentifier(value.id)
     && boundedString(value.name, MAX_NAME_LENGTH, false)
     && boundedString(value.description, MAX_DESCRIPTION_LENGTH, true)
@@ -90,9 +109,10 @@ export function isChatPlan(value: unknown): value is ChatPlan {
     && validReference(value.provider)
     && validReference(value.model)
     && isReasoningEffort(value.reasoningEffort)
+    && (!Object.hasOwn(value, 'contextLimits') || isContextLimits(value.contextLimits))
 }
 
-export function validateChatPlan(value: unknown): ChatPlan {
+export function validateChatPlan(value: unknown): NormalizedChatPlan {
   if (!isChatPlan(value)) throw new TypeError('Invalid chat plan')
   return Object.freeze({
     id: value.id,
@@ -102,7 +122,8 @@ export function validateChatPlan(value: unknown): ChatPlan {
     personaId: value.personaId,
     provider: value.provider,
     model: value.model,
-    reasoningEffort: value.reasoningEffort
+    reasoningEffort: value.reasoningEffort,
+    contextLimits: Object.freeze({ ...(value.contextLimits ?? DEFAULT_CHAT_CONTEXT_LIMITS) })
   })
 }
 
@@ -173,6 +194,7 @@ export function buildChatSessionDefinition(plan: ChatPlan, persona: ChatPersona)
       provider: selectedPlan.provider,
       name: selectedPlan.model,
       reasoningEffort: selectedPlan.reasoningEffort
-    })
+    }),
+    ...(Object.hasOwn(plan, 'contextLimits') ? { contextLimits: selectedPlan.contextLimits } : {})
   })
 }

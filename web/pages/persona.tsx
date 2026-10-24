@@ -6,6 +6,7 @@ import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section } from 
 import { Button } from '../components/ui/button.tsx';
 import { Input } from '../components/ui/input.tsx';
 import { Textarea } from '../components/ui/textarea.tsx';
+import { createBuiltinWhalePersonaDraft } from '../../src/host/chat-templates.ts';
 
 interface Persona {
   readonly id: string;
@@ -78,6 +79,7 @@ export function PersonaPage({ api, connected, connect, setDirty, navigate }: Pag
     ? Object.values(draft).some(value => value.trim() !== '')
     : selected !== null && !samePersona(draft, selected);
   const idConflict = useMemo(() => creating && catalog?.personas.some(persona => persona.id === draft.id.trim()) === true, [catalog, creating, draft.id]);
+  const templateDisabled = dirty || loading || saving || saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown';
 
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
@@ -149,6 +151,16 @@ export function PersonaPage({ api, connected, connect, setDirty, navigate }: Pag
     setSaveState('idle');
   }
 
+  function useBuiltinPersona(): void {
+    if (!catalog || templateDisabled) return;
+    setSelectedId(null);
+    setDraft(createBuiltinWhalePersonaDraft(catalog.personas));
+    setCreating(true);
+    setFieldError('');
+    setWriteError('');
+    setSaveState('idle');
+  }
+
   async function save(): Promise<void> {
     if (!catalog || !dirty || saving) return;
     const normalized = { ...draft, id: draft.id.trim(), name: draft.name.trim() };
@@ -201,6 +213,10 @@ export function PersonaPage({ api, connected, connect, setDirty, navigate }: Pag
       : !catalog ? <Section title="人设库不可用" description={loadError || '服务没有返回可识别的人设库。'}><EmptyState locked title="无法读取原生人设库" description="暂时无法读取人设内容，请稍后重试。" /></Section>
         : <div className="grid items-start gap-5 lg:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
           <Section scrollable title="人设库" description="这里保存可被聊天方案引用的人设。" actions={<Button size="sm" onClick={createPersona} disabled={dirty || saving}><Plus className="size-3.5" />新建人设</Button>}>
+            <div className="mb-4 grid gap-2 rounded-lg border border-dashed p-3">
+              <Button size="sm" variant="outline" onClick={useBuiltinPersona} disabled={templateDisabled}>使用内置小鲸鱼</Button>
+              <p className="text-xs leading-5 text-muted-foreground">通用可编辑模板，并非核心策略。只填入新的未保存草稿，不覆盖现有人设；保存后仍需在聊天方案中选择关联。</p>
+            </div>
             <div className="min-w-0">{catalog.personas.length === 0 ? <EmptyState title="还没有人设" description="创建第一份独立人设，之后可在聊天方案中选择关联。" action={<Button size="sm" onClick={createPersona}><Plus className="size-3.5" />新建人设</Button>} /> : <div className="grid gap-1.5">{catalog.personas.map(persona => <Button key={persona.id} variant={!creating && selectedId === persona.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-2.5 text-left whitespace-normal" disabled={dirty || saving} onClick={() => choose(persona)}><UserRound className="size-4 shrink-0" /><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{persona.name}</strong><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{persona.id}</span></span></Button>)}</div>}</div>
           </Section>
           <Section scrollable title={creating ? '新建人设' : draft.name || '人设内容'} description="只描述这个角色是谁、如何表达；不要在这里写工具权限、触发条件或用户偏好。" footer={<SaveBar dirty={dirty} saving={saving} message={stateMessage(saveState, dirty)} onSave={() => void save()} onReset={reset} label={creating ? '创建人设' : '保存人设'}><Button variant="outline" onClick={() => navigate('model')}>查看聊天方案</Button></SaveBar>}>

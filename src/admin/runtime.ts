@@ -13,10 +13,17 @@ import {
   type ChatPersona
 } from '../host/chat-plans.ts'
 import {
+  publicModelProviders,
+  updateModelProviders,
+  validateModelProviders,
+  type NativeModelProvider
+} from '../host/model-providers.ts'
+import {
   createDefaultAdapterConfiguration,
   publicAdapterConfiguration,
   updateAdapterConfiguration,
   validateAdapterConfiguration,
+  type AdapterConnectionStatus,
   type AdapterRuntimePort,
   type NativeAdapterConfiguration
 } from '../host/adapter-configuration.ts'
@@ -52,6 +59,11 @@ interface StoredAdapters {
   readonly adapters: NativeAdapterConfiguration
 }
 
+interface StoredProviders {
+  readonly schema: 1
+  readonly providers: readonly NativeModelProvider[]
+}
+
 interface Document<Value> {
   readonly revision: string
   readonly value: Value
@@ -71,7 +83,9 @@ const DEFAULT_ACCESS: StoredAccess = Object.freeze({
   owner: null
 })
 const DEFAULT_ADAPTERS: StoredAdapters = Object.freeze({ schema: 1, adapters: createDefaultAdapterConfiguration() })
+const DEFAULT_PROVIDERS: StoredProviders = Object.freeze({ schema: 1, providers: Object.freeze([]) })
 const writeTails = new Map<string, Promise<void>>()
+const adapterControls = new Map<string, Promise<unknown>>()
 
 function requestError(statusCode: number, code: string): never {
   throw new AdminRequestError(statusCode, code)
@@ -284,13 +298,13 @@ async function updateDocument<Value>(
   fallback: Value,
   validate: (value: unknown) => Value,
   update: (current: Value) => Value | Promise<Value>,
-  precommit: (next: Value) => void | Promise<void> = () => undefined
+  precommit: (next: Value, current: Value) => void | Promise<void> = () => undefined
 ): Promise<Document<Value>> {
   return withDirectoryWriteLock(directory, async () => {
     const current = await readDocument(filename, fallback, validate)
     if (current.revision !== expectedRevision) requestError(409, 'chat_revision_conflict')
     const next = await update(current.value)
-    await precommit(next)
+    await precommit(next, current.value)
     return writeDocumentLocked(directory, filename, expectedRevision, fallback, validate, next)
   })
 }
@@ -339,10 +353,17 @@ function validateStoredAdapters(value: unknown): StoredAdapters {
   return Object.freeze({ schema: 1, adapters: validateAdapterConfiguration(value.adapters) })
 }
 
+function validateStoredProviders(value: unknown): StoredProviders {
+  if (!isRecord(value) || !hasExactKeys(value, ['schema', 'providers']) || value.schema !== 1) {
+    throw new TypeError('Invalid providers document')
+  }
+  return Object.freeze({ schema: 1, providers: validateModelProviders(value.providers) })
+}
+
 interface AdapterRuntimeStatus {
   readonly assembled: boolean
   readonly running: boolean
-  readonly applyAvailable: false
+  readonly applyAvailable: boolean
 }
 
 async function adapterRuntimeStatus(port: AdapterRuntimePort | undefined): Promise<AdapterRuntimeStatus> {
@@ -352,18 +373,94 @@ async function adapterRuntimeStatus(port: AdapterRuntimePort | undefined): Promi
     if (!isRecord(status) || !hasExactKeys(status, ['running']) || typeof status.running !== 'boolean') {
       requestError(503, 'adapter_runtime_status_unavailable')
     }
-    return { assembled: true, running: status.running, applyAvailable: false }
+    return { assembled: true, running: status.running, applyAvailable: typeof port.connect === 'function' }
   } catch {
     requestError(503, 'adapter_runtime_status_unavailable')
   }
 }
 
-function adaptersResponse(document: Document<StoredAdapters>, status: AdapterRuntimeStatus): Record<string, unknown> {
-  return { revision: document.revision, adapters: publicAdapterConfiguration(document.value.adapters), status }
+async function adapterConnectionStatus(port: AdapterRuntimePort | undefined): Promise<AdapterConnectionStatus | undefined> {
+  if (port?.connectionStatus === undefined) return undefined
+  try {
+    const status: unknown = await port.connectionStatus()
+    if (!isRecord(status) || !hasExactKeys(status, ['state', 'selfId', 'lastError', 'received', 'dropped', 'chatReady'])
+      || !['disconnected', 'connecting', 'connected', 'reconnecting', 'error'].includes(String(status.state))
+      || status.selfId !== null && (typeof status.selfId !== 'string' || !/^[1-9][0-9]{0,31}$/.test(status.selfId))
+      || status.lastError !== null && typeof status.lastError !== 'string'
+      || ![status.received, status.dropped].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+      || status.chatReady !== false) requestError(503, 'adapter_runtime_status_unavailable')
+    return Object.freeze({
+      state: status.state as AdapterConnectionStatus['state'], selfId: status.selfId as string | null,
+      lastError: status.lastError === null ? null
+        : /^(?:onebot_ws_[a-z0-9_]{1,64}|adapter_runtime_(?:aborted|closed|busy))$/.test(String(status.lastError))
+          ? String(status.lastError) : 'adapter_connection_error',
+      received: status.received as number, dropped: status.dropped as number, chatReady: false
+    })
+  } catch {
+    requestError(503, 'adapter_runtime_status_unavailable')
+  }
+}
+
+function adaptersResponse(
+  document: Document<StoredAdapters>,
+  status: AdapterRuntimeStatus,
+  connection?: AdapterConnectionStatus
+): Record<string, unknown> {
+  return {
+    revision: document.revision, adapters: publicAdapterConfiguration(document.value.adapters), status,
+    ...(connection === undefined ? {} : { connection })
+  }
+}
+
+async function controlAdapterRuntime<Value>(
+  directory: string,
+  signal: AbortSignal,
+  operation: (signal: AbortSignal) => Promise<Value>
+): Promise<Value> {
+  if (adapterControls.has(directory)) requestError(409, 'adapter_runtime_busy')
+  if (signal.aborted) requestError(499, 'request_aborted')
+  const controller = new AbortController()
+  let rejectDeadline: ((error: AdminRequestError) => void) | undefined
+  const deadline = new Promise<never>((_resolvePromise, rejectPromise) => { rejectDeadline = rejectPromise })
+  const cancel = (): void => {
+    controller.abort()
+    rejectDeadline?.(new AdminRequestError(499, 'request_aborted'))
+  }
+  signal.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(() => {
+    controller.abort()
+    rejectDeadline?.(new AdminRequestError(504, 'adapter_runtime_timeout'))
+  }, 5_000)
+  const pending = (async () => {
+    const release = await acquireDirectoryLock(directory)
+    try {
+      if (controller.signal.aborted) requestError(499, 'request_aborted')
+      return await operation(controller.signal)
+    } catch (error: unknown) {
+      if (error instanceof AdminRequestError) throw error
+      requestError(503, 'adapter_connection_failed')
+    } finally {
+      await release()
+    }
+  })()
+  adapterControls.set(directory, pending)
+  void pending.finally(() => {
+    if (adapterControls.get(directory) === pending) adapterControls.delete(directory)
+  }).catch(() => undefined)
+  try {
+    return await Promise.race([pending, deadline])
+  } finally {
+    clearTimeout(timer)
+    signal.removeEventListener('abort', cancel)
+  }
 }
 
 function plansResponse(document: Document<StoredPlans>): Record<string, unknown> {
   return { revision: document.revision, activePlanId: document.value.activePlanId, plans: document.value.plans }
+}
+
+function providersResponse(document: Document<StoredProviders>): Record<string, unknown> {
+  return { revision: document.revision, providers: publicModelProviders(document.value.providers) }
 }
 
 function personasResponse(document: Document<StoredPersonas>): Record<string, unknown> {
@@ -461,13 +558,50 @@ function assertPersonaReferences(plans: readonly ChatPlan[], personas: readonly 
   if (plans.some(plan => !ids.has(plan.personaId))) requestError(409, 'persona_in_use_or_missing')
 }
 
+function assertPlanModelReferences(
+  next: StoredPlans,
+  current: StoredPlans,
+  providers: readonly NativeModelProvider[]
+): void {
+  for (const plan of next.plans) {
+    const provider = providers.find(entry => entry.id === plan.provider)
+    if (provider?.enabled && provider.models.some(model => model.id === plan.model)) continue
+    const previous = current.plans.find(entry => entry.id === plan.id)
+    const unchanged = previous?.provider === plan.provider && previous.model === plan.model
+    const newlyActive = next.activePlanId === plan.id && current.activePlanId !== plan.id
+    if (!unchanged || newlyActive) requestError(409, 'provider_model_missing_or_disabled')
+  }
+}
+
+function assertProviderReferences(
+  next: readonly NativeModelProvider[],
+  current: readonly NativeModelProvider[],
+  plans: readonly ChatPlan[]
+): void {
+  for (const plan of plans) {
+    const previous = current.find(entry => entry.id === plan.provider)
+    if (previous === undefined) continue
+    const provider = next.find(entry => entry.id === plan.provider)
+    if (provider === undefined || previous.enabled && !provider.enabled
+      || previous.models.some(model => model.id === plan.model)
+        && !provider.models.some(model => model.id === plan.model)) {
+      requestError(409, 'provider_model_in_use')
+    }
+  }
+}
+
+function validAdapterRuntimePort(value: unknown): value is AdapterRuntimePort {
+  return isRecord(value) && typeof value.status === 'function'
+    && ['connect', 'disconnect', 'connectionStatus'].every(key => !Object.hasOwn(value, key)
+      || typeof value[key] === 'function')
+}
+
 export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): readonly AdminRoute[] {
   if (!isRecord(options) || !Object.hasOwn(options, 'directory')
     || !Object.keys(options).every(key => key === 'directory' || key === 'adapterRuntime')
     || typeof options.directory !== 'string'
     || options.directory.length === 0 || options.directory.includes('\0') || !isAbsolute(options.directory)
-    || options.adapterRuntime !== undefined && (!isRecord(options.adapterRuntime)
-      || typeof options.adapterRuntime.status !== 'function')) {
+    || options.adapterRuntime !== undefined && !validAdapterRuntimePort(options.adapterRuntime)) {
     throw new TypeError('Native runtime routes require an absolute directory and an optional runtime status port.')
   }
   const directory = resolve(options.directory)
@@ -477,6 +611,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   const personasFile = join(directory, 'chat-personas.json')
   const accessFile = join(directory, 'chat-access.json')
   const adaptersFile = join(directory, 'chat-adapters.json')
+  const providersFile = join(directory, 'chat-providers.json')
   const adapterRuntime = options.adapterRuntime
 
   const routes: AdminRoute[] = [
@@ -497,9 +632,11 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         return plansResponse(await updateDocument(
           directory, plansFile, request.revision, DEFAULT_PLANS, validateStoredPlans,
           () => request.value,
-          async next => {
+          async (next, current) => {
             const personas = await readDocument(personasFile, DEFAULT_PERSONAS, validateStoredPersonas)
             assertPersonaReferences(next.plans, personas.value.personas)
+            const providers = await readDocument(providersFile, DEFAULT_PROVIDERS, validateStoredProviders)
+            assertPlanModelReferences(next, current, providers.value.providers)
           }
         ))
       }
@@ -555,6 +692,43 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
             } catch {
               requestError(400, 'invalid_chat_request')
             }
+          },
+          async (next, current) => {
+            const providers = await readDocument(providersFile, DEFAULT_PROVIDERS, validateStoredProviders)
+            assertPlanModelReferences(next, current, providers.value.providers)
+          }
+        ))
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/chat/providers',
+      async handle({ query }) {
+        requireEmptyQuery(query)
+        await ready
+        return providersResponse(await readDocument(providersFile, DEFAULT_PROVIDERS, validateStoredProviders))
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/chat/providers',
+      async handle({ query, body }) {
+        requireEmptyQuery(query)
+        await ready
+        if (!isRecord(body) || !hasExactKeys(body, ['revision', 'providers'])
+          || typeof body.revision !== 'string' || !REVISION_PATTERN.test(body.revision)) {
+          requestError(400, 'invalid_model_providers')
+        }
+        return providersResponse(await updateDocument(
+          directory, providersFile, body.revision, DEFAULT_PROVIDERS, validateStoredProviders,
+          current => {
+            try {
+              return Object.freeze({ schema: 1, providers: updateModelProviders(current.providers, body.providers) })
+            } catch {
+              requestError(400, 'invalid_model_providers')
+            }
+          },
+          async (next, current) => {
+            const plans = await readDocument(plansFile, DEFAULT_PLANS, validateStoredPlans)
+            assertProviderReferences(next.providers, current.providers, plans.value.plans)
           }
         ))
       }
@@ -655,7 +829,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         await ready
         const document = await readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
         const status = await adapterRuntimeStatus(adapterRuntime)
-        return adaptersResponse(document, status)
+        return adaptersResponse(document, status, await adapterConnectionStatus(adapterRuntime))
       }
     },
     {
@@ -668,6 +842,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
           requestError(400, 'invalid_adapter_configuration')
         }
         const status = await adapterRuntimeStatus(adapterRuntime)
+        const connection = await adapterConnectionStatus(adapterRuntime)
         const document = await updateDocument(
           directory, adaptersFile, body.revision, DEFAULT_ADAPTERS, validateStoredAdapters,
           current => {
@@ -678,7 +853,40 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
             }
           }
         )
-        return adaptersResponse(document, status)
+        return adaptersResponse(document, status, connection)
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/chat/adapters/connect',
+      async handle({ query, body, signal }) {
+        requireEmptyQuery(query)
+        if (!isRecord(body) || !hasExactKeys(body, ['revision'])
+          || typeof body.revision !== 'string' || !REVISION_PATTERN.test(body.revision)) {
+          requestError(400, 'invalid_adapter_configuration')
+        }
+        if (adapterRuntime?.connect === undefined) requestError(503, 'adapter_runtime_unavailable')
+        await ready
+        return controlAdapterRuntime(directory, signal, async controlSignal => {
+          const document = await readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
+          if (document.revision !== body.revision) requestError(409, 'chat_revision_conflict')
+          await adapterRuntime.connect?.(document.value.adapters, controlSignal)
+          return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime))
+        })
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/chat/adapters/disconnect',
+      async handle({ query, body, signal }) {
+        requireEmptyQuery(query)
+        if (!isRecord(body) || !hasExactKeys(body, [])) requestError(400, 'invalid_adapter_configuration')
+        if (adapterRuntime?.disconnect === undefined) requestError(503, 'adapter_runtime_unavailable')
+        await ready
+        return controlAdapterRuntime(directory, signal, async controlSignal => {
+          if (controlSignal.aborted) requestError(499, 'request_aborted')
+          await adapterRuntime.disconnect?.()
+          const document = await readDocument(adaptersFile, DEFAULT_ADAPTERS, validateStoredAdapters)
+          return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime))
+        })
       }
     }
   ]

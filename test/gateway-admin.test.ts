@@ -4,7 +4,9 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -14,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { promisify } from 'node:util';
+import { WebSocketServer } from 'ws';
 
 import {
   gatewayAdminAddress,
@@ -392,4 +395,108 @@ test('CLI address is offline-safe while listening and health use the configured 
       return true;
     }
   );
+});
+
+test('gateway mounts explicit WS protocol controls, verifies login, drops incoming chat and drains connections on close', async context => {
+  const files = createFiles({ gatewayPort: await availablePort(), upstreamPort: await availablePort() });
+  context.after(() => rmSync(files.directory, { recursive: true, force: true }));
+  const sockets = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await new Promise<void>(resolvePromise => sockets.once('listening', () => resolvePromise()));
+  context.after(async () => {
+    for (const client of sockets.clients) client.terminate();
+    await new Promise<void>(resolvePromise => sockets.close(() => resolvePromise()));
+  });
+  const address = sockets.address();
+  assert(address !== null && typeof address !== 'string');
+  let connections = 0;
+  const requests: Record<string, unknown>[] = [];
+  let loginRequested: (() => void) | undefined;
+  const requested = new Promise<void>(resolvePromise => { loginRequested = resolvePromise; });
+  let respondLogin: (() => void) | undefined;
+  let autoLogin = false;
+  sockets.on('connection', (socket, request) => {
+    connections += 1;
+    assert.equal(request.headers.authorization, 'Bearer fixture-ws-secret');
+    socket.on('message', raw => {
+      const message = parseObject(JSON.parse(raw.toString()) as unknown);
+      requests.push(message);
+      assert.equal(message.action, 'get_login_info');
+      assert.deepEqual(message.params, {});
+      const respond = (): void => {
+        socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: message.echo, data: { user_id: 123, nickname: 'Fixture' } }));
+        socket.send(JSON.stringify({ post_type: 'message', message_type: 'private', self_id: 123,
+          user_id: 456, message_id: 1, message: [{ type: 'text', data: { text: 'private-incoming-fixture' } }] }));
+      };
+      respondLogin = respond;
+      loginRequested?.();
+      if (autoLogin) respond();
+    });
+  });
+  const service = await startGatewayAdmin(loadGatewayAdminConfiguration(files.adminConfiguration));
+  context.after(() => service.close());
+  const origin = `http://127.0.0.1:${service.address.port}`;
+  const headers = { authorization: `Bearer ${ADMIN_TOKEN}` };
+  const postHeaders = { ...headers, origin, 'content-type': 'application/json' };
+  async function getAdapters(): Promise<Record<string, unknown>> {
+    const response = await fetch(`${origin}/api/chat/adapters`, { headers });
+    assert.equal(response.status, 200);
+    return parseObject(await response.json());
+  }
+  async function post(action: string, body: Record<string, unknown>): Promise<Response> {
+    return fetch(`${origin}/api/chat/adapters${action}`, { method: 'POST', headers: postHeaders, body: JSON.stringify(body) });
+  }
+  const initial = await getAdapters();
+  assert.deepEqual(initial.status, { assembled: true, running: false, applyAvailable: true });
+  assert.deepEqual(initial.connection, { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false });
+  assert.equal(connections, 0);
+  assert.equal((await fetch(`${origin}/api/chat/adapters/connect`, {
+    method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ revision: initial.revision })
+  })).status, 401);
+  const savedResponse = await post('', { revision: initial.revision, adapters: {
+    onebotHttp: { enabled: true, endpoint: 'https://existing-http.example.test', secret: 'existing-http-private-key' },
+    onebotWs: { enabled: true, endpoint: `ws://127.0.0.1:${address.port}`, secret: 'fixture-ws-secret' }
+  } });
+  assert.equal(savedResponse.status, 200);
+  const saved = parseObject(await savedResponse.json());
+  assert.equal(connections, 0);
+  assert.equal(parseObject(saved.status).running, false);
+  const filename = join(files.directory, 'runtime', 'chat-adapters.json');
+  const original = readFileSync(filename);
+  const metadata = statSync(filename);
+  const connecting = post('/connect', { revision: saved.revision });
+  await requested;
+  const pending = await getAdapters();
+  assert.equal(parseObject(pending.status).running, false);
+  assert.equal(parseObject(pending.connection).state, 'connecting');
+  respondLogin?.();
+  const connectedResponse = await connecting;
+  assert.equal(connectedResponse.status, 200);
+  const connected = parseObject(await connectedResponse.json());
+  assert.deepEqual(connected.status, { assembled: true, running: true, applyAvailable: true });
+  assert.equal(parseObject(connected.connection).selfId, '123');
+  assert.equal(parseObject(connected.connection).chatReady, false);
+  const statusResponse = await fetch(`${origin}/api/chat/status`, { headers });
+  assert.deepEqual(await statusResponse.json(), { runtimeConnected: false });
+  const counted = await getAdapters();
+  assert.equal(parseObject(counted.connection).received, 1);
+  assert.equal(parseObject(counted.connection).dropped, 1);
+  const stoppedResponse = await post('/disconnect', {});
+  assert.equal(stoppedResponse.status, 200);
+  const stopped = parseObject(await stoppedResponse.json());
+  assert.equal(parseObject(stopped.status).running, false);
+  assert.equal(parseObject(stopped.connection).state, 'disconnected');
+  assert.deepEqual(readFileSync(filename), original);
+  assert.equal(statSync(filename).ino, metadata.ino);
+  assert.equal(statSync(filename).mtimeMs, metadata.mtimeMs);
+  assert.doesNotMatch(JSON.stringify([connected, counted, stopped]), /fixture-ws-secret|existing-http-private-key|private-incoming-fixture/);
+  autoLogin = true;
+  const restarted = await post('/connect', { revision: saved.revision });
+  assert.equal(restarted.status, 200);
+  const active = [...sockets.clients].filter(client => client.readyState === client.OPEN);
+  assert.equal(active.length, 1);
+  const closed = new Promise<void>(resolvePromise => active[0]!.once('close', () => resolvePromise()));
+  await service.close();
+  await closed;
+  assert.equal(connections, 2);
+  assert(requests.every(request => request.action === 'get_login_info'));
 });

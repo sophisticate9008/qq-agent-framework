@@ -4,7 +4,7 @@ import type { PageProps } from '../lib/types.ts';
 
 export function ModelPage(props: PageProps) {
   return <div className="page-stack" data-page="model">
-    <PageHeading title="聊天方案" description="直接创建、编辑并选择原生聊天方案。模型、关联人设和方案指令在这里组合，人设库、能力与授权仍分别管理。" />
+    <PageHeading title="聊天方案" description="从集中维护的提供方和模型中选择，分别设置群聊、私聊上下文，再组合人设与回复指令。" />
     <ChatPlanManager {...props} />
   </div>;
 }

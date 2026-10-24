@@ -165,6 +165,83 @@ test('DSH snapshots trusted bindings but resolves current plan for every new ses
   assert.equal(fake.requests.length, 2)
 })
 
+test('DSH explicit context budgets select only the exact trusted preset without protocol overrides', async context => {
+  const fake = await fixture(context)
+  const contextLimits = { group: 172_000, private: 384_000 }
+  const definition = { ...sessionDefinition, contextLimits }
+  const client = fake.port({
+    sessionDefinition: structuredClone(definition),
+    presetBindings: [{ agentPreset: 'framework-chat', definition }]
+  })
+  contextLimits.group = 1
+  contextLimits.private = 2
+  assert.deepEqual(await client.createSession(createRequest()), { ok: true, value: { sessionId: 'session-1' } })
+  assert.deepEqual(fake.requests.map(request => request.method), ['session/create', 'session/selectModel'])
+  assert.deepEqual(fake.requests[0]!.payload.args.request, { agentPreset: 'framework-chat' })
+  assert.deepEqual(fake.requests[1]!.payload.args.request, {
+    sessionId: 'session-1', provider: 'test-provider', model: 'test-model', reasoningEffort: 'high'
+  })
+  assert(!JSON.stringify(fake.requests).includes('contextLimits'))
+})
+
+test('DSH omitted or mismatched group/private budgets reject before any authentication or network call', async context => {
+  const fetch = context.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected network request') })
+  const exact = { ...sessionDefinition, contextLimits: { group: 172_000, private: 384_000 } }
+  for (const [selected, trusted] of [
+    [{ ...exact, contextLimits: { group: 172_001, private: 384_000 } }, exact],
+    [{ ...exact, contextLimits: { group: 172_000, private: 384_001 } }, exact],
+    [exact, sessionDefinition],
+    [sessionDefinition, exact],
+    [{ ...sessionDefinition, contextLimits: { group: 128_000, private: 128_000 } }, sessionDefinition]
+  ]) {
+    const client = createDshJsonRpcPort({
+      endpoint: 'https://agent.example.test', auth: 'private-fixture-token', sessionDefinition: selected,
+      presetBindings: [{ agentPreset: 'trusted-preset', definition: trusted }]
+    })
+    context.after(() => client.close())
+    assert.deepEqual(await client.createSession(createRequest()), {
+      ok: false, error: { code: 'DSH_INSTRUCTIONS_UNSUPPORTED' }
+    })
+  }
+  let selected: ChatSessionDefinition = exact
+  const dynamic = createDshJsonRpcPort({
+    endpoint: 'https://agent.example.test', auth: 'private-fixture-token', sessionDefinition: () => selected,
+    presetBindings: [{ agentPreset: 'trusted-preset', definition: exact }]
+  })
+  context.after(() => dynamic.close())
+  selected = { ...exact, contextLimits: { group: 172_000, private: 512_000 } }
+  assert.deepEqual(await dynamic.createSession(createRequest()), {
+    ok: false, error: { code: 'DSH_INSTRUCTIONS_UNSUPPORTED' }
+  })
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
+test('DSH rejects malformed context budgets in definitions, trusted bindings and dynamic plans without network', async context => {
+  const fetch = context.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected network request') })
+  const options = { endpoint: 'https://agent.example.test', auth: 'private-fixture-token' }
+  for (const contextLimits of [
+    undefined, null, {}, { group: 1 }, { group: 1, private: 2, extra: 3 },
+    { group: 0, private: 1 }, { group: 1, private: 16_777_217 },
+    { group: 1.5, private: 1 }, { group: 1, private: NaN },
+    { group: Infinity, private: 1 }, { group: 1, private: '384000' }
+  ]) {
+    const definition = { ...sessionDefinition, contextLimits } as unknown as ChatSessionDefinition
+    assert.throws(() => createDshJsonRpcPort({ ...options, sessionDefinition: definition }), {
+      code: 'DSH_INVALID_SESSION_DEFINITION'
+    })
+    assert.throws(() => createDshJsonRpcPort({
+      ...options, presetBindings: [{ agentPreset: 'trusted-preset', definition }]
+    }), { code: 'DSH_INVALID_SESSION_DEFINITION' })
+    const client = createDshJsonRpcPort({
+      ...options, sessionDefinition: () => definition,
+      presetBindings: [{ agentPreset: 'trusted-preset', definition: sessionDefinition }]
+    })
+    context.after(() => client.close())
+    await assert.rejects(client.createSession(createRequest()), { code: 'DSH_INVALID_SESSION_DEFINITION' })
+  }
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
 test('DSH explicit operator cookie bypasses token exchange and is used for HTTP and WebSocket', async context => {
   const fake = await fixture(context)
   const client = fake.port({ auth: 'cookie:operator=signed.value' })

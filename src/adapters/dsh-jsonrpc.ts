@@ -60,6 +60,7 @@ function definition(value: ChatSessionDefinition): ChatSessionDefinition {
       id: value.planId, name: value.planId, description: '', instructions: value.instructions,
       personaId: value.personaId, provider: value.model.provider, model: value.model.name,
       reasoningEffort: value.model.reasoningEffort,
+      ...(Object.hasOwn(value, 'contextLimits') ? { contextLimits: value.contextLimits } : {}),
     }, { id: value.personaId, name: value.personaId, identity: value.persona.identity, style: value.persona.style })
   } catch {
     throw failure('DSH_INVALID_SESSION_DEFINITION')

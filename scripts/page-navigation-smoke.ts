@@ -269,16 +269,19 @@ async function run(): Promise<void> {
       await navigate(page, item.id, item.label, item.heading);
       if (item.id === 'providers') await section(page, 'Fixture Provider').waitFor();
       if (item.id === 'model') await section(page, 'Fixture Plan').waitFor();
+      if (item.id === 'usage') await section(page, '用量暂不可用').waitFor();
       const navigator = visibleNavigator(page);
-      const entryCount = await navigator.getByRole('button').count();
-      assert(entryCount > 0, `${item.label} has no page navigation entries.`);
-      state.pageEntryCounts[item.id] = entryCount;
       const headings = await page.locator(`[data-page="${item.id}"] h2:visible`).allTextContents();
       assert(headings.length > 0, `${item.label} has no visible h2 headings.`);
       for (const heading of headings.map(value => value.trim()).filter(Boolean)) {
-        assert.equal(await navigator.getByRole('button', { name: heading, exact: true }).count(), 1,
+        const entry = navigator.getByRole('button', { name: heading, exact: true });
+        await entry.waitFor();
+        assert.equal(await entry.count(), 1,
           `${item.label} does not index h2 ${heading}.`);
       }
+      const entryCount = await navigator.getByRole('button').count();
+      assert(entryCount > 0, `${item.label} has no page navigation entries.`);
+      state.pageEntryCounts[item.id] = entryCount;
     }
     assert.equal(Object.keys(state.pageEntryCounts).length, 10);
 

@@ -90,6 +90,14 @@ npm run cli -- install --browser --with-deps
 
 该选项会调用 Playwright 的系统包安装，可能需要管理员权限并修改系统库；普通安装和测试不会自动执行此操作。`test --browser --with-deps` 也可先安装系统库再测试。`--with-deps` 不能与 `--skip-browser-download` 同时使用。
 
+### CI 失败排查
+
+GitHub Actions 的浏览器测试步骤失败后，可在该次运行的 Artifacts 下载 `browser-diagnostics-node-…`，保留 3 天。只收集固定测试目录的 PNG 和脱敏 JSON 摘要：检查结果、计数、错误类型与公开脚本行位置；不上传原始请求体、消息、令牌、配置、SQLite、浏览器测试包或缓存。截图仅来自合成测试数据，不应给这些测试配置真实凭据。
+
+收集器是纳入普通 strict 检查的 `scripts/collect-browser-diagnostics.ts`，不接受自定义扫描路径。最多 200 个文件、每目录浅读 256 个条目；PNG 单个不超过 10 MiB，JSON 原文不超过 256 KiB，输出合计不超过 64 MiB。符号链接、硬链接、路径逃逸与陌生文件名均跳过；收集失败时不上传已有的陌生输出目录。
+
+先结合任务日志与截图定位失败阶段，再用 `--target` 运行对应项目。安装或构建阶段失败、尚未生成诊断文件时，会提示没有可上传文件；没有工件不代表测试通过。
+
 ## 卸载测试工具
 
 ```sh

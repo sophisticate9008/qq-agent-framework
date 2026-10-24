@@ -480,8 +480,6 @@ async function exerciseGatewayScope(page: Page, state: FixtureState, files: Fixt
   await page.locator('[data-page="settings"]').waitFor();
   const proxy = page.locator('section').filter({ has: page.getByRole('heading', { name: 'HTTPS 反向代理', exact: true }) }).first();
   await proxy.waitFor();
-  const details = proxy.locator('details');
-  if (!await details.evaluate(element => element instanceof HTMLDetailsElement && element.open)) await proxy.locator('summary').click();
   await input(proxy, '管理页公开 HTTPS 来源').waitFor();
   assert.equal(await input(proxy, '管理页公开 HTTPS 来源').inputValue(), '');
   assert.equal(await proxy.getByRole('switch', { name: '信任本机 TLS 代理', exact: true }).getAttribute('aria-checked'), 'false');

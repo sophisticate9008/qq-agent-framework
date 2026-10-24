@@ -205,11 +205,31 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 
 需要统一限速时，可把 transport 包装为 `createThrottledTransport({ transport, minIntervalMs?, maxPending? })`；它提供有限全局 FIFO 与协作停机，队列溢出、排队取消和停机取消返回 `rejected`，`unknown` 不会自动重试。
 
+### 旧 OneBot HTTP egress 兼容服务
+
+`createOneBotCompatGateway({ store, upstreamEndpoint, upstreamToken?, token, allowedConversations, persona, authorizationVersion?, fetch?, timeoutMs?, maxPending?, maxBodyBytes?, maxSendUses?, grantTtlMs? })` 返回 `{ handle, metrics, close }`。`handle` 只接受认证后的固定 OneBot HTTP read/write action；有目标的请求必须命中 `allowedConversations`。写入保存命令、params、状态与响应，使用 durable outbox；中断或无法确认的结果为 `unknown`，不自动重试。显式 `X-Idempotency-Key` 只能复用于完全相同的 action、target、params 与 persona；未提供时每次请求使用新 key。
+
+写入 params 原样转发，显式 reply/mention/media segment 不由兼容层改写。普通写入校验 `messaging.send` grant，forward 还校验 `messaging.forward`。默认不添加日常服务次数和到期限制；限额与有效期可显式配置。grant 身份包含 persona、conversation 与 `authorizationVersion`：同版本重启沿用已有计数和期限；只有 operator 显式改变版本才创建新代 grant并撤销旧代。修改限额但不改版本会冲突而不是隐式续期。
+
+`loadOneBotGatewayConfiguration` 只读取权限私有、非 symlink 的有限 JSON 文件；token 从独立私有文件读取。`startOneBotGateway` 仅监听 loopback，使用私有 SQLite，提供 Bearer 认证的 `/health`；`scripts/onebot-gateway.ts --health` 还校验配置 revision。该服务只代理旧 HTTP egress，不接管旧 OneBot WS、DSH session 或插件。完整 action、配置、接入与回退合同见 [旧 OneBot HTTP 出站兼容网关](LEGACY_GATEWAY.md)。
+
+### 图片生成与自我表达服务
+
+`createImageGenerationAdapter({ endpoint, authentication, publishImage, resolveWorkerReference?, fetch?, timeoutMs?, pollIntervalMs?, maxConcurrent?, maxPending?, maxImageBytes? })` 提供 `generate(input, context)` 与 `metrics()`。input 支持无 reference 的 `generate`，或使用 1–4 个受控 reference asset 的 `edit`；context 必须包含 conversation、可信 `OutboundScope`、幂等键和取消信号。job id 由 conversation 与幂等键稳定生成。worker dispatch 后的超时/网络异常以及发布结果不确定均为 `unknown`，不得自动重新提交。`publishImage` 必须返回受控 assetId；adapter 不直接发送消息。
+
+`createImageGenerationEffect(adapter)` 只把 effect 的可信 scope 和稳定请求指纹接入 adapter，不创建权限，也不判断 owner 或普通群友。会话被 transport allowlist 允许，不等于获得通用画图 capability；业务来源授权必须由 composition 单独提供。
+
+`createSelfExpressionService({ imagePack, generate, check, discard, chooseHistory, random?, timeoutMs?, maxPending?, maxHistoryCandidates? })` 编排最多两次候选生成/检查，并可回退到相同 image-pack 版本、相同 conversation/persona、候选已声明的 session/generation 也匹配且已批准的历史 asset。它返回 selected/none，不发送消息；callback 的 rejected/unknown 保持显式。`createSelfExpressionEffect(service)` 只接入可信 persona/conversation/session/generation scope。
+
+自我表达服务不读取聊天上下文、不验证真实 source message、不识别自拍语境、不自带 identity manifest，也不代表候选已在线上复检。真实自拍业务仍需 composition 提供身份资源、语境与来源授权、生成、检查、丢弃、历史、发布和发送 callback。
+
 ### 管理路由
 
 `createAdminServer` 可接收最多 64 个唯一 `AdminRoute`，每项声明 `GET` 或 `POST`、`/api/...` 路径和 `handle({ query, body, signal })`。扩展不能覆盖内建路由，共用 Bearer 认证；POST 另需同源 JSON 且请求体不超过 32 KiB，响应不超过 256 KiB，客户端断开会触发 `signal`。handler 默认期限为 10 秒，可在 10–300000 毫秒内调整；GET 超时返回 `504 / handler_timeout`，POST 超时返回 `504 / operation_unknown`，不会自动重试。`dispatchDemo` 可选，未提供时不开放演示事件处理。
 
 `createHostAdminRoutes(host)` 提供只读 metrics、storage、sessions、tasks、outbox 和 replies 路由。集合列表使用 `limit`（默认 100，最大 1000）与可选 `after`，返回 `{ items, next }`；只暴露现有管理元数据，不返回消息正文，也不提供授权或其他写操作。`GET /api/host/storage` 返回 store.stats 的统计形状；存储未实现 stats 时为 null。它不会清理过期记录、删除 unknown、对账或重试。replies 项仅包含 id、会话/session、generation、request id、期限、状态、更新时间和 cursor。
+
+`startGatewayAdmin(configuration)` 提供真实 HTTP 兼容网关的只读管理 UI。私有配置的 `host`、`port`、`tokenFile`、`gatewayConfiguration` 分别控制监听、独立认证和数据源，不从浏览器输入建立权限。它通过精确 revision 的 authenticated gateway health 与只读 get_status 获取状态，不打开生产 SQLite、不创建演示会话，也不提供发送或授权写操作。UI 使用同源相对 API，令牌仅驻留页面内存；正式网关模式隐藏演示控件。监听非回环地址必须由部署方显式配置，HTTP 不提供链路加密。初始化与令牌轮换见 [管理界面教程](GATEWAY_ADMIN.md)。
 
 ### Bridge host
 

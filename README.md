@@ -23,6 +23,8 @@ npm run demo
 
 口令至少 24 个字符。启动后访问 `http://127.0.0.1:3210`；演示数据只在当前进程内有效。
 
+连接真实出站网关、生成独立管理令牌及配置局域网监听，见[管理界面初始化教程](docs/GATEWAY_ADMIN.md)。管理监听地址、端口和令牌文件均由私有配置决定，不与演示模式混用。
+
 运行测试：
 
 ```sh
@@ -65,8 +67,8 @@ src/host/       宿主持久化、会话和恢复基础件
 src/adapters/   外部协议与 agent 适配器
 src/rendering/  可选的离线 Markdown 渲染
 src/features/   可独立装配的功能包
-src/admin/      本地管理接口
-web/            演示管理页
+src/admin/      认证管理接口与网关观察宿主
+web/            管理页与离线演示模式
 test/           自动化测试
 scripts/        构建、检查和基准脚本
 docs/           公共设计与使用文档
@@ -77,6 +79,8 @@ docs/           公共设计与使用文档
 - [目标与范围](docs/GOALS.md)
 - [架构](docs/ARCHITECTURE.md)
 - [公共契约](docs/CONTRACTS.md)
+- [旧 OneBot HTTP 出站兼容网关](docs/LEGACY_GATEWAY.md)
+- [管理界面初始化与配置](docs/GATEWAY_ADMIN.md)
 - [扩展功能](docs/EXTENDING.md)
 - [文档表达与最小装配](docs/PRESENTATION.md)
 - [安全边界](docs/SECURITY.md)

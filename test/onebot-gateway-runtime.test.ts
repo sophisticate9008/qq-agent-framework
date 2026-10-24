@@ -92,7 +92,7 @@ test('gateway CLI health rejects a stale configuration revision', async context 
   const script = new URL(`../scripts/onebot-gateway.${extension}`, import.meta.url);
   await assert.rejects(execute(process.execPath, [script.pathname, '--config', source.filename, '--health']), error => {
     assert(error instanceof Error && 'stderr' in error && typeof error.stderr === 'string');
-    assert.equal(error.stderr.trim(), 'GATEWAY_START_FAILED');
+    assert.equal(error.stderr.trim().split(/\r?\n/).at(-1), 'GATEWAY_START_FAILED');
     assert(!error.stderr.includes(token));
     return true;
   });

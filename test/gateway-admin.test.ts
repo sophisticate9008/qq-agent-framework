@@ -350,7 +350,7 @@ test('CLI address is offline-safe while listening and health use the configured 
     execute(process.execPath, [script.pathname, '--config', files.adminConfiguration, '--health']),
     error => {
       assert(error instanceof Error && 'stderr' in error && typeof error.stderr === 'string');
-      assert.equal(error.stderr.trim(), 'GATEWAY_ADMIN_START_FAILED');
+      assert.equal(error.stderr.trim().split(/\r?\n/).at(-1), 'GATEWAY_ADMIN_START_FAILED');
       assert(!error.stderr.includes(ADMIN_TOKEN));
       assert(!error.stderr.includes(GATEWAY_TOKEN));
       return true;

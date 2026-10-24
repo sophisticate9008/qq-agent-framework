@@ -168,9 +168,11 @@ test('raw provider promises stay bounded after event aborts and release capacity
 
 test('hung send becomes unknown and a timed-out execution rejects late effects', async () => {
   const delivery = deferred<DeliveryReceipt>();
+  const entered = deferred<void>();
   const requests: SendRequest[] = [];
-  const { engine, policy, grant } = fixture({ eventTimeoutMs: 25, transport: { send(request) {
+  const { engine, policy, grant } = fixture({ eventTimeoutMs: 500, transport: { send(request) {
     requests.push(request);
+    entered.resolve();
     return delivery.promise;
   } } });
   grant(['messaging.send']);
@@ -180,7 +182,9 @@ test('hung send becomes unknown and a timed-out execution rejects late effects',
     captured = execution;
     receipt = await execution.send([{ type: 'text', text: 'hello' }]);
   }, ['messaging.send']));
-  const report = await within(engine.emit(event('send')));
+  const pending = engine.emit(event('send'));
+  await within(entered.promise, 1_000);
+  const report = await within(pending, 1_000);
   assert.equal(report.outcomes[0].errorCode, 'EVENT_TIMEOUT_UNKNOWN');
   assert.deepEqual(receipt, { status: 'unknown' });
   assert.equal(requests.length, 1);

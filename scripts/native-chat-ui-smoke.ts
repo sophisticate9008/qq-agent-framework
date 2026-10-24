@@ -249,14 +249,7 @@ async function navigate(page: Page, destination: 'access' | 'adapters'): Promise
 
 async function enabled(locator: Locator, expected: boolean): Promise<void> {
   await locator.waitFor();
-  await locator.page().waitForFunction(({ selector, desired }) => {
-    const element = document.querySelector(selector);
-    return element instanceof HTMLButtonElement && !element.disabled === desired;
-  }, { selector: await locator.evaluate(element => {
-    const identifier = `native-chat-smoke-${crypto.getRandomValues(new Uint32Array(1))[0]}`;
-    element.setAttribute('data-native-chat-smoke-control', identifier);
-    return `[data-native-chat-smoke-control="${identifier}"]`;
-  }), desired: expected });
+  await locator.and(locator.page().locator(expected ? 'button:enabled' : 'button:disabled')).waitFor({ timeout: 15_000 });
 }
 
 async function assertBounded(section: Locator, height: number): Promise<void> {
@@ -328,7 +321,12 @@ async function exerciseAuthorization(page: Page, state: FixtureState): Promise<v
     await page.waitForTimeout(250);
     assert.equal(countPosts(state, '/api/chat/authorization'), before + 1);
     state.authorizationOutcome = 'success';
+    const reread = page.waitForResponse(response => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/chat/authorization');
     await card.getByRole('button', { name: '重新读取', exact: true }).click();
+    const response = await reread;
+    assert.equal(response.status(), 200, `${outcome}: authorization reread failed`);
+    assert.deepEqual(await response.json(), state.authorization, `${outcome}: authorization reread DTO differs`);
     await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), true);
     assert.equal(await input(card, '模型提交次数').first().inputValue(), '20');
   }

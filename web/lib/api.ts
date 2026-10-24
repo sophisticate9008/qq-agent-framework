@@ -9,23 +9,47 @@ export interface ApiClient {
   post(path: string, body: unknown, signal?: AbortSignal): Promise<unknown>;
 }
 
-export function createApiClient(readToken: () => string): ApiClient {
-  async function request(path: string, method: 'GET' | 'POST', body?: unknown, signal?: AbortSignal): Promise<unknown> {
-    try {
-      const response = await fetch(path, {
-        method, headers: { authorization: `Bearer ${readToken()}`, ...(method === 'POST' ? { 'content-type': 'application/json' } : {}) },
-        ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
-        credentials: 'same-origin', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(75_000)]) : AbortSignal.timeout(75_000),
-      });
-      const result: unknown = await response.json();
-      if (!response.ok) throw new ApiError(isRecord(result) && typeof result.error === 'string' ? result.error : 'request_failed', response.status);
-      return result;
-    } catch (error) {
-      if (error instanceof ApiError) throw error;
-      throw new ApiError(method === 'POST' ? 'operation_unknown' : 'service_unavailable', 504);
-    }
+async function request(
+  path: string,
+  method: 'GET' | 'POST',
+  body?: unknown,
+  signal?: AbortSignal,
+  authorization?: string
+): Promise<unknown> {
+  try {
+    const response = await fetch(path, {
+      method,
+      headers: {
+        ...(authorization === undefined ? {} : { authorization }),
+        ...(method === 'POST' ? { 'content-type': 'application/json' } : {})
+      },
+      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}),
+      credentials: 'same-origin',
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(75_000)]) : AbortSignal.timeout(75_000),
+    });
+    const result: unknown = await response.json();
+    if (!response.ok) throw new ApiError(isRecord(result) && typeof result.error === 'string' ? result.error : 'request_failed', response.status);
+    return result;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(method === 'POST' ? 'operation_unknown' : 'service_unavailable', 504);
   }
+}
+
+export function createApiClient(): ApiClient {
   return { get: (path, signal) => request(path, 'GET', undefined, signal), post: (path, body, signal) => request(path, 'POST', body, signal) };
+}
+
+export function loginAccessSession(administratorToken: string, signal?: AbortSignal): Promise<unknown> {
+  return request('/api/auth/login', 'POST', {}, signal, `Bearer ${administratorToken}`);
+}
+
+export function readAccessSession(signal?: AbortSignal): Promise<unknown> {
+  return request('/api/auth/session', 'GET', undefined, signal);
+}
+
+export function logoutAccessSession(signal?: AbortSignal): Promise<unknown> {
+  return request('/api/auth/logout', 'POST', {}, signal);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }

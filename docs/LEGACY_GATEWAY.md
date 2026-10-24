@@ -80,7 +80,7 @@ CLI 接受一个严格 JSON 配置文件。配置文件、token 文件必须是�
 | `allowedConversations` | 是 | 0–1000 个唯一 `private:<decimal-id>` / `group:<decimal-id>`。这是固定拒绝式 allowlist，不是旁路列表；空数组表示拒绝全部带目标的请求。 |
 | `persona` | 是 | `{ id, version }`，进入持久状态、幂等与授权作用域。 |
 | `authorizationVersion` | 否 | 显式授权代次，默认 `1`；只允许 1–64 位字母、数字、点、下划线或短横线。 |
-| `timeoutMs` | 否 | 单次请求期限；host 配置范围 10–120000 ms，默认 15000 ms。 |
+| `timeoutMs` | 否 | 单次请求期限；host 配置范围 10–120000 ms，默认 60000 ms。 |
 | `maxPending` | 否 | upstream 在途上限；host 配置范围 1–64，默认 16。 |
 | `maxBodyBytes` | 否 | 请求、响应及相关持久值边界；host 默认 28 MiB，范围 1 KiB–32 MiB。 |
 | `maxRecords` | 否 | SQLite 最大记录数，范围 100–100000，默认 10000。 |

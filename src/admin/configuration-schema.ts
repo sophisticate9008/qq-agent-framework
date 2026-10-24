@@ -494,6 +494,13 @@ const bridgeGroups: readonly ConfigurationGroupDefinition[] = [
 
 const gatewayGroups: readonly ConfigurationGroupDefinition[] = [
   {
+    id: 'gateway-targets', title: '消息发送范围', category: 'access', source: 'gateway',
+    description: '只允许向明确列出的会话发送消息；空列表拒绝所有发送。修改后更新授权版本，保存不等于已应用。',
+    applyLabel: '应用消息网关设置',
+    fields: [field('allowedConversations', '允许发送的会话', '每行填写 group:群号 或 private:QQ号。此处只控制出站发送，不代表已接通聊天入站。', 'list',
+      { maxItems: 1_000, itemMaxLength: 24, allowUnset: false, rotatesAuthorization: true })]
+  },
+  {
     id: 'gateway-runtime', title: '网关连接', category: 'settings', source: 'gateway',
     description: '设置消息网关使用的端口和聊天服务地址。发送额度、超时和容量限制保持基本设置中的数值。',
     applyLabel: '应用消息网关设置',
@@ -536,6 +543,13 @@ const gatewayGroups: readonly ConfigurationGroupDefinition[] = [
 
 const adminGroups: readonly ConfigurationGroupDefinition[] = [
   {
+    id: 'admin-access-session', title: '访问会话', category: 'settings', source: 'admin',
+    description: '管理员凭据只用于登录验证；访问会话允许刷新后继续使用，主动退出时立即注销。保存后重启管理服务生效。',
+    fields: [
+      numberField('accessSessionTtlMs', '访问令牌有效期', '默认 7 天，最长 30 天；到期或管理服务重启后需重新登录。管理员凭据不会写入浏览器存储。', 300_000, 30 * 86_400_000, '毫秒')
+    ]
+  },
+  {
     id: 'admin-deployment', title: '管理端部署文件', category: 'settings', source: 'admin',
     description: '查看管理页面使用的令牌文件和消息网关设置文件位置。为避免连接中断，这些位置不能在此修改。',
     fields: [
@@ -543,7 +557,7 @@ const adminGroups: readonly ConfigurationGroupDefinition[] = [
         { editable: false }),
       textField('gatewayConfiguration', '网关配置文件', '管理端启动时加载的网关配置文件路径。', 1_024,
         { editable: false }),
-      textField('legacyRoot', '旧版桥接目录', '管理端启动时读取的旧版桥接项目目录，仅供查看。', 1_024,
+      textField('legacyRoot', 'QQ 桥接项目目录', '可选迁移接入使用的 QQ 桥接项目目录。独立部署无需配置；此处仅供查看。', 1_024,
         { editable: false }),
       textField('serviceManager', '服务管理程序', '由本机部署指定的受信任服务管理程序路径，仅供查看；网页不能修改或传入命令参数。', 1_024,
         { editable: false })

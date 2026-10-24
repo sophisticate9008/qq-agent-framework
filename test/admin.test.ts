@@ -147,6 +147,16 @@ test('validates construction inputs without binding the server', () => {
   assert.equal(server.maxHeadersCount, 100)
 })
 
+test('serves a self-contained SVG tab icon without executable markup', async t => {
+  const fixture = await start()
+  t.after(async () => stop(fixture.server))
+  const response = await rawRequest(fixture.origin, '/favicon.svg')
+  assert.equal(response.status, 200)
+  assert.match(String(response.headers['content-type']), /^image\/svg\+xml/)
+  assert.match(response.text, /<svg[^>]+viewBox="0 0 64 64"/)
+  assert.doesNotMatch(response.text, /<script|foreignObject|onload=/i)
+})
+
 test('serves public health and only explicit static assets', async t => {
   const fixture = await start()
   t.after(async () => stop(fixture.server))
@@ -493,11 +503,17 @@ test('returns stable errors without leaking handler failures', async t => {
   assert.doesNotMatch(dispatch.text, /secret/)
 })
 
-test('frontend client keeps authentication in request headers and out of persistent storage', async () => {
+test('frontend uses the administrator bearer only for cookie login and no persistent token storage', async () => {
   const asset = import.meta.url.endsWith('.ts') ? '../web/lib/api.ts' : '../../web/lib/api.ts'
   const source = await readFile(new URL(asset, import.meta.url), 'utf8')
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML/)
-  assert.match(source, /authorization: `Bearer/)
+  assert.match(source, /export function createApiClient\(\): ApiClient/)
+  assert.match(source, /return request\('\/api\/auth\/login', 'POST', \{\}, signal, `Bearer \$\{administratorToken\}`\)/)
+  assert.match(source, /return request\('\/api\/auth\/session', 'GET', undefined, signal\)/)
+  assert.match(source, /return request\('\/api\/auth\/logout', 'POST', \{\}, signal\)/)
+  assert.equal(source.match(/`Bearer \$\{administratorToken\}`/g)?.length, 1)
+  assert.doesNotMatch(source, /createApiClient\(readToken|readToken\(\)/)
+  assert.match(source, /credentials: 'same-origin'/)
   assert.doesNotMatch(source, /setInterval|setTimeout/)
 })
 

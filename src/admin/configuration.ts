@@ -214,7 +214,9 @@ function publicGroups(descriptor: SourceDescriptor, document: ConfigurationDocum
     category: group.category,
     source: group.source,
     revision: document.revision,
-    fields: Object.freeze(group.fields.map(field => publicField(field, document.values))),
+    fields: Object.freeze(group.fields.filter(field => !(descriptor.source === 'admin'
+      && (field.id === 'legacyRoot' || field.id === 'serviceManager')
+      && ownValue(document.values, [field.id]) === undefined)).map(field => publicField(field, document.values))),
     ...(group.applyLabel === undefined ? {} : { applyLabel: group.applyLabel })
   }));
 }
@@ -355,6 +357,10 @@ function validateList(field: ConfigurationFieldDefinition, value: unknown): void
   }
   if (!value.every(item => typeof item === 'string' && item.length > 0
     && item.length <= (field.itemMaxLength ?? 128) && !/[\0\r\n]/.test(item))) {
+    requestError(400, 'invalid_configuration');
+  }
+  if (field.id === 'allowedConversations' && (!value.every(item => typeof item === 'string'
+    && /^(?:group|private):[1-9]\d{0,15}$/.test(item)) || new Set(value).size !== value.length)) {
     requestError(400, 'invalid_configuration');
   }
   if (field.id === 'pricing.holidays' && (!value.every(item => typeof item === 'string'
@@ -615,7 +621,7 @@ function sourceDescriptors(options: ConfigurationRouteOptions): readonly SourceD
   }
   descriptors.push({
     source: 'gateway', filename: gatewayConfigurationFilename, maxBytes: MAX_CONFIGURATION_BYTES,
-    groups: configurationSchemaForSource('gateway')
+    groups: configurationSchemaForSource('gateway').filter(group => group.id !== 'gateway-targets' || options.legacyRoot === undefined)
   });
   descriptors.push({
     source: 'admin', filename: adminConfigurationFilename, maxBytes: MAX_CONFIGURATION_BYTES,

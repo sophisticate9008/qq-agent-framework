@@ -39,6 +39,7 @@ const results: Record<string, boolean> = {
   bootstrapAutoCreatedOnce: false,
   setupResponseSecretFree: false,
   localFileLogin: false,
+  workspaceSearchUsed: false,
   settingsPageLoaded: false,
   budgetControlsReady: false,
   budgetSwitchChanged: false,
@@ -174,7 +175,7 @@ async function createLegacyFixture(legacyRoot: string): Promise<LegacyFixture> {
       }
       if (request.method === 'GET' && url.pathname === '/api/status') {
         sendJson(response, {
-          mode: 'fixture',
+          mode: 'reserved2',
           role: fixture.currentRole,
           dshReady: true,
           socialV2Paused: false,
@@ -186,6 +187,13 @@ async function createLegacyFixture(legacyRoot: string): Promise<LegacyFixture> {
             silent: false,
             degraded: false
           }
+        });
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/mode') {
+        sendJson(response, {
+          mode: 'reserved2',
+          revision: '8f2d047817f4eac59304a5a9f4b6a25fc53591d115991fcb6f83a90ba4cc4dd1'
         });
         return;
       }
@@ -294,6 +302,24 @@ function section(page: Page, title: string): Locator {
 async function navigate(page: Page, label: string, heading = label): Promise<void> {
   await page.getByRole('button', { name: label, exact: true }).first().click();
   await page.getByRole('heading', { name: heading, exact: true }).waitFor();
+}
+
+async function selectWorkspaceSearchResult(
+  page: Page,
+  query: string,
+  title: string,
+  pagePath: string
+): Promise<void> {
+  await page.getByRole('button', { name: '搜索工作台', exact: true }).click();
+  const search = page.getByRole('combobox', { name: '搜索设置或功能', exact: true });
+  await search.waitFor();
+  assert.equal(await search.getAttribute('placeholder'), '搜索设置或功能…');
+  await search.fill(query);
+  const option = page.locator(`[role="option"][data-search-title=${JSON.stringify(title)}]`).filter({ hasText: pagePath });
+  await option.first().waitFor();
+  assert.equal(await option.count(), 1, `Workspace search returned an ambiguous result for ${title}.`);
+  await option.click();
+  await search.waitFor({ state: 'hidden' });
 }
 
 async function waitForTheme(page: Page, theme: 'light' | 'dark'): Promise<void> {
@@ -644,14 +670,13 @@ async function run(): Promise<void> {
     assert.equal(legacy.model.reasoningEffort, 'high');
     results.modelEffortSavedThroughRealRoute = true;
 
-    const modelSearch = page.getByPlaceholder('搜索分组或设置名称');
-    await modelSearch.fill('模型定价');
+    await selectWorkspaceSearchResult(page, '模型 定价', '模型定价', '模型与回复');
     const pricingSection = section(page, '模型定价');
     await pricingSection.getByLabel('模型标识', { exact: true }).waitFor();
     assert.equal(await pricingSection.getByLabel('模型标识', { exact: true }).inputValue(), 'fixture-model');
     await pricingSection.getByLabel('输出价', { exact: true }).fill('6');
     await pricingSection.getByRole('button', { name: '保存本组', exact: true }).click();
-    await pricingSection.getByText('设置已保存', { exact: true }).first().waitFor();
+    await pricingSection.getByText('已保存，等待应用', { exact: true }).first().waitFor();
     let pricing = (await readJson(join(legacyRoot, 'config.json'))).pricing;
     assert(isRecord(pricing) && isRecord(pricing.models));
     const savedModel = pricing.models['fixture-model'];
@@ -676,7 +701,7 @@ async function run(): Promise<void> {
 
     await pricingSection.getByLabel('结束时间', { exact: true }).fill('19');
     await pricingSection.getByRole('button', { name: '保存本组', exact: true }).click();
-    await pricingSection.getByText('设置已保存', { exact: true }).first().waitFor();
+    await pricingSection.getByText('已保存，等待应用', { exact: true }).first().waitFor();
     pricing = (await readJson(join(legacyRoot, 'config.json'))).pricing;
     assert(isRecord(pricing));
     assert.deepEqual(pricing.peakWindows, [[9, 19]]);
@@ -685,16 +710,14 @@ async function run(): Promise<void> {
     results.structuredTimeWindowsSaved = true;
 
     await navigate(page, '功能与触发');
-    const search = page.getByPlaceholder('搜索分组或设置名称');
-    await search.waitFor();
-    await search.fill('启用主动话题');
+    await selectWorkspaceSearchResult(page, '启用 主动话题', '启用主动话题', '功能与触发');
     const proactiveSwitch = page.getByRole('switch', { name: '启用主动话题' });
     await proactiveSwitch.waitFor();
     assert.equal(await proactiveSwitch.getAttribute('data-checked'), null);
     await proactiveSwitch.click();
     const proactiveSection = section(page, '二代主动话题');
     await proactiveSection.getByRole('button', { name: '保存本组', exact: true }).click();
-    await proactiveSection.getByText('设置已保存', { exact: true }).first().waitFor();
+    await proactiveSection.getByText('已保存，等待应用', { exact: true }).first().waitFor();
     const bridgeConfiguration = await readJson(join(legacyRoot, 'config.json'));
     const socialV2 = bridgeConfiguration.socialV2;
     assert(isRecord(socialV2));
@@ -704,11 +727,12 @@ async function run(): Promise<void> {
     results.featureConfigurationSavedToFixture = true;
     await navigate(page, '概览', '工作台概览');
     await navigate(page, '功能与触发');
-    await search.fill('启用主动话题');
+    await selectWorkspaceSearchResult(page, '启用主动话题', '启用主动话题', '功能与触发');
     await proactiveSection.getByRole('button', { name: '重新加载聊天服务', exact: true }).click();
     await proactiveSection.getByText('配置应用流程已完成', { exact: true }).first().waitFor();
     assert.deepEqual(configurationApplyCalls, ['bridge']);
     results.savedFeatureApplyAfterNavigation = true;
+    results.workspaceSearchUsed = true;
 
     const xssExecuted = await page.evaluate(() => Boolean((globalThis as typeof globalThis & {
       __managementSmokeXss?: boolean;
@@ -742,6 +766,7 @@ async function run(): Promise<void> {
       'bootstrapAutoCreatedOnce',
       'setupResponseSecretFree',
       'localFileLogin',
+      'workspaceSearchUsed',
       'budgetInputEnabled',
       'budgetFormChanged',
       'budgetSaveSubmitted',

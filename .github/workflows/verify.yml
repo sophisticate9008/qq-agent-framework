@@ -25,14 +25,5 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
-      - run: npm run test:built
-      - run: npx playwright install --with-deps chromium
-        if: matrix.node == '24'
-      - run: npm run test:browser
-        if: matrix.node == '24'
-      - run: node scripts/management-smoke.ts
-        if: matrix.node == '24'
-      - run: node scripts/markdown-smoke.ts
-        if: matrix.node == '24'
-      - run: node scripts/presentation-smoke.ts
+      - run: npm run cli -- test --browser --with-deps
         if: matrix.node == '24'

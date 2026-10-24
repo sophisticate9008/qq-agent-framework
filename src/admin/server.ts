@@ -8,6 +8,8 @@ import {
   type ServerResponse
 } from 'node:http'
 
+import { createAccessSessionStore, type AccessSessionStore } from './access-sessions.ts'
+
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_HEADER_BYTES = 16 * 1024
 const MAX_CACHED_ASSET_BYTES = 256 * 1024
@@ -17,6 +19,11 @@ const SOCKET_TIMEOUT_MS = 20 * 1000
 const DEFAULT_HANDLER_TIMEOUT_MS = 10 * 1000
 const MIN_HANDLER_TIMEOUT_MS = 10
 const MAX_HANDLER_TIMEOUT_MS = 5 * 60 * 1000
+const DEFAULT_ACCESS_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const MIN_ACCESS_SESSION_TTL_MS = 10
+const MAX_ACCESS_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const ACCESS_SESSION_COOKIE = 'qq_admin_access'
+const AUTH_ROUTE_PREFIX = '/api/auth/'
 const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 const WEB_ROOT = import.meta.url.endsWith('.ts')
   ? new URL('../../dist/admin-web/', import.meta.url)
@@ -34,6 +41,7 @@ export interface AdminServerOptions {
   dispatchDemo?: (body: Record<string, unknown>, signal?: AbortSignal) => unknown | Promise<unknown>
   routes?: readonly AdminRoute[]
   handlerTimeoutMs?: number
+  accessSessionTtlMs?: number
   setup?: {
     status: () => unknown
     initialize: () => unknown
@@ -51,6 +59,7 @@ export interface AdminRoute {
 }
 
 const STATIC_ROUTES = new Map<string, StaticAsset>([
+  ['/favicon.svg', { url: new URL('favicon.svg', WEB_ROOT), type: 'image/svg+xml; charset=utf-8' }],
   ['/', { url: new URL('index.html', WEB_ROOT), type: 'text/html; charset=utf-8' }],
   ['/app.js', { url: APP_URL, type: 'text/javascript; charset=utf-8' }],
   ['/style.css', { url: new URL('style.css', WEB_ROOT), type: 'text/css; charset=utf-8' }]
@@ -102,12 +111,17 @@ function sendError(
   sendJson(response, statusCode, { error: code }, extraHeaders)
 }
 
-function hasValidBearer(request: IncomingMessage, tokenBuffer: Buffer | null): boolean {
-  if (tokenBuffer === null) return false
+function hasValidBearer(request: IncomingMessage, administratorToken: string | null): boolean {
+  if (administratorToken === null) return false
   const authorization = request.headers.authorization
   if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) return false
   const supplied = Buffer.from(authorization.slice(7))
+  const tokenBuffer = Buffer.from(administratorToken)
   return supplied.byteLength === tokenBuffer.byteLength && timingSafeEqual(supplied, tokenBuffer)
+}
+
+function isTlsRequest(request: IncomingMessage): boolean {
+  return 'encrypted' in request.socket && request.socket.encrypted === true
 }
 
 function hasSameOrigin(request: IncomingMessage): boolean {
@@ -116,11 +130,49 @@ function hasSameOrigin(request: IncomingMessage): boolean {
   if (typeof origin !== 'string' || typeof host !== 'string') return false
   try {
     const parsed = new URL(origin)
-    const expected = new URL(`http://${host}`)
+    const expected = new URL(`${isTlsRequest(request) ? 'https' : 'http'}://${host}`)
     return origin === parsed.origin && parsed.origin === expected.origin
   } catch {
     return false
   }
+}
+
+function accessTokenFromCookie(request: IncomingMessage): string | null {
+  const header = request.headers.cookie
+  if (typeof header !== 'string') return null
+  let token: string | null = null
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=')
+    if (separator < 0 || part.slice(0, separator).trim() !== ACCESS_SESSION_COOKIE) continue
+    if (token !== null) return null
+    const value = part.slice(separator + 1).trim()
+    if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return null
+    token = value
+  }
+  return token
+}
+
+function accessSessionCookie(token: string, ttlMs: number, secure: boolean): string {
+  return `${ACCESS_SESSION_COOKIE}=${token}; Path=/api; Max-Age=${Math.ceil(ttlMs / 1000)}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`
+}
+
+function clearedAccessSessionCookie(secure: boolean): string {
+  return `${ACCESS_SESSION_COOKIE}=; Path=/api; Max-Age=0; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`
+}
+
+function hasRequestBody(request: IncomingMessage): boolean {
+  const length = request.headers['content-length']
+  return request.headers['transfer-encoding'] !== undefined || length !== undefined && length !== '0'
+}
+
+function authenticateManagementRequest(
+  request: IncomingMessage,
+  administratorToken: string | null,
+  sessions: AccessSessionStore
+): boolean {
+  if (request.headers.authorization !== undefined) return hasValidBearer(request, administratorToken)
+  const accessToken = accessTokenFromCookie(request)
+  return accessToken !== null && sessions.authenticate(accessToken, administratorToken) !== null
 }
 
 function hasJsonContentType(request: IncomingMessage): boolean {
@@ -293,7 +345,8 @@ export function createAdminServer({
   dispatchDemo,
   routes = [],
   setup,
-  handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS
+  handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
+  accessSessionTtlMs = DEFAULT_ACCESS_SESSION_TTL_MS
 }: AdminServerOptions): Server {
   if (typeof token !== 'function' && (typeof token !== 'string' || token.length < 24)) {
     throw new TypeError('token must contain at least 24 characters')
@@ -306,6 +359,11 @@ export function createAdminServer({
     || handlerTimeoutMs > MAX_HANDLER_TIMEOUT_MS) {
     throw new TypeError('handlerTimeoutMs must be an integer between 10 and 300000')
   }
+  if (!Number.isInteger(accessSessionTtlMs)
+    || accessSessionTtlMs < MIN_ACCESS_SESSION_TTL_MS
+    || accessSessionTtlMs > MAX_ACCESS_SESSION_TTL_MS) {
+    throw new TypeError('accessSessionTtlMs must be an integer between 10 and 2592000000')
+  }
 
   if (!Array.isArray(routes) || routes.length > 64) throw new TypeError('routes must be a bounded array')
   const extensions = new Map<string, AdminRoute>()
@@ -313,17 +371,19 @@ export function createAdminServer({
   for (const route of routes) {
     if (!/^\/api\/[a-z][a-z0-9/-]{0,127}$/.test(route.pathname) || route.pathname.includes('//')
       || route.pathname === '/api/snapshot' || route.pathname === '/api/demo/events' || route.pathname === '/api/setup'
+      || route.pathname === '/api/auth' || route.pathname.startsWith(AUTH_ROUTE_PREFIX)
       || !['GET', 'POST'].includes(route.method) || typeof route.handle !== 'function'
       || extensions.has(`${route.method} ${route.pathname}`)) throw new TypeError('Invalid or duplicate admin route')
     extensions.set(`${route.method} ${route.pathname}`, Object.freeze({ ...route }))
     methods.set(route.pathname, [...(methods.get(route.pathname) ?? []), route.method])
   }
 
-  const currentToken = (): Buffer | null => {
+  const currentToken = (): string | null => {
     const value = typeof token === 'function' ? token() : token
-    return typeof value === 'string' && value.length >= 24 ? Buffer.from(value) : null
+    return typeof value === 'string' && value.length >= 24 ? value : null
   }
   const staticCache = new Map<string, Promise<Buffer>>()
+  const accessSessions = createAccessSessionStore({ ttlMs: accessSessionTtlMs })
   const server = createServer({
     connectionsCheckingInterval: 1000,
     headersTimeout: HEADERS_TIMEOUT_MS,
@@ -335,6 +395,75 @@ export function createAdminServer({
       const requestTarget = request.url ?? '/'
       const queryIndex = requestTarget.indexOf('?')
       const pathname = queryIndex === -1 ? requestTarget : requestTarget.slice(0, queryIndex)
+
+      if (pathname.startsWith(AUTH_ROUTE_PREFIX)) {
+        const allowedMethod = pathname === '/api/auth/session' ? 'GET'
+          : pathname === '/api/auth/login' || pathname === '/api/auth/logout' ? 'POST' : null
+        if (allowedMethod === null) { sendError(response, 404, 'not_found'); return }
+        if (request.method !== allowedMethod) {
+          sendError(response, 405, 'method_not_allowed', { Allow: allowedMethod })
+          return
+        }
+        if (queryIndex !== -1) { sendError(response, 400, 'invalid_request'); return }
+
+        const administratorToken = currentToken()
+        if (pathname === '/api/auth/session') {
+          if (hasRequestBody(request)) { sendError(response, 400, 'invalid_request'); return }
+          if (request.headers.authorization !== undefined && !hasValidBearer(request, administratorToken)) {
+            sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
+            return
+          }
+          const accessToken = accessTokenFromCookie(request)
+          const expiresAt = accessToken === null ? null : accessSessions.authenticate(accessToken, administratorToken)
+          if (expiresAt === null) {
+            sendError(response, 401, 'unauthorized', {
+              'Set-Cookie': clearedAccessSessionCookie(isTlsRequest(request)),
+              'WWW-Authenticate': 'Bearer'
+            })
+            return
+          }
+          sendJson(response, 200, { authenticated: true, expiresAt })
+          return
+        }
+
+        if (!hasSameOrigin(request)) { sendError(response, 403, 'origin_forbidden'); return }
+        if (!hasJsonContentType(request)) { sendError(response, 415, 'unsupported_media_type'); return }
+        const body = await readJsonBody(request)
+        if (Object.keys(body).length !== 0) { sendError(response, 400, 'invalid_request'); return }
+
+        if (pathname === '/api/auth/login') {
+          if (!hasValidBearer(request, administratorToken) || administratorToken === null) {
+            sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
+            return
+          }
+          const priorAccessToken = accessTokenFromCookie(request)
+          if (priorAccessToken !== null) accessSessions.revoke(priorAccessToken)
+          const session = accessSessions.issue(administratorToken)
+          if (session === null) { sendError(response, 503, 'session_capacity'); return }
+          sendJson(response, 200, { authenticated: true, expiresAt: session.expiresAt }, {
+            'Set-Cookie': accessSessionCookie(session.token, accessSessionTtlMs, isTlsRequest(request))
+          })
+          return
+        }
+
+        if (request.headers.authorization !== undefined && !hasValidBearer(request, administratorToken)) {
+          sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
+          return
+        }
+        const accessToken = accessTokenFromCookie(request)
+        if (accessToken === null || accessSessions.authenticate(accessToken, administratorToken) === null) {
+          sendError(response, 401, 'unauthorized', {
+            'Set-Cookie': clearedAccessSessionCookie(isTlsRequest(request)),
+            'WWW-Authenticate': 'Bearer'
+          })
+          return
+        }
+        accessSessions.revoke(accessToken)
+        sendJson(response, 200, { authenticated: false }, {
+          'Set-Cookie': clearedAccessSessionCookie(isTlsRequest(request))
+        })
+        return
+      }
 
       if (setup && pathname === '/api/setup') {
         if (request.method === 'GET') { sendJson(response, 200, setup.status()); return }
@@ -356,7 +485,7 @@ export function createAdminServer({
       }
 
       if (request.method === 'GET' && pathname === '/api/snapshot') {
-        if (!hasValidBearer(request, currentToken())) {
+        if (!authenticateManagementRequest(request, currentToken(), accessSessions)) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }
@@ -372,7 +501,7 @@ export function createAdminServer({
       }
 
       if (dispatchDemo && request.method === 'POST' && pathname === '/api/demo/events') {
-        if (!hasValidBearer(request, currentToken())) {
+        if (!authenticateManagementRequest(request, currentToken(), accessSessions)) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }
@@ -398,7 +527,7 @@ export function createAdminServer({
 
       const route = extensions.get(`${request.method} ${pathname}`)
       if (route) {
-        if (!hasValidBearer(request, currentToken())) {
+        if (!authenticateManagementRequest(request, currentToken(), accessSessions)) {
           sendError(response, 401, 'unauthorized', { 'WWW-Authenticate': 'Bearer' })
           return
         }
@@ -458,6 +587,9 @@ export function createAdminServer({
   })
   server.maxHeadersCount = 100
   server.setTimeout(SOCKET_TIMEOUT_MS)
-  server.once('close', () => staticCache.clear())
+  server.once('close', () => {
+    staticCache.clear()
+    accessSessions.clear()
+  })
   return server
 }

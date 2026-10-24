@@ -32,6 +32,8 @@ interface Fixture {
   };
   roles: Map<string, string>;
   currentRole: string | null;
+  mode: 'chat' | 'reserved' | 'reserved2' | 'closed-agent';
+  modeResult: { readonly ok: boolean; readonly mode: string; readonly dshSynced: boolean } | null;
   paused: boolean;
 }
 
@@ -49,7 +51,11 @@ function json(response: ServerResponse, value: unknown, status = 200): void {
   response.end(JSON.stringify(value));
 }
 
-async function fixture(testContext: TestContext, configuredToken = CONFIG_TOKEN): Promise<Fixture> {
+async function fixture(
+  testContext: TestContext,
+  configuredToken = CONFIG_TOKEN,
+  supported: { readonly reserved?: boolean; readonly reserved2?: boolean } = {}
+): Promise<Fixture> {
   const directory = mkdtempSync(join(tmpdir(), 'legacy-admin-'));
   const legacyRoot = join(directory, 'legacy');
   mkdirSync(join(legacyRoot, 'state'), { recursive: true });
@@ -68,6 +74,8 @@ async function fixture(testContext: TestContext, configuredToken = CONFIG_TOKEN)
     },
     roles: new Map([['测试伙伴', 'Original persona']]),
     currentRole: '测试伙伴',
+    mode: 'reserved2',
+    modeResult: null,
     paused: false
   };
   const server = createServer(async (request, response) => {
@@ -82,12 +90,17 @@ async function fixture(testContext: TestContext, configuredToken = CONFIG_TOKEN)
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     if (request.method === 'GET' && url.pathname === '/api/status') {
       json(response, {
-        mode: 'reserved2', role: state.currentRole, dshReady: true, socialV2Paused: state.paused,
+        mode: state.mode, role: state.currentRole, dshReady: true, socialV2Paused: state.paused,
         ownerQQ: 123, activity: ['private conversation secret'], consoleToken: CONFIG_TOKEN,
         snowluma: { connected: true, accountOnline: null, good: true, goodSource: 'secret-source',
           goodError: 'private error', lastPacketAgoMs: 25, lastPacketKind: 'meta_event', silent: false,
           degraded: false, hint: 'private diagnostic' }
       });
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/mode') {
+      state.mode = String(requestBody?.mode) as Fixture['mode'];
+      json(response, state.modeResult ?? { ok: true, mode: state.mode, dshSynced: true });
       return;
     }
     if (request.method === 'GET' && url.pathname === '/api/sessions') {
@@ -157,6 +170,8 @@ async function fixture(testContext: TestContext, configuredToken = CONFIG_TOKEN)
     consolePort: address.port,
     consoleHost: '203.0.113.8',
     consoleToken: configuredToken,
+    social: { enabled: supported.reserved ?? true },
+    socialV2: { enabled: supported.reserved2 ?? true },
     unrelatedCredential: 'never-return-this'
   }));
   writeFileSync(join(legacyRoot, 'state', 'console-token'), `${STATE_TOKEN}\n`);
@@ -192,6 +207,8 @@ test('uses the configured loopback port and only exposes bounded status and sess
   const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
   assert.deepEqual(routes.map(entry => `${entry.method} ${entry.pathname}`), [
     'GET /api/legacy/status',
+    'GET /api/legacy/mode',
+    'POST /api/legacy/mode',
     'GET /api/legacy/sessions',
     'GET /api/legacy/access',
     'POST /api/legacy/access',
@@ -210,10 +227,80 @@ test('uses the configured loopback port and only exposes bounded status and sess
       silent: false, degraded: false }
   });
   assert.doesNotMatch(JSON.stringify(status), /activity|credential|token|diagnostic|error|source/i);
+  const mode = object(await call(route(routes, 'GET', '/api/legacy/mode')));
+  assert.equal(mode.mode, 'reserved2');
+  assert.match(String(mode.revision), /^[a-f0-9]{64}$/);
+  assert.deepEqual(mode.supported, { reserved: true, reserved2: true });
   assert.deepEqual(await call(route(routes, 'GET', '/api/legacy/sessions')), {
     sessions: [{ key: 'group:456', sessionId: 'session-secret-id', owner: false }]
   });
   assert(source.requests.every(request => request.token === CONFIG_TOKEN));
+});
+
+test('mode writes use strict CAS and the fixed legacy mode endpoint without changing feature switches', async testContext => {
+  const source = await fixture(testContext);
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+  const current = object(await call(route(routes, 'GET', '/api/legacy/mode')));
+  const changed = object(await call(route(routes, 'POST', '/api/legacy/mode'), {
+    revision: current.revision,
+    mode: 'reserved'
+  }));
+  assert.equal(changed.mode, 'reserved');
+  assert.deepEqual(changed.supported, { reserved: true, reserved2: true });
+  assert.match(String(changed.revision), /^[a-f0-9]{64}$/);
+  const writes = source.requests.filter(request => request.method === 'POST' && request.url === '/api/mode');
+  assert.deepEqual(writes.map(request => request.body), [{ mode: 'reserved' }]);
+
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/mode'), {
+    revision: current.revision,
+    mode: 'chat'
+  }), { code: 'revision_conflict', statusCode: 409 });
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/mode'), {
+    revision: changed.revision,
+    mode: 'simulation'
+  }), { code: 'invalid_mode', statusCode: 400 });
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/mode'), {
+    revision: changed.revision,
+    mode: 'chat',
+    pathname: '/api/arbitrary'
+  }), { code: 'invalid_request', statusCode: 400 });
+  assert.equal(source.requests.filter(request => request.method === 'POST' && request.url === '/api/mode').length, 1);
+});
+
+test('mode writes reject disabled generations before contacting the legacy bridge', async testContext => {
+  const source = await fixture(testContext, CONFIG_TOKEN, { reserved: false, reserved2: false });
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+  const current = object(await call(route(routes, 'GET', '/api/legacy/mode')));
+  assert.deepEqual(current.supported, { reserved: false, reserved2: false });
+  for (const mode of ['reserved', 'reserved2']) {
+    await assert.rejects(call(route(routes, 'POST', '/api/legacy/mode'), {
+      revision: current.revision,
+      mode
+    }), { code: 'legacy_mode_disabled', statusCode: 409 });
+  }
+  assert.equal(source.requests.filter(request => request.method === 'POST' && request.url === '/api/mode').length, 0);
+});
+
+test('mode writes remain unknown on mismatched or unsynchronized legacy acknowledgements and are not retried', async testContext => {
+  const source = await fixture(testContext);
+  const routes = createLegacyAdminRoutes({ legacyRoot: source.legacyRoot });
+
+  let current = object(await call(route(routes, 'GET', '/api/legacy/mode')));
+  source.modeResult = { ok: true, mode: 'reserved2', dshSynced: true };
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/mode'), {
+    revision: current.revision,
+    mode: 'reserved'
+  }), { code: 'mode_change_unknown', statusCode: 504 });
+
+  current = object(await call(route(routes, 'GET', '/api/legacy/mode')));
+  source.modeResult = { ok: true, mode: 'chat', dshSynced: false };
+  await assert.rejects(call(route(routes, 'POST', '/api/legacy/mode'), {
+    revision: current.revision,
+    mode: 'chat'
+  }), { code: 'mode_change_unknown', statusCode: 504 });
+
+  assert.deepEqual(source.requests.filter(request => request.method === 'POST' && request.url === '/api/mode')
+    .map(request => request.body), [{ mode: 'reserved' }, { mode: 'chat' }]);
 });
 
 test('falls back to the state token without honoring the configured console host', async testContext => {

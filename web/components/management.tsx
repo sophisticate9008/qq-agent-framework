@@ -9,8 +9,8 @@ export function PageHeading({ title, description, actions }: { title: string; de
   return <div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="page-title">{title}</h1><p className="page-description">{description}</p></div>{actions && <div className="flex items-center gap-2">{actions}</div>}</div>;
 }
 
-export function Section({ title, description, children, footer, actions, className }: { title: string; description?: string; children: ReactNode; footer?: ReactNode; actions?: ReactNode; className?: string }) {
-  return <section className={cn('panel', className)}><div className="panel-header"><div><h2 className="panel-title">{title}</h2>{description && <p className="panel-description">{description}</p>}</div>{actions}</div><div className="panel-body">{children}</div>{footer && <div className="panel-footer">{footer}</div>}</section>;
+export function Section({ id, title, description, children, footer, actions, className }: { id?: string; title: string; description?: string; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; className?: string }) {
+  return <section id={id} className={cn('panel', className)}><div className="panel-header"><div><h2 className="panel-title">{title}</h2>{description && <p className="panel-description">{description}</p>}</div>{actions}</div><div className="panel-body">{children}</div>{footer && <div className="panel-footer">{footer}</div>}</section>;
 }
 
 export function Field({ label, description, error, children, className }: { label: string; description?: string; error?: string; children: ReactNode; className?: string }) {

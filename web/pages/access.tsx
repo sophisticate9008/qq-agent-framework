@@ -127,6 +127,7 @@ function accessError(error: unknown): string {
 
 export function AccessPage(props: PageProps) {
   const { api, connected, connect, setDirty } = props;
+  const chatManagement = asRecord(props.snapshot.integrations).chatManagement !== false;
   const [access, setAccess] = useState<AccessState | null>(null);
   const [form, setForm] = useState<AccessForm | null>(null);
   const [errors, setErrors] = useState<AccessErrors>({});
@@ -144,7 +145,7 @@ export function AccessPage(props: PageProps) {
   }, [api]);
 
   useEffect(() => {
-    if (!connected) {
+    if (!connected || !chatManagement) {
       setAccess(null);
       setForm(null);
       return;
@@ -158,7 +159,7 @@ export function AccessPage(props: PageProps) {
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [connected, loadAccess]);
+  }, [chatManagement, connected, loadAccess]);
 
   const parsedForm = form === null ? null : parseForm(form);
   const dirty = access !== null && form !== null
@@ -204,8 +205,10 @@ export function AccessPage(props: PageProps) {
   let content;
   if (!connected) {
     content = <ConnectPrompt connect={connect} />;
+  } else if (!chatManagement) {
+    content = <Section title="消息网关访问范围" description="当前未接入聊天宿主。以下允许范围只约束网关出站，不创建聊天入站或管理员 QQ 身份。" />;
   } else if (loading && !access) {
-    content = <Section title="正在读取访问范围"><div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在连接旧版桥接服务</div></Section>;
+    content = <Section title="正在读取访问范围"><div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在连接聊天服务</div></Section>;
   } else if (loadError || !access || !form) {
     content = <Section title="暂时无法读取访问范围" description={loadError || '服务返回了无法识别的内容。'}><Button variant="outline" onClick={() => { setLoading(true); void loadAccess().catch(error => setLoadError(accessError(error))).finally(() => setLoading(false)); }}><RotateCw className="size-4" />重新读取</Button></Section>;
   } else {
@@ -232,7 +235,7 @@ export function AccessPage(props: PageProps) {
   }
 
   return <div className="page-stack" data-page="access">
-    <PageHeading title="访问范围" description="设置可对话的群聊、私聊与管理员账号。保存时会先同步网关，再更新旧版桥接服务。" />
+    <PageHeading title="访问范围" description="设置可对话的群聊、私聊与管理员账号。保存时会先同步网关，再更新已接入的聊天服务。" />
     {content}
     {connected && <ConfigurationEditor category="access" {...props} setDirty={setConfigurationDirty} />}
   </div>;

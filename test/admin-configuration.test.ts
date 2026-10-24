@@ -173,7 +173,7 @@ test('configuration GET uses raw revisions, null inheritance and secret redactio
   const adminFields = fieldMap(result, 'admin');
   assert.deepEqual(adminFields.get('legacyRoot'), {
     id: 'legacyRoot',
-    label: '旧版桥接目录',
+    label: 'QQ 桥接项目目录',
     description: adminFields.get('legacyRoot')?.description,
     type: 'text',
     value: 'legacy',
@@ -474,4 +474,42 @@ test('private-file checks reject broad permissions and symlinks', async context 
   symlinkSync(target, files.gateway);
   assert(lstatSync(files.gateway).isSymbolicLink());
   await rejectsCode(invoke(routes(files), 'GET', '/api/configuration'), 500, 'configuration_file_invalid');
+});
+
+test('independent deployment hides absent migration paths and exposes bounded access-session settings', async context => {
+  const files = fixture(context);
+  const document = object(JSON.parse(readFileSync(files.admin, 'utf8')));
+  delete document.legacyRoot;
+  delete document.serviceManager;
+  writeFileSync(files.admin, JSON.stringify(document), { mode: 0o600 });
+  const items = createConfigurationRoutes({
+    gatewayConfigurationFilename: files.gateway, adminConfigurationFilename: files.admin
+  });
+  const result = object(await invoke(items, 'GET', '/api/configuration'));
+  const admin = fieldMap(result, 'admin');
+  assert.equal(admin.has('legacyRoot'), false);
+  assert.equal(admin.has('serviceManager'), false);
+  assert(admin.has('accessSessionTtlMs'));
+  assert(fieldMap(result, 'gateway').has('allowedConversations'));
+  const authorizationBefore = object(JSON.parse(readFileSync(files.gateway, 'utf8'))).authorizationVersion;
+  await invoke(items, 'POST', '/api/configuration', {
+    source: 'gateway', revision: hash(files.gateway), changes: { allowedConversations: ['private:12345'] }
+  });
+  const gateway = object(JSON.parse(readFileSync(files.gateway, 'utf8')));
+  assert.deepEqual(gateway.allowedConversations, ['private:12345']);
+  assert.notEqual(gateway.authorizationVersion, authorizationBefore);
+  for (const allowedConversations of [['private:0'], ['group:1', 'group:1'], ['anything']]) {
+    await rejectsCode(invoke(items, 'POST', '/api/configuration', {
+      source: 'gateway', revision: hash(files.gateway), changes: { allowedConversations }
+    }), 400, 'invalid_configuration');
+  }
+  await invoke(items, 'POST', '/api/configuration', {
+    source: 'admin', revision: hash(files.admin), changes: { accessSessionTtlMs: 86_400_000 }
+  });
+  assert.equal(object(JSON.parse(readFileSync(files.admin, 'utf8'))).accessSessionTtlMs, 86_400_000);
+  for (const value of [299_999, 30 * 86_400_000 + 1]) {
+    await rejectsCode(invoke(items, 'POST', '/api/configuration', {
+      source: 'admin', revision: hash(files.admin), changes: { accessSessionTtlMs: value }
+    }), 400, 'invalid_configuration');
+  }
 });

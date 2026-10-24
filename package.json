@@ -8,14 +8,21 @@
   "engines": {
     "node": ">=24.12.0"
   },
+  "bin": {
+    "qq-agent": "scripts/cli.ts"
+  },
   "scripts": {
+    "start": "node scripts/cli.ts start",
+    "cli": "node scripts/cli.ts",
     "build": "node scripts/build.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json",
-    "test": "npm run build && node --test test/*.test.ts",
+    "test": "node scripts/cli.ts test",
     "test:built": "npm run build && node --test dist/test/*.test.js",
-    "test:browser": "npm run build && node scripts/browser-smoke.ts",
-    "test:management": "npm run build && node scripts/management-smoke.ts",
-    "test:markdown-smoke": "npm run build && node scripts/markdown-smoke.ts",
+    "test:browser": "node scripts/cli.ts test --browser",
+    "test:management": "node scripts/cli.ts test --browser",
+    "test:page-navigation": "node scripts/cli.ts test --browser",
+    "test:markdown-smoke": "node scripts/cli.ts test --browser",
+    "test:presentation-smoke": "node scripts/cli.ts test --browser",
     "demo": "npm run build && node src/demo.ts",
     "check": "npm run typecheck && node scripts/check.ts",
     "bench:core": "node --expose-gc scripts/bench-core.ts",
@@ -32,7 +39,6 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
-    "playwright": "1.61.1",
     "shadcn": "4.22.1",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",

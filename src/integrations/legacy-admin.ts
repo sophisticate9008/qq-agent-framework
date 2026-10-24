@@ -17,6 +17,14 @@ const MAX_ACCESS_IDENTIFIERS = 1_000;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
 const ROLE_NAME_PATTERN = /^[A-Za-z0-9_\u4e00-\u9fff-]+$/;
+const LEGACY_MODES = ['chat', 'reserved', 'reserved2', 'closed-agent'] as const;
+
+type LegacyMode = typeof LEGACY_MODES[number];
+
+interface LegacyModeSupport {
+  readonly reserved: boolean;
+  readonly reserved2: boolean;
+}
 
 interface AccessList {
   readonly groups: number[];
@@ -39,6 +47,7 @@ export interface LegacyAdminOptions {
 interface LegacyConnection {
   readonly endpoint: string;
   readonly token: string;
+  readonly supported: LegacyModeSupport;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -73,6 +82,27 @@ function revision(value: unknown): string {
 function parseRevision(value: unknown): string {
   if (typeof value !== 'string' || !REVISION_PATTERN.test(value)) fail(400, 'invalid_request');
   return value;
+}
+
+function legacyMode(value: unknown, response = false): LegacyMode {
+  if (typeof value === 'string' && (LEGACY_MODES as readonly string[]).includes(value)) {
+    return value as LegacyMode;
+  }
+  fail(response ? 502 : 400, response ? 'legacy_invalid_response' : 'invalid_mode');
+}
+
+function modeSupport(configuration: Record<string, unknown>): LegacyModeSupport {
+  const social = record(configuration.social) ? configuration.social : {};
+  const socialV2 = record(configuration.socialV2) ? configuration.socialV2 : {};
+  return {
+    reserved: social.enabled !== false,
+    reserved2: socialV2.enabled !== false
+  };
+}
+
+function modeResponse(mode: LegacyMode, supported: LegacyModeSupport) {
+  const state = { mode, supported };
+  return { mode, revision: revision(state), supported };
 }
 
 function boundedString(value: unknown, maximum: number): string {
@@ -230,7 +260,7 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
     }
     const configured = typeof configuration.consoleToken === 'string' ? configuration.consoleToken.trim() : '';
     if (configured.length >= 10 && configured.length <= 128 && TOKEN_PATTERN.test(configured)) {
-      return { endpoint: `http://127.0.0.1:${port}`, token: configured };
+      return { endpoint: `http://127.0.0.1:${port}`, token: configured, supported: modeSupport(configuration) };
     }
     let token: string;
     try {
@@ -241,16 +271,17 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
     if (token.length === 0 || token.length > 128 || /[\r\n]/.test(token)) {
       fail(503, 'legacy_credentials_unavailable');
     }
-    return { endpoint: `http://127.0.0.1:${port}`, token };
+    return { endpoint: `http://127.0.0.1:${port}`, token, supported: modeSupport(configuration) };
   }
 
   async function requestLegacy(
     pathname: string,
     method: 'GET' | 'POST',
     body: unknown,
-    signal: AbortSignal
+    signal: AbortSignal,
+    existingConnection?: LegacyConnection
   ): Promise<unknown> {
-    const target = await connection();
+    const target = existingConnection ?? await connection();
     const serialized = method === 'POST' ? JSON.stringify(body) : undefined;
     if (serialized !== undefined && Buffer.byteLength(serialized, 'utf8') > MAX_WRITE_BODY_BYTES) {
       fail(400, 'request_too_large');
@@ -281,6 +312,13 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
 
   async function readAccess(signal: AbortSignal) {
     return accessResponse(accessFromLegacy(await requestLegacy('/api/whitelist', 'GET', undefined, signal)));
+  }
+
+  async function readMode(signal: AbortSignal) {
+    const target = await connection();
+    const value = await requestLegacy('/api/status', 'GET', undefined, signal, target);
+    if (!record(value)) fail(502, 'legacy_invalid_response');
+    return modeResponse(legacyMode(value.mode, true), target.supported);
   }
 
   function modelFromLegacy(value: unknown) {
@@ -364,6 +402,37 @@ export function createLegacyAdminRoutes(options: LegacyAdminOptions): readonly A
             degraded: health.degraded
           }
         };
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/legacy/mode', async handle({ query, signal }) {
+        noQuery(query);
+        return readMode(signal);
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/legacy/mode', handle({ query, body, signal }) {
+        noQuery(query);
+        return serializeWrite(async () => {
+          const request = requiredBody(body);
+          exactKeys(request, ['mode', 'revision']);
+          const expectedRevision = parseRevision(request.revision);
+          const requestedMode = legacyMode(request.mode);
+          const current = await readMode(signal);
+          if (current.revision !== expectedRevision) fail(409, 'revision_conflict');
+          if (requestedMode === 'reserved' && !current.supported.reserved
+            || requestedMode === 'reserved2' && !current.supported.reserved2) {
+            fail(409, 'legacy_mode_disabled');
+          }
+          try {
+            const result = await requestLegacy('/api/mode', 'POST', { mode: requestedMode }, signal);
+            if (signal.aborted || !record(result) || result.ok !== true || result.mode !== requestedMode
+              || result.dshSynced !== true) fail(504, 'mode_change_unknown');
+            return modeResponse(requestedMode, current.supported);
+          } catch {
+            fail(504, 'mode_change_unknown');
+          }
+        });
       }
     },
     {

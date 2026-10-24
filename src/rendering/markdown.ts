@@ -2,7 +2,6 @@ import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
 
 import MarkdownIt from 'markdown-it';
-import type { Browser } from 'playwright';
 
 import { FrameworkError } from '../core/values.ts';
 
@@ -136,7 +135,29 @@ hr { margin: 1.6em 0; border: 0; border-top: 2px solid #d8dee8; }
 }
 `;
 
-export type MarkdownBrowser = Pick<Browser, 'newContext'>;
+export interface MarkdownBrowser {
+  newContext(options: {
+    acceptDownloads: boolean;
+    bypassCSP: boolean;
+    colorScheme: 'light';
+    deviceScaleFactor: number;
+    javaScriptEnabled: boolean;
+    offline: boolean;
+    permissions: string[];
+    reducedMotion: 'reduce';
+    serviceWorkers: 'block';
+    viewport: { width: number; height: number };
+  }): Promise<{
+    route(pattern: string, handler: (route: { abort(code?: string): Promise<void> }) => Promise<void>): Promise<unknown>;
+    newPage(): Promise<{
+      setContent(html: string, options: { waitUntil: 'load'; timeout: number }): Promise<void>;
+      evaluate<Result, Argument = void>(callback: (argument: Argument) => Result | Promise<Result>, argument?: Argument): Promise<Result>;
+      setViewportSize(viewport: { width: number; height: number }): Promise<void>;
+      screenshot(options: { animations: 'disabled'; caret: 'hide'; omitBackground: boolean; type: 'png' }): Promise<Uint8Array>;
+    }>;
+    close(options?: { reason?: string }): Promise<void>;
+  }>;
+}
 
 export interface MarkdownRendererOptions {
   browser: MarkdownBrowser;

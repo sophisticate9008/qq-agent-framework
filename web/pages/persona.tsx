@@ -42,6 +42,7 @@ function resultMessage(result: ResultState, dirty: boolean): string | undefined 
 
 export function PersonaPage(props: PageProps) {
   const { api, connected, connect, setDirty } = props;
+  const chatManagement = asRecord(props.snapshot.integrations).chatManagement !== false;
   const [roles, setRoles] = useState<string[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -82,7 +83,7 @@ export function PersonaPage(props: PageProps) {
   }, []);
 
   useEffect(() => {
-    if (!connected) {
+    if (!connected || !chatManagement) {
       setRoles([]);
       setCurrent(null);
       setSelectedName(null);
@@ -117,10 +118,10 @@ export function PersonaPage(props: PageProps) {
       if (!controller.signal.aborted) setListLoading(false);
     });
     return () => controller.abort();
-  }, [api, connected, reloadKey]);
+  }, [api, chatManagement, connected, reloadKey]);
 
   useEffect(() => {
-    if (!connected || creating || selectedName === null) return;
+    if (!connected || !chatManagement || creating || selectedName === null) return;
     if (skipRoleLoad.current === selectedName) {
       skipRoleLoad.current = null;
       return;
@@ -145,7 +146,7 @@ export function PersonaPage(props: PageProps) {
       if (!controller.signal.aborted) setRoleLoading(false);
     });
     return () => controller.abort();
-  }, [api, connected, creating, reloadKey, selectedName]);
+  }, [api, chatManagement, connected, creating, reloadKey, selectedName]);
 
   function applyTarget(target: EditorTarget): void {
     setPendingTarget(null);
@@ -240,6 +241,7 @@ export function PersonaPage(props: PageProps) {
   }
 
   if (!connected) return <div className="page-stack" data-page="persona"><PageHeading title="人设与形象" description="管理伙伴的身份、表达方式和当前启用的人设。" /><ConnectPrompt connect={connect} /></div>;
+  if (!chatManagement) return <div className="page-stack" data-page="persona"><PageHeading title="人设与形象" description="管理宿主提供的人设与消息身份。" /><Section title="尚未接入聊天宿主" description="当前只有消息网关，人设正文与形象能力需由聊天宿主接入。下面的人格标识仅用于发送记录，不代替人设。" /><ConfigurationEditor category="persona" {...props} setDirty={setConfigurationDirty} /></div>;
 
   const busy = listLoading || roleLoading || saving || activating;
   const activationLabel = current === selectedName ? '停用当前人设' : '启用这个人设';

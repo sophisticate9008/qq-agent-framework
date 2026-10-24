@@ -28,6 +28,7 @@ export interface GatewayAdminConfiguration {
   gatewayConfiguration: string;
   legacyRoot?: string;
   serviceManager?: string;
+  accessSessionTtlMs?: number;
 }
 
 interface GatewayHealth {
@@ -82,12 +83,14 @@ function gatewayRevision(configuration: Readonly<OneBotGatewayConfiguration>): s
 export function loadGatewayAdminConfiguration(filename: string): Readonly<GatewayAdminConfiguration> {
   const input: unknown = JSON.parse(privateText(filename, 64 * 1024));
   assert(isRecord(input)
-    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'legacyRoot', 'serviceManager'].includes(key))
+    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'legacyRoot', 'serviceManager', 'accessSessionTtlMs'].includes(key))
     && validHost(input.host)
     && Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65_535
     && reference(input.tokenFile) && reference(input.gatewayConfiguration)
     && (input.legacyRoot === undefined || reference(input.legacyRoot))
-    && (input.serviceManager === undefined || reference(input.serviceManager)),
+    && (input.serviceManager === undefined || reference(input.serviceManager))
+    && (input.accessSessionTtlMs === undefined || Number.isSafeInteger(input.accessSessionTtlMs)
+      && Number(input.accessSessionTtlMs) >= 300_000 && Number(input.accessSessionTtlMs) <= 30 * 86_400_000),
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator configuration contains invalid fields.');
   const base = dirname(resolve(filename));
   const configuration = snapshot({
@@ -97,6 +100,7 @@ export function loadGatewayAdminConfiguration(filename: string): Readonly<Gatewa
     gatewayConfiguration: resolve(base, input.gatewayConfiguration),
     ...(input.legacyRoot === undefined ? {} : { legacyRoot: resolve(base, input.legacyRoot) }),
     ...(input.serviceManager === undefined ? {} : { serviceManager: resolve(base, input.serviceManager) }),
+    ...(input.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: Number(input.accessSessionTtlMs) }),
   });
   if (existsSync(configuration.tokenFile)) adminToken(configuration.tokenFile);
   loadOneBotGatewayConfiguration(configuration.gatewayConfiguration);
@@ -296,7 +300,7 @@ function policyConfiguration(configuration: Readonly<OneBotGatewayConfiguration>
         ? '无到期日' : configuration.grantTtlMs
     },
     limits: {
-      timeoutMs: configuration.timeoutMs ?? 15_000,
+      timeoutMs: configuration.timeoutMs ?? 60_000,
       maxPending: configuration.maxPending ?? 16,
       maxBodyBytes: configuration.maxBodyBytes ?? 28 * 1024 * 1024,
       maxRecords: configuration.maxRecords ?? 10_000
@@ -327,7 +331,8 @@ function liveSnapshot(
   configuration: Readonly<OneBotGatewayConfiguration>,
   health: GatewayHealth,
   status: GatewayStatus,
-  configurable: boolean
+  configurable: boolean,
+  chatManagement: boolean
 ) {
   const metrics = health.metrics;
   const operationalMetrics = metrics === null ? null : {
@@ -363,6 +368,7 @@ function liveSnapshot(
   return snapshot({
     mode: 'gateway-live',
     revision,
+    integrations: { chatManagement },
     overview: {
       name: 'QQ Agent Framework Gateway Admin',
       mode: 'gateway-live',
@@ -388,7 +394,7 @@ function liveSnapshot(
       },
       preferences: null,
       provenance: {
-        agentRuntime: 'legacy-dsh-continues-serving',
+        agentRuntime: chatManagement ? 'external-chat-service-configured' : 'not-connected',
         session: 'not-observed-by-gateway-admin',
         legacyWebSocketTraffic: 'bypasses-this-gateway'
       }
@@ -449,7 +455,8 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     const status = health.ok
       ? await probeStatus(current.configuration, current.token, signal)
       : { verified: false, online: null, good: null, error: health.error };
-    return liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined);
+    return liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined,
+      configuration.legacyRoot !== undefined);
   };
   const healthRoute: AdminRoute = {
     method: 'GET',
@@ -487,6 +494,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     ...(operations === undefined ? {} : { beforeAccessSave: operations.synchronizeAccess }),
   }));
   const server = createAdminServer({ token: () => bootstrap.token(), snapshot: snapshotHandler, routes, handlerTimeoutMs: 70_000,
+    ...(configuration.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: configuration.accessSessionTtlMs }),
     setup: {
       status: () => ({ ...bootstrap.status(), revision }),
       initialize: () => ({ ...bootstrap.initialize(), revision }),

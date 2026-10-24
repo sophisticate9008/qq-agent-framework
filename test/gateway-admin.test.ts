@@ -160,6 +160,15 @@ test('loads only private explicit configuration and formats reachable addresses'
   assert.equal(gatewayAdminAddress({ ...configuration, host: '::1', port: 3210 }), 'http://[::1]:3210');
   assert.equal(gatewayAdminAddress({ ...configuration, host: 'localhost', port: 3210 }), 'http://localhost:3210');
 
+  for (const accessSessionTtlMs of [300_000, 7 * 86_400_000, 30 * 86_400_000]) {
+    writePrivate(files.adminConfiguration, JSON.stringify({ ...configuration, accessSessionTtlMs }));
+    assert.equal(loadGatewayAdminConfiguration(files.adminConfiguration).accessSessionTtlMs, accessSessionTtlMs);
+  }
+  for (const accessSessionTtlMs of [0, 299_999, 30 * 86_400_000 + 1, 300_000.5, '604800000']) {
+    writePrivate(files.adminConfiguration, JSON.stringify({ ...configuration, accessSessionTtlMs }));
+    assert.throws(() => loadGatewayAdminConfiguration(files.adminConfiguration), { code: 'GATEWAY_ADMIN_INVALID_CONFIG' });
+  }
+
   for (const host of ['192.0.2.20', '2001:db8::20', 'localhost']) {
     writePrivate(files.adminConfiguration, JSON.stringify({
       host,
@@ -238,7 +247,8 @@ test('binds 0.0.0.0 and serves an authenticated real read-only gateway snapshot'
   assert(Array.isArray(policy.grants));
   assert.equal(parseObject(policy.grants[0]).sendRemaining, '未设置日常次数限制');
   assert.equal(parseObject(second.context).session, undefined);
-  assert.match(secondText, /legacy-dsh-continues-serving/);
+  assert.equal(parseObject(second.integrations).chatManagement, false);
+  assert.equal(parseObject(parseObject(second.context).provenance).agentRuntime, 'not-connected');
   assert.match(secondText, /current-gateway-process-only/);
   assert.match(secondText, /bypasses-this-gateway/);
   for (const secret of [ADMIN_TOKEN, GATEWAY_TOKEN, UPSTREAM_SECRET, files.adminToken, files.gatewayToken, files.storeFilename]) {

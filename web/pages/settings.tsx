@@ -368,7 +368,7 @@ export function SettingsPage(props: PageProps) {
       <Section title="运营预算" description="限制消息发送授权的次数和有效时间；关闭预算不会清空已填写的额度。">
         <div className="divide-y">
           <ToggleField label="启用发送预算" description="开启后，每次授权按次数与有效时间限制；关闭时保留下面的数值供以后恢复。" checked={gateway.budgetEnabled} disabled={busy} onChange={budgetEnabled => setGateway(current => current ? { ...current, budgetEnabled } : current)} />
-          <div className="grid gap-5 py-5 sm:grid-cols-2">
+          <div hidden={!gateway.budgetEnabled} className={gateway.budgetEnabled ? 'grid gap-5 py-5 sm:grid-cols-2' : 'hidden'}>
             <div><NumberField label="每次授权最多发送" description="不设值代表次数无限。" unit="次" min={1} value={gateway.maxSendUses} disabled={!gateway.budgetEnabled || busy} onChange={maxSendUses => setGateway(current => current ? { ...current, maxSendUses } : current)} />{gatewayErrors.maxSendUses && <p className="mt-2 text-xs text-destructive" role="alert">{gatewayErrors.maxSendUses}</p>}</div>
             <div><NumberField label="授权有效时间" description="支持小数；不设值代表时间无限，最长 168 小时。" unit="小时" min={1 / 3_600} max={168} value={gateway.grantTtlHours} disabled={!gateway.budgetEnabled || busy} onChange={grantTtlHours => setGateway(current => current ? { ...current, grantTtlHours } : current)} />{gatewayErrors.grantTtlHours && <p className="mt-2 text-xs text-destructive" role="alert">{gatewayErrors.grantTtlHours}</p>}</div>
           </div>

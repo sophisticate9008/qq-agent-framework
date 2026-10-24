@@ -77,6 +77,7 @@ function saveMessage(result: SaveResult, dirty: boolean): string | undefined {
 
 export function ModelPage(props: PageProps) {
   const { api, connected, connect, setDirty } = props;
+  const chatManagement = asRecord(props.snapshot.integrations).chatManagement !== false;
   const [model, setModel] = useState<ModelState | null>(null);
   const [selectedEffort, setSelectedEffort] = useState('');
   const [loading, setLoading] = useState(false);
@@ -103,7 +104,7 @@ export function ModelPage(props: PageProps) {
   }, []);
 
   useEffect(() => {
-    if (!connected) {
+    if (!connected || !chatManagement) {
       setModel(null);
       setSelectedEffort('');
       setLoadError('');
@@ -127,7 +128,7 @@ export function ModelPage(props: PageProps) {
       if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [api, connected, reloadKey]);
+  }, [api, chatManagement, connected, reloadKey]);
 
   const selectedLabel = useMemo(() => {
     if (!model) return null;
@@ -163,6 +164,7 @@ export function ModelPage(props: PageProps) {
   }
 
   if (!connected) return <div className="page-stack" data-page="model"><PageHeading title="模型与回复" description="查看当前模型服务，并调整回复时的思考强度。" /><ConnectPrompt connect={connect} /></div>;
+  if (!chatManagement) return <div className="page-stack" data-page="model"><PageHeading title="模型与回复" description="管理聊天宿主提供的模型配置。" /><Section title="尚未接入聊天宿主" description="消息网关不直接调用模型。接入 agent 与模型适配器后，再由宿主提供对应配置。" /><ConfigurationEditor category="model" {...props} setDirty={setConfigurationDirty} /></div>;
 
   return <div className="page-stack" data-page="model">
     <PageHeading title="模型与回复" description="模型由当前服务提供，这里可以调整每条新消息使用的思考强度。" actions={<Button variant="outline" onClick={reload} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />

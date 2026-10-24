@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
-import { AlertCircle, CheckCircle2, ChevronDown, CircleOff, LoaderCircle, Search } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronDown, CircleOff, LoaderCircle } from 'lucide-react';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select.tsx';
+import { Switch } from './ui/switch.tsx';
 import { Textarea } from './ui/textarea.tsx';
 import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { StructuredFields, type StructuredFieldFormat, type StructuredFieldState } from './structured-fields.tsx';
 import { ApiError, asRecord, errorMessage, isRecord } from '../lib/api.ts';
+import { resolveConfigurationVisibility } from '../lib/configuration-visibility.ts';
 import type { PageProps } from '../lib/types.ts';
 
 type ConfigurationCategory = 'persona' | 'features' | 'access' | 'model' | 'settings';
@@ -288,13 +290,13 @@ function FieldEditor({ field, draft, disabled, resetToken, onChange, onStructure
   </Field>;
 }
 
-export function ConfigurationEditor({ connected, api, setDirty, category, connect }: PageProps & { category: ConfigurationCategory }) {
+export function ConfigurationEditor({ connected, api, setDirty, category, connect, activeMode }: PageProps & { category: ConfigurationCategory; activeMode?: string | null }) {
   const dirtyScope = `configuration:${category}`;
   const [editor, setEditor] = useState<EditorState>(() => stateFromGroups([]));
   const [capabilities, setCapabilities] = useState({ apply: false });
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [query, setQuery] = useState('');
+  const [showInactive, setShowInactive] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [applyingSource, setApplyingSource] = useState<ConfigurationSource | null>(null);
@@ -465,17 +467,18 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     try {
       const result = asRecord(await api.post('/api/configuration', { source: group.source, revision: group.revision, changes }));
       if (result.ok !== true || typeof result.revision !== 'string') throw new Error('save_result_unknown');
-      if (result.restartRequired === true) setPendingSources(current => new Set(current).add(group.source));
+      const applyRequired = result.applyRequired === true || result.restartRequired === true;
+      if (applyRequired) setPendingSources(current => new Set(current).add(group.source));
       try {
         const refreshed = parseConfiguration(await api.get('/api/configuration'));
         const groups = refreshed.groups.filter(item => item.category === category);
         setEditor(current => reconcileState(current, groups, completedKeys));
         setCapabilities(refreshed.capabilities);
-        setGroupStatuses(current => ({ ...current, [group.id]: { text: result.restartRequired === true ? '已保存，等待应用' : '设置已保存', tone: result.restartRequired === true ? 'warning' : 'success' } }));
+        setGroupStatuses(current => ({ ...current, [group.id]: { text: applyRequired ? '已保存，等待应用' : '设置已保存', tone: applyRequired ? 'warning' : 'success' } }));
       } catch {
         const groups = optimisticGroups(group, changes, result.revision);
         setEditor(current => reconcileState(current, groups, completedKeys));
-        setGroupStatuses(current => ({ ...current, [group.id]: { text: '已保存，但最新状态暂时无法确认。', tone: 'warning' } }));
+        setGroupStatuses(current => ({ ...current, [group.id]: { text: applyRequired ? '已保存，等待应用；最新状态暂时无法确认。' : '已保存，但最新状态暂时无法确认。', tone: 'warning' } }));
       }
       setFieldErrors(current => {
         const next = { ...current };
@@ -535,29 +538,47 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     }
   }
 
-  const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN');
+  const visibilityValues = useMemo(() => {
+    const values: Record<string, unknown> = {};
+    for (const group of editor.groups) for (const field of group.fields) {
+      const key = fieldKey(group.id, field.id);
+      values[field.id] = Object.hasOwn(editor.drafts, key) ? editor.drafts[key] : field.value;
+    }
+    return values;
+  }, [editor.drafts, editor.groups]);
+  const dirtyFieldIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const group of editor.groups) for (const field of group.fields) {
+      if (editor.dirtyKeys.has(fieldKey(group.id, field.id))) ids.add(field.id);
+    }
+    return ids;
+  }, [editor.dirtyKeys, editor.groups]);
+  const visibility = useMemo(() => resolveConfigurationVisibility(editor.groups, {
+    activeMode,
+    values: visibilityValues,
+    dirtyFieldIds,
+    showInactive
+  }), [activeMode, dirtyFieldIds, editor.groups, showInactive, visibilityValues]);
   const matchingGroups = useMemo(() => {
     const matches = new Map<string, ReadonlySet<string> | null>();
     for (const group of editor.groups) {
-      if (!normalizedQuery || group.title.toLocaleLowerCase('zh-CN').includes(normalizedQuery)) {
-        matches.set(group.id, null);
-        continue;
-      }
-      const fieldIds = new Set(group.fields.filter(field => field.label.toLocaleLowerCase('zh-CN').includes(normalizedQuery)).map(field => field.id));
-      if (fieldIds.size > 0) matches.set(group.id, fieldIds);
+      const groupVisibility = visibility.get(group.id);
+      if (!groupVisibility?.visible) continue;
+      matches.set(group.id, groupVisibility.fieldIds);
     }
     return matches;
-  }, [editor.groups, normalizedQuery]);
+  }, [editor.groups, visibility]);
   const featureSummary = useMemo(() => {
     let enabled = 0;
     let disabled = 0;
     for (const group of editor.groups) for (const field of group.fields) {
+      if (!visibility.get(group.id)?.fieldIds.has(field.id)) continue;
       if (field.type !== 'boolean') continue;
-      if (field.value === true) enabled += 1;
-      if (field.value === false) disabled += 1;
+      if (visibilityValues[field.id] === true) enabled += 1;
+      if (visibilityValues[field.id] === false) disabled += 1;
     }
     return { enabled, disabled };
-  }, [editor.groups]);
+  }, [editor.groups, visibility, visibilityValues]);
 
   if (!connected) return <ConnectPrompt connect={connect} />;
   if (loading) return <div className="panel flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取设置</div>;
@@ -566,13 +587,15 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
 
   return <div className="grid gap-5">
     <div className="flex flex-wrap items-center gap-3">
-      <label className="relative min-w-56 flex-1 sm:max-w-sm"><Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" /><span className="sr-only">搜索设置</span><Input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索分组或设置名称" className="pl-8" /></label>
+      {category === 'features' && <label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch size="sm" checked={showInactive} onCheckedChange={setShowInactive} aria-label="显示停用配置" /><span>显示停用配置</span></label>}
       {category === 'features' && (featureSummary.enabled > 0 || featureSummary.disabled > 0) && <div className="flex items-center gap-2" aria-label="功能状态摘要"><StatusPill tone="success">配置开启 {featureSummary.enabled} 项</StatusPill><StatusPill tone="neutral">配置关闭 {featureSummary.disabled} 项</StatusPill></div>}
     </div>
     {matchingGroups.size === 0 && <div className="panel"><EmptyState title="没有匹配的设置" description="换一个功能或设置名称试试。" /></div>}
     {editor.groups.map(group => {
       const groupVisible = matchingGroups.has(group.id);
       const visibleFieldIds = matchingGroups.get(group.id);
+      const groupVisibility = visibility.get(group.id);
+      const inactiveDirtyCount = groupVisibility?.inactiveDirtyFieldIds.size ?? 0;
       const dirtyCount = group.fields.filter(field => editor.dirtyKeys.has(fieldKey(group.id, field.id))).length;
       const groupDirty = dirtyCount > 0;
       const sourceDirty = editor.groups.some(item => item.source === group.source
@@ -581,11 +604,13 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
       const pending = pendingSources.has(group.source);
       const status = groupStatuses[group.id] ?? sourceStatuses[group.source];
       const busy = savingGroup !== null || applyingSource !== null;
-      const open = normalizedQuery !== '' || expanded.has(group.id);
+      const visibleFieldCount = visibleFieldIds === null
+        ? groupVisibility?.fieldIds.size ?? 0
+        : visibleFieldIds?.size ?? 0;
+      const open = inactiveDirtyCount > 0 || expanded.has(group.id);
       const message = status?.text ?? (groupDirty ? `${dirtyCount} 项更改尚未保存` : pending ? (capabilities.apply ? '已保存，等待应用' : '已保存，需要稍后重启服务') : '已读取保存的配置');
       return <Section key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} description={group.description} actions={status && <StatusPill tone={status.tone}>{status.text}</StatusPill>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
         <details open={open} onToggle={event => {
-          if (normalizedQuery) return;
           const isOpen = event.currentTarget.open;
           setExpanded(current => {
             const next = new Set(current);
@@ -594,10 +619,11 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
             return next;
           });
         }}>
-          <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg px-1 py-2 text-xs font-medium text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><span>{open ? '收起设置' : `展开 ${group.fields.length} 项设置`}</span><ChevronDown className={`size-4 transition-transform ${open ? 'rotate-180' : ''}`} /></summary>
+          <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg px-1 py-2 text-xs font-medium text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><span>{open ? '收起设置' : `展开 ${visibleFieldCount} 项设置`}</span><ChevronDown className={`size-4 transition-transform ${open ? 'rotate-180' : ''}`} /></summary>
+          {inactiveDirtyCount > 0 && <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4 text-amber-600" />仍显示 {inactiveDirtyCount} 项受停用开关或运行模式隐藏的草稿；保存只写入草稿值，不会开启父功能或切换运行模式。</p>}
           <div className="grid gap-5 pt-5 md:grid-cols-2">{group.fields.map(field => {
             const key = fieldKey(group.id, field.id);
-            const fieldVisible = visibleFieldIds === null || visibleFieldIds?.has(field.id) === true;
+            const fieldVisible = groupVisibility?.fieldIds.has(field.id) === true && (visibleFieldIds === null || visibleFieldIds?.has(field.id) === true);
             return <div key={field.id} className={fieldVisible ? 'contents' : 'hidden'}><FieldEditor field={field} draft={editor.drafts[key] ?? initialDraft(field)} disabled={busy || field.editable === false} resetToken={`${structuredEpoch}:${structuredVersions[key] ?? 0}`} onChange={value => updateField(group, field, value)} onStructuredChange={state => updateStructuredField(group, field, state)} /></div>;
           })}</div>
           {group.fields.length === 0 && <div className="flex items-center gap-2 py-5 text-xs text-muted-foreground"><CircleOff className="size-4" />此分组没有可显示的设置</div>}

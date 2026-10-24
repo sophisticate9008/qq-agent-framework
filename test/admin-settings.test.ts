@@ -99,7 +99,7 @@ test('settings GET exposes only controlled values, revisions, and apply capabili
         budgetEnabled: true,
         maxSendUses: 7,
         grantTtlMs: 60_000,
-        timeoutMs: 15_000,
+        timeoutMs: 60_000,
         maxPending: 16,
         maxBodyBytes: 28 * 1024 * 1024,
         maxRecords: 10_000

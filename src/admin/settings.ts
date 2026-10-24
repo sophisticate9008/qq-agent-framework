@@ -8,7 +8,7 @@ import { AdminRequestError, type AdminRoute } from './server.ts';
 
 const MAX_CONFIGURATION_BYTES = 64 * 1024;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_PENDING = 16;
 const DEFAULT_MAX_BODY_BYTES = 28 * 1024 * 1024;
 const DEFAULT_MAX_RECORDS = 10_000;

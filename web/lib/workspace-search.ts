@@ -18,7 +18,7 @@ export interface WorkspaceSearchVisibleEntry {
 
 export interface WorkspaceSearchSources {
   readonly configuration: unknown;
-  readonly legacyMode: unknown;
+  readonly runtimeStatus?: unknown;
   readonly settings: unknown;
   readonly currentPage?: PageId;
   readonly visibleEntries?: readonly WorkspaceSearchVisibleEntry[];
@@ -41,7 +41,8 @@ const pageDefinitions: readonly { readonly id: PageId; readonly title: string }[
   { id: 'persona', title: '人设与形象' },
   { id: 'features', title: '功能与触发' },
   { id: 'access', title: '访问范围' },
-  { id: 'model', title: '模型与回复' },
+  { id: 'model', title: '聊天方案' },
+  { id: 'adapters', title: '适配器' },
   { id: 'settings', title: '运行设置' },
 ];
 
@@ -93,12 +94,6 @@ function parseConfiguration(configuration: unknown): {
     });
   }
   return { groups, booleanValues };
-}
-
-function parseActiveMode(response: unknown): string | null {
-  const mode = asRecord(response).mode;
-  if (typeof mode !== 'string') return null;
-  return mode;
 }
 
 function settingsTargets(response: unknown): readonly WorkspaceSearchTarget[] {
@@ -165,8 +160,8 @@ export function applyCurrentPageVisibility(
 
 export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): readonly WorkspaceSearchTarget[] {
   const { groups, booleanValues } = parseConfiguration(sources.configuration);
-  const activeMode = parseActiveMode(sources.legacyMode);
-  const visibility = resolveConfigurationVisibility(groups, { activeMode, values: booleanValues });
+  const runtimeConnected = asRecord(sources.runtimeStatus).runtimeConnected === true;
+  const visibility = resolveConfigurationVisibility(groups, { values: booleanValues });
   const configurationTargets: WorkspaceSearchTarget[] = [];
 
   for (const group of groups) {
@@ -193,9 +188,11 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     ...workspacePageTargets,
     ...configurationTargets,
     ...settingsTargets(sources.settings),
-    ...(activeMode === null ? [] : Object.values(usageSectionLabels).map(title => ({
+    { page: 'model', title: '聊天方案', sectionTitle: '聊天方案', kind: 'section' },
+    { page: 'persona', title: '人设库', sectionTitle: '人设库', kind: 'section' },
+    ...(runtimeConnected ? Object.values(usageSectionLabels).map(title => ({
       page: 'usage' as const, title, sectionTitle: title, kind: 'section' as const,
-    }))),
+    })) : []),
   ]);
   if (sources.currentPage && sources.visibleEntries) {
     targets = applyCurrentPageVisibility(targets, sources.currentPage, sources.visibleEntries);
@@ -209,7 +206,9 @@ export function normalizeWorkspaceSearchQuery(query: string): readonly string[] 
 
 function searchableText(target: WorkspaceSearchTarget): string {
   const aliases = target.kind === 'page' && target.page === 'usage' ? 'token tokens 费用 花费 用量'
-    : target.kind === 'page' && target.page === 'sessions' ? 'session sessions 群聊 私聊 会话' : '';
+    : target.kind === 'page' && target.page === 'sessions' ? 'session sessions 群聊 私聊 会话'
+      : target.kind === 'page' && target.page === 'adapters' ? 'adapter adapters OneBot webhook DSH 协议 接入 服务地址 连接凭据'
+        : target.kind === 'page' && target.page === 'model' ? '模型 回复 prompt 方案 指令' : '';
   return [workspacePageTitle(target.page), target.sectionTitle, target.title, aliases]
     .filter((part): part is string => typeof part === 'string')
     .join(' ')

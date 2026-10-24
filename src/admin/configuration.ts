@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { lstat, open, rename, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { dirname, isAbsolute, normalize, relative, resolve, sep, win32 } from 'node:path';
+import { dirname, isAbsolute, normalize, resolve, sep, win32 } from 'node:path';
 
 import { AdminRequestError, type AdminRoute } from './server.ts';
 import { loadOneBotGatewayConfiguration } from '../host/onebot-gateway.ts';
@@ -16,14 +16,12 @@ import {
   type ConfigurationSource
 } from './configuration-schema.ts';
 
-const MAX_BRIDGE_CONFIGURATION_BYTES = 512 * 1024;
 const MAX_CONFIGURATION_BYTES = 64 * 1024;
 const MAX_CHANGES = 256;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export interface ConfigurationRouteOptions {
-  readonly legacyRoot?: string;
   readonly gatewayConfigurationFilename: string;
   readonly adminConfigurationFilename: string;
   readonly apply?: (
@@ -215,7 +213,7 @@ function publicGroups(descriptor: SourceDescriptor, document: ConfigurationDocum
     source: group.source,
     revision: document.revision,
     fields: Object.freeze(group.fields.filter(field => !(descriptor.source === 'admin'
-      && (field.id === 'legacyRoot' || field.id === 'serviceManager')
+      && field.id === 'serviceManager'
       && ownValue(document.values, [field.id]) === undefined)).map(field => publicField(field, document.values))),
     ...(group.applyLabel === undefined ? {} : { applyLabel: group.applyLabel })
   }));
@@ -227,7 +225,7 @@ function parseRevision(value: unknown): string {
 }
 
 function parseSource(value: unknown): ConfigurationSource {
-  if (value !== 'bridge' && value !== 'gateway' && value !== 'admin') {
+  if (value !== 'gateway' && value !== 'admin') {
     requestError(400, 'invalid_configuration');
   }
   return value;
@@ -241,14 +239,9 @@ function validReference(value: string): boolean {
   return /^[\p{L}\p{N}][\p{L}\p{N}._:/@+-]{0,127}$/u.test(value) && !value.includes('..');
 }
 
-function validIdentifier(value: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(value);
-}
-
-function validNormalizedPath(value: string, allowCommand: boolean): boolean {
+function validNormalizedPath(value: string): boolean {
   if (value === '') return true;
   if (value.includes('\0') || /[\r\n]/.test(value) || value.length > 1_024) return false;
-  if (allowCommand && /^[A-Za-z0-9._-]{1,128}$/.test(value)) return true;
   const windowsAbsolute = win32.isAbsolute(value);
   const nativeAbsolute = isAbsolute(value);
   if (!windowsAbsolute && !nativeAbsolute) {
@@ -260,14 +253,6 @@ function validNormalizedPath(value: string, allowCommand: boolean): boolean {
   return normalized === value || normalized.replace(/[\\/]+$/, '') === value.replace(/[\\/]+$/, '');
 }
 
-function validRelativePath(value: string, configurationFilename: string): boolean {
-  if (value === '' || isAbsolute(value) || win32.isAbsolute(value) || !validNormalizedPath(value, false)) return false;
-  const base = dirname(configurationFilename);
-  const target = resolve(base, value);
-  const relation = relative(base, target);
-  return relation !== '' && relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
-}
-
 function loopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true;
@@ -275,38 +260,16 @@ function loopbackHostname(hostname: string): boolean {
   return Number(host.split('.')[0]) === 127;
 }
 
-function privateLiteralAddress(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (loopbackHostname(host)) return true;
-  if (isIP(host) === 4) {
-    const parts = host.split('.').map(Number);
-    return parts[0] === 10 || parts[0] === 127 || parts[0] === 0
-      || parts[0] === 169 && parts[1] === 254
-      || parts[0] === 172 && parts[1] !== undefined && parts[1] >= 16 && parts[1] <= 31
-      || parts[0] === 192 && parts[1] === 168;
-  }
-  return isIP(host) === 6 && (host === '::1' || host === '::' || host.startsWith('fc') || host.startsWith('fd')
-    || /^fe[89ab]/.test(host));
-}
-
-function validUrl(value: string, kind: 'http' | 'https' | 'websocket' | 'loopback'): boolean {
-  if (value === '') return kind === 'https';
+function validLoopbackUrl(value: string): boolean {
+  if (value === '') return false;
   let url: URL;
   try {
     url = new URL(value);
   } catch {
     return false;
   }
-  if (url.username || url.password || url.hash) return false;
-  if (kind === 'websocket') return (url.protocol === 'wss:'
-    || url.protocol === 'ws:' && loopbackHostname(url.hostname)) && !url.search;
-  if (kind === 'loopback') {
-    return url.protocol === 'http:' && loopbackHostname(url.hostname)
-      && !url.search && !url.hash;
-  }
-  if (kind === 'https') return url.protocol === 'https:' && !privateLiteralAddress(url.hostname);
-  return (url.protocol === 'https:' || url.protocol === 'http:'
-    && loopbackHostname(url.hostname)) && !url.search;
+  return url.protocol === 'http:' && loopbackHostname(url.hostname)
+    && !url.username && !url.password && !url.search && !url.hash;
 }
 
 function parseJsonPresentation(field: ConfigurationFieldDefinition, value: string): unknown {
@@ -317,44 +280,11 @@ function parseJsonPresentation(field: ConfigurationFieldDefinition, value: strin
     requestError(400, 'invalid_configuration');
   }
   if (hasForbiddenKey(parsed)) requestError(400, 'invalid_configuration');
-  if (field.validation === 'pricing-windows') {
-    if (!Array.isArray(parsed) || parsed.length > 24 || !parsed.every(window => Array.isArray(window)
-      && window.length === 2 && window.every(hour => Number.isSafeInteger(hour) && hour >= 0 && hour <= 24)
-      && Number(window[0]) < Number(window[1]))) requestError(400, 'invalid_configuration');
-  }
-  if (field.validation === 'pricing-models') {
-    if (!isRecord(parsed) || Object.keys(parsed).length > 100) requestError(400, 'invalid_configuration');
-    for (const [model, definition] of Object.entries(parsed)) {
-      const prices = isRecord(definition) && isRecord(definition.off) ? definition.off : null;
-      if (!validReference(model) || !isRecord(definition)
-        || !Object.keys(definition).every(key => key === 'label' || key === 'off')
-        || typeof definition.label !== 'string' || definition.label.length < 1 || definition.label.length > 200
-        || prices === null
-        || !Object.keys(prices).every(key => ['cacheHit', 'cacheMiss', 'cacheWrite', 'output'].includes(key))
-        || !['cacheHit', 'cacheMiss', 'output'].every(key => typeof prices[key] === 'number'
-          && Number.isFinite(prices[key]) && Number(prices[key]) >= 0 && Number(prices[key]) <= 1_000_000)
-        || prices.cacheWrite !== undefined && (typeof prices.cacheWrite !== 'number'
-          || !Number.isFinite(prices.cacheWrite) || prices.cacheWrite < 0
-          || prices.cacheWrite > 1_000_000)) requestError(400, 'invalid_configuration');
-    }
-  }
   return parsed;
 }
 
 function validateList(field: ConfigurationFieldDefinition, value: unknown): void {
   if (!Array.isArray(value) || value.length > (field.maxItems ?? 100)) requestError(400, 'invalid_configuration');
-  if (field.id === 'pricing.peakWeekdays') {
-    if (!value.every(item => Number.isSafeInteger(item) && Number(item) >= 1 && Number(item) <= 7)
-      || new Set(value).size !== value.length) requestError(400, 'invalid_configuration');
-    return;
-  }
-  if (field.id === 'slang.inferenceThresholds') {
-    if (!value.every(item => Number.isSafeInteger(item) && Number(item) > 0 && Number(item) <= 1_000_000)
-      || value.some((item, index) => index > 0 && Number(value[index - 1]) >= Number(item))) {
-      requestError(400, 'invalid_configuration');
-    }
-    return;
-  }
   if (!value.every(item => typeof item === 'string' && item.length > 0
     && item.length <= (field.itemMaxLength ?? 128) && !/[\0\r\n]/.test(item))) {
     requestError(400, 'invalid_configuration');
@@ -363,19 +293,9 @@ function validateList(field: ConfigurationFieldDefinition, value: unknown): void
     && /^(?:group|private):[1-9]\d{0,15}$/.test(item)) || new Set(value).size !== value.length)) {
     requestError(400, 'invalid_configuration');
   }
-  if (field.id === 'pricing.holidays' && (!value.every(item => typeof item === 'string'
-    && /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/.test(item)
-    && new Date(`${item}T00:00:00.000Z`).toISOString().slice(0, 10) === item)
-    || new Set(value).size !== value.length)) {
-    requestError(400, 'invalid_configuration');
-  }
 }
 
-function normalizeFieldValue(
-  field: ConfigurationFieldDefinition,
-  input: unknown,
-  descriptor: SourceDescriptor
-): unknown {
+function normalizeFieldValue(field: ConfigurationFieldDefinition, input: unknown): unknown {
   if (field.type === 'boolean') {
     if (typeof input !== 'boolean') requestError(400, 'invalid_configuration');
     return input;
@@ -402,37 +322,12 @@ function normalizeFieldValue(
   }
   if (field.allowUnset === false && input.length === 0) requestError(400, 'invalid_configuration');
   if (field.validation === 'reference' && !validReference(input)
-    || field.validation === 'legacy-console-token' && !/^[A-Za-z0-9_-]{10,128}$/.test(input)
-    || field.validation === 'identifier' && !validIdentifier(input)
-    || field.validation === 'safe-header' && !/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/.test(input)
-    || field.validation === 'optional-path' && !validNormalizedPath(input, false)
-    || field.validation === 'optional-command-path' && !validNormalizedPath(input, true)
-    || field.validation === 'optional-relative-path' && !validRelativePath(input, descriptor.filename)
-    || field.validation === 'safe-url' && !validUrl(input, 'http')
-    || field.validation === 'optional-https-url' && !validUrl(input, 'https')
-    || field.validation === 'optional-websocket-url' && !validUrl(input, 'websocket')
-    || field.validation === 'loopback-http-url' && !validUrl(input, 'loopback')) {
-    requestError(400, 'invalid_configuration');
-  }
-  if (field.id === 'consoleHost' && input !== 'localhost' && isIP(input) === 0) {
+    || field.validation === 'optional-path' && !validNormalizedPath(input)
+    || field.validation === 'loopback-http-url' && !validLoopbackUrl(input)) {
     requestError(400, 'invalid_configuration');
   }
   return input;
 }
-
-const orderedPairs = [
-  ['social.activeCheckMinMs', 'social.activeCheckMaxMs'],
-  ['social.activeReplyDelayMinMs', 'social.activeReplyDelayMaxMs'],
-  ['social.activeDurationMinMs', 'social.activeDurationMaxMs'],
-  ['social.proactiveCheckMinMs', 'social.proactiveCheckMaxMs'],
-  ['social.burstIntervalMinMs', 'social.burstIntervalMaxMs'],
-  ['social.longGapMinMs', 'social.longGapMaxMs'],
-  ['socialV2.wake.recommendedSleepMinMs', 'socialV2.wake.recommendedSleepMaxMs'],
-  ['socialV2.send.burstIntervalMinMs', 'socialV2.send.burstIntervalMaxMs'],
-  ['socialV2.send.longGapMinMs', 'socialV2.send.longGapMaxMs'],
-  ['socialV2.wait.minMs', 'socialV2.wait.maxMs'],
-  ['socialV2.proactive.checkIntervalMinMs', 'socialV2.proactive.checkIntervalMaxMs']
-] as const;
 
 function validateRelations(source: ConfigurationSource, configuration: Record<string, unknown>): void {
   if (source === 'gateway') {
@@ -447,48 +342,6 @@ function validateRelations(source: ConfigurationSource, configuration: Record<st
       }
       const upstreamPort = upstream.port === '' ? 80 : Number(upstream.port);
       if (port === upstreamPort) requestError(400, 'invalid_configuration');
-    }
-    return;
-  }
-  if (source !== 'bridge') return;
-  for (const [lowerPath, upperPath] of orderedPairs) {
-    const lower = ownValue(configuration, lowerPath.split('.'));
-    const upper = ownValue(configuration, upperPath.split('.'));
-    if (typeof lower === 'number' && typeof upper === 'number' && lower > upper) {
-      requestError(400, 'invalid_configuration');
-    }
-  }
-  const waitDefault = ownValue(configuration, ['socialV2', 'wait', 'defaultMs']);
-  const waitMin = ownValue(configuration, ['socialV2', 'wait', 'minMs']);
-  const waitMax = ownValue(configuration, ['socialV2', 'wait', 'maxMs']);
-  if (typeof waitDefault === 'number' && typeof waitMin === 'number' && waitDefault < waitMin
-    || typeof waitDefault === 'number' && typeof waitMax === 'number' && waitDefault > waitMax) {
-    requestError(400, 'invalid_configuration');
-  }
-  const sleepMin = ownValue(configuration, ['socialV2', 'wake', 'sleepMinMs']);
-  const sleepMax = ownValue(configuration, ['socialV2', 'wake', 'sleepMaxMs']);
-  if (typeof sleepMin === 'number' && typeof sleepMax === 'number' && sleepMax !== 0 && sleepMin > sleepMax) {
-    requestError(400, 'invalid_configuration');
-  }
-  const voiceDirectory = ownValue(configuration, ['socialV2', 'voice', 'dir']);
-  const allowAbsolute = ownValue(configuration, ['socialV2', 'voice', 'allowAbsolutePath']);
-  if (typeof voiceDirectory === 'string' && voiceDirectory !== ''
-    && (isAbsolute(voiceDirectory) || win32.isAbsolute(voiceDirectory)) && allowAbsolute !== true) {
-    requestError(400, 'invalid_configuration');
-  }
-  const dshBaseUrl = ownValue(configuration, ['dsh', 'baseUrl']);
-  const dshAuthToken = ownValue(configuration, ['dsh', 'authToken']);
-  const dshAllowRemote = ownValue(configuration, ['dsh', 'allowRemote']);
-  if (typeof dshBaseUrl === 'string') {
-    let url: URL;
-    try {
-      url = new URL(dshBaseUrl);
-    } catch {
-      requestError(400, 'invalid_configuration');
-    }
-    if (!loopbackHostname(url.hostname) && dshAllowRemote !== true
-      && !(typeof dshAuthToken === 'string' && dshAuthToken.length > 0)) {
-      requestError(400, 'invalid_configuration');
     }
   }
 }
@@ -610,19 +463,10 @@ function parseApplyRequest(
 function sourceDescriptors(options: ConfigurationRouteOptions): readonly SourceDescriptor[] {
   const gatewayConfigurationFilename = resolve(options.gatewayConfigurationFilename);
   const adminConfigurationFilename = resolve(options.adminConfigurationFilename);
-  const descriptors: SourceDescriptor[] = [];
-  if (options.legacyRoot !== undefined) {
-    descriptors.push({
-      source: 'bridge',
-      filename: resolve(options.legacyRoot, 'config.json'),
-      maxBytes: MAX_BRIDGE_CONFIGURATION_BYTES,
-      groups: configurationSchemaForSource('bridge')
-    });
-  }
-  descriptors.push({
+  const descriptors: SourceDescriptor[] = [{
     source: 'gateway', filename: gatewayConfigurationFilename, maxBytes: MAX_CONFIGURATION_BYTES,
-    groups: configurationSchemaForSource('gateway').filter(group => group.id !== 'gateway-targets' || options.legacyRoot === undefined)
-  });
+    groups: configurationSchemaForSource('gateway')
+  }];
   descriptors.push({
     source: 'admin', filename: adminConfigurationFilename, maxBytes: MAX_CONFIGURATION_BYTES,
     groups: configurationSchemaForSource('admin')
@@ -635,7 +479,6 @@ function sourceDescriptors(options: ConfigurationRouteOptions): readonly SourceD
 
 export function createConfigurationRoutes(options: ConfigurationRouteOptions): readonly AdminRoute[] {
   if (!isRecord(options)
-    || options.legacyRoot !== undefined && (typeof options.legacyRoot !== 'string' || options.legacyRoot.length === 0)
     || typeof options.gatewayConfigurationFilename !== 'string' || options.gatewayConfigurationFilename.length === 0
     || typeof options.adminConfigurationFilename !== 'string' || options.adminConfigurationFilename.length === 0
     || options.apply !== undefined && typeof options.apply !== 'function') {
@@ -680,7 +523,7 @@ export function createConfigurationRoutes(options: ConfigurationRouteOptions): r
               changed = deleteValue(configuration, definition.path) || changed;
               continue;
             }
-            const value = normalizeFieldValue(definition, input, request.descriptor);
+            const value = normalizeFieldValue(definition, input);
             const previous = ownValue(configuration, definition.path);
             if (valuesEqual(previous, value)) continue;
             setValue(configuration, definition.path, value);

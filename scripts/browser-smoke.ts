@@ -39,7 +39,7 @@ try {
   assert(sessionCookie.expires > Date.now() / 1000);
   assert.equal(await page.evaluate(value => JSON.stringify(localStorage).includes(value)
     || JSON.stringify(sessionStorage).includes(value) || document.cookie.includes(value), token), false);
-  assert.doesNotMatch(await page.locator('main').innerText(), /gateway-live|maxPending|messaging\.send|legacy-egress|JSON/);
+  assert.doesNotMatch(await page.locator('main').innerText(), /gateway-live|maxPending|messaging\.send|JSON/);
   const theme = page.getByRole('combobox', { name: '显示模式' });
   await theme.selectOption('light');
   await page.screenshot({ path: new URL('desktop-light.png', directory).pathname, fullPage: true, animations: 'disabled' });
@@ -81,15 +81,10 @@ try {
   await page.screenshot({ path: new URL('mobile-light.png', directory).pathname, fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: '切换侧栏', exact: true }).first().click();
   await page.getByRole('dialog').waitFor();
-  await page.route('**/api/legacy/roles', route => route.fulfill({
+  await page.route('**/api/chat/personas', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ roles: ['浏览器测试'], current: '浏览器测试' })
-  }));
-  await page.route('**/api/legacy/role?*', route => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify({ name: '浏览器测试', content: '原始人设正文', revision: 'a'.repeat(64) })
+    body: JSON.stringify({ revision: 'a'.repeat(64), personas: [{ id: 'browser-persona', name: '浏览器测试', identity: '测试角色的身份定义', style: '自然简洁' }] })
   }));
   await page.getByRole('button', { name: '人设与形象', exact: true }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
@@ -98,7 +93,7 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: new URL('mobile-dark.png', directory).pathname, fullPage: true, animations: 'disabled' });
 
-  const persona = page.getByRole('textbox', { name: '人设正文' });
+  const persona = page.getByRole('textbox', { name: '身份定义' });
   await persona.fill('尚未保存的人设正文');
   await page.getByRole('button', { name: '断开连接', exact: true }).click();
   await page.getByRole('heading', { name: '还有未保存的更改' }).waitFor();

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const root = new URL('../', import.meta.url);
@@ -8,6 +8,7 @@ if (argumentsList.some(argument => argument !== '--web') || argumentsList.filter
   throw new Error('Use node scripts/build.ts [--web].');
 }
 if (!argumentsList.includes('--web')) {
+  rmSync(new URL('dist/', root), { recursive: true, force: true });
   execFileSync(process.execPath, [fileURLToPath(new URL('node_modules/typescript/bin/tsc', root))],
     { cwd: fileURLToPath(root), stdio: 'inherit' });
 }

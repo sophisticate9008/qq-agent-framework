@@ -426,10 +426,26 @@ export function parseUsageSnapshot(value: unknown): UsageSnapshot | null {
 }
 
 const countFormatter = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 });
+const usageCountFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, useGrouping: false });
 const decimalFormatter = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
 
 export function formatActivityCount(value: number): string {
   return countFormatter.format(value);
+}
+
+export function formatUsageCount(value: number, detailed = false): string {
+  if (!Number.isFinite(value) || value < 0) throw new RangeError('Usage count must be finite and nonnegative.');
+  if (detailed || value < 1_000) return formatActivityCount(value);
+  const units = [
+    { divisor: 1_000, suffix: 'k' },
+    { divisor: 1_000_000, suffix: 'm' },
+    { divisor: 1_000_000_000, suffix: 'b' },
+  ];
+  for (const [index, unit] of units.entries()) {
+    const formatted = usageCountFormatter.format(value / unit.divisor);
+    if (Number(formatted) < 1_000 || index === units.length - 1) return `${formatted}${unit.suffix}`;
+  }
+  return formatActivityCount(value);
 }
 
 export function formatActivityCost(value: number, _currency: string, symbol: string): string {

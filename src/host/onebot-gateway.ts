@@ -89,7 +89,7 @@ export async function startOneBotGateway(configuration: Readonly<OneBotGatewayCo
     if (request.url === '/health') {
       const authorized = gatewayAuthorization(token, request.headers.authorization);
       response.writeHead(!authorized ? 401 : gateway ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-      response.end(JSON.stringify(authorized ? { ok: Boolean(gateway), mode: 'legacy-egress-compatibility',
+      response.end(JSON.stringify(authorized ? { ok: Boolean(gateway), mode: 'onebot-egress',
         revision, pid: process.pid, metrics: gateway?.metrics() ?? null } : { ok: false }));
       return;
     }

@@ -190,6 +190,15 @@ test('loads only private explicit configuration and formats reachable addresses'
     host: '127.0.0.1',
     port: 3210,
     tokenFile: './admin.token',
+    gatewayConfiguration: './gateway.json',
+    legacyRoot: '/root/qq-bridge'
+  }));
+  assert.throws(() => loadGatewayAdminConfiguration(files.adminConfiguration), { code: 'GATEWAY_ADMIN_INVALID_CONFIG' });
+
+  writePrivate(files.adminConfiguration, JSON.stringify({
+    host: '127.0.0.1',
+    port: 3210,
+    tokenFile: './admin.token',
     gatewayConfiguration: './gateway.json'
   }));
   chmodSync(files.adminToken, 0o640);
@@ -221,6 +230,7 @@ test('binds 0.0.0.0 and serves an authenticated real read-only gateway snapshot'
   assert.equal(health.ok, true);
   assert.equal(health.mode, 'gateway-live');
   assert.equal(health.revision, service.revision);
+  assert.equal(health.gatewayMode, 'onebot-egress');
 
   const firstResponse = await fetch(`${origin}/api/snapshot`, { headers });
   assert.equal(firstResponse.status, 200);
@@ -247,13 +257,29 @@ test('binds 0.0.0.0 and serves an authenticated real read-only gateway snapshot'
   assert(Array.isArray(policy.grants));
   assert.equal(parseObject(policy.grants[0]).sendRemaining, '未设置日常次数限制');
   assert.equal(parseObject(second.context).session, undefined);
-  assert.equal(parseObject(second.integrations).chatManagement, false);
+  assert.deepEqual(second.integrations, { nativeRuntimeResources: true, nativeChatRuntime: false });
   assert.equal(parseObject(parseObject(second.context).provenance).agentRuntime, 'not-connected');
+  assert.equal(parseObject(parseObject(second.context).configuration).gatewayMode, 'onebot-egress');
   assert.match(secondText, /current-gateway-process-only/);
-  assert.match(secondText, /bypasses-this-gateway/);
+  assert.doesNotMatch(secondText, /legacy|qq-bridge|bypasses-this-gateway/i);
   for (const secret of [ADMIN_TOKEN, GATEWAY_TOKEN, UPSTREAM_SECRET, files.adminToken, files.gatewayToken, files.storeFilename]) {
     assert(!secondText.includes(secret));
   }
+
+  const nativeFeatures = await fetch(`${origin}/api/chat/features`, { headers });
+  assert.equal(nativeFeatures.status, 200);
+  assert.deepEqual(parseObject(await nativeFeatures.json()), {
+    runtimeConnected: false,
+    editableResources: true,
+    capabilities: [
+      { id: 'chat-plans', installed: false },
+      { id: 'personas', installed: false },
+      { id: 'model-settings', installed: false },
+      { id: 'access-policy', installed: false }
+    ],
+    features: []
+  });
+  assert.equal(existsSync(join(files.directory, 'runtime')), true);
 
   const postHeaders = {
     ...headers,

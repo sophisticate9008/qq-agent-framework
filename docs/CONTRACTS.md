@@ -203,25 +203,21 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 
 已有成熟 DSH SDK 时，先用 `createDshSdkPort({ client, subscribe, createSessionRequest?, cancel? })` 桥接其 sessions、事件订阅和 mux 边界，再把返回 port 交给 `createDshAdapter`；该组合不重新实现底层客户端。
 
+需要直接网络接入时可使用 `createDshJsonRpcPort`。它只连接显式端点，使用有限请求/跟随、明确认证和未知结果语义，不发现其他项目配置。当前 DSH 网络协议不支持直接覆盖 system 指令：必须有完整匹配的可信部署 preset 绑定，否则在联网前拒绝；不把人设和指令偷渡成用户消息。该 port 不代表 CLI 已装配聊天宿主，限制与部署副作用见 [DSH 网络适配器](DSH_ADAPTER.md)。
+
 需要统一限速时，可把 transport 包装为 `createThrottledTransport({ transport, minIntervalMs?, maxPending? })`；它提供有限全局 FIFO 与协作停机，队列溢出、排队取消和停机取消返回 `rejected`，`unknown` 不会自动重试。
 
-### 旧 OneBot HTTP egress 兼容服务
+### OneBot HTTP 出站服务
 
 `createOneBotCompatGateway({ store, upstreamEndpoint, upstreamToken?, token, allowedConversations, persona, authorizationVersion?, fetch?, timeoutMs?, maxPending?, maxBodyBytes?, maxSendUses?, grantTtlMs? })` 返回 `{ handle, metrics, close }`。`handle` 只接受认证后的固定 OneBot HTTP read/write action；有目标的请求必须命中 `allowedConversations`。写入保存命令、params、状态与响应，使用 durable outbox；中断或无法确认的结果为 `unknown`，不自动重试。显式 `X-Idempotency-Key` 只能复用于完全相同的 action、target、params 与 persona；未提供时每次请求使用新 key。
 
 写入 params 原样转发，显式 reply/mention/media segment 不由兼容层改写。普通写入校验 `messaging.send` grant，forward 还校验 `messaging.forward`。默认不添加日常服务次数和到期限制；限额与有效期可显式配置。grant 身份包含 persona、conversation 与 `authorizationVersion`：同版本重启沿用已有计数和期限；只有 operator 显式改变版本才创建新代 grant并撤销旧代。修改限额但不改版本会冲突而不是隐式续期。
 
-`loadOneBotGatewayConfiguration` 只读取权限私有、非 symlink 的有限 JSON 文件；token 从独立私有文件读取。`startOneBotGateway` 仅监听 loopback，使用私有 SQLite，提供 Bearer 认证的 `/health`；`scripts/onebot-gateway.ts --health` 还校验配置 revision。该服务只代理旧 HTTP egress，不接管旧 OneBot WS、DSH session 或插件。完整 action、配置、接入与回退合同见 [旧 OneBot HTTP 出站兼容网关](LEGACY_GATEWAY.md)。
+`loadOneBotGatewayConfiguration` 只读取权限私有、非 symlink 的有限 JSON 文件；token 从独立私有文件读取。`startOneBotGateway` 仅监听 loopback，使用私有 SQLite，提供 Bearer 认证的 `/health`；`scripts/onebot-gateway.ts --health` 还校验配置 revision。该服务处理标准 OneBot HTTP action，不依赖其他桥接项目；它不是聊天 ingress 或 agent session 宿主。完整 action 与配置见 [OneBot 网关](ONEBOT_GATEWAY.md)。
 
-### 图片生成与自我表达服务
+### 业务扩展边界
 
-`createImageGenerationAdapter({ endpoint, authentication, publishImage, resolveWorkerReference?, fetch?, timeoutMs?, pollIntervalMs?, maxConcurrent?, maxPending?, maxImageBytes? })` 提供 `generate(input, context)` 与 `metrics()`。input 支持无 reference 的 `generate`，或使用 1–4 个受控 reference asset 的 `edit`；context 必须包含 conversation、可信 `OutboundScope`、幂等键和取消信号。job id 由 conversation 与幂等键稳定生成。worker dispatch 后的超时/网络异常以及发布结果不确定均为 `unknown`，不得自动重新提交。`publishImage` 必须返回受控 assetId；adapter 不直接发送消息。
-
-`createImageGenerationEffect(adapter)` 只把 effect 的可信 scope 和稳定请求指纹接入 adapter，不创建权限，也不判断 owner 或普通群友。会话被 transport allowlist 允许，不等于获得通用画图 capability；业务来源授权必须由 composition 单独提供。
-
-`createSelfExpressionService({ imagePack, generate, check, discard, chooseHistory, random?, timeoutMs?, maxPending?, maxHistoryCandidates? })` 编排最多两次候选生成/检查，并可回退到相同 image-pack 版本、相同 conversation/persona、候选已声明的 session/generation 也匹配且已批准的历史 asset。它返回 selected/none，不发送消息；callback 的 rejected/unknown 保持显式。`createSelfExpressionEffect(service)` 只接入可信 persona/conversation/session/generation scope。
-
-自我表达服务不读取聊天上下文、不验证真实 source message、不识别自拍语境、不自带 identity manifest，也不代表候选已在线上复检。真实自拍业务仍需 composition 提供身份资源、语境与来源授权、生成、检查、丢弃、历史、发布和发送 callback。
+框架不预设生图接口、服务商、技能或专用配置项。开发者或 AI 按实际使用方式编写独立功能包，通过现有 `FeatureDefinition`、`EffectAdapter`、资源和 policy 机制接入；新增能力不要求修改核心协议。具体生成、检查与回退流程由功能包自行实现，不作为框架契约。允许会话收发消息不等于授予其他副作用权限。
 
 ### 管理路由
 
@@ -229,58 +225,13 @@ OneBot 默认不启用 forward。operator 必须显式配置 `forward: { senderI
 
 `createHostAdminRoutes(host)` 提供只读 metrics、storage、sessions、tasks、outbox 和 replies 路由。集合列表使用 `limit`（默认 100，最大 1000）与可选 `after`，返回 `{ items, next }`；只暴露现有管理元数据，不返回消息正文，也不提供授权或其他写操作。`GET /api/host/storage` 返回 store.stats 的统计形状；存储未实现 stats 时为 null。它不会清理过期记录、删除 unknown、对账或重试。replies 项仅包含 id、会话/session、generation、request id、期限、状态、更新时间和 cursor。
 
-显式接入聊天后端的 `createLegacyAdminRoutes({ legacyRoot, fetch?, timeoutMs?, beforeAccessSave? })` 使用固定回环管理端点，不接受浏览器提供上游地址或凭据。用量接口均受管理认证保护，查询参数拒绝重复键和未知键，响应按白名单解析，不返回账本文件路径或凭据：
+原生管理资源通过 createNativeRuntimeRoutes({ directory }) 提供，使用框架自己的私有文档和 revision 条件写入，不读取其他项目目录或代理控制台。
 
-| 路由 | 查询 / 请求体 | 响应范围 |
-| --- | --- | --- |
-| `GET /api/legacy/usage` | `limit=200`，1–500 | 全局累计、会话汇总、revision、可选价目与账本统计；最多 2 MiB。 |
-| `GET /api/legacy/usage/series` | `hours=24`，1–2160；`buckets=48`，6–120 | 实际时间桶、窗口总量与图外历史；最多 1 MiB。buckets 是桶数上限，不保证恰好返回该数量。 |
-| `GET /api/legacy/usage/turns` | 必填 `key`；`limit=200`，1–1000 | 指定会话的累计与可追溯轮次；最多 4 MiB。无对应会话返回 404。 |
-| `GET /api/legacy/usage/recent` | `limit=40`，1–500 | 保留的最近调用样本；最多 2 MiB。 |
-| `POST /api/legacy/usage/reset` | `{ revision, confirm: '清空用量账本' }` | 发起前版本预检；受理后返回 `{ ok: true, resetAccepted: true }`。 |
+- GET/POST /api/chat/plans：方案目录与 activePlanId；方案包含名称、行为指令、模型路由及人设引用。
+- GET/POST /api/chat/personas：独立身份和表达风格。
+- GET/POST /api/chat/model：当前方案的模型路由，不建立第二份模型配置真源。
+- GET/POST /api/chat/access：独立允许、拒绝与所有者策略；默认拒绝。
+- GET /api/chat/status 与 /api/chat/features：报告原生宿主实际装配状态；源码中导出能力不等于 installed。
+- 没有原生宿主时，会话/用量返回 runtime_not_connected，不代理第三方桥接项目，也不以零值表示成功。
 
-summary 缺少整块价目或账本元数据时，`unavailable` 标明 `pricing` / `ledger`，不补造配置；部分提供但不合法的块拒绝。`revision` 覆盖全局累计、价目配置和可用账本统计，不包含分页列表、生成时间或当前价档。累计投影与保留样本不一定可加和，不能要求逐轮已归属费用与仅累计历史之和恰好等于权威累计。所有费用均为价目表估算，不是平台账单。reset 预检不能提供跨进程原子删除保证，预检后的并发记录仍可能被清空；冲突不调用清空，写入结果不明返回 `usage_reset_unknown`，不自动重试。受理不证明旧后端文件持久截断成功。
-
-`startGatewayAdmin(configuration)` 提供真实 HTTP 网关的管理 UI。私有配置的 `host`、`port`、`tokenFile`、`gatewayConfiguration` 分别控制监听、独立认证和数据源。它通过精确 revision 的 authenticated gateway health 与只读 get_status 获取状态，不打开生产 SQLite、不创建演示会话，不提供消息发送或授权创建操作；配置管理和可选聊天后端管理通过受控路由接入。UI 使用同源相对 API，管理员凭据只用于登录，访问会话由有限有效期的 HttpOnly cookie 保持，退出撤销；正式网关模式隐藏演示控件。监听非回环地址必须由部署方显式配置，HTTP 不提供链路加密。初始化、令牌与各管理操作的边界见 [管理界面教程](GATEWAY_ADMIN.md)。
-
-### Bridge host
-
-`createBridgeHost({ store, agent, transport, context, persona, authorizeIncoming, routeIncoming?, agentMessagePreparation?, model?, observer?, eventValidators?, effectAdapters?, clock?, taskTickMs?, maxConcurrentSends?, eventTimeoutMs?, timeouts?, replyTimeoutMs?, replyTimeoutNotice?, selectAgentMessage?, onFault? })` 组装持久 policy、功能状态、会话、出站、任务、首回复监视和会话历史，并安装内置 `agent-relay` 功能。
-
-扩展只由可信装配根注入。eventValidators 必须同步严格返回 true；effect adapter 通过执行 SDK 受 capability/policy 约束，model 仍需 model.respond 授权。禁止覆盖内置 message.received/trigger.fired、messaging.send/messaging.forward/model.respond，以及全部 agent.* 事件或 capability；重复名称不是替换机制。observer 接收脱敏 AuditRecord，其异常被隔离，不是 veto 或授权回调。注册表不能通过普通消息或模型输出修改。
-
-返回对象公开 `engine`、`policy`、`sessions`、`outbox`、`tasks`、`history`、`replies`，以及：
-
-- `receive(message)`：接收协议层已认证、规范化的 `InboundMessage`，先执行 `authorizeIncoming`，再持久去重并投递。
-- `start()`：恢复中断状态、已有 session follow 和到期任务；整体超时会正常返回并把启动状态标为 `degraded`。
-- `metrics()`：返回轻量宿主与引擎计数，包括 `startupState`、超时次数和最后故障码。
-- `storageStats(options?)`：转交可选 store.stats，未提供时返回 null，只读。
-- `stop()`：停止新工作、取消 follow 并排空任务和引擎副作用。
-
-宿主不会自动创建 grant。转发一个会话前，操作者必须显式给 `agent-relay` 授予该会话的 `agent.submit` 与 `messaging.send` 有限预算。只有定向且非自身的入站消息会提交给 agent；prompt 必须返回 `accepted`。agent 事件先以稳定映射、单调序号和 `deadlineAt` 持久登记，再进入同 TTL 的任务；旧 session/generation、重复事件或排队期间已过期事件不会发送。
-
-配置 routeIncoming 时，入站先通过 authorizeIncoming，再同步路由，成功后才写历史并广播一次 message.received；路由异常则拒绝，不能把 Promise 当作命中。内置 relay 还要求 routing.relayToAgent 为 true；未配置路由则保留既有 directed/isSelf 行为。agent 输出包含 forward 时还需单独授予 agent-relay 的 messaging.forward。
-
-`createMessageRouter({ rules, defaultRoute })` 接受最多 256 条 `{ id, priority, route, relayToAgent, selector }` 同步规则，id 唯一、priority 为安全整数，值越大优先。selector 只接收脱离原对象的冻结规范消息并严格返回 boolean。最高匹配优先级多命中返回 ROUTING_CONFLICT，selector 抛错/异步或非 boolean 也拒绝；未命中用显式 defaultRoute，不依赖功能安装顺序。决策仅含冻结的 `{ route, ruleId, relayToAgent, reasonCode }`，reasonCode 为 ROUTING_RULE_MATCHED 或 ROUTING_DEFAULT，不带授权或正文。
-
-`withMessageRoute(feature, route)` 仅在 message.received 上按 event.data.routing.route 过滤该功能的处理器，其他订阅照常执行；未包装的旁观者仍收到广播。它不让事件变为单播，也不保证多个绑定同一 route 的响应功能互斥。createRoutedMessageEvent 与 routedMessageRelaysToAgent 为可信 host 的纯辅助件，不能把普通入站自报的 routing 当成授权。NLU/模型意图识别由上层提供规则或数据，不内置于路由器。
-
-`message` 事件可以进入受 policy 约束的持久出站；`question` 和 `approval` 仅作为事件记录，不会自动回答问题或批准工具。启动恢复把遗留 `processing` 入站、`running` 任务和未决发送标为 `unknown`，不会自动重放。
-
-`selectAgentMessage(event, binding)` 是可选同步挂载点，可根据包含原始 `data` 的 `AgentEvent` 返回待发送 `MessageContent[]`，或返回 `null` 跳过出站且不消耗发送预算；未配置时普通 message 按默认 relay。框架不假定每个 `assistant/message` 都表示 turn 完成或都适合公开发送，operator 应按所接 SDK 的事件语义显式过滤内部工作文本，而不是依赖内置人格或工具隐藏规则。
-
-`agentMessagePreparation` 是另一个可选挂载点：`{ capabilities: readonly string[], prepare(execution, event) }`。额外 capability 列表最多 32 项且不可重复，合并到内置 agent-relay manifest，但不会创建 grant。prepare 在引擎的 agent.message 处理器内执行，可同步或异步返回规范内容或 null；null 不发送、不消耗发送预算，也不产生 confirmed 首回复。返回内容仍走原有 execution.send、policy 与持久 outbox；异常不会偷偷退回原消息发送。
-
-hook 的 execution 只含 `context`、`signal`、`invoke`、`generate`，没有 send、state 或 store 句柄。通过 invoke('presentation.prepare', …) 或 generate 调用的准备/选择工作仍受各自 capability 声明及授权约束；没有额外授权不会启动相应 renderer/model。可信 hook 应使用这些受控入口，不在闭包中绕开 policy 直调渲染器。只有配置 hook 时，原 AgentEvent.data 才随 message 进入 event.data.agentData（缺失时为空对象）；它是待校验的 metadata，不是权限或自动可公开内容。框架不内置 Markdown、DSH 字段规则或 NLU；未配置 hook 时保留原 relay，配置后可对普通格式原样返回 event.data.content。最小接线见 [文档表达](PRESENTATION.md)。
-
-`timeouts` 的 `createSessionMs`、`followMs`、`submitMs`、`sendMs`、`authorizeMs`、`startMs` 均允许 10–300000 毫秒，默认依次为 10 秒、10 秒、10 秒、10 秒、3 秒和 15 秒。授权超时返回 `rejected / INBOUND_AUTH_TIMEOUT` 且不写历史；真实未结 authorization promise 最多保留 256 个，超时不释放其占用，满载时新入站快速返回 `rejected / INBOUND_BACKPRESSURE`，实际 callback settle 后才释放，当前数量见 `metrics.unsettledAuthorizations`。create/follow 未决采用保守 `unknown`，submit 返回 `unknown`，send 持久记录为 `unknown`，这些结果都不会自动重试。迟到的 follow setup 会执行 disposer，迟到 frame 会被过滤。
-
-宿主 bounded agent 与 transport 默认各最多保留 16 个尚未结束的底层 promise。期限到达只让上层有限返回，不代表底层已结束；迟到 promise 继续占用该上限，满载后新调用快速返回保守背压结果，而不是继续无界堆积。
-
-agent prompt 返回 `accepted` 后，宿主默认等待 30 秒内出现该会话首条 confirmed assistant 消息；`replyTimeoutMs` 可在 10–300000 毫秒内调整。等待记录持久化，更多入站不会延长当前期限，启动会恢复仍在等待的 timer，正常 confirmed 回复会清除它。超时只把记录标为 `timed-out`，增加 metrics 并上报 `AGENT_REPLY_TIMEOUT`；不会取消或重新提交 agent 工作。
-
-`replyTimeoutNotice` 默认是中性状态说明，可改为有界字符串或 `null`。非空时，独立 watchdog 通过 `agent.reply-timeout` 和既有 `agent-relay / messaging.send` 授权尝试发送一次，不绕过撤销或预算，也不把超时表述为任务完成或失败。等待状态为 `waiting`、`responded`、`timed-out` 或 `responded-late`。当前 agent message 不携带原 prompt request id，因此 `responded-late` 只表示活动会话在超时后出现 confirmed assistant 消息，不能可靠归因所有迟到远程任务已经完成；该消息仍按普通 agent 消息处理。
-
-上述实现尚需针对具体 QQ 网关、DSH client、持久目录和故障场景做集成验收；公共接口存在不代表生产部署已经通过。
-
-候选 release 的分阶段激活/失败回滚、业务状态 schema 迁移、可关联和恢复的长 job 控制面，以及跨任务/出站/资源的 retention 与容量治理仍不完整。只读 stats、calendar occurrence TTL 或准备文档图片，均不能代替这些能力的端到端验收。
+保存方案不等于外部 DSH 部署或已有会话已更新；工具权限与偏好不进入人设。CAS 冲突、写入未知和未装配应分别处理，不自动重试。

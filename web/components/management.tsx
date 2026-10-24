@@ -9,8 +9,9 @@ export function PageHeading({ title, description, actions }: { title: string; de
   return <div className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="page-title">{title}</h1><p className="page-description">{description}</p></div>{actions && <div className="flex items-center gap-2">{actions}</div>}</div>;
 }
 
-export function Section({ id, title, description, children, footer, actions, className }: { id?: string; title: string; description?: string; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; className?: string }) {
-  return <section id={id} className={cn('panel', className)}><div className="panel-header"><div><h2 className="panel-title">{title}</h2>{description && <p className="panel-description">{description}</p>}</div>{actions}</div><div className="panel-body">{children}</div>{footer && <div className="panel-footer">{footer}</div>}</section>;
+export function Section({ id, title, description, children, footer, actions, className, scrollable = false, height = 'md' }: { id?: string; title: string; description?: string; children?: ReactNode; footer?: ReactNode; actions?: ReactNode; className?: string; scrollable?: boolean; height?: 'sm' | 'md' | 'lg' }) {
+  const contentHeight = height === 'sm' ? 'h-64' : height === 'lg' ? 'h-[32rem]' : 'h-96';
+  return <section id={id} className={cn('panel min-w-0', className)}><div className="panel-header flex-wrap"><div className="min-w-0 flex-1 basis-40 break-words"><h2 className="panel-title">{title}</h2>{description && <p className="panel-description">{description}</p>}</div>{actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}</div><div data-bounded-card={scrollable ? height : undefined} className={cn('panel-body', scrollable && `${contentHeight} min-h-0 overflow-auto overscroll-contain`)}>{children}</div>{footer && <div className="panel-footer">{footer}</div>}</section>;
 }
 
 export function Field({ label, description, error, children, className }: { label: string; description?: string; error?: string; children: ReactNode; className?: string }) {
@@ -39,5 +40,5 @@ export function SaveBar({ dirty, saving, message, onSave, onReset, label = '‰øùÂ
 }
 
 export function StatusPill({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'success' | 'warning' | 'neutral' }) {
-  return <span className={cn('inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium', tone === 'success' ? 'status-success' : tone === 'warning' ? 'status-warning' : 'bg-muted text-muted-foreground')}><span className="size-1.5 rounded-full bg-current" />{children}</span>;
+  return <span className={cn('inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium whitespace-nowrap', tone === 'success' ? 'status-success' : tone === 'warning' ? 'status-warning' : 'bg-muted text-muted-foreground')}><span className="size-1.5 rounded-full bg-current" />{children}</span>;
 }

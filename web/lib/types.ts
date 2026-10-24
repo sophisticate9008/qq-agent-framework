@@ -1,6 +1,6 @@
 import type { ApiClient } from './api.ts';
 
-export type PageId = 'overview' | 'persona' | 'features' | 'access' | 'model' | 'settings' | 'sessions' | 'usage';
+export type PageId = 'overview' | 'persona' | 'features' | 'access' | 'model' | 'settings' | 'sessions' | 'usage' | 'adapters';
 
 export interface PageProps {
   readonly connected: boolean;

@@ -21,6 +21,7 @@ import { ModelPage } from './pages/model.tsx';
 import { SettingsPage } from './pages/settings.tsx';
 import { SessionsPage } from './pages/sessions.tsx';
 import { UsagePage } from './pages/usage.tsx';
+import { AdaptersPage } from './pages/adapters.tsx';
 
 const pages = [
   { id: 'overview', label: '概览', icon: LayoutDashboard, description: '伙伴的运行近况和常用入口' },
@@ -29,7 +30,8 @@ const pages = [
   { id: 'persona', label: '人设与形象', icon: UserRound, description: '管理伙伴的人设、表达和固定形象' },
   { id: 'features', label: '功能与触发', icon: Sparkles, description: '管理能力、触发条件与表达方式' },
   { id: 'access', label: '访问范围', icon: ShieldCheck, description: '设置可对话的群、好友与管理员' },
-  { id: 'model', label: '模型与回复', icon: Bot, description: '调整思考强度和聊天行为' },
+  { id: 'model', label: '聊天方案', icon: Bot, description: '管理模型、行为指令与关联人设' },
+  { id: 'adapters', label: '适配器', icon: Waves, description: '接入 QQ 协议、DSH 与外部服务' },
   { id: 'settings', label: '运行设置', icon: Settings2, description: '管理预算、连接与服务参数' },
 ] as const;
 
@@ -44,7 +46,7 @@ function routeFromLocation(): PageId {
 }
 
 const pageComponents: Readonly<Record<PageId, ComponentType<PageProps>>> = {
-  overview: OverviewPage, persona: PersonaPage, features: FeaturesPage, access: AccessPage, model: ModelPage, settings: SettingsPage,
+  overview: OverviewPage, persona: PersonaPage, features: FeaturesPage, access: AccessPage, model: ModelPage, settings: SettingsPage, adapters: AdaptersPage,
   sessions: SessionsPage, usage: UsagePage,
 };
 

@@ -34,7 +34,7 @@ try {
     console.log('Framework compatibility gateway ready.');
   } else {
     const service = await startOneBotGateway(configuration);
-    console.log(`Framework legacy-egress compatibility gateway listening on 127.0.0.1:${service.address.port}.`);
+    console.log(`Framework OneBot gateway listening on 127.0.0.1:${service.address.port}.`);
     let closing = false;
     const stop = () => {
       if (closing) return;

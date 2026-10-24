@@ -2,7 +2,7 @@
 
 ## Relationship to qq-bridge
 
-QQ Agent Framework is an independent TypeScript rebuild informed by the requirements, interfaces, operational lessons, and failure modes of the open source project [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge). It also contains compatibility and migration work intended for existing qq-bridge deployments.
+QQ Agent Framework is an independent TypeScript rebuild informed by the requirements, interfaces, operational lessons, and failure modes of the open source project [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge). This attribution does not imply a runtime dependency on that project.
 
 This repository is not an official release, successor, or Git fork of qq-bridge, and it is not endorsed by the qq-bridge authors. It does not claim that the referenced design and operational work is wholly original to this repository. Where qq-bridge material is adapted or redistributed, the following upstream copyright and MIT license apply.
 

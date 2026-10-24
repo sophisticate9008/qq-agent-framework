@@ -33,6 +33,7 @@ agent / transport / 其他 effect adapter
 | 渲染 | `createMarkdownRenderer` / `createRenderedAssetPublisher` | 离线 PNG 与可选受控本地发布，不直接发送 |
 | QQ | `createOneBotTransport` / `createOneBotReceiver` | OneBot HTTP 消息块转换、HMAC 入站和回执映射 |
 | agent | `createDshAdapter` | 注入 client port，创建/提交/跟随/取消并规范化事件 |
+| DSH 网络 | `createDshJsonRpcPort` | 显式端点与认证、有限网络请求/跟随，不发现其他桥接项目；指令需可信 preset 绑定 |
 | 宿主 | `createBridgeHost` | 入站授权、agent relay、持久去重、follow 恢复和停机排空 |
 
 这些模块提供装配基础，不代表任意 OneBot 或 DSH 部署已经兼容。端点、事件版本、网关限速和恢复行为仍需对目标环境集成测试。

@@ -1,0 +1,213 @@
+import { isIP } from 'node:net'
+
+export interface NativeAdapterConfiguration {
+  readonly onebotHttp: {
+    readonly enabled: boolean
+    readonly endpoint: string
+    readonly secret: string
+  }
+  readonly dshAgent: {
+    readonly enabled: boolean
+    readonly endpoint: string
+    readonly auth: string
+  }
+  readonly onebotWebhook: {
+    readonly enabled: boolean
+    readonly host: string
+    readonly port: number
+    readonly selfId: string
+    readonly hmac: string
+  }
+}
+
+export interface PublicAdapterConfiguration {
+  readonly onebotHttp: {
+    readonly enabled: boolean
+    readonly endpoint: string
+    readonly secretConfigured: boolean
+  }
+  readonly dshAgent: {
+    readonly enabled: boolean
+    readonly endpoint: string
+    readonly authConfigured: boolean
+  }
+  readonly onebotWebhook: {
+    readonly enabled: boolean
+    readonly host: string
+    readonly port: number
+    readonly selfId: string
+    readonly hmacConfigured: boolean
+  }
+}
+
+export interface AdapterRuntimePort {
+  status(): { readonly running: boolean } | Promise<{ readonly running: boolean }>
+}
+
+const ADAPTER_IDS = ['onebotHttp', 'dshAgent', 'onebotWebhook'] as const
+const MAX_ENDPOINT_LENGTH = 2_048
+const MAX_CREDENTIAL_LENGTH = 4_096
+
+function invalid(): never {
+  throw new TypeError('Invalid adapter configuration')
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function keys(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
+  if (!record(value) || !required.every(key => Object.hasOwn(value, key))
+    || !Object.keys(value).every(key => required.includes(key) || optional.includes(key))) return invalid()
+  return value
+}
+
+function loopbackHost(value: string): boolean {
+  return value === 'localhost' || value === '::1'
+    || isIP(value) === 4 && value.startsWith('127.')
+}
+
+export function validateAdapterEndpoint(value: unknown): string {
+  if (typeof value !== 'string' || value.length > MAX_ENDPOINT_LENGTH) return invalid()
+  if (value === '') return value
+  if (!/^https?:\/\//.test(value) || /[\u0000-\u0020\u007f\\?#]/.test(value)) return invalid()
+  const authority = value.slice(value.indexOf('://') + 3).split('/', 1)[0]
+  if (authority.includes('@')) return invalid()
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return invalid()
+  }
+  if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') return invalid()
+  if (url.protocol === 'http:') {
+    const match = /^(localhost|127(?:\.[0-9]{1,3}){3}|\[::1\])(?::[0-9]{1,5})?$/.exec(authority)
+    if (match === null || !loopbackHost(match[1] === '[::1]' ? '::1' : match[1])) return invalid()
+  } else if (url.protocol !== 'https:') {
+    return invalid()
+  }
+  return value
+}
+
+function credential(value: unknown): string {
+  if (typeof value !== 'string' || value.length > MAX_CREDENTIAL_LENGTH
+    || value !== '' && !/^[\x21-\x7e]+$/.test(value)) return invalid()
+  return value
+}
+
+function mergeCredential(current: string, value: Record<string, unknown>, key: string, clearKey: string): string {
+  const next = Object.hasOwn(value, key) ? credential(value[key]) : ''
+  if (Object.hasOwn(value, clearKey) && typeof value[clearKey] !== 'boolean') return invalid()
+  if (value[clearKey] === true) {
+    if (next !== '') return invalid()
+    return ''
+  }
+  return next === '' ? current : next
+}
+
+function outbound(value: unknown, secretKey: string): {
+  readonly enabled: boolean
+  readonly endpoint: string
+  readonly credential: string
+} {
+  const parsed = keys(value, ['enabled', 'endpoint', secretKey])
+  if (typeof parsed.enabled !== 'boolean') return invalid()
+  const endpoint = validateAdapterEndpoint(parsed.endpoint)
+  if (parsed.enabled && endpoint === '') return invalid()
+  return { enabled: parsed.enabled, endpoint, credential: credential(parsed[secretKey]) }
+}
+
+function webhook(value: unknown): NativeAdapterConfiguration['onebotWebhook'] {
+  const parsed = keys(value, ['enabled', 'host', 'port', 'selfId', 'hmac'])
+  if (typeof parsed.enabled !== 'boolean' || typeof parsed.host !== 'string' || !loopbackHost(parsed.host)
+    || typeof parsed.port !== 'number' || !Number.isSafeInteger(parsed.port)
+    || parsed.port < 0 || parsed.port > 65_535
+    || typeof parsed.selfId !== 'string'
+    || parsed.selfId !== '' && !/^[1-9][0-9]{0,31}$/.test(parsed.selfId)) return invalid()
+  const hmac = credential(parsed.hmac)
+  if (parsed.enabled && (parsed.port === 0 || parsed.selfId === '' || hmac === '')) return invalid()
+  return Object.freeze({
+    enabled: parsed.enabled, host: parsed.host, port: parsed.port, selfId: parsed.selfId, hmac
+  })
+}
+
+export function createDefaultAdapterConfiguration(): NativeAdapterConfiguration {
+  return Object.freeze({
+    onebotHttp: Object.freeze({ enabled: false, endpoint: '', secret: '' }),
+    dshAgent: Object.freeze({ enabled: false, endpoint: '', auth: '' }),
+    onebotWebhook: Object.freeze({ enabled: false, host: '127.0.0.1', port: 0, selfId: '', hmac: '' })
+  })
+}
+
+export function validateAdapterConfiguration(value: unknown): NativeAdapterConfiguration {
+  const parsed = keys(value, ADAPTER_IDS)
+  const onebotHttp = outbound(parsed.onebotHttp, 'secret')
+  const dshAgent = outbound(parsed.dshAgent, 'auth')
+  return Object.freeze({
+    onebotHttp: Object.freeze({
+      enabled: onebotHttp.enabled, endpoint: onebotHttp.endpoint, secret: onebotHttp.credential
+    }),
+    dshAgent: Object.freeze({ enabled: dshAgent.enabled, endpoint: dshAgent.endpoint, auth: dshAgent.credential }),
+    onebotWebhook: webhook(parsed.onebotWebhook)
+  })
+}
+
+function outboundPatch(
+  currentCredential: string,
+  value: unknown,
+  secretKey: string,
+  clearKey: string
+): Record<string, unknown> {
+  const parsed = keys(value, ['enabled', 'endpoint'], [secretKey, clearKey])
+  return {
+    enabled: parsed.enabled,
+    endpoint: parsed.endpoint,
+    [secretKey]: mergeCredential(currentCredential, parsed, secretKey, clearKey)
+  }
+}
+
+export function updateAdapterConfiguration(current: NativeAdapterConfiguration, patch: unknown): NativeAdapterConfiguration {
+  const previous = validateAdapterConfiguration(current)
+  const updates = keys(patch, [], ADAPTER_IDS)
+  if (Object.keys(updates).length === 0) return invalid()
+  let onebotWebhook: unknown = previous.onebotWebhook
+  if (Object.hasOwn(updates, 'onebotWebhook')) {
+    const parsed = keys(updates.onebotWebhook, ['enabled', 'host', 'port', 'selfId'], ['hmac', 'clearHmac'])
+    onebotWebhook = {
+      enabled: parsed.enabled, host: parsed.host, port: parsed.port, selfId: parsed.selfId,
+      hmac: mergeCredential(previous.onebotWebhook.hmac, parsed, 'hmac', 'clearHmac')
+    }
+  }
+  return validateAdapterConfiguration({
+    onebotHttp: Object.hasOwn(updates, 'onebotHttp')
+      ? outboundPatch(previous.onebotHttp.secret, updates.onebotHttp, 'secret', 'clearSecret')
+      : previous.onebotHttp,
+    dshAgent: Object.hasOwn(updates, 'dshAgent')
+      ? outboundPatch(previous.dshAgent.auth, updates.dshAgent, 'auth', 'clearAuth')
+      : previous.dshAgent,
+    onebotWebhook
+  })
+}
+
+export function publicAdapterConfiguration(value: NativeAdapterConfiguration): PublicAdapterConfiguration {
+  const configuration = validateAdapterConfiguration(value)
+  return Object.freeze({
+    onebotHttp: Object.freeze({
+      enabled: configuration.onebotHttp.enabled,
+      endpoint: configuration.onebotHttp.endpoint,
+      secretConfigured: configuration.onebotHttp.secret !== ''
+    }),
+    dshAgent: Object.freeze({
+      enabled: configuration.dshAgent.enabled,
+      endpoint: configuration.dshAgent.endpoint,
+      authConfigured: configuration.dshAgent.auth !== ''
+    }),
+    onebotWebhook: Object.freeze({
+      enabled: configuration.onebotWebhook.enabled,
+      host: configuration.onebotWebhook.host,
+      port: configuration.onebotWebhook.port,
+      selfId: configuration.onebotWebhook.selfId,
+      hmacConfigured: configuration.onebotWebhook.hmac !== ''
+    })
+  })
+}

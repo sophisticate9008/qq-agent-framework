@@ -19,7 +19,6 @@ import {
   startOneBotGateway,
   type OneBotGatewayConfiguration
 } from '../src/host/onebot-gateway.ts';
-import { prepareLegacyGateway } from '../src/integrations/legacy-gateway.ts';
 
 const PLAYWRIGHT_VERSION = '1.61.1';
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -41,7 +40,6 @@ export interface ParsedCliArguments {
   readonly help: boolean;
   readonly config?: string;
   readonly gatewayConfig?: string;
-  readonly legacyRoot?: string;
   readonly serviceManager?: string;
   readonly host?: string;
   readonly port?: number;
@@ -71,7 +69,6 @@ const GENERAL_HELP = `QQ Agent Framework 命令行
 
 用法：
   npm run cli -- init [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]
-  npm run cli -- init --bridge-dir /path/to/qq-bridge [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]
   npm run cli -- init --gateway-config <网关配置> [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]
   npm run cli -- start [--config <管理配置>] [--admin-only]
   npm run cli -- status [--config <管理配置>]
@@ -79,8 +76,7 @@ const GENERAL_HELP = `QQ Agent Framework 命令行
   npm run cli -- build
 
 配置优先级：--config > QQ_AGENT_CONFIG > runtime/admin/config.json
-init 默认创建独立的本机 OneBot HTTP 网关配置；不需要 qq-bridge，也不声明 DSH 已接入。
---bridge-dir 仅用于迁移已有 qq-bridge；--gateway-config 用于复用已严格校验的高级网关配置，两者互斥。
+init 默认创建独立的本机 OneBot HTTP 网关配置；--gateway-config 可复用已严格校验的高级网关配置。
 默认上游为 http://127.0.0.1:3000，网关监听 127.0.0.1:3131，管理端监听 127.0.0.1:3210。
 新配置不允许任何会话发送；请首次访问管理网页生成管理令牌，再显式配置外部 OneBot 和发送范围。
 只有显式提供 --service-manager 时才启用服务管理，不会自动猜测或执行脚本。
@@ -119,7 +115,7 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
       flags.add(argument);
       continue;
     }
-    if (['--config', '--gateway-config', '--bridge-dir', '--legacy-root', '--service-manager', '--host', '--port'].includes(argument)) {
+    if (['--config', '--gateway-config', '--service-manager', '--host', '--port'].includes(argument)) {
       if (values.has(argument)) usage(`参数 ${argument} 不能重复。`);
       values.set(argument, optionValue(argumentsList, index, argument));
       index += 1;
@@ -129,20 +125,12 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
   }
 
   const allowed = command === 'init'
-    ? new Set(['--config', '--gateway-config', '--bridge-dir', '--legacy-root', '--service-manager', '--host', '--port'])
+    ? new Set(['--config', '--gateway-config', '--service-manager', '--host', '--port'])
     : command === 'start' ? new Set(['--config', '--admin-only'])
       : command === 'status' ? new Set(['--config'])
       : command === 'test' ? new Set(['--browser', '--with-deps']) : new Set<string>();
   for (const option of [...values.keys(), ...flags]) {
     if (!allowed.has(option)) usage(`命令 ${command} 不支持参数 ${option}。`);
-  }
-  if (command === 'init') {
-    if (values.has('--bridge-dir') && values.has('--legacy-root')) {
-      usage('--bridge-dir 与兼容别名 --legacy-root 不能同时提供。');
-    }
-    const bridgeDirectory = values.has('--bridge-dir') || values.has('--legacy-root');
-    const sources = Number(values.has('--gateway-config')) + Number(bridgeDirectory);
-    if (sources > 1) usage('--bridge-dir 与 --gateway-config 互斥，不能同时提供。');
   }
   if (flags.has('--with-deps') && !flags.has('--browser')) usage('--with-deps 只能与 --browser 一起使用。');
   const portText = values.get('--port');
@@ -154,9 +142,6 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     help: false,
     ...(values.has('--config') ? { config: values.get('--config')! } : {}),
     ...(values.has('--gateway-config') ? { gatewayConfig: values.get('--gateway-config')! } : {}),
-    ...(values.has('--bridge-dir') || values.has('--legacy-root')
-      ? { legacyRoot: values.get('--bridge-dir') ?? values.get('--legacy-root')! }
-      : {}),
     ...(values.has('--service-manager') ? { serviceManager: values.get('--service-manager')! } : {}),
     ...(values.has('--host') ? { host: values.get('--host')! } : {}),
     ...(port === undefined ? {} : { port }),
@@ -244,7 +229,6 @@ function assertDistinctGatewayEndpoint(configuration: Readonly<OneBotGatewayConf
 function writeAdminConfiguration(options: {
   readonly filename: string;
   readonly gatewayConfiguration: string;
-  readonly legacyRoot?: string;
   readonly serviceManager?: string;
   readonly host?: string;
   readonly port?: number;
@@ -264,7 +248,6 @@ function writeAdminConfiguration(options: {
     port,
     tokenFile,
     gatewayConfiguration: options.gatewayConfiguration,
-    ...(options.legacyRoot === undefined ? {} : { legacyRoot: options.legacyRoot }),
     ...(options.serviceManager === undefined ? {} : { serviceManager: options.serviceManager })
   }, null, 2) + '\n', options.createdFiles);
   loadGatewayAdminConfiguration(options.filename);
@@ -286,19 +269,6 @@ function standaloneGatewayFiles(configurationFilename: string): {
 function adminInitializationFiles(configurationFilename: string): readonly string[] {
   const tokenFile = join(dirname(configurationFilename), 'gateway-admin.token');
   return Object.freeze([configurationFilename, tokenFile, `${tokenFile}.initialized`]);
-}
-
-function preflightLegacyGateway(legacyRoot: string, configurationFilename: string): void {
-  const runtimeDirectory = gatewayRuntimeDirectory(configurationFilename);
-  const migration = join(runtimeDirectory, 'migration.json');
-  if (pathExists(migration)) return;
-  preflightAbsent([
-    join(runtimeDirectory, 'legacy-config-before.json'),
-    join(runtimeDirectory, 'gateway.token'),
-    join(runtimeDirectory, 'gateway.sqlite'),
-    join(legacyRoot, 'config/local/framework-gateway.json'),
-    migration
-  ]);
 }
 
 function writeStandaloneGateway(configurationFilename: string, createdFiles: string[]): string {
@@ -323,10 +293,7 @@ function writeStandaloneGateway(configurationFilename: string, createdFiles: str
 
 function cliErrorMessage(error: unknown): string {
   if (error instanceof CliOperationError) return error.message;
-  const code = errorCode(error, 'CLI_FAILED');
-  if (code === 'LEGACY_PREPARE_CONFLICT') return '检测到已有 gateway 部署文件，拒绝覆盖；请先核对现有部署。';
-  if (code === 'LEGACY_INVALID_UPSTREAM') return '旧 bridge 端点不是独立的本机 HTTP 上游，存在自代理风险，拒绝初始化。';
-  return code;
+  return errorCode(error, 'CLI_FAILED');
 }
 
 function runProcess(executable: string, argumentsList: readonly string[]): Promise<void> {
@@ -394,8 +361,8 @@ function testFiles(directory: string, extension: '.ts' | '.js'): readonly string
 async function runTests(browser: boolean, withDeps: boolean): Promise<void> {
   if (!browser) {
     await build();
-    await runProcess(process.execPath, ['--test', ...testFiles('test', '.ts')]);
-    await runProcess(process.execPath, ['--test', ...testFiles('dist/test', '.js')]);
+    await runProcess(process.execPath, ['--test', '--test-concurrency=4', ...testFiles('test', '.ts')]);
+    await runProcess(process.execPath, ['--test', '--test-concurrency=4', ...testFiles('dist/test', '.js')]);
     return;
   }
   await prepareBrowser(withDeps);
@@ -459,7 +426,7 @@ export async function prepareGatewayForStart(configurationFilename: string): Pro
     }
     const health = await readJson(response);
     if (!response.ok || !isRecord(health) || health.ok !== true
-      || health.mode !== 'legacy-egress-compatibility' || health.revision !== revision(configuration)) {
+      || health.mode !== 'onebot-egress' || health.revision !== revision(configuration)) {
       throw new CliOperationError('gateway 端口已被其他或配置不匹配的服务占用。');
     }
     return Object.freeze({ started: false, async close() {} });
@@ -580,29 +547,21 @@ export async function runCli(argumentsList: readonly string[], io: CliIo = DEFAU
       const serviceManager = parsed.serviceManager === undefined
         ? undefined
         : trustedServiceManager(parsed.serviceManager, io.cwd);
-      const legacyRoot = parsed.legacyRoot === undefined ? undefined : resolve(io.cwd, parsed.legacyRoot);
       preflightAbsent(adminInitializationFiles(configurationFilename));
-      if (legacyRoot !== undefined) preflightLegacyGateway(legacyRoot, configurationFilename);
-      if (legacyRoot === undefined && parsed.gatewayConfig === undefined) {
+      if (parsed.gatewayConfig === undefined) {
         const standalone = standaloneGatewayFiles(configurationFilename);
         preflightAbsent([standalone.configuration, standalone.token, standalone.store]);
       }
       const createdFiles: string[] = [];
       try {
-        const gatewayConfigurationFilename = legacyRoot !== undefined
-          ? prepareLegacyGateway({
-            legacyRoot,
-            runtimeDirectory: gatewayRuntimeDirectory(configurationFilename)
-          }).gatewayConfiguration
-          : parsed.gatewayConfig !== undefined
-            ? resolve(io.cwd, parsed.gatewayConfig)
-            : writeStandaloneGateway(configurationFilename, createdFiles);
+        const gatewayConfigurationFilename = parsed.gatewayConfig !== undefined
+          ? resolve(io.cwd, parsed.gatewayConfig)
+          : writeStandaloneGateway(configurationFilename, createdFiles);
         const gatewayConfiguration = loadOneBotGatewayConfiguration(gatewayConfigurationFilename);
         assertDistinctGatewayEndpoint(gatewayConfiguration);
         writeAdminConfiguration({
           filename: configurationFilename,
           gatewayConfiguration: gatewayConfigurationFilename,
-          ...(legacyRoot === undefined ? {} : { legacyRoot }),
           ...(serviceManager === undefined ? {} : { serviceManager }),
           ...(parsed.host === undefined ? {} : { host: parsed.host }),
           ...(parsed.port === undefined ? {} : { port: parsed.port }),

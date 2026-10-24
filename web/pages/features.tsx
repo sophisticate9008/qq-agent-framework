@@ -1,180 +1,111 @@
 import { useEffect, useState } from 'react';
-import { LoaderCircle, RefreshCw } from 'lucide-react';
+import { Boxes, Check, LoaderCircle, RefreshCw, ServerOff, Wrench } from 'lucide-react';
 import { ConfigurationEditor } from '../components/configuration-editor.tsx';
-import { Field, PageHeading, SaveBar, Section, StatusPill } from '../components/management.tsx';
+import { ConnectPrompt, EmptyState, PageHeading, Section, StatusPill } from '../components/management.tsx';
+import { Badge } from '../components/ui/badge.tsx';
 import { Button } from '../components/ui/button.tsx';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.tsx';
-import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
+import { asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 
-const legacyModes = ['chat', 'reserved', 'reserved2', 'closed-agent'] as const;
-type LegacyMode = typeof legacyModes[number];
-
-interface LegacyModeState {
-  readonly mode: LegacyMode;
-  readonly revision: string;
-  readonly supported: {
-    readonly reserved: boolean;
-    readonly reserved2: boolean;
-  };
+interface CapabilityState {
+  readonly id: string;
+  readonly installed: boolean;
 }
 
-const modeLabels: Readonly<Record<LegacyMode, string>> = {
-  chat: '普通聊天',
-  reserved: '一代仿真',
-  reserved2: '二代仿真',
-  'closed-agent': '工作模式',
-};
-
-function isLegacyMode(value: unknown): value is LegacyMode {
-  return typeof value === 'string' && (legacyModes as readonly string[]).includes(value);
+interface FeatureState {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly status: string;
 }
 
-function parseModeState(value: unknown): LegacyModeState {
+interface NativeFeatures {
+  readonly runtimeConnected: boolean;
+  readonly editableResources: boolean;
+  readonly capabilities: readonly CapabilityState[];
+  readonly features: readonly FeatureState[];
+}
+
+function parseFeature(value: unknown): FeatureState | null {
   const record = asRecord(value);
-  const supported = asRecord(record.supported);
-  if (!isLegacyMode(record.mode)
-    || typeof record.revision !== 'string'
-    || !/^[a-f0-9]{64}$/.test(record.revision)
-    || typeof supported.reserved !== 'boolean'
-    || typeof supported.reserved2 !== 'boolean') throw new Error('invalid_mode_response');
+  if (typeof record.id !== 'string') return null;
   return {
-    mode: record.mode,
-    revision: record.revision,
-    supported: { reserved: supported.reserved, reserved2: supported.reserved2 },
+    id: record.id,
+    name: typeof record.name === 'string' ? record.name : record.id,
+    description: typeof record.description === 'string' ? record.description : '本地装配功能',
+    status: typeof record.status === 'string' ? record.status : 'installed',
   };
 }
 
-function modeSupported(mode: LegacyMode, state: LegacyModeState): boolean {
-  if (mode === 'reserved') return state.supported.reserved;
-  if (mode === 'reserved2') return state.supported.reserved2;
-  return true;
-}
-
-function unavailableModeMessage(mode: LegacyMode): string {
-  return `${modeLabels[mode]}的功能总开关当前为关闭；请先保存并应用对应开关，再重新读取运行模式。`;
-}
-
-function modeError(error: unknown, selected: LegacyMode): string {
-  if (error instanceof ApiError && error.code === 'legacy_mode_disabled') return unavailableModeMessage(selected);
-  if (error instanceof ApiError && /conflict|revision/.test(error.code)) {
-    return '运行模式已在其他窗口发生变化，请重新读取后再应用。';
-  }
-  if (!(error instanceof ApiError) || /unknown/.test(error.code)) {
-    return '暂时无法确认模式切换结果；不会自动重试，请重新读取真实运行状态。';
-  }
-  return errorMessage(error);
+function parseFeatures(value: unknown): NativeFeatures | null {
+  const record = asRecord(value);
+  if (typeof record.runtimeConnected !== 'boolean' || typeof record.editableResources !== 'boolean'
+    || !Array.isArray(record.capabilities) || !Array.isArray(record.features)) return null;
+  const capabilities = record.capabilities.map(item => {
+    const capability = asRecord(item);
+    return typeof capability.id === 'string' && typeof capability.installed === 'boolean'
+      ? { id: capability.id, installed: capability.installed }
+      : null;
+  });
+  const features = record.features.map(parseFeature);
+  if (capabilities.some(capability => capability === null) || features.some(feature => feature === null)) return null;
+  return {
+    runtimeConnected: record.runtimeConnected,
+    editableResources: record.editableResources,
+    capabilities: capabilities as CapabilityState[],
+    features: features as FeatureState[],
+  };
 }
 
 export function FeaturesPage(props: PageProps) {
-  const { api, connected, setDirty } = props;
-  const [modeState, setModeState] = useState<LegacyModeState | null>(null);
-  const [selectedMode, setSelectedMode] = useState<LegacyMode | null>(null);
-  const [loadingMode, setLoadingMode] = useState(false);
-  const [savingMode, setSavingMode] = useState(false);
-  const [modeMessage, setModeMessage] = useState('');
-  const [confirmingMode, setConfirmingMode] = useState(false);
+  const { api, connected, connect } = props;
+  const [features, setFeatures] = useState<NativeFeatures | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [reloadVersion, setReloadVersion] = useState(0);
-  const modeDirty = modeState !== null && selectedMode !== null && selectedMode !== modeState.mode;
-  const selectedUnsupported = modeState !== null && selectedMode !== null && !modeSupported(selectedMode, modeState);
 
   useEffect(() => {
-    setDirty(modeDirty, 'legacy-mode');
-  }, [modeDirty, setDirty]);
-  useEffect(() => () => setDirty(false, 'legacy-mode'), [setDirty]);
-
-  useEffect(() => {
-    if (!connected || asRecord(props.snapshot.integrations).chatManagement === false) {
-      setModeState(null);
-      setSelectedMode(null);
-      setModeMessage('');
-      setLoadingMode(false);
+    if (!connected) {
+      setFeatures(null);
+      setLoadError('');
       return;
     }
     const controller = new AbortController();
-    setLoadingMode(true);
-    setModeMessage('');
-    void api.get('/api/legacy/mode', controller.signal).then(value => {
-      const next = parseModeState(value);
-      setModeState(next);
-      setSelectedMode(next.mode);
+    setLoading(true);
+    setLoadError('');
+    void api.get('/api/chat/features', controller.signal).then(value => {
+      const next = parseFeatures(value);
+      if (!next) throw new Error('invalid_features_response');
+      setFeatures(next);
     }).catch(error => {
       if (!controller.signal.aborted) {
-        setModeState(null);
-        setSelectedMode(null);
-        setModeMessage(errorMessage(error));
+        setFeatures(null);
+        setLoadError(errorMessage(error));
       }
     }).finally(() => {
-      if (!controller.signal.aborted) setLoadingMode(false);
+      if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [api, connected, props.snapshot.integrations, reloadVersion]);
+  }, [api, connected, reloadVersion]);
 
-  function requestModeSave(): void {
-    if (!modeDirty || selectedMode === null || selectedUnsupported || savingMode) return;
-    setConfirmingMode(true);
-  }
+  if (!connected) return <div className="page-stack" data-page="features"><PageHeading title="功能与触发" description="查看本机装配的能力与功能。" /><ConnectPrompt connect={connect} /></div>;
 
-  async function saveMode(): Promise<void> {
-    if (!modeState || !selectedMode || !modeDirty || selectedUnsupported || savingMode) return;
-    setConfirmingMode(false);
-    setSavingMode(true);
-    setModeMessage('正在应用运行模式');
-    try {
-      const next = parseModeState(await api.post('/api/legacy/mode', {
-        revision: modeState.revision,
-        mode: selectedMode,
-      }));
-      setModeState(next);
-      setSelectedMode(next.mode);
-      setModeMessage(`已切换到${modeLabels[next.mode]}。`);
-    } catch (error) {
-      setModeMessage(modeError(error, selectedMode));
-    } finally {
-      setSavingMode(false);
-    }
-  }
-
-  const editorModeProps = modeState === null ? {} : { activeMode: modeState.mode };
-  const saveMessage = selectedUnsupported && selectedMode !== null
-    ? unavailableModeMessage(selectedMode)
-    : modeMessage || (modeDirty ? '已选择新模式，确认后才会应用。' : '显示已接入聊天服务当前实际运行的模式。');
-
+  const installedCapabilities = features?.capabilities.filter(capability => capability.installed) ?? [];
   return <div className="page-stack" data-page="features">
-    <PageHeading title="功能与触发" description="按需管理能力、触发条件与表达方式；关闭功能不会清除其他设置。" />
-    {connected && asRecord(props.snapshot.integrations).chatManagement !== false && <Section
-      title="运行模式"
-      description="已接入的聊天服务一次只运行一种模式；一代与二代可以都配置为可用，但不能同时运行。"
-      actions={modeState && <StatusPill tone="neutral">当前：{modeLabels[modeState.mode]}</StatusPill>}
-      footer={modeState && selectedMode ? <SaveBar
-        dirty={modeDirty}
-        saving={savingMode}
-        disabled={selectedUnsupported || loadingMode}
-        message={saveMessage}
-        label="应用运行模式"
-        onSave={requestModeSave}
-        onReset={() => { setSelectedMode(modeState.mode); setModeMessage(''); }}
-      ><Button type="button" variant="outline" disabled={loadingMode || savingMode || modeDirty} onClick={() => setReloadVersion(version => version + 1)}><RefreshCw className={loadingMode ? 'size-4 animate-spin' : 'size-4'} />重新读取</Button></SaveBar> : undefined}
-    >
-      {loadingMode && !modeState ? <div className="flex min-h-28 items-center justify-center gap-2 text-sm text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取真实运行模式</div> : modeState && selectedMode ? <div className="grid gap-3">
-        <Field label="选择运行模式" description="选择不会立即写入；应用前会再次确认影响。">
-          <Select value={selectedMode} disabled={savingMode} onValueChange={value => {
-            if (isLegacyMode(value)) {
-              setSelectedMode(value);
-              setModeMessage('');
-            }
-          }}>
-            <SelectTrigger className="w-full"><SelectValue>{modeLabels[selectedMode]}</SelectValue></SelectTrigger>
-            <SelectContent>
-              {legacyModes.map(mode => <SelectItem key={mode} value={mode}>{modeLabels[mode]}{!modeSupported(mode, modeState) ? '（功能总开关已关闭）' : ''}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </Field>
-        <p className="text-xs leading-6 text-muted-foreground">切换只改变互斥的运行模式，不会自动打开主动话题、黑话学习或其他已关闭的功能开关。</p>
-      </div> : <div className="flex flex-wrap items-center justify-between gap-3" role="alert"><span className="text-sm text-destructive">{modeMessage || '暂时无法读取真实运行模式，不会默认选择二代。'}</span><Button type="button" variant="outline" disabled={loadingMode} onClick={() => setReloadVersion(version => version + 1)}><RefreshCw className={loadingMode ? 'size-4 animate-spin' : 'size-4'} />重新读取</Button></div>}
-    </Section>}
-    <ConfigurationEditor {...props} category="features" {...editorModeProps} />
-    <Dialog open={confirmingMode} onOpenChange={setConfirmingMode}><DialogContent><DialogHeader><DialogTitle>确认应用运行模式</DialogTitle><DialogDescription>已有会话和上下文会保留，但模式切换可能取消尚未投递的排队任务。此操作不会开启主动话题、黑话学习或其他已关闭的功能。</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setConfirmingMode(false)}>取消</Button><Button type="button" onClick={() => void saveMode()}>确认应用{selectedMode ? `：${modeLabels[selectedMode]}` : ''}</Button></DialogFooter></DialogContent></Dialog>
+    <PageHeading title="功能与触发" description="查看本机实际装配的能力与功能。聊天方案、人设、访问授权和用户偏好仍分别管理。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>} />
+    {loading && !features ? <Section title="本地装配"><div className="flex min-h-44 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取本地能力</div></Section>
+      : !features ? <Section title="本地装配不可用" description={loadError || '服务没有返回可识别的功能数据。'}><EmptyState locked title="无法读取本机能力" description="暂时无法读取能力与功能清单，请稍后重试。" /></Section>
+        : <>
+          {!features.runtimeConnected && <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5"><ServerOff className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" /><p><strong>原生聊天宿主未接入。</strong><span className="mt-1 block text-muted-foreground">可以查看和配置本地资源，但这些能力当前不会参与真实聊天。</span></p></div>}
+          <div className="grid gap-5 lg:grid-cols-2">
+            <Section title="能力装配" description="显示本机当前可提供的受控动作。" actions={<StatusPill tone={installedCapabilities.length > 0 ? 'success' : 'neutral'}>{installedCapabilities.length} 项已安装</StatusPill>}>
+              <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1">{features.capabilities.length === 0 ? <EmptyState title="没有已声明能力" description="当前版本没有报告任何本机能力。" /> : <div className="grid gap-2">{features.capabilities.map(capability => <div key={capability.id} className="flex min-h-12 items-center justify-between gap-3 rounded-lg border px-3 py-2.5"><span className="flex min-w-0 items-center gap-2"><Wrench className="size-4 shrink-0 text-muted-foreground" /><code className="truncate text-xs">{capability.id}</code></span><Badge variant={capability.installed ? 'secondary' : 'outline'}>{capability.installed ? <><Check className="size-3" />已安装</> : '未安装'}</Badge></div>)}</div>}</div>
+            </Section>
+            <Section title="已装配功能" description="显示使用上述能力的本机功能；空列表表示尚未装配。" actions={<StatusPill>{features.features.length} 项</StatusPill>}>
+              <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1">{features.features.length === 0 ? <EmptyState title="尚未装配功能" description="当前没有报告可运行功能。" /> : <div className="grid gap-2">{features.features.map(feature => <div key={feature.id} className="flex items-start gap-3 rounded-lg border p-3"><span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><Boxes className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="text-xs font-medium">{feature.name}</strong><Badge variant="outline">{feature.status}</Badge></div><p className="mt-1 text-[11px] leading-5 text-muted-foreground">{feature.description}</p><code className="mt-1 block truncate text-[10px] text-muted-foreground">{feature.id}</code></div></div>)}</div>}</div>
+            </Section>
+          </div>
+          {features.editableResources && <ConfigurationEditor {...props} category="features" />}
+        </>}
   </div>;
 }

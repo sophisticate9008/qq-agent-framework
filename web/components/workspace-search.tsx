@@ -67,13 +67,13 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
     setLoadState({ status: 'loading' });
     void Promise.allSettled([
       api.get('/api/configuration', controller.signal),
-      api.get('/api/legacy/mode', controller.signal),
+      api.get('/api/chat/status', controller.signal),
       api.get('/api/settings', controller.signal),
-    ]).then(([configuration, legacyMode, settings]) => {
+    ]).then(([configuration, runtimeStatus, settings]) => {
       if (controller.signal.aborted) return;
       if (configuration.status !== 'fulfilled') throw configuration.reason;
       const targets = buildWorkspaceSearchTargets({ configuration: configuration.value,
-        legacyMode: legacyMode.status === 'fulfilled' ? legacyMode.value : undefined,
+        runtimeStatus: runtimeStatus.status === 'fulfilled' ? runtimeStatus.value : undefined,
         settings: settings.status === 'fulfilled' ? settings.value : undefined });
       setLoadState({ status: 'ready', targets });
     }).catch(error => {

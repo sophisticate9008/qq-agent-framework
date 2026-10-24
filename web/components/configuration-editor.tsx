@@ -12,7 +12,7 @@ import { resolveConfigurationVisibility } from '../lib/configuration-visibility.
 import type { PageProps } from '../lib/types.ts';
 
 type ConfigurationCategory = 'persona' | 'features' | 'access' | 'model' | 'settings';
-type ConfigurationSource = 'bridge' | 'gateway' | 'admin';
+type ConfigurationSource = 'gateway' | 'admin';
 type ConfigurationFieldType = 'boolean' | 'number' | 'text' | 'textarea' | 'list' | 'select' | 'secret';
 type JsonValue = null | boolean | number | string | JsonValue[] | { readonly [key: string]: JsonValue };
 type DraftValue = boolean | string | null;
@@ -66,7 +66,7 @@ interface OperationStatus {
 }
 
 const categories = new Set<ConfigurationCategory>(['persona', 'features', 'access', 'model', 'settings']);
-const sources = new Set<ConfigurationSource>(['bridge', 'gateway', 'admin']);
+const sources = new Set<ConfigurationSource>(['gateway', 'admin']);
 const fieldTypes = new Set<ConfigurationFieldType>(['boolean', 'number', 'text', 'textarea', 'list', 'select', 'secret']);
 const fieldFormats = new Set<StructuredFieldFormat>(['time-windows', 'model-prices']);
 
@@ -290,7 +290,7 @@ function FieldEditor({ field, draft, disabled, resetToken, onChange, onStructure
   </Field>;
 }
 
-export function ConfigurationEditor({ connected, api, setDirty, category, connect, activeMode }: PageProps & { category: ConfigurationCategory; activeMode?: string | null }) {
+export function ConfigurationEditor({ connected, api, setDirty, category, connect }: PageProps & { category: ConfigurationCategory }) {
   const dirtyScope = `configuration:${category}`;
   const [editor, setEditor] = useState<EditorState>(() => stateFromGroups([]));
   const [capabilities, setCapabilities] = useState({ apply: false });
@@ -554,11 +554,10 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     return ids;
   }, [editor.dirtyKeys, editor.groups]);
   const visibility = useMemo(() => resolveConfigurationVisibility(editor.groups, {
-    activeMode,
     values: visibilityValues,
     dirtyFieldIds,
     showInactive
-  }), [activeMode, dirtyFieldIds, editor.groups, showInactive, visibilityValues]);
+  }), [dirtyFieldIds, editor.groups, showInactive, visibilityValues]);
   const matchingGroups = useMemo(() => {
     const matches = new Map<string, ReadonlySet<string> | null>();
     for (const group of editor.groups) {
@@ -609,7 +608,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
         : visibleFieldIds?.size ?? 0;
       const open = inactiveDirtyCount > 0 || expanded.has(group.id);
       const message = status?.text ?? (groupDirty ? `${dirtyCount} 项更改尚未保存` : pending ? (capabilities.apply ? '已保存，等待应用' : '已保存，需要稍后重启服务') : '已读取保存的配置');
-      return <Section key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} description={group.description} actions={status && <StatusPill tone={status.tone}>{status.text}</StatusPill>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
+      return <Section scrollable={open} key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} description={group.description} actions={status && <StatusPill tone={status.tone}>{status.text}</StatusPill>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
         <details open={open} onToggle={event => {
           const isOpen = event.currentTarget.open;
           setExpanded(current => {
@@ -620,7 +619,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
           });
         }}>
           <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg px-1 py-2 text-xs font-medium text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><span>{open ? '收起设置' : `展开 ${visibleFieldCount} 项设置`}</span><ChevronDown className={`size-4 transition-transform ${open ? 'rotate-180' : ''}`} /></summary>
-          {inactiveDirtyCount > 0 && <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4 text-amber-600" />仍显示 {inactiveDirtyCount} 项受停用开关或运行模式隐藏的草稿；保存只写入草稿值，不会开启父功能或切换运行模式。</p>}
+          {inactiveDirtyCount > 0 && <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4 text-amber-600" />仍显示 {inactiveDirtyCount} 项受停用开关隐藏的草稿；保存只写入草稿值，不会开启父功能。</p>}
           <div className="grid gap-5 pt-5 md:grid-cols-2">{group.fields.map(field => {
             const key = fieldKey(group.id, field.id);
             const fieldVisible = groupVisibility?.fieldIds.has(field.id) === true && (visibleFieldIds === null || visibleFieldIds?.has(field.id) === true);

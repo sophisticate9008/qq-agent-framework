@@ -38,31 +38,6 @@ function fixture(port = 3131): { readonly directory: string; readonly gatewayCon
   return { directory, gatewayConfiguration };
 }
 
-function legacyFixture(httpUrl = 'http://127.0.0.1:3000'): {
-  readonly directory: string;
-  readonly legacyRoot: string;
-  readonly configuration: string;
-  readonly original: string;
-} {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-cli-legacy-'));
-  const legacyRoot = join(directory, 'qq-bridge');
-  mkdirSync(join(legacyRoot, 'config/local'), { recursive: true, mode: 0o700 });
-  const configuration = join(legacyRoot, 'config.json');
-  const original = JSON.stringify({
-    snowluma: {
-      httpUrl,
-      wsUrl: 'ws://127.0.0.1:3001',
-      accessToken: GATEWAY_SECRET,
-      session: 'existing-session'
-    },
-    allow: { private: [123], groups: [456] },
-    persona: { id: 'existing-role', prompt: 'keep this role' },
-    sessions: { 'private:123': { id: 'existing-session', generation: 7 } }
-  });
-  privateFile(configuration, original);
-  return { directory, legacyRoot, configuration, original };
-}
-
 function capturedIo(directory: string, environment: NodeJS.ProcessEnv = {}): {
   readonly io: CliIo;
   readonly stdout: string[];
@@ -107,23 +82,16 @@ test('CLI parses only supported command options and presents standalone init fir
     const help = capturedIo(directory);
     assert.equal(await runCli(['init', '--help'], help.io), 0);
     assert.match(help.stdout.join('\n'), /用法：\n  npm run cli -- init \[/);
-    assert.match(help.stdout.join('\n'), /npm run cli -- init --bridge-dir \/path\/to\/qq-bridge/);
-    assert.doesNotMatch(help.stdout.join('\n'), /--legacy-root/);
-    assert.match(help.stdout.join('\n'), /不需要 qq-bridge/);
+    assert.match(help.stdout.join('\n'), /npm run cli -- init --gateway-config <网关配置>/);
+    assert.doesNotMatch(help.stdout.join('\n'), /bridge-dir|legacy-root|qq-bridge/i);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test('init bridge directory and gateway configuration options are strictly exclusive', async () => {
-  assert.equal(parseCliArguments(['init', '--bridge-dir', '/tmp/bridge']).legacyRoot, '/tmp/bridge');
-  assert.equal(parseCliArguments(['init', '--legacy-root', '/tmp/bridge']).legacyRoot, '/tmp/bridge');
-  assert.throws(() => parseCliArguments([
-    'init', '--bridge-dir', '/tmp/bridge', '--legacy-root', '/tmp/compatibility-alias'
-  ]), /不能同时提供/);
-  assert.throws(() => parseCliArguments([
-    'init', '--bridge-dir', '/tmp/bridge', '--gateway-config', '/tmp/gateway.json'
-  ]), /互斥/);
+test('init rejects removed bridge directory options', () => {
+  assert.throws(() => parseCliArguments(['init', '--bridge-dir', '/tmp/bridge']), /无法识别/);
+  assert.throws(() => parseCliArguments(['init', '--legacy-root', '/tmp/bridge']), /无法识别/);
 });
 
 test('gateway preparation starts only an unused port and closes only the owned service', async context => {
@@ -168,7 +136,7 @@ test('gateway preparation rejects an occupied mismatched port without stopping i
     requests.push(request.headers.authorization ?? '');
     request.resume();
     response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify({ ok: true, mode: 'legacy-egress-compatibility', revision: 'different' }));
+    response.end(JSON.stringify({ ok: true, mode: 'onebot-egress', revision: 'different' }));
   });
   context.after(async () => {
     await close(occupant);
@@ -295,30 +263,8 @@ test('init creates a private admin configuration without a token and never overw
   }
 });
 
-test('init prepares an isolated existing bridge without changing its endpoint, sessions or role', async () => {
-  const values = legacyFixture();
-  try {
-    const output = capturedIo(values.directory);
-    assert.equal(await runCli(['init', '--bridge-dir', values.legacyRoot], output.io), 0);
-
-    const adminConfiguration = join(values.directory, 'runtime/admin/config.json');
-    const admin = JSON.parse(readFileSync(adminConfiguration, 'utf8')) as Record<string, unknown>;
-    const gatewayConfiguration = join(values.legacyRoot, 'config/local/framework-gateway.json');
-    assert.equal(admin.gatewayConfiguration, gatewayConfiguration);
-    assert.equal(admin.legacyRoot, values.legacyRoot);
-    assert.equal(Object.hasOwn(admin, 'serviceManager'), false);
-    assert.equal(readFileSync(values.configuration, 'utf8'), values.original);
-    assert.equal(existsSync(join(values.directory, 'runtime/gateway/migration.json')), true);
-    assert.equal(existsSync(join(values.directory, 'runtime/gateway/gateway.token')), true);
-    assert.equal(existsSync(join(values.directory, 'runtime/admin/gateway-admin.token')), false);
-    assert.doesNotMatch([...output.stdout, ...output.stderr].join('\n'), new RegExp(`${ADMIN_SECRET}|${GATEWAY_SECRET}`));
-  } finally {
-    rmSync(values.directory, { recursive: true, force: true });
-  }
-});
-
 test('init accepts only an explicit trusted service manager and never executes it', async () => {
-  const values = legacyFixture();
+  const values = fixture();
   try {
     const marker = join(values.directory, 'manager-ran');
     const manager = join(values.directory, 'service-manager');
@@ -326,17 +272,16 @@ test('init accepts only an explicit trusted service manager and never executes i
     chmodSync(manager, 0o722);
     const rejected = capturedIo(values.directory);
     assert.equal(await runCli([
-      'init', '--bridge-dir', values.legacyRoot, '--service-manager', manager
+      'init', '--gateway-config', values.gatewayConfiguration, '--service-manager', manager
     ], rejected.io), 1);
     assert.match(rejected.stderr.join('\n'), /不可被组或其他用户写入/);
     assert.equal(existsSync(join(values.directory, 'runtime')), false);
-    assert.equal(existsSync(join(values.legacyRoot, 'config/local/framework-gateway.json')), false);
     assert.equal(existsSync(marker), false);
 
     chmodSync(manager, 0o700);
     const output = capturedIo(values.directory);
     assert.equal(await runCli([
-      'init', '--bridge-dir', values.legacyRoot, '--service-manager', manager
+      'init', '--gateway-config', values.gatewayConfiguration, '--service-manager', manager
     ], output.io), 0);
     const admin = JSON.parse(readFileSync(join(values.directory, 'runtime/admin/config.json'), 'utf8')) as Record<string, unknown>;
     assert.equal(admin.serviceManager, manager);
@@ -346,36 +291,25 @@ test('init accepts only an explicit trusted service manager and never executes i
   }
 });
 
-test('init rejects an existing admin deployment before preparing bridge files', async () => {
-  const values = legacyFixture();
+test('init rejects an existing admin deployment before preparing gateway files', async () => {
+  const values = fixture();
   try {
     const adminConfiguration = join(values.directory, 'runtime/admin/config.json');
     mkdirSync(join(values.directory, 'runtime/admin'), { recursive: true, mode: 0o700 });
     privateFile(adminConfiguration, '{"existing":true}\n');
     const output = capturedIo(values.directory);
-    assert.equal(await runCli(['init', '--bridge-dir', values.legacyRoot], output.io), 1);
+    assert.equal(await runCli(['init'], output.io), 1);
     assert.match(output.stderr.join('\n'), /管理配置已存在.*拒绝覆盖/);
     assert.equal(readFileSync(adminConfiguration, 'utf8'), '{"existing":true}\n');
-    assert.equal(existsSync(join(values.legacyRoot, 'config/local/framework-gateway.json')), false);
     assert.equal(existsSync(join(values.directory, 'runtime/gateway')), false);
-    assert.equal(readFileSync(values.configuration, 'utf8'), values.original);
   } finally {
     rmSync(values.directory, { recursive: true, force: true });
   }
 });
 
-test('init clearly rejects bridge and advanced gateway endpoints that would self-proxy', async () => {
-  const values = legacyFixture('http://127.0.0.1:3131');
+test('init clearly rejects advanced gateway endpoints that would self-proxy', async () => {
   const advanced = fixture();
   try {
-    const output = capturedIo(values.directory);
-    assert.equal(await runCli(['init', '--bridge-dir', values.legacyRoot], output.io), 1);
-    assert.match(output.stderr.join('\n'), /自代理风险.*拒绝初始化/);
-    assert.equal(readFileSync(values.configuration, 'utf8'), values.original);
-    assert.equal(existsSync(join(values.legacyRoot, 'config/local/framework-gateway.json')), false);
-    assert.equal(existsSync(join(values.directory, 'runtime/admin/config.json')), false);
-    assert.doesNotMatch([...output.stdout, ...output.stderr].join('\n'), new RegExp(`${ADMIN_SECRET}|${GATEWAY_SECRET}`));
-
     const advancedInput = JSON.parse(readFileSync(advanced.gatewayConfiguration, 'utf8')) as Record<string, unknown>;
     advancedInput.upstreamEndpoint = 'http://localhost:3131';
     writeFileSync(advanced.gatewayConfiguration, JSON.stringify(advancedInput), { mode: 0o600 });
@@ -384,7 +318,6 @@ test('init clearly rejects bridge and advanced gateway endpoints that would self
     assert.match(advancedOutput.stderr.join('\n'), /自代理风险.*拒绝初始化/);
     assert.equal(existsSync(join(advanced.directory, 'runtime/admin/config.json')), false);
   } finally {
-    rmSync(values.directory, { recursive: true, force: true });
     rmSync(advanced.directory, { recursive: true, force: true });
   }
 });

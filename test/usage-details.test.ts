@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  buildUsageChartGeometry,
   formatUsageWindowEndpoint,
   parseUsageConversation,
   parseUsageRecent,
   parseUsageResetAccepted,
   parseUsageSeries,
+  usageBucketValue,
   usageSectionLabels,
 } from '../web/lib/usage-details.ts';
 
@@ -50,12 +50,16 @@ test('pricing window endpoints preserve configured fractional hours', () => {
   assert.equal(formatUsageWindowEndpoint(14.2569444444), '14:15:25');
 });
 
-test('series parser preserves zero buckets and chart geometry never invents a positive scale label', () => {
+test('bucket metrics use declared totals without adding reasoning tokens again', () => {
   const parsed = parseUsageSeries(seriesFixture());
   assert(parsed);
-  assert.equal(parsed.buckets[0]?.tokens, 0);
-  assert.equal(buildUsageChartGeometry(parsed, 'cost').maximum, 0.25);
+  const bucket = parsed.buckets[1]!;
+  const bucketWithReasoning = { ...bucket, reasoning: 80 };
+  assert.equal(usageBucketValue(bucketWithReasoning, 'tokens'), 160);
+  assert.equal(usageBucketValue(bucketWithReasoning, 'cost'), 0.25);
+});
 
+test('series parsing and bucket metrics preserve zero values', () => {
   const source = seriesFixture();
   const zeroFixture = {
     ...source,
@@ -67,19 +71,8 @@ test('series parser preserves zero buckets and chart geometry never invents a po
   };
   const zero = parseUsageSeries(zeroFixture);
   assert(zero);
-  const geometry = buildUsageChartGeometry(zero, 'tokens');
-  assert.deepEqual(geometry.axisValues, [0, 0, 0]);
-  assert(geometry.bars.every(bar => bar.height === 0 && bar.value === 0));
-});
-
-test('chart geometry reduces tick density without shrinking mobile labels', () => {
-  const parsed = parseUsageSeries(seriesFixture());
-  assert(parsed);
-  const geometry = buildUsageChartGeometry(parsed, 'cost', 280);
-  assert.equal(geometry.width, 280);
-  assert(geometry.ticks.length <= 3);
-  assert(geometry.bars.every(bar => bar.x >= geometry.plotLeft
-    && bar.x + bar.width <= geometry.plotLeft + geometry.plotWidth));
+  assert(zero.buckets.every(bucket => usageBucketValue(bucket, 'tokens') === 0
+    && usageBucketValue(bucket, 'cost') === 0));
 });
 
 test('series parser enforces TimeClip, contiguous buckets and the backend key bound', () => {

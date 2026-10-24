@@ -38,14 +38,14 @@ function fixture(context: TestContext): Fixture {
     maxSendUses: 7,
     grantTtlMs: 60_000,
     authorizationVersion: 'existing-budget',
-    privateLegacy: { accessToken: 'must-not-leak', targetIds: ['123456'] }
+    privateExtension: { accessToken: 'must-not-leak', targetIds: ['123456'] }
   }), { mode: 0o600 });
   writeFileSync(admin, JSON.stringify({
     host: '127.0.0.1',
     port: 3210,
     tokenFile: '/private/admin.token',
     gatewayConfiguration: gateway,
-    privateLegacy: { operatorToken: 'must-not-leak-either' }
+    privateExtension: { operatorToken: 'must-not-leak-either' }
   }), { mode: 0o600 });
   context.after(() => rmSync(directory, { recursive: true, force: true }));
   return { directory, admin, gateway };
@@ -138,7 +138,7 @@ test('gateway saves preserve private fields and rotate authorization only for bu
   assert.equal(saved.maxSendUses, 7);
   assert.equal(saved.grantTtlMs, 60_000);
   assert.match(String(saved.authorizationVersion), /^[a-f0-9-]{36}$/);
-  assert.deepEqual(saved.privateLegacy, { accessToken: 'must-not-leak', targetIds: ['123456'] });
+  assert.deepEqual(saved.privateExtension, { accessToken: 'must-not-leak', targetIds: ['123456'] });
   assert.equal(statSync(files.gateway).mode & 0o777, 0o600);
 
   const authorizationVersion = saved.authorizationVersion;

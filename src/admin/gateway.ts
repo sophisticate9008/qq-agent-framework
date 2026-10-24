@@ -14,8 +14,8 @@ import { createAdminServer, type AdminRoute } from './server.ts';
 import { createAdminBootstrap } from './bootstrap.ts';
 import { createSettingsRoutes } from './settings.ts';
 import { createManagementOperations } from './operations.ts';
-import { createLegacyAdminRoutes } from '../integrations/legacy-admin.ts';
 import { createConfigurationRoutes } from './configuration.ts';
+import { createNativeRuntimeRoutes } from './runtime.ts';
 
 const FRAMEWORK_VERSION = '0.1.0';
 const PROBE_TIMEOUT_MS = 2_500;
@@ -26,14 +26,13 @@ export interface GatewayAdminConfiguration {
   port: number;
   tokenFile: string;
   gatewayConfiguration: string;
-  legacyRoot?: string;
   serviceManager?: string;
   accessSessionTtlMs?: number;
 }
 
 interface GatewayHealth {
   readonly ok: boolean;
-  readonly mode: 'legacy-egress-compatibility' | null;
+  readonly mode: 'onebot-egress' | null;
   readonly metrics: OneBotCompatGatewayMetrics | null;
   readonly error: string | null;
 }
@@ -83,11 +82,10 @@ function gatewayRevision(configuration: Readonly<OneBotGatewayConfiguration>): s
 export function loadGatewayAdminConfiguration(filename: string): Readonly<GatewayAdminConfiguration> {
   const input: unknown = JSON.parse(privateText(filename, 64 * 1024));
   assert(isRecord(input)
-    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'legacyRoot', 'serviceManager', 'accessSessionTtlMs'].includes(key))
+    && Object.keys(input).every(key => ['host', 'port', 'tokenFile', 'gatewayConfiguration', 'serviceManager', 'accessSessionTtlMs'].includes(key))
     && validHost(input.host)
     && Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65_535
     && reference(input.tokenFile) && reference(input.gatewayConfiguration)
-    && (input.legacyRoot === undefined || reference(input.legacyRoot))
     && (input.serviceManager === undefined || reference(input.serviceManager))
     && (input.accessSessionTtlMs === undefined || Number.isSafeInteger(input.accessSessionTtlMs)
       && Number(input.accessSessionTtlMs) >= 300_000 && Number(input.accessSessionTtlMs) <= 30 * 86_400_000),
@@ -98,7 +96,6 @@ export function loadGatewayAdminConfiguration(filename: string): Readonly<Gatewa
     port: Number(input.port),
     tokenFile: resolve(base, input.tokenFile),
     gatewayConfiguration: resolve(base, input.gatewayConfiguration),
-    ...(input.legacyRoot === undefined ? {} : { legacyRoot: resolve(base, input.legacyRoot) }),
     ...(input.serviceManager === undefined ? {} : { serviceManager: resolve(base, input.serviceManager) }),
     ...(input.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: Number(input.accessSessionTtlMs) }),
   });
@@ -235,13 +232,13 @@ async function probeHealth(
       return { ok: false, mode: null, metrics: null, error: 'gateway_not_ready' };
     }
     if (response.body.ok !== true
-      || response.body.mode !== 'legacy-egress-compatibility'
+      || response.body.mode !== 'onebot-egress'
       || response.body.revision !== gatewayRevision(configuration)) {
       return { ok: false, mode: null, metrics: null, error: 'gateway_revision_mismatch' };
     }
     const metrics = sanitizeMetrics(response.body.metrics);
     if (metrics === null) return { ok: false, mode: null, metrics: null, error: 'gateway_metrics_invalid' };
-    return { ok: true, mode: 'legacy-egress-compatibility', metrics, error: null };
+    return { ok: true, mode: 'onebot-egress', metrics, error: null };
   } catch (error: unknown) {
     if (signal?.aborted) throw error;
     return {
@@ -331,8 +328,7 @@ function liveSnapshot(
   configuration: Readonly<OneBotGatewayConfiguration>,
   health: GatewayHealth,
   status: GatewayStatus,
-  configurable: boolean,
-  chatManagement: boolean
+  configurable: boolean
 ) {
   const metrics = health.metrics;
   const operationalMetrics = metrics === null ? null : {
@@ -351,7 +347,7 @@ function liveSnapshot(
   const features = [];
   if (health.ok) {
     features.push({
-      id: 'onebot-compatibility-gateway',
+      id: 'onebot-egress-gateway',
       version: configuration.authorizationVersion ?? '1',
       status: 'active',
       capabilities: ['gateway.health.read']
@@ -368,7 +364,7 @@ function liveSnapshot(
   return snapshot({
     mode: 'gateway-live',
     revision,
-    integrations: { chatManagement },
+    integrations: { nativeRuntimeResources: true, nativeChatRuntime: false },
     overview: {
       name: 'QQ Agent Framework Gateway Admin',
       mode: 'gateway-live',
@@ -382,21 +378,19 @@ function liveSnapshot(
       budgetEnabled: configuration.budgetEnabled === false ? '关闭，保留配置' : '开启',
       error: health.error ?? status.error,
       metrics: operationalMetrics,
-      metricsScope: 'current-gateway-process-only',
-      legacyWebSocketTraffic: 'not-observed'
+      metricsScope: 'current-gateway-process-only'
     },
     features,
     context: {
       persona: configuration.persona,
       configuration: {
-        gatewayMode: 'legacy-egress-compatibility',
+        gatewayMode: health.mode,
         managementMode: configurable ? 'controlled-configuration' : 'read-only'
       },
       preferences: null,
       provenance: {
-        agentRuntime: chatManagement ? 'external-chat-service-configured' : 'not-connected',
-        session: 'not-observed-by-gateway-admin',
-        legacyWebSocketTraffic: 'bypasses-this-gateway'
+        agentRuntime: 'not-connected',
+        session: 'not-observed-by-gateway-admin'
       }
     },
     policy: {
@@ -411,16 +405,14 @@ function liveSnapshot(
       pending: metrics.pending,
       unknown: metrics.unknown,
       recoveredUnknown: metrics.recoveredUnknown,
-      scope: 'current-gateway-process-only',
-      legacyWebSocketTraffic: 'not-observed'
+      scope: 'current-gateway-process-only'
     }],
     audit: metrics === null ? [] : [{
       kind: 'gateway-request-metrics',
       requests: metrics.requests,
       reads: metrics.reads,
       rejected: metrics.rejected,
-      scope: 'current-gateway-process-only',
-      legacyWebSocketTraffic: 'not-observed'
+      scope: 'current-gateway-process-only'
     }]
   });
 }
@@ -455,8 +447,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     const status = health.ok
       ? await probeStatus(current.configuration, current.token, signal)
       : { verified: false, online: null, good: null, error: health.error };
-    return liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined,
-      configuration.legacyRoot !== undefined);
+    return liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined);
   };
   const healthRoute: AdminRoute = {
     method: 'GET',
@@ -476,23 +467,21 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
   const operations = options.configurationFilename && configuration.serviceManager ? createManagementOperations({
     adminConfigurationFilename: options.configurationFilename,
     gatewayConfigurationFilename: configuration.gatewayConfiguration,
-    serviceManager: configuration.serviceManager,
-    ...(configuration.legacyRoot === undefined ? {} : { legacyConfigurationFilename: join(configuration.legacyRoot, 'config.json') }),
+    serviceManager: configuration.serviceManager
   }) : undefined;
-  const routes: AdminRoute[] = [healthRoute];
+  const routes: AdminRoute[] = [
+    healthRoute,
+    ...createNativeRuntimeRoutes({ directory: join(dirname(configuration.tokenFile), 'runtime') })
+  ];
   if (options.configurationFilename) {
     const filenames = { adminConfigurationFilename: options.configurationFilename, gatewayConfigurationFilename: configuration.gatewayConfiguration };
     routes.push(...createSettingsRoutes({ ...filenames,
       ...(operations === undefined ? {} : { apply: operations.apply }),
     }));
     routes.push(...createConfigurationRoutes({ ...filenames,
-      ...(configuration.legacyRoot === undefined ? {} : { legacyRoot: configuration.legacyRoot }),
       ...(operations === undefined ? {} : { apply: operations.apply }),
     }));
   }
-  if (configuration.legacyRoot) routes.push(...createLegacyAdminRoutes({ legacyRoot: configuration.legacyRoot,
-    ...(operations === undefined ? {} : { beforeAccessSave: operations.synchronizeAccess }),
-  }));
   const server = createAdminServer({ token: () => bootstrap.token(), snapshot: snapshotHandler, routes, handlerTimeoutMs: 70_000,
     ...(configuration.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: configuration.accessSessionTtlMs }),
     setup: {

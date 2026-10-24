@@ -5,6 +5,7 @@ import {
   describeConversationKey,
   formatActivityCost,
   formatActivityCount,
+  formatUsageCount,
   parseSessionResetResult,
   parseSessionSnapshot,
   parseUsageSnapshot,
@@ -181,4 +182,28 @@ test('activity formatters use locale counts and fall back to the provided curren
   assert.equal(formatActivityCost(1.25, 'USD', '$'), '$1.25');
   assert.equal(formatActivityCost(1.25, 'invalid-currency', '¤'), '¤1.25');
   assert.equal(formatActivityCost(1.25, 'invalid-currency', '<b>'), '<b>1.25');
+});
+
+test('usage counts compact thousands, millions and billions with rounded unit promotion', () => {
+  for (const [value, expected] of [
+    [0, '0'], [999, '999'], [1_000, '1k'], [1_250, '1.25k'], [1_255, '1.26k'],
+    [12_345, '12.35k'], [999_994, '999.99k'], [999_995, '1m'], [999_999, '1m'],
+    [1_000_000, '1m'], [1_250_000, '1.25m'], [999_999_999, '1b'],
+    [1_000_000_000, '1b'], [1_250_000_000, '1.25b'],
+  ] as const) {
+    assert.equal(formatUsageCount(value), expected);
+  }
+});
+
+test('usage detailed counts preserve full locale counts without changing session formatting', () => {
+  for (const value of [0, 999, 1_000, 1_250, 999_999, 1_000_000, 1_000_000_000]) {
+    assert.equal(formatUsageCount(value, true), formatActivityCount(value));
+  }
+  assert.equal(formatUsageCount(1_250, true), '1,250');
+  assert.equal(formatUsageCount(999_999, true), '999,999');
+  assert.equal(formatActivityCount(1_000_000), '1,000,000');
+  for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.throws(() => formatUsageCount(value), RangeError);
+    assert.throws(() => formatUsageCount(value, true), RangeError);
+  }
 });

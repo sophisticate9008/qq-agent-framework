@@ -1,19 +1,21 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Locator, type Page, type Request as PlaywrightRequest } from 'playwright';
 
-import { createAdminServer } from '../src/admin/server.ts';
-import { createLegacyAdminRoutes } from '../src/integrations/legacy-admin.ts';
+import { AdminRequestError, createAdminServer, type AdminRoute } from '../src/admin/server.ts';
 
 const outputDirectory = new URL('../runtime/activity-smoke/', import.meta.url);
 const builtApplication = new URL('../dist/admin-web/app.js', import.meta.url);
 const administratorToken = 'activity-smoke-administrator-token-1234567890';
-const legacyToken = 'activity-smoke-legacy-token-1234567890';
+const sessionsPath = '/api/chat/sessions';
+const sessionResetPath = '/api/chat/sessions/reset';
+const usagePath = '/api/chat/usage';
+const usageTurnsPath = '/api/chat/usage/turns';
 const resetKey = 'group:410001';
 const resetSessionId = 'fixture-session-group-410001';
 const filteredKey = 'private:420002';
@@ -37,9 +39,8 @@ interface SmokeState {
   sessions: FixtureSession[];
   resetOutcome: ResetOutcome;
   unavailable: boolean;
-  chatManagement: boolean;
-  readonly legacyRequests: string[];
-  readonly upstreamResetBodies: unknown[];
+  readonly fixtureRequests: string[];
+  readonly resetBodies: unknown[];
   readonly browserPosts: BrowserPost[];
   readonly browserAuthorizations: string[];
   readonly pageErrors: string[];
@@ -54,11 +55,10 @@ async function writePrivateJson(filename: string, value: unknown): Promise<void>
   await writeFile(filename, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
-function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+async function screenshot(page: Page, name: string): Promise<void> {
+  const filename = new URL(`${name}-${runId}.png`, outputDirectory).pathname;
+  await page.screenshot({ path: filename, fullPage: true, animations: 'disabled' });
+  await chmod(filename, 0o600);
 }
 
 async function requestBody(request: PlaywrightRequest): Promise<unknown> {
@@ -75,13 +75,22 @@ function sessionsRevision(sessions: readonly FixtureSession[]): string {
 
 function usageFixture(): unknown {
   return {
-    ok: true,
+    source: 'chat-ledger',
+    revision: 'activity-fixture-usage-v1',
     generatedAt: Date.UTC(2026, 9, 24, 8, 30, 0),
     currency: 'USD',
     symbol: '$',
+    limit: 200,
+    limited: false,
+    unavailable: ['pricing', 'ledger'],
     totals: {
       buckets: { cacheMiss: 30_000, cacheHit: 10_000, cacheWrite: 1_000, output: 4_678, reasoning: 2_345 },
       inputTokens: 41_000,
+      outputTokens: 4_678,
+      cacheHitTokens: 10_000,
+      cacheMissTokens: 30_000,
+      cacheWriteTokens: 1_000,
+      reasoningTokens: 2_345,
       totalTokens: 45_678,
       cost: 1.234567,
       attributedCost: 1.111111,
@@ -98,9 +107,11 @@ function usageFixture(): unknown {
     conversations: [
       {
         key: resetKey,
-        sessions: 2,
+        sessionCount: 2,
         buckets: { cacheMiss: 20_000, cacheHit: 8_000, cacheWrite: 500, output: 3_000, reasoning: 1_500 },
         inputTokens: 28_500,
+        outputTokens: 3_000,
+        cacheHitTokens: 8_000,
         totalTokens: 31_500,
         cost: 0.987654,
         attributedCost: 0.9,
@@ -116,9 +127,11 @@ function usageFixture(): unknown {
       },
       {
         key: filteredKey,
-        sessions: 1,
+        sessionCount: 1,
         buckets: { cacheMiss: 10_000, cacheHit: 2_000, cacheWrite: 500, output: 1_678, reasoning: 845 },
         inputTokens: 12_500,
+        outputTokens: 1_678,
+        cacheHitTokens: 2_000,
         totalTokens: 14_178,
         cost: 0.123457,
         attributedCost: 0.111111,
@@ -140,13 +153,12 @@ function usageTurnsFixture(key: string): unknown {
   const sessionId = key === filteredKey ? 'fixture-session-private-420002' : resetSessionId;
   const turnBuckets = { cacheMiss: 900, cacheHit: 3_200, cacheWrite: 30, output: 420, reasoning: 40 };
   return {
-    ok: true,
     generatedAt: Date.UTC(2026, 9, 24, 8, 30, 0),
     currency: 'USD',
     symbol: '$',
     key,
     sessionIds: [sessionId],
-    sessions: 1,
+    sessionCount: 1,
     buckets: turnBuckets,
     cost: 0.01,
     attributedCost: 0.01,
@@ -175,38 +187,47 @@ function usageTurnsFixture(key: string): unknown {
   };
 }
 
-function createFixtureFetch(state: SmokeState): typeof fetch {
-  return async (input, init) => {
-    const request = input instanceof Request ? input : new Request(input, init);
-    const url = new URL(request.url);
-    assert.equal(url.hostname, '127.0.0.1');
-    assert.equal(request.headers.get('x-console-token'), legacyToken);
-    state.legacyRequests.push(`${request.method} ${url.pathname}${url.search}`);
-    if (state.unavailable && (url.pathname === '/api/sessions' || url.pathname === '/api/tokens/summary')) {
-      throw new TypeError('fixture legacy API disconnected');
-    }
-    if (request.method === 'GET' && url.pathname === '/api/sessions') {
-      return jsonResponse({ sessions: state.sessions });
-    }
-    if (request.method === 'GET' && url.pathname === '/api/tokens/summary') {
-      assert.equal(url.searchParams.get('limit'), '200');
-      return jsonResponse(usageFixture());
-    }
-    if (request.method === 'GET' && url.pathname === '/api/tokens/turns') {
-      assert.equal(url.searchParams.get('limit'), '200');
-      return jsonResponse(usageTurnsFixture(url.searchParams.get('key') ?? resetKey));
-    }
-    if (request.method === 'POST' && url.pathname === '/api/session/reset') {
-      const body = await request.json() as unknown;
-      state.upstreamResetBodies.push(body);
-      if (state.resetOutcome === 'unknown') {
-        return jsonResponse({ ok: true, key: resetKey, archived: 'different-fixture-session' });
-      }
-      state.sessions = state.sessions.filter(session => session.key !== resetKey);
-      return jsonResponse({ ok: true, key: resetKey, archived: resetSessionId });
-    }
-    return jsonResponse({ ok: false }, 404);
-  };
+function createFixtureRoutes(state: SmokeState): readonly AdminRoute[] {
+  return [
+    {
+      method: 'GET', pathname: sessionsPath, handle: ({ query }) => {
+        state.fixtureRequests.push(`GET ${sessionsPath}?${query.toString()}`);
+        if (state.unavailable) throw new AdminRequestError(503, 'runtime_not_connected');
+        return { sessions: state.sessions, revision: sessionsRevision(state.sessions) };
+      },
+    },
+    {
+      method: 'POST', pathname: sessionResetPath, handle: ({ body }) => {
+        state.fixtureRequests.push(`POST ${sessionResetPath}`);
+        if (!body || body.revision !== sessionsRevision(state.sessions)) {
+          throw new AdminRequestError(409, 'session_revision_conflict');
+        }
+        if (body.key !== resetKey || body.sessionId !== resetSessionId || body.confirm !== true) {
+          throw new AdminRequestError(400, 'invalid_request');
+        }
+        state.resetBodies.push(body);
+        if (state.resetOutcome === 'unknown') throw new AdminRequestError(504, 'session_reset_unknown');
+        state.sessions = state.sessions.filter(session => session.key !== resetKey);
+        return { ok: true, key: resetKey, previousSessionId: resetSessionId,
+          bridgeBindingRemoved: true, externalWorkStopped: 'unverified' };
+      },
+    },
+    {
+      method: 'GET', pathname: usagePath, handle: ({ query }) => {
+        state.fixtureRequests.push(`GET ${usagePath}?${query.toString()}`);
+        assert.equal(query.get('limit'), '200');
+        if (state.unavailable) throw new AdminRequestError(503, 'runtime_not_connected');
+        return usageFixture();
+      },
+    },
+    {
+      method: 'GET', pathname: usageTurnsPath, maxResponseBytes: 4 * 1024 * 1024, handle: ({ query }) => {
+        state.fixtureRequests.push(`GET ${usageTurnsPath}?${query.toString()}`);
+        assert.equal(query.get('limit'), '200');
+        return usageTurnsFixture(query.get('key') ?? resetKey);
+      },
+    },
+  ];
 }
 
 async function listen(server: Server): Promise<AddressInfo> {
@@ -237,6 +258,12 @@ function section(page: Page, title: string): Locator {
   return page.locator('section').filter({
     has: page.getByRole('heading', { name: title, exact: true, includeHidden: true }),
   }).first();
+}
+
+async function expandDetails(panel: Locator): Promise<void> {
+  const open = await panel.evaluate(element => element instanceof HTMLDetailsElement && element.open);
+  if (!open) await panel.locator('summary').click();
+  assert.equal(await panel.evaluate(element => element instanceof HTMLDetailsElement && element.open), true);
 }
 
 async function navigate(page: Page, label: string, pageId: 'sessions' | 'usage', heading: string): Promise<void> {
@@ -289,7 +316,7 @@ async function assertBuiltActivityContract(): Promise<void> {
   } catch {
     throw new Error('Built UI is missing. Wait for the main thread build before running activity smoke.');
   }
-  for (const text of ['会话管理', '用量统计', '重置这条会话', '费用估算', '尚未接入聊天宿主']) {
+  for (const text of ['会话管理', '用量统计', '重置这条会话', '费用估算', 'usage-detailed-counts', '原生聊天宿主尚未接入']) {
     assert(application.includes(text), `Built UI does not contain ${text}; wait for the main thread build.`);
   }
 }
@@ -305,9 +332,9 @@ async function waitForPostCount(state: SmokeState, pathname: string, count: numb
 
 async function run(): Promise<void> {
   await assertBuiltActivityContract();
-  await mkdir(outputDirectory, { recursive: true });
+  await mkdir(outputDirectory, { recursive: true, mode: 0o700 });
+  await chmod(outputDirectory, 0o700);
   const fixtureDirectory = await mkdtemp(join(tmpdir(), 'activity-smoke-'));
-  const legacyRoot = join(fixtureDirectory, 'legacy');
   const state: SmokeState = {
     sessions: [
       { key: resetKey, sessionId: resetSessionId, owner: false },
@@ -315,9 +342,8 @@ async function run(): Promise<void> {
     ],
     resetOutcome: 'success',
     unavailable: false,
-    chatManagement: true,
-    legacyRequests: [],
-    upstreamResetBodies: [],
+    fixtureRequests: [],
+    resetBodies: [],
     browserPosts: [],
     browserAuthorizations: [],
     pageErrors: [],
@@ -329,18 +355,12 @@ async function run(): Promise<void> {
   let page: Page | undefined;
 
   try {
-    await mkdir(join(legacyRoot, 'state'), { recursive: true, mode: 0o700 });
-    await writePrivateJson(join(legacyRoot, 'config.json'), {
-      consolePort: 3100,
-      consoleToken: legacyToken,
-      privateFixtureMarker: true,
-    });
-    const routes = createLegacyAdminRoutes({ legacyRoot, fetch: createFixtureFetch(state), timeoutMs: 2_000 });
+    const routes = createFixtureRoutes(state);
     server = createAdminServer({
       token: administratorToken,
       snapshot: () => ({
         mode: 'gateway-live',
-        integrations: { chatManagement: state.chatManagement },
+        integrations: { nativeRuntimeResources: true, nativeChatRuntime: false },
         overview: {
           online: true,
           gatewayHealthy: true,
@@ -365,7 +385,7 @@ async function run(): Promise<void> {
     page.on('pageerror', error => state.pageErrors.push(error.message));
     page.on('request', request => {
       const url = new URL(request.url());
-      if (url.origin === origin && url.pathname.startsWith('/api/legacy/')) {
+      if (url.origin === origin && url.pathname.startsWith('/api/chat/')) {
         const authorization = request.headers().authorization;
         if (authorization !== undefined) state.browserAuthorizations.push(authorization);
       }
@@ -404,7 +424,7 @@ async function run(): Promise<void> {
     await page.locator(`[data-session-key="${resetKey}"]`).waitFor();
     await page.locator(`[data-session-key="${resetKey}"]`).getByRole('button', { name: '查看' }).click();
 
-    const resetPostsBeforeCancel = state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset').length;
+    const resetPostsBeforeCancel = state.browserPosts.filter(request => request.pathname === sessionResetPath).length;
     await page.locator('#session-reset-open').click();
     const resetDialog = page.getByRole('dialog');
     await resetDialog.getByRole('heading', { name: '重置所选会话绑定？', exact: true }).waitFor();
@@ -415,8 +435,8 @@ async function run(): Promise<void> {
     assert(!(await resetDialog.locator('#session-reset-submit').isDisabled()));
     await resetDialog.getByRole('button', { name: '取消', exact: true }).click();
     await resetDialog.waitFor({ state: 'hidden' });
-    assert.equal(state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset').length, resetPostsBeforeCancel);
-    assert.equal(state.upstreamResetBodies.length, 0);
+    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel);
+    assert.equal(state.resetBodies.length, 0);
 
     const initialRevision = sessionsRevision(state.sessions);
     state.sessions = [...state.sessions, { key: 'group:430003', sessionId: 'fixture-session-group-430003', owner: false }];
@@ -424,17 +444,17 @@ async function run(): Promise<void> {
     await resetDialog.locator('#session-reset-confirm').fill(resetKey);
     await resetDialog.locator('#session-reset-submit').click();
     await resetDialog.getByText('会话列表已在其他位置变化。请重新读取列表，再检查并确认当前绑定。', { exact: true }).waitFor();
-    await waitForPostCount(state, '/api/legacy/session/reset', resetPostsBeforeCancel + 1);
-    const conflictPosts = state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset');
+    await waitForPostCount(state, sessionResetPath, resetPostsBeforeCancel + 1);
+    const conflictPosts = state.browserPosts.filter(request => request.pathname === sessionResetPath);
     assert.deepEqual(conflictPosts.at(-1)?.body, {
       key: resetKey,
       sessionId: resetSessionId,
       revision: initialRevision,
       confirm: true,
     });
-    assert.equal(state.upstreamResetBodies.length, 0);
+    assert.equal(state.resetBodies.length, 0);
     await page.waitForTimeout(250);
-    assert.equal(state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset').length, resetPostsBeforeCancel + 1);
+    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 1);
     await resetDialog.getByRole('button', { name: '关闭并刷新', exact: true }).click();
     await resetDialog.waitFor({ state: 'hidden' });
     await page.getByText('已读取 3 条当前绑定。', { exact: true }).waitFor();
@@ -446,18 +466,18 @@ async function run(): Promise<void> {
     await resetDialog.locator('#session-reset-confirm').fill(resetKey);
     await resetDialog.locator('#session-reset-submit').click();
     await resetDialog.getByText('暂时无法确认重置是否完成。请勿再次提交；关闭窗口后手动刷新当前状态。', { exact: true }).waitFor();
-    await waitForPostCount(state, '/api/legacy/session/reset', resetPostsBeforeCancel + 2);
-    const unknownPosts = state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset');
+    await waitForPostCount(state, sessionResetPath, resetPostsBeforeCancel + 2);
+    const unknownPosts = state.browserPosts.filter(request => request.pathname === sessionResetPath);
     assert.deepEqual(unknownPosts.at(-1)?.body, {
       key: resetKey,
       sessionId: resetSessionId,
       revision: refreshedRevision,
       confirm: true,
     });
-    assert.deepEqual(state.upstreamResetBodies, [{ key: resetKey }]);
+    assert.equal(state.resetBodies.length, 1);
     await page.waitForTimeout(250);
-    assert.equal(state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset').length, resetPostsBeforeCancel + 2);
-    assert.equal(state.upstreamResetBodies.length, 1);
+    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 2);
+    assert.equal(state.resetBodies.length, 1);
     await resetDialog.getByRole('button', { name: '关闭并刷新', exact: true }).click();
     await resetDialog.waitFor({ state: 'hidden' });
 
@@ -469,23 +489,30 @@ async function run(): Promise<void> {
     await resetDialog.waitFor({ state: 'hidden' });
     await page.getByText('已读取 2 条当前绑定。', { exact: true }).waitFor();
     assert.equal(await page.locator(`[data-session-key="${resetKey}"]`).count(), 0);
-    assert.equal(state.upstreamResetBodies.length, 2);
-    assert.equal(state.browserPosts.filter(request => request.pathname === '/api/legacy/session/reset').length, resetPostsBeforeCancel + 3);
-    await page.getByText(/外部任务是否停止、外部会话是否归档均无法验证/).waitFor();
+    assert.equal(state.resetBodies.length, 2);
+    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 3);
+    await page.getByText(/外部任务是否停止、外部会话是否归档仍需单独核对/).waitFor();
 
     await openWorkspaceSearch(page, '用量 统计', '用量统计', '用量统计');
     await page.locator('[data-page="usage"]').waitFor();
     await section(page, '账本汇总').waitFor();
+    await expandDetails(page.locator('details[data-usage-conversations-panel]'));
+    await page.locator('[data-usage-metric="total-tokens"]').getByText('45.68k', { exact: true }).waitFor();
+    const detailedCounts = page.getByRole('switch', { name: '详细数值', exact: true });
+    assert.equal(await detailedCounts.isChecked(), false);
+    await detailedCounts.click();
+    assert.equal(await detailedCounts.isChecked(), true);
     await page.locator('[data-usage-metric="total-tokens"]').getByText('45,678', { exact: true }).waitFor();
     await page.locator('[data-usage-metric="estimated-cost"]').getByText(/1\.234567/).waitFor();
     await page.locator(`[data-usage-key="${resetKey}"]`).getByText(/0\.987654/).waitFor();
     await page.getByText(xssText, { exact: true }).waitFor();
-    await page.getByText(/无法拆到具体轮次的历史估算费用/).waitFor();
+    await page.getByText('聊天宿主未提供完整价目表；已有 token 与费用汇总仍可查看。', { exact: true }).waitFor();
+    await expandDetails(page.locator('details[data-usage-turns-panel]'));
     await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
     for (const title of ['账本汇总', 'Token 构成', '按会话汇总']) {
       assert.equal(await visibleNavigator(page).getByRole('button', { name: title, exact: true }).count(), 1);
     }
-    assert(state.legacyRequests.some(request => request.includes('/api/tokens/turns')));
+    assert(state.fixtureRequests.some(request => request.includes(usageTurnsPath)));
 
     await page.setViewportSize({ width: 390, height: 844 });
     for (const theme of ['light', 'dark'] as const) {
@@ -493,52 +520,40 @@ async function run(): Promise<void> {
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       assert(await page.locator('[data-usage-key]').first().isVisible());
       assert(await page.locator('table').first().locator('..').evaluate(element => element.scrollWidth > element.clientWidth));
-      await page.screenshot({ path: new URL(`loaded-usage-mobile-${theme}-${runId}.png`, outputDirectory).pathname,
-        fullPage: true, animations: 'disabled' });
+      await screenshot(page, `loaded-usage-mobile-${theme}`);
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
     await navigate(page, '会话管理', 'sessions', '会话管理');
     await page.locator('[data-session-key]').first().waitFor();
     await page.setViewportSize({ width: 390, height: 844 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    await page.screenshot({ path: new URL(`loaded-sessions-mobile-${runId}.png`, outputDirectory).pathname,
-      fullPage: true, animations: 'disabled' });
+    await screenshot(page, 'loaded-sessions-mobile');
     await page.setViewportSize({ width: 1440, height: 1000 });
     await navigate(page, '用量统计', 'usage', '用量与费用');
 
     state.unavailable = true;
     await navigate(page, '会话管理', 'sessions', '会话管理');
-    await section(page, '无法读取会话').waitFor();
-    await page.getByText('当前状态未知，不会按零条会话显示。请检查聊天宿主连接后重试。', { exact: true }).waitFor();
+    await section(page, '原生会话不可用').waitFor();
+    await page.getByText('当前状态不会按零条会话显示。接入原生聊天宿主后再试。', { exact: true }).waitFor();
     await navigate(page, '用量统计', 'usage', '用量与费用');
-    await section(page, '用量不可用').waitFor();
-    await page.getByText('统计失败时不会显示为零。请检查聊天宿主和账本服务后重试。', { exact: true }).waitFor();
+    await section(page, '用量暂不可用').waitFor();
+    await page.getByText('请先接入聊天宿主与账本数据源；不可用不代表用量为零。', { exact: true }).waitFor();
     assert.equal(await page.locator('[data-usage-metric="total-tokens"]').count(), 0);
 
-    state.unavailable = false;
-    state.chatManagement = false;
-    const legacyRequestCount = state.legacyRequests.length;
+    const fixtureRequestCount = state.fixtureRequests.length;
     await page.reload();
     await page.locator('[data-page="usage"]').waitFor();
-    await section(page, '尚未接入聊天宿主').waitFor();
+    await section(page, '用量暂不可用').waitFor();
     await navigate(page, '会话管理', 'sessions', '会话管理');
-    await section(page, '尚未接入聊天宿主').waitFor();
-    assert.equal(state.legacyRequests.length, legacyRequestCount);
+    await section(page, '原生会话不可用').waitFor();
+    assert(state.fixtureRequests.length > fixtureRequestCount, 'Native operational pages did not request their 503 routes.');
 
     await page.setViewportSize({ width: 390, height: 844 });
     await setTheme(page, 'light');
-    await page.screenshot({
-      path: new URL(`mobile-light-${runId}.png`, outputDirectory).pathname,
-      fullPage: true,
-      animations: 'disabled',
-    });
+    await screenshot(page, 'mobile-light');
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
     await setTheme(page, 'dark');
-    await page.screenshot({
-      path: new URL(`mobile-dark-${runId}.png`, outputDirectory).pathname,
-      fullPage: true,
-      animations: 'disabled',
-    });
+    await screenshot(page, 'mobile-dark');
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
 
     assert(await tokenIsAbsentFromStorage(page));
@@ -550,7 +565,7 @@ async function run(): Promise<void> {
       checkedAt: new Date().toISOString(),
       builtUi: true,
       realAdminServer: true,
-      realLegacyAdminRoutes: true,
+      independentFixtureRoutes: true,
       fixedPrivateFixture: true,
       cookieAuthentication: true,
       sessionFilteringAndDetails: true,
@@ -562,7 +577,7 @@ async function run(): Promise<void> {
       estimatedCostIsNonzero: true,
       perTurnEndpointRequired: true,
       disconnectedApiIsUnavailable: true,
-      unconnectedChatHostPrompt: true,
+      nativeRuntimeUnavailableAfterReload: true,
       workspaceSearch: true,
       pageNavigation: true,
       mobileThemes: ['light', 'dark'],
@@ -573,29 +588,25 @@ async function run(): Promise<void> {
       externalRequests: 0,
       xssExecuted: false,
     };
-    await writeFile(new URL(`result-${runId}.json`, outputDirectory), `${JSON.stringify(result, null, 2)}\n`);
+    await writePrivateJson(new URL(`result-${runId}.json`, outputDirectory).pathname, result);
     console.log(`Activity smoke passed. Results: runtime/activity-smoke/result-${runId}.json`);
   } catch (error: unknown) {
     if (page !== undefined && !page.isClosed()) {
-      await page.screenshot({
-        path: new URL(`failure-${runId}.png`, outputDirectory).pathname,
-        fullPage: true,
-        animations: 'disabled',
-      }).catch(() => undefined);
+      await screenshot(page, 'failure').catch(() => undefined);
     }
     const failure = {
       checkedAt: new Date().toISOString(),
       error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error),
       state: {
-        legacyRequests: state.legacyRequests,
-        upstreamResetBodies: state.upstreamResetBodies,
+        fixtureRequests: state.fixtureRequests,
+        resetBodies: state.resetBodies,
         browserPosts: state.browserPosts,
         browserAuthorizations: state.browserAuthorizations,
         pageErrors: state.pageErrors,
         externalRequests: state.externalRequests,
       },
     };
-    await writeFile(new URL(`failure-${runId}.json`, outputDirectory), `${JSON.stringify(failure, null, 2)}\n`);
+    await writePrivateJson(new URL(`failure-${runId}.json`, outputDirectory).pathname, failure);
     throw error;
   } finally {
     await context?.close().catch(() => undefined);

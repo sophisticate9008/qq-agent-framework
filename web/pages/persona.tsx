@@ -1,268 +1,217 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, LoaderCircle, Plus, RefreshCw, UserRound } from 'lucide-react';
-import { ConfigurationEditor } from '../components/configuration-editor.tsx';
-import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section } from '../components/management.tsx';
-import { Badge } from '../components/ui/badge.tsx';
-import { Button } from '../components/ui/button.tsx';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx';
-import { Input } from '../components/ui/input.tsx';
-import { Textarea } from '../components/ui/textarea.tsx';
+import { CircleAlert, LoaderCircle, Plus, RefreshCw, UserRound } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
+import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section } from '../components/management.tsx';
+import { Button } from '../components/ui/button.tsx';
+import { Input } from '../components/ui/input.tsx';
+import { Textarea } from '../components/ui/textarea.tsx';
 
-interface RoleDetail {
+interface Persona {
+  readonly id: string;
   readonly name: string;
-  readonly content: string;
+  readonly identity: string;
+  readonly style: string;
+}
+
+interface PersonaCatalog {
   readonly revision: string;
+  readonly personas: readonly Persona[];
 }
 
-type EditorTarget = { readonly kind: 'role'; readonly name: string } | { readonly kind: 'new' };
-type ResultState = 'idle' | 'saved' | 'activated' | 'conflict' | 'unknown';
+type SaveState = 'idle' | 'saved' | 'busy' | 'conflict' | 'unknown';
 
-function readRoles(value: unknown): { roles: string[]; current: string | null } | null {
+const emptyPersona: Persona = { id: '', name: '', identity: '', style: '' };
+
+function parsePersona(value: unknown): Persona | null {
   const record = asRecord(value);
-  if (!Array.isArray(record.roles) || !record.roles.every(role => typeof role === 'string')) return null;
-  if (record.current !== null && typeof record.current !== 'string') return null;
-  return { roles: [...record.roles], current: record.current as string | null };
+  if (typeof record.id !== 'string' || typeof record.name !== 'string'
+    || typeof record.identity !== 'string' || typeof record.style !== 'string') return null;
+  return { id: record.id, name: record.name, identity: record.identity, style: record.style };
 }
 
-function readRole(value: unknown): RoleDetail | null {
+function parseCatalog(value: unknown): PersonaCatalog | null {
   const record = asRecord(value);
-  if (typeof record.name !== 'string' || typeof record.content !== 'string' || typeof record.revision !== 'string') return null;
-  return { name: record.name, content: record.content, revision: record.revision };
+  if (typeof record.revision !== 'string' || !Array.isArray(record.personas)) return null;
+  const personas = record.personas.map(parsePersona);
+  if (personas.some(persona => persona === null)) return null;
+  const complete = personas as Persona[];
+  if (new Set(complete.map(persona => persona.id)).size !== complete.length) return null;
+  return { revision: record.revision, personas: complete };
 }
 
-function resultMessage(result: ResultState, dirty: boolean): string | undefined {
-  if (result === 'saved') return '人设已保存';
-  if (result === 'activated') return '当前人设状态已更新';
-  if (result === 'conflict') return '人设已在其他窗口更新，请重新载入后再编辑。';
-  if (result === 'unknown') return '暂时无法确认操作结果，请重新载入后查看。';
-  return dirty ? undefined : '内容与已保存版本一致';
+function samePersona(left: Persona, right: Persona): boolean {
+  return left.id === right.id && left.name === right.name && left.identity === right.identity && left.style === right.style;
 }
 
-export function PersonaPage(props: PageProps) {
-  const { api, connected, connect, setDirty } = props;
-  const chatManagement = asRecord(props.snapshot.integrations).chatManagement !== false;
-  const [roles, setRoles] = useState<string[]>([]);
-  const [current, setCurrent] = useState<string | null>(null);
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+function stateForError(error: unknown): SaveState {
+  if (error instanceof ApiError && error.code === 'chat_storage_busy') return 'busy';
+  if (error instanceof ApiError && (error.status === 409 || /conflict|revision/.test(error.code))) return 'conflict';
+  if (error instanceof ApiError && (error.status >= 500 || /unknown/.test(error.code))) return 'unknown';
+  return 'idle';
+}
+
+function stateMessage(state: SaveState, dirty: boolean): string {
+  if (state === 'saved') return '人设库已保存。';
+  if (state === 'busy') return '另一项保存正在进行，请稍后重新载入后再提交；不会自动重试。';
+  if (state === 'conflict') return '人设库已在其他窗口更新，请重新载入。';
+  if (state === 'unknown') return '无法确认保存结果，请重新载入核对；不会自动重试。';
+  return dirty ? '人设更改尚未保存。' : '当前内容与已保存人设库一致。';
+}
+
+export function PersonaPage({ api, connected, connect, setDirty, navigate }: PageProps) {
+  const [catalog, setCatalog] = useState<PersonaCatalog | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Persona>(emptyPersona);
   const [creating, setCreating] = useState(false);
-  const [detail, setDetail] = useState<RoleDetail | null>(null);
-  const [draftName, setDraftName] = useState('');
-  const [draftContent, setDraftContent] = useState('');
-  const [listLoading, setListLoading] = useState(false);
-  const [roleLoading, setRoleLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [activating, setActivating] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [writeError, setWriteError] = useState('');
   const [fieldError, setFieldError] = useState('');
-  const [result, setResult] = useState<ResultState>('idle');
-  const [pendingTarget, setPendingTarget] = useState<EditorTarget | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-  const [configurationDirty, setConfigurationDirty] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
+  const [reloadVersion, setReloadVersion] = useState(0);
   const reportedDirty = useRef(false);
   const setDirtyRef = useRef(setDirty);
-  const skipRoleLoad = useRef<string | null>(null);
-
-  const dirty = useMemo(() => creating
-    ? draftName.trim().length > 0 || draftContent.length > 0
-    : detail !== null && draftContent !== detail.content,
-  [creating, detail, draftContent, draftName]);
-  const pageDirty = dirty || configurationDirty;
+  const selected = catalog?.personas.find(persona => persona.id === selectedId) ?? null;
+  const dirty = creating
+    ? Object.values(draft).some(value => value.trim() !== '')
+    : selected !== null && !samePersona(draft, selected);
+  const idConflict = useMemo(() => creating && catalog?.personas.some(persona => persona.id === draft.id.trim()) === true, [catalog, creating, draft.id]);
 
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
-    if (reportedDirty.current === pageDirty) return;
-    reportedDirty.current = pageDirty;
-    setDirty(pageDirty);
-  }, [pageDirty, setDirty]);
+    if (reportedDirty.current === dirty) return;
+    reportedDirty.current = dirty;
+    setDirty(dirty, 'personas');
+  }, [dirty, setDirty]);
   useEffect(() => () => {
     reportedDirty.current = false;
-    setDirtyRef.current(false);
+    setDirtyRef.current(false, 'personas');
   }, []);
 
   useEffect(() => {
-    if (!connected || !chatManagement) {
-      setRoles([]);
-      setCurrent(null);
-      setSelectedName(null);
+    if (!connected) {
+      setCatalog(null);
+      setSelectedId(null);
+      setDraft(emptyPersona);
       setCreating(false);
-      setDetail(null);
-      setDraftName('');
-      setDraftContent('');
-      setLoadError('');
-      setWriteError('');
-      setResult('idle');
       return;
     }
     const controller = new AbortController();
-    setListLoading(true);
-    setLoadError('');
-    void api.get('/api/legacy/roles', controller.signal).then(value => {
-      const next = readRoles(value);
-      if (!next) throw new Error('invalid_roles_response');
-      setRoles(next.roles);
-      setCurrent(next.current);
-      const preferred = next.current && next.roles.includes(next.current) ? next.current : next.roles[0] ?? null;
-      setSelectedName(preferred);
-      setCreating(preferred === null);
-      if (preferred === null) {
-        setDetail(null);
-        setDraftName('');
-        setDraftContent('');
-      }
-    }).catch(error => {
-      if (!controller.signal.aborted) setLoadError(errorMessage(error));
-    }).finally(() => {
-      if (!controller.signal.aborted) setListLoading(false);
-    });
-    return () => controller.abort();
-  }, [api, chatManagement, connected, reloadKey]);
-
-  useEffect(() => {
-    if (!connected || !chatManagement || creating || selectedName === null) return;
-    if (skipRoleLoad.current === selectedName) {
-      skipRoleLoad.current = null;
-      return;
-    }
-    const controller = new AbortController();
-    setRoleLoading(true);
-    setDetail(null);
-    setDraftName(selectedName);
-    setDraftContent('');
+    setLoading(true);
     setLoadError('');
     setWriteError('');
-    setResult('idle');
-    void api.get(`/api/legacy/role?name=${encodeURIComponent(selectedName)}`, controller.signal).then(value => {
-      const next = readRole(value);
-      if (!next || next.name !== selectedName) throw new Error('invalid_role_response');
-      setDetail(next);
-      setDraftName(next.name);
-      setDraftContent(next.content);
+    setSaveState('idle');
+    void api.get('/api/chat/personas', controller.signal).then(value => {
+      const next = parseCatalog(value);
+      if (!next) throw new Error('invalid_personas_response');
+      const preferred = next.personas[0] ?? null;
+      setCatalog(next);
+      setSelectedId(preferred?.id ?? null);
+      setDraft(preferred ?? emptyPersona);
+      setCreating(preferred === null);
     }).catch(error => {
-      if (!controller.signal.aborted) setLoadError(errorMessage(error));
+      if (!controller.signal.aborted) {
+        setCatalog(null);
+        setLoadError(errorMessage(error));
+      }
     }).finally(() => {
-      if (!controller.signal.aborted) setRoleLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     });
     return () => controller.abort();
-  }, [api, chatManagement, connected, creating, reloadKey, selectedName]);
+  }, [api, connected, reloadVersion]);
 
-  function applyTarget(target: EditorTarget): void {
-    setPendingTarget(null);
+  function update<Key extends keyof Persona>(key: Key, value: Persona[Key]): void {
+    setDraft(current => ({ ...current, [key]: value }));
     setFieldError('');
     setWriteError('');
-    setResult('idle');
-    if (target.kind === 'new') {
-      setCreating(true);
-      setSelectedName(null);
-      setDetail(null);
-      setDraftName('');
-      setDraftContent('');
-      return;
-    }
+    setSaveState('idle');
+  }
+
+  function choose(persona: Persona): void {
+    if (dirty || saving) return;
+    setSelectedId(persona.id);
+    setDraft(persona);
     setCreating(false);
-    setSelectedName(target.name);
-    setDetail(null);
-    setDraftName(target.name);
-    setDraftContent('');
-  }
-
-  function requestTarget(target: EditorTarget): void {
-    if (target.kind === 'role' && !creating && target.name === selectedName) return;
-    if (target.kind === 'new' && creating) return;
-    if (dirty) setPendingTarget(target);
-    else applyTarget(target);
-  }
-
-  function reload(): void {
+    setFieldError('');
     setWriteError('');
-    setResult('idle');
-    setReloadKey(key => key + 1);
+    setSaveState('idle');
+  }
+
+  function createPersona(): void {
+    if (dirty || saving) return;
+    setSelectedId(null);
+    setDraft(emptyPersona);
+    setCreating(true);
+    setFieldError('');
+    setWriteError('');
+    setSaveState('idle');
   }
 
   async function save(): Promise<void> {
-    const name = creating ? draftName.trim() : detail?.name ?? '';
-    if (!name) {
-      setFieldError('请填写人设名称。');
+    if (!catalog || !dirty || saving) return;
+    const normalized = { ...draft, id: draft.id.trim(), name: draft.name.trim() };
+    if (!normalized.id || !normalized.name || !normalized.identity.trim() || !normalized.style.trim()) {
+      setFieldError('内部标识、名称、身份和表达风格必须填写。');
       return;
     }
-    if (!draftContent.trim()) {
-      setFieldError('请填写人设正文。');
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(normalized.id)) {
+      setFieldError('内部标识只能使用字母、数字、点、下划线和短横线，且不能超过 128 个字符。');
       return;
     }
-    if (!creating && detail === null) return;
+    if (idConflict) {
+      setFieldError('内部标识已存在。');
+      return;
+    }
+    const personas = creating ? [...catalog.personas, normalized] : catalog.personas.map(persona => persona.id === selectedId ? normalized : persona);
     setSaving(true);
-    setFieldError('');
     setWriteError('');
-    setResult('idle');
+    setSaveState('idle');
     try {
-      const body = creating
-        ? { name, content: draftContent, create: true }
-        : { name, content: draftContent, revision: detail!.revision };
-      const response = readRole(await api.post('/api/legacy/role', body));
-      if (!response || response.name !== name || response.content !== draftContent) throw new Error('invalid_role_response');
-      if (creating) skipRoleLoad.current = response.name;
-      setDetail(response);
-      setDraftName(response.name);
-      setDraftContent(response.content);
-      setSelectedName(response.name);
+      const next = parseCatalog(await api.post('/api/chat/personas', { revision: catalog.revision, personas }));
+      if (!next) throw new Error('invalid_personas_response');
+      const saved = next.personas.find(persona => persona.id === normalized.id);
+      if (!saved) throw new Error('invalid_personas_response');
+      setCatalog(next);
+      setSelectedId(saved.id);
+      setDraft(saved);
       setCreating(false);
-      setRoles(existing => existing.includes(response.name) ? existing : [...existing, response.name]);
-      setResult('saved');
+      setSaveState('saved');
     } catch (error) {
-      const code = error instanceof ApiError ? error.code : '';
-      setResult(/conflict|stale|revision/.test(code) ? 'conflict' : /unknown/.test(code) ? 'unknown' : 'idle');
+      setSaveState(stateForError(error));
       setWriteError(errorMessage(error));
     } finally {
       setSaving(false);
     }
   }
 
-  async function activate(): Promise<void> {
-    if (selectedName === null || creating || dirty) return;
-    setActivating(true);
+  function reset(): void {
+    setDraft(creating ? emptyPersona : selected ?? emptyPersona);
+    setFieldError('');
     setWriteError('');
-    setResult('idle');
-    const nextName = current === selectedName ? null : selectedName;
-    try {
-      const response = asRecord(await api.post('/api/legacy/role/activate', { name: nextName }));
-      if (response.current !== null && typeof response.current !== 'string') throw new Error('invalid_activate_response');
-      if (response.current !== nextName) throw new Error('invalid_activate_response');
-      setCurrent(nextName);
-      setResult('activated');
-    } catch (error) {
-      const code = error instanceof ApiError ? error.code : '';
-      setResult(/unknown/.test(code) ? 'unknown' : 'idle');
-      setWriteError(errorMessage(error));
-    } finally {
-      setActivating(false);
-    }
+    setSaveState('idle');
   }
 
-  if (!connected) return <div className="page-stack" data-page="persona"><PageHeading title="人设与形象" description="管理伙伴的身份、表达方式和当前启用的人设。" /><ConnectPrompt connect={connect} /></div>;
-  if (!chatManagement) return <div className="page-stack" data-page="persona"><PageHeading title="人设与形象" description="管理宿主提供的人设与消息身份。" /><Section title="尚未接入聊天宿主" description="当前只有消息网关，人设正文与形象能力需由聊天宿主接入。下面的人格标识仅用于发送记录，不代替人设。" /><ConfigurationEditor category="persona" {...props} setDirty={setConfigurationDirty} /></div>;
-
-  const busy = listLoading || roleLoading || saving || activating;
-  const activationLabel = current === selectedName ? '停用当前人设' : '启用这个人设';
+  if (!connected) return <div className="page-stack" data-page="persona"><PageHeading title="人设与形象" description="独立管理身份定义与表达风格。" /><ConnectPrompt connect={connect} /></div>;
 
   return <div className="page-stack" data-page="persona">
-    <PageHeading title="人设与形象" description="选择现有人设继续调整，或创建一个新的身份与表达方式。" actions={<Button variant="outline" onClick={reload} disabled={busy || dirty}><RefreshCw className={listLoading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />
-    {loadError && !roles.length ? <Section title="无法读取人设" description={loadError} actions={<Button variant="outline" onClick={reload}>重试</Button>}><EmptyState title="人设列表暂时不可用" description="请检查连接后重试，现有配置不会受到影响。" /></Section> : <div className="grid items-start gap-5 lg:grid-cols-[minmax(13rem,0.36fr)_minmax(0,1fr)]">
-      <Section title="人设列表" description="当前可用的全部人设。" actions={<Button size="sm" onClick={() => requestTarget({ kind: 'new' })} disabled={busy}><Plus className="size-3.5" />新建</Button>}>
-        {listLoading ? <div className="flex min-h-44 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取人设</div> : roles.length === 0 ? <EmptyState title="还没有人设" description="新建第一份人设，为伙伴设定身份和表达方式。" action={<Button size="sm" onClick={() => requestTarget({ kind: 'new' })}><Plus className="size-3.5" />新建人设</Button>} /> : <div className="grid gap-1.5">{roles.map(role => <Button key={role} variant={!creating && selectedName === role ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-2.5 text-left whitespace-normal" onClick={() => requestTarget({ kind: 'role', name: role })} disabled={busy}><UserRound className="size-4 shrink-0" /><span className="min-w-0 flex-1 truncate">{role}</span>{current === role && <Badge variant="outline"><Check className="size-3" />当前</Badge>}</Button>)}</div>}
-      </Section>
-      <div className="grid min-w-0 gap-5">
-        <Section title={creating ? '新建人设' : selectedName ?? '人设内容'} description={creating ? '名称用于在人设列表中辨认，正文决定身份和表达方式。' : current === selectedName ? '这是当前启用的人设，保存后不会重置已有会话。' : '保存内容后，可将它设为当前人设。'} footer={<SaveBar dirty={dirty} saving={saving} message={resultMessage(result, dirty)} onSave={() => void save()} onReset={() => detail ? setDraftContent(detail.content) : (setDraftName(''), setDraftContent(''))} label={creating ? '创建人设' : '保存人设'}><Button variant="outline" disabled={creating || selectedName === null || dirty || busy} onClick={() => void activate()}>{activating && <LoaderCircle className="size-4 animate-spin" />}{activating ? '正在更新' : activationLabel}</Button></SaveBar>}>
-          {roleLoading ? <div className="flex min-h-72 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取人设内容</div> : loadError && !detail && !creating ? <EmptyState title="无法读取人设内容" description={loadError} action={<Button variant="outline" onClick={reload}>重试</Button>} /> : <div className="grid gap-5">
-            <Field label="人设名称" description={creating ? '使用容易辨认的名称，创建后不可在此页面改名。' : '现有人设名称不可修改。'} error={fieldError && !draftName.trim() ? fieldError : undefined}><Input value={draftName} onChange={event => { setDraftName(event.target.value); setFieldError(''); setResult('idle'); }} disabled={!creating || saving} placeholder="例如：日常伙伴" maxLength={128} /></Field>
-            <Field label="人设正文" description="写下身份、性格、语气和需要遵守的表达边界。" error={fieldError && draftName.trim() && !draftContent.trim() ? fieldError : undefined}><Textarea value={draftContent} onChange={event => { setDraftContent(event.target.value); setFieldError(''); setResult('idle'); }} disabled={roleLoading || saving} placeholder="描述伙伴的身份、性格和表达方式" className="min-h-80 resize-y leading-6" /></Field>
-            {writeError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(result === 'conflict' || result === 'unknown') && <Button size="sm" variant="outline" onClick={reload}>重新载入</Button>}</div>}
-          </div>}
-        </Section>
-        <ConfigurationEditor category="persona" {...props} setDirty={setConfigurationDirty} />
-      </div>
-    </div>}
-    <Dialog open={pendingTarget !== null} onOpenChange={open => { if (!open) setPendingTarget(null); }}><DialogContent><DialogHeader><DialogTitle>切换前还有未保存内容</DialogTitle><DialogDescription>切换后，本次编辑会被舍弃。你也可以留在这里先保存。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setPendingTarget(null)}>继续编辑</Button><Button variant="destructive" onClick={() => { if (pendingTarget) applyTarget(pendingTarget); }}>舍弃并切换</Button></DialogFooter></DialogContent></Dialog>
+    <PageHeading title="人设与形象" description="人设库只定义身份和表达风格。聊天方案可以选择关联人设，能力、访问授权和用户偏好仍分别管理。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />
+    {loading && !catalog ? <Section scrollable title="人设库"><div className="flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取人设库</div></Section>
+      : !catalog ? <Section title="人设库不可用" description={loadError || '服务没有返回可识别的人设库。'}><EmptyState locked title="无法读取原生人设库" description="暂时无法读取人设内容，请稍后重试。" /></Section>
+        : <div className="grid items-start gap-5 lg:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
+          <Section scrollable title="人设库" description="这里保存可被聊天方案引用的人设。" actions={<Button size="sm" onClick={createPersona} disabled={dirty || saving}><Plus className="size-3.5" />新建人设</Button>}>
+            <div className="min-w-0">{catalog.personas.length === 0 ? <EmptyState title="还没有人设" description="创建第一份独立人设，之后可在聊天方案中选择关联。" action={<Button size="sm" onClick={createPersona}><Plus className="size-3.5" />新建人设</Button>} /> : <div className="grid gap-1.5">{catalog.personas.map(persona => <Button key={persona.id} variant={!creating && selectedId === persona.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-2.5 text-left whitespace-normal" disabled={dirty || saving} onClick={() => choose(persona)}><UserRound className="size-4 shrink-0" /><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{persona.name}</strong><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{persona.id}</span></span></Button>)}</div>}</div>
+          </Section>
+          <Section scrollable title={creating ? '新建人设' : draft.name || '人设内容'} description="只描述这个角色是谁、如何表达；不要在这里写工具权限、触发条件或用户偏好。" footer={<SaveBar dirty={dirty} saving={saving} message={stateMessage(saveState, dirty)} onSave={() => void save()} onReset={reset} label={creating ? '创建人设' : '保存人设'}><Button variant="outline" onClick={() => navigate('model')}>查看聊天方案</Button></SaveBar>}>
+            <div className="grid gap-5">
+              <div className="grid gap-5 sm:grid-cols-2"><Field label="内部标识" description={creating ? '用于稳定关联，创建后不可修改。' : '现有内部标识不可修改。'}><Input value={draft.id} disabled={!creating || saving} maxLength={128} placeholder="persona-default" onChange={event => update('id', event.target.value)} /></Field><Field label="显示名称"><Input value={draft.name} disabled={saving} maxLength={128} placeholder="日常伙伴" onChange={event => update('name', event.target.value)} /></Field></div>
+              <Field label="身份定义" description="说明角色身份、关系边界和稳定事实。"><Textarea value={draft.identity} disabled={saving} className="h-44 resize-none leading-6" placeholder="描述这个角色是谁" onChange={event => update('identity', event.target.value)} /></Field>
+              <Field label="表达风格" description="说明语气、措辞和表达边界，不包含能力授权。"><Textarea value={draft.style} disabled={saving} className="h-36 resize-none leading-6" placeholder="描述这个角色如何表达" onChange={event => update('style', event.target.value)} /></Field>
+              {fieldError && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />{fieldError}</div>}
+              {writeError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown') && <Button size="sm" variant="outline" onClick={() => setReloadVersion(version => version + 1)}>重新载入</Button>}</div>}
+            </div>
+          </Section>
+        </div>}
   </div>;
 }

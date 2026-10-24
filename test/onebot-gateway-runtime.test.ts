@@ -63,7 +63,7 @@ test('gateway runtime authenticates health, forwards a read and closes idempoten
   assert.equal(service.address.address, '127.0.0.1');
   assert.equal((await fetch(`${base}/health`)).status, 401);
   const health = await (await fetch(`${base}/health`, { headers: { authorization: `Bearer ${token}` } })).json();
-  assert.equal(health.mode, 'legacy-egress-compatibility');
+  assert.equal(health.mode, 'onebot-egress');
   assert.equal(health.revision, service.revision);
   const result = await (await fetch(`${base}/get_status`, { method: 'POST', headers: { authorization: `Bearer ${token}`,
     'content-type': 'application/json' }, body: '{}' })).json();

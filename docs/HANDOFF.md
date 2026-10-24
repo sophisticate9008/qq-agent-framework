@@ -75,3 +75,12 @@ GitHub 操作复用现有 gh 认证，先核对当前账号、目标仓库和变
 - GitHub Actions 运行 `40066776704` 对上述实现提交 completed/success，包含浏览器验收。
 - 本轮后续证据文档提交不修改 TS 源码；实现文件摘要见 iterations/001-evidence.json。
 - 本机日志：runtime/iterations/001/clean-clone.log；原始失败日志和截图保留但不上传。
+
+## 迭代002发布核验
+
+- 性能实现提交：`a3cd21eabb3cd5b15cbc4316d86b0a030fc33bd1`，已推送同一公开仓库main。
+- GitHub Actions `40068964834` 对上述提交 completed/success；包含check、源码、编译产物和Chromium门槛。
+- 本机源码81/81、编译产物81/81、浏览器通过；52个公开文件检查通过，29个src/test/scripts的TS摘要与公开证据一致。
+- 完整方法和不利结果见 iterations/002-performance.md，结构化分布及源码/原始测量摘要见002-evidence.json。
+- 当前性能证据是短时离线合成负载，不是QQ/DSH生产容量或长稳验收；未完成项保持上文未勾选。
+- 本节是发布后留档，不修改被测TypeScript；首轮实现、证据及旧项目未提交成果保留。

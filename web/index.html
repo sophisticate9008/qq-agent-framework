@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>QQ Agent Framework · Demo Console</title>
+    <link rel="stylesheet" href="/style.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#overview" aria-label="返回概览">
+        <span class="brand-mark" aria-hidden="true">Q</span>
+        <span>Agent Console</span>
+      </a>
+      <div class="demo-badge"><span aria-hidden="true"></span>Demo · 非生产</div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar" aria-label="管理分类">
+        <p class="eyebrow">Workspace</p>
+        <nav>
+          <a href="#overview">概览</a>
+          <a href="#features">功能</a>
+          <a href="#context">上下文</a>
+          <a href="#policy">策略</a>
+          <a href="#outbox">发件箱</a>
+          <a href="#audit">审计</a>
+          <a href="#demo">手动演示</a>
+        </nav>
+        <div class="scope-note">
+          <strong>首轮范围</strong>
+          <span>只读观察与手动演示</span>
+          <span>不会自动触发或真实外发</span>
+        </div>
+      </aside>
+
+      <main>
+        <section class="hero" id="overview">
+          <div>
+            <p class="eyebrow">Control surface</p>
+            <h1>运行概览</h1>
+            <p class="lede">查看独立框架的演示状态，清晰区分能力、上下文、策略与运行记录。</p>
+          </div>
+          <div class="connection-card">
+            <label for="token">管理 Token</label>
+            <div class="token-row">
+              <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="仅保存在当前页面内存">
+              <button id="connect" type="button">连接</button>
+            </div>
+            <p id="connection-status" class="status" role="status">尚未连接</p>
+          </div>
+        </section>
+
+        <section class="panel overview-panel" aria-labelledby="overview-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Snapshot</p>
+              <h2 id="overview-title">环境状态</h2>
+            </div>
+            <button id="refresh" class="secondary" type="button" disabled>刷新快照</button>
+          </div>
+          <div id="overview-content" class="metric-grid empty-state">连接后显示概览</div>
+        </section>
+
+        <section class="panel" id="features" aria-labelledby="features-title">
+          <div class="section-heading"><div><p class="eyebrow">Capabilities</p><h2 id="features-title">功能</h2></div></div>
+          <div id="features-content" class="card-grid empty-state">暂无数据</div>
+        </section>
+
+        <section class="panel" id="context" aria-labelledby="context-title">
+          <div class="section-heading"><div><p class="eyebrow">Identity & settings</p><h2 id="context-title">上下文</h2></div></div>
+          <div id="context-content" class="detail-grid empty-state">暂无数据</div>
+        </section>
+
+        <section class="panel" id="policy" aria-labelledby="policy-title">
+          <div class="section-heading"><div><p class="eyebrow">Authorization</p><h2 id="policy-title">策略</h2></div></div>
+          <div id="policy-content" class="detail-grid empty-state">暂无数据</div>
+        </section>
+
+        <section class="panel" id="outbox" aria-labelledby="outbox-title">
+          <div class="section-heading"><div><p class="eyebrow">Demo transport</p><h2 id="outbox-title">发件箱</h2></div></div>
+          <div id="outbox-content" class="list empty-state">暂无演示消息</div>
+        </section>
+
+        <section class="panel" id="audit" aria-labelledby="audit-title">
+          <div class="section-heading"><div><p class="eyebrow">Observability</p><h2 id="audit-title">审计</h2></div></div>
+          <div id="audit-content" class="list empty-state">暂无审计记录</div>
+        </section>
+
+        <section class="panel demo-panel" id="demo" aria-labelledby="demo-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Manual only</p><h2 id="demo-title">手动演示</h2></div>
+            <span class="safe-label">离线 · 无真实外发</span>
+          </div>
+          <form id="demo-form">
+            <div class="form-grid">
+              <label>事件类型
+                <select id="event-type">
+                  <option value="message.received">定向消息</option>
+                  <option value="trigger.fired">提醒触发</option>
+                </select>
+              </label>
+              <label>会话标识
+                <input id="conversation-id" value="demo:room" maxlength="120" required>
+              </label>
+            </div>
+            <label>演示内容
+              <textarea id="event-text" rows="3" maxlength="2000" required placeholder="输入只用于本地演示的内容"></textarea>
+            </label>
+            <div class="form-footer">
+              <p id="demo-status" class="status" role="status">仅点击按钮后发送演示事件</p>
+              <button id="dispatch" type="submit" disabled>运行演示</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

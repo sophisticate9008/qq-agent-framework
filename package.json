@@ -1,0 +1,25 @@
+{
+  "name": "qq-agent-framework",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An independent, capability-oriented bridge engine with separated persona, preferences and policy.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.ts",
+    "test:built": "npm run build && node --test dist/test/*.test.js",
+    "test:browser": "npm run build && node scripts/browser-smoke.ts",
+    "demo": "npm run build && node src/demo.ts",
+    "check": "npm run typecheck && node scripts/check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "playwright": "1.61.1",
+    "typescript": "5.9.3"
+  }
+}

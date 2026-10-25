@@ -97,7 +97,13 @@ export async function verifyExecutionThemes(page: Page, origin: string, capture:
 
 export async function verifyExecutionRuntimeUi(page: Page, origin: string, capture: (label: string) => Promise<void> = async () => {}): Promise<Readonly<Record<string, boolean | number>>> {
   const evidence: Record<string, boolean | number> = {};
-  const showFeatureSettings = async () => { const tab = page.getByRole('tab', { name: '功能设置', exact: true }); if (await tab.count()) await tab.click(); };
+  const showFeatureSettings = async () => {
+    if (!new URL(page.url()).searchParams.get('view')?.startsWith('features')) return;
+    const tab = page.getByRole('tab', { name: '功能设置', exact: true });
+    await tab.click();
+    await tab.and(page.locator('[aria-selected="true"]')).waitFor();
+    await page.getByRole('tabpanel').filter({ has: page.locator('#native-bootstrap-summary') }).waitFor();
+  };
   const open = async (view: string) => { await page.goto(`${origin}/test/fixtures/execution-runtime.html?view=${view}`); if (view.startsWith('features')) await showFeatureSettings(); if (view === 'authorization') await page.getByText('高级：旧模式授权与次数', { exact: true }).click(); };
   const pending = (count: number) => page.waitForFunction(count => document.querySelector('#runtime-fixture-state')?.getAttribute('data-pending') === String(count), count);
   const writeCount = async () => Number(await page.locator('#runtime-fixture-state').getAttribute('data-writes'));
@@ -389,14 +395,35 @@ export async function verifyExecutionRuntimeUi(page: Page, origin: string, captu
   evidence.journalApiSwapOldSuccessFailureFinallyCannotReplaceNewRead = true;
   await open('features');
   await page.getByText('合成功能 A 0', { exact: true }).waitFor();
-  const featureRegion = page.getByRole('region', { name: '功能清单', exact: true });
-  await page.getByRole('tab', { name: '聊天工具', exact: true }).click();
+  const featureRegion = page.getByRole('region', { name: '功能清单', exact: true, includeHidden: true });
   const toolStatus = page.locator('#native-tool-runtime');
-  await toolStatus.getByText('当前运行快照没有已装配的功能包。', { exact: true }).waitFor();
-  await toolStatus.getByText('框架工具通道尚未接入。已保存的权限不会使未接入的通道自动可用。', { exact: true }).waitFor();
-  assert.equal(await toolStatus.getByRole('button', { name: '管理框架工具授权', exact: true }).count(), 1);
-  await showFeatureSettings();
-  await featureRegion.evaluate(element => { element.scrollTop = 0; });
+  const layoutFrames = () => page.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  for (const offset of [1400, 0]) {
+    await featureRegion.evaluate((element, offset) => { element.scrollTop = offset; }, offset);
+    await layoutFrames();
+    const visibleHeight = await featureRegion.getByRole('list', { exact: true }).evaluate(element => element.scrollHeight);
+    await page.getByRole('tab', { name: '聊天工具', exact: true }).click();
+    await toolStatus.getByText('当前运行快照没有已装配的功能包。', { exact: true }).waitFor();
+    await toolStatus.getByText('框架工具通道尚未接入。已保存的权限不会使未接入的通道自动可用。', { exact: true }).waitFor();
+    assert.equal(await toolStatus.getByRole('button', { name: '管理框架工具授权', exact: true }).count(), 1);
+    await featureRegion.waitFor({ state: 'hidden' });
+    await page.waitForFunction(() => document.querySelector('[aria-label="功能清单"]')?.querySelectorAll('[data-virtual-index]').length === 0);
+    await layoutFrames();
+    const hidden = await featureRegion.evaluate(element => ({
+      height: element.getBoundingClientRect().height,
+      total: [...element.querySelectorAll<HTMLElement>('[data-virtual-spacer]')]
+        .reduce((total, spacer) => total + Number.parseFloat(spacer.style.height), 0),
+    }));
+    assert.equal(hidden.height, 0);
+    assert.ok(Math.abs(hidden.total - visibleHeight) <= 1, JSON.stringify({ offset, visibleHeight, hidden }));
+    await showFeatureSettings();
+    await featureRegion.evaluate((element, offset) => { element.scrollTop = offset; }, offset);
+    await layoutFrames();
+    assert.ok(Math.abs(await featureRegion.evaluate(element => element.scrollTop) - offset) <= 1);
+  }
+  evidence.featuresHiddenTabPreservesMeasuredGeometryAtTopAndMiddle = true;
   await page.getByText('合成功能 A 0', { exact: true }).waitFor();
   await featureRegion.getByText('状态待确认', { exact: true }).waitFor();
   const featureVisible = await page.locator('[data-page="features"]').innerText();

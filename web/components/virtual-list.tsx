@@ -1,5 +1,5 @@
 import { Fragment, cloneElement, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type HTMLAttributes, type ReactElement, type ReactNode, type Ref } from 'react';
-import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual';
+import { defaultRangeExtractor, measureElement as measureVirtualElement, useVirtualizer, type Range } from '@tanstack/react-virtual';
 import { includeVirtualPins, virtualGaps } from './virtual-range.ts';
 
 const virtualizationThreshold = 60;
@@ -51,6 +51,15 @@ function useMeasuredItems<Item, Element extends HTMLElement>({ items, getItemKey
     scrollMargin,
     scrollPaddingStart: headerHeight,
     rangeExtractor,
+    measureElement(element, entry, instance) {
+      // Kept-mounted panels have no layout while hidden. Preserve the last
+      // real size so showing them does not turn zero-height rows into scroll corrections.
+      if (element.getClientRects().length === 0) {
+        const index = instance.indexFromElement(element);
+        return instance.itemSizeCache.get(instance.options.getItemKey(index)) ?? instance.options.estimateSize(index);
+      }
+      return measureVirtualElement(element, entry, instance);
+    },
     useFlushSync: false,
   });
 
@@ -60,6 +69,7 @@ function useMeasuredItems<Item, Element extends HTMLElement>({ items, getItemKey
     if (!element || !viewport) return;
     const table = element.closest('table');
     const measure = () => {
+      if (element.getClientRects().length === 0 || viewport.getClientRects().length === 0) return;
       setScrollMargin(element.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop - viewport.clientTop);
       setHeaderHeight(table?.tHead?.getBoundingClientRect().height ?? 0);
     };

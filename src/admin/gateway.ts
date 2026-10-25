@@ -1,3 +1,6 @@
+import { createNativeAccounts } from '../host/native-accounts.ts';
+import { createNativeAccountRoutes } from './native-accounts.ts';
+import { createNativeAccountRuntimeBundle, createNativeAccountDispatchRoutes, type NativeAccountRuntimeBundle } from './native-account-runtime.ts';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
@@ -5,21 +8,34 @@ import { isIP, type AddressInfo } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 
 import type { OneBotCompatGatewayMetrics, OneBotCompatPolicyMetric } from '../adapters/onebot-compat.ts';
-import { assert, isRecord, reference, snapshot } from '../core/values.ts';
+import { assert, isRecord, snapshot } from '../core/values.ts';
+import { isConfigurationPath, resolveConfigurationPath } from '../host/configuration-path.ts';
 import {
   loadOneBotGatewayConfiguration,
   type OneBotGatewayConfiguration
 } from '../host/onebot-gateway.ts';
-import { createAdminServer, type AdminRoute } from './server.ts';
+import { createAdminServer, AdminRequestError, type AdminRoute } from './server.ts';
 import { createAdminBootstrap } from './bootstrap.ts';
+import type { LoadedNativeBootstrap } from '../host/native-bootstrap.ts';
 import { createSettingsRoutes } from './settings.ts';
 import { createManagementOperations } from './operations.ts';
 import { createConfigurationRoutes } from './configuration.ts';
-import { createNativeRuntimeRoutes, readNativeChatConfiguration } from './runtime.ts';
-import { createNativeChatRuntime } from '../host/native-chat-runtime.ts';
-import type { NativeChatDeploymentRuntime } from '../host/native-chat-configuration.ts';
+import { createNativeRuntimeRoutes, restoreNativeChatRunningIntent, applyNativeAccessRuntime } from './runtime.ts';
+import { prepareNativeChatAuthorization, readNativeChatConfiguration, readNativeAdapterConfiguration,
+  createNativeAccessPersistence } from './native-configuration-repository.ts';
+import { createNativeChatRuntime, type NativeChatRuntime } from '../host/native-chat-runtime.ts';
+import { createAccessService } from '../host/access-service.ts';
+import { ACCESS_COMMAND_REPLIES, createAccessCommandHandler, parseAccessCommand } from '../features/access-commands.ts';
+import type { NativeChatDeploymentRuntimeInput } from '../host/native-chat-configuration.ts';
+import { checkedNativeDeploymentRuntime } from '../host/native-deployment-runtime.ts';
 import { createNativeDshDeploymentRuntime } from '../adapters/dsh-profile-deployment.ts';
 import { isLoopbackAddress, validatePublicOrigin } from './public-origin.ts';
+import { createNativeCapabilityApprovalResolver, createNativeCapabilityManagement } from './native-capabilities.ts';
+import { NativeConfigurationRepository } from './native-configuration-repository.ts';
+import { createNativeAssistantTarget } from '../host/native-assistant-target.ts';
+import { FrameworkError } from '../core/values.ts';
+import { createNativePackageConfigurationRegistry } from '../host/native-package-configuration.ts';
+import { readNativeRuntimeProjection } from '../host/native-runtime-projection.ts';
 
 const FRAMEWORK_VERSION = '0.1.0';
 const PROBE_TIMEOUT_MS = 2_500;
@@ -60,6 +76,7 @@ class GatewayProbeError extends Error {
 }
 
 function privateText(filename: string, maxBytes: number): string {
+  filename = resolveConfigurationPath(filename);
   const metadata = lstatSync(filename);
   assert(metadata.isFile() && !metadata.isSymbolicLink() && (metadata.mode & 0o077) === 0
     && metadata.size <= maxBytes, 'GATEWAY_ADMIN_PRIVATE_FILE', 'A bounded private regular file is required.');
@@ -101,8 +118,8 @@ export function loadGatewayAdminConfiguration(filename: string): Readonly<Gatewa
       'publicOrigin', 'trustedLoopbackProxy'].includes(key))
     && validHost(input.host)
     && Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65_535
-    && reference(input.tokenFile) && reference(input.gatewayConfiguration)
-    && (input.serviceManager === undefined || reference(input.serviceManager)) && validProxyConfiguration(input)
+    && isConfigurationPath(input.tokenFile) && isConfigurationPath(input.gatewayConfiguration)
+    && (input.serviceManager === undefined || isConfigurationPath(input.serviceManager)) && validProxyConfiguration(input)
     && (input.accessSessionTtlMs === undefined || Number.isSafeInteger(input.accessSessionTtlMs)
       && Number(input.accessSessionTtlMs) >= 300_000 && Number(input.accessSessionTtlMs) <= 30 * 86_400_000),
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator configuration contains invalid fields.');
@@ -110,9 +127,9 @@ export function loadGatewayAdminConfiguration(filename: string): Readonly<Gatewa
   const configuration = snapshot({
     host: input.host,
     port: Number(input.port),
-    tokenFile: resolve(base, input.tokenFile),
-    gatewayConfiguration: resolve(base, input.gatewayConfiguration),
-    ...(input.serviceManager === undefined ? {} : { serviceManager: resolve(base, input.serviceManager) }),
+    tokenFile: resolveConfigurationPath(input.tokenFile, base),
+    gatewayConfiguration: resolveConfigurationPath(input.gatewayConfiguration, base),
+    ...(input.serviceManager === undefined ? {} : { serviceManager: resolveConfigurationPath(input.serviceManager, base) }),
     ...(input.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: Number(input.accessSessionTtlMs) }),
     ...(input.publicOrigin === undefined ? {} : { publicOrigin: String(input.publicOrigin) }),
     ...(input.trustedLoopbackProxy === undefined ? {} : { trustedLoopbackProxy: Boolean(input.trustedLoopbackProxy) }),
@@ -142,8 +159,8 @@ function sanitizePolicyMetric(value: unknown): OneBotCompatPolicyMetric | null {
   if (!isRecord(value)
     || typeof value.conversationId !== 'string'
     || !/^(?:group|private):[1-9]\d{0,15}$/.test(value.conversationId)
-    || !nonnegativeInteger(value.sendRemaining)
-    || !nonnegativeInteger(value.forwardRemaining)
+    || value.sendRemaining !== null && !nonnegativeInteger(value.sendRemaining)
+    || value.forwardRemaining !== null && !nonnegativeInteger(value.forwardRemaining)
     || value.expiresAt !== null && !nonnegativeInteger(value.expiresAt)
     || typeof value.active !== 'boolean') return null;
   return snapshot({
@@ -331,9 +348,9 @@ function policyGrants(
   const budgetEnabled = configuration.budgetEnabled !== false;
   return metrics.policy.map(metric => ({
     conversationId: metric.conversationId,
-    sendRemaining: !budgetEnabled || configuration.maxSendUses === undefined
+    sendRemaining: !budgetEnabled || configuration.maxSendUses === undefined || metric.sendRemaining === null
       ? '未设置日常次数限制' : metric.sendRemaining,
-    forwardRemaining: !budgetEnabled || configuration.maxSendUses === undefined
+    forwardRemaining: !budgetEnabled || configuration.maxSendUses === undefined || metric.forwardRemaining === null
       ? '未设置日常次数限制' : metric.forwardRemaining,
     expiresAt: !budgetEnabled || configuration.grantTtlMs === undefined || configuration.grantTtlMs === null
       ? '无到期日' : metric.expiresAt,
@@ -447,11 +464,13 @@ async function closeServer(server: Server): Promise<void> {
 
 export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConfiguration>, options: {
   configurationFilename?: string;
-  deploymentRuntime?: NativeChatDeploymentRuntime;
+  deploymentRuntime?: NativeChatDeploymentRuntimeInput;
+  bootstrap?: LoadedNativeBootstrap;
 } = {}) {
   assert(validHost(configuration.host)
     && Number.isSafeInteger(configuration.port) && configuration.port >= 0 && configuration.port <= 65_535
-    && reference(configuration.tokenFile) && reference(configuration.gatewayConfiguration),
+    && isConfigurationPath(configuration.tokenFile) && isConfigurationPath(resolve(configuration.tokenFile))
+    && isConfigurationPath(configuration.gatewayConfiguration) && isConfigurationPath(resolve(configuration.gatewayConfiguration)),
   'GATEWAY_ADMIN_INVALID_CONFIG', 'Gateway administrator configuration is invalid.');
   const bootstrap = createAdminBootstrap({ tokenFile: configuration.tokenFile });
   function currentGateway() {
@@ -469,13 +488,16 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       ? await probeStatus(current.configuration, current.token, signal)
       : { verified: false, online: null, good: null, error: health.error };
     const gateway = liveSnapshot(revision, current.configuration, health, status, options.configurationFilename !== undefined);
-    const native = await chatRuntime.status();
+    const adopted = (await accounts.read()).legacy.adoptedBy !== null;
+    const projection = await readNativeRuntimeProjection(adopted ? undefined : chatRuntime);
+    const native = adopted ? { ...projection, missingReasons: ['native_legacy_account_adopted'] } : projection;
     return { ...gateway,
       integrations: { nativeRuntimeResources: true, nativeChatRuntime: native.chatReady },
+      runtimeProjection: native,
       overview: { ...gateway.overview, nativeChatRuntimeState: native.state, chatReady: native.chatReady,
         nativeChatMissingReasons: native.missingReasons },
-      features: [...gateway.features, ...(native.chatReady ? [{ id: 'agent-relay', version: '1.0.0',
-        status: 'active', capabilities: ['agent.submit', 'messaging.send'] }] : [])]
+      features: [...gateway.features.map(feature => ({ ...feature, source: 'gateway', coverage: 'current-gateway-probes' })),
+        ...native.features.map(feature => ({ ...feature, source: native.source, coverage: native.coverage }))]
     };
   };
   const healthRoute: AdminRoute = {
@@ -499,15 +521,67 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     serviceManager: configuration.serviceManager
   }) : undefined;
   const directory = join(dirname(configuration.tokenFile), 'runtime');
-  const deploymentRuntime = options.deploymentRuntime ?? createNativeDshDeploymentRuntime();
-  const chatRuntime = createNativeChatRuntime({ directory,
+  const deploymentRuntime = checkedNativeDeploymentRuntime(options.deploymentRuntime ?? createNativeDshDeploymentRuntime({
+    resolveCapabilityApproval: createNativeCapabilityApprovalResolver(directory)
+  }));
+  let chatRuntime: NativeChatRuntime;
+  const repository = new NativeConfigurationRepository(directory);
+  const packageConfigurationRegistry = createNativePackageConfigurationRegistry({ directory, contributions: options.bootstrap?.packageConfigurations });
+  const assistantTarget = createNativeAssistantTarget({ directory,
+    loadConfiguration: () => readNativeChatConfiguration(directory), loadAssistant: () => repository.readAssistant(),
+    async authorizeApply(signal) {
+      signal.throwIfAborted();
+      if (!(await chatRuntime.status()).canApplyDeployment) throw new FrameworkError('ASSISTANT_DEPLOYMENT_REQUIRES_STOPPED', 'Stop chat before applying an assistant deployment.');
+    } });
+  const accessService = createAccessService({ ...createNativeAccessPersistence(directory),
+    async publish(saved, previous, signal) {
+      await applyNativeAccessRuntime(directory, chatRuntime, previous.revision, saved.revision, signal);
+    } });
+  const accessCommand = createAccessCommandHandler({ readAccess: signal => accessService.read(signal),
+    change: (request, signal) => accessService.change(request, signal) });
+  chatRuntime = createNativeChatRuntime({ directory, packageConfigurationRegistry, bootstrap: options.bootstrap,
+    resolveWorkTarget: signal => assistantTarget.resolve(signal),
+    controlCommands: [{ id: 'access-management', replyTexts: ACCESS_COMMAND_REPLIES,
+      matches: message => parseAccessCommand(message) !== null,
+      handle: context => accessCommand(context.message, context.reply, context.signal) }],
+    prepareAuthorization: () => prepareNativeChatAuthorization(directory),
     loadConfiguration: () => readNativeChatConfiguration(directory),
     resolveDeployment: configuration => deploymentRuntime.reconcile(configuration)
   });
+  const accountBundles = new Map<string, NativeAccountRuntimeBundle>();
+  const accounts = createNativeAccounts({ directory, protocols: [{ id: 'onebot', validateAccountId: id => /^[1-9][0-9]{0,31}$/.test(id), create(account) {
+    const bundle = createNativeAccountRuntimeBundle({ ...account, bootstrap: options.bootstrap, deploymentRuntime: options.deploymentRuntime });
+    accountBundles.set(account.directory, bundle);
+    return bundle;
+  } }], legacy: {
+    isStopped: () => chatRuntime.activity().state === 'stopped',
+    close: () => chatRuntime.close(),
+    async verifyIdentity(scope, signal) {
+      assert(scope.protocolId === 'onebot', 'ACCOUNT_PROTOCOL_UNAVAILABLE', 'The legacy runtime uses the OneBot protocol.');
+      const proof = await chatRuntime.verifyProtocolIdentity(scope.accountId, signal);
+      return { verified: proof.verified, accountScope: scope, evidence: proof.evidence };
+    }
+  } });
   const adapterRuntime = chatRuntime.adapterRuntime;
   const routes: AdminRoute[] = [
     healthRoute,
-    ...createNativeRuntimeRoutes({ directory, adapterRuntime, chatRuntime, deploymentRuntime })
+    ...createNativeAccountRoutes(accounts),
+    ...createNativeAccountDispatchRoutes({ accounts, async bundle(id) {
+      const accountDirectory = await accounts.accountDirectory(id);
+      await accounts.runtime(id);
+      const bundle = accountBundles.get(accountDirectory);
+      assert(bundle, 'ACCOUNT_RUNTIME_UNAVAILABLE', 'The account runtime is unavailable.');
+      return bundle;
+    } }),
+    ...[...createNativeRuntimeRoutes({ directory, adapterRuntime, chatRuntime, deploymentRuntime, assistantTarget, packageConfigurationRegistry,
+      interactions: () => chatRuntime.interactions(), tools: signal => chatRuntime.tools(signal) }),
+    ...createNativeCapabilityManagement({ directory, deploymentRuntime,
+      canApplyDeployment: async () => (await chatRuntime.status()).canApplyDeployment }).routes].map(route => ({ ...route,
+      async handle(request: Parameters<AdminRoute['handle']>[0]) {
+        if ((await accounts.read()).legacy.adoptedBy !== null) throw new AdminRequestError(409, 'native_legacy_account_adopted');
+        return route.handle(request);
+      }
+    }))
   ];
   if (options.configurationFilename) {
     const filenames = { adminConfigurationFilename: options.configurationFilename, gatewayConfigurationFilename: configuration.gatewayConfiguration };
@@ -537,11 +611,36 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       });
     });
   } catch (error: unknown) {
-    await chatRuntime.close();
+    await Promise.allSettled([accounts.close(), chatRuntime.close()]);
     server.closeAllConnections();
     await closeServer(server);
     throw error;
   }
+  const startupController = new AbortController();
+  const startupSignal = AbortSignal.any([startupController.signal, AbortSignal.timeout(45_000)]);
+  const startup = (async () => {
+    const registered = await accounts.read();
+    if (registered.legacy.adoptedBy === null) {
+      await readNativeAdapterConfiguration(directory)
+        .then(adapters => chatRuntime.synchronizeProtocol(adapters,
+          AbortSignal.any([startupSignal, AbortSignal.timeout(10_000)])))
+        .catch(() => undefined);
+      await restoreNativeChatRunningIntent(directory, chatRuntime, startupSignal).catch(() => undefined);
+    }
+    for (const account of registered.accounts) {
+      startupSignal.throwIfAborted();
+      if (account.adoption !== 'ready') continue;
+      try {
+        const accountDirectory = await accounts.accountDirectory(account.id);
+        const intent = await new NativeConfigurationRepository(accountDirectory).readRunningIntent();
+        if (!intent.value.desiredRunning) continue;
+        await accounts.runtime(account.id);
+        const bundle = accountBundles.get(accountDirectory);
+        assert(bundle, 'ACCOUNT_RUNTIME_UNAVAILABLE', 'The account runtime is unavailable.');
+        await bundle.restore(startupSignal);
+      } catch { /* Each account retains its own failed/unknown evidence; another account may still recover. */ }
+    }
+  })().catch(() => undefined);
   const address = server.address();
   assert(address !== null && typeof address !== 'string', 'GATEWAY_ADMIN_LISTEN_FAILED',
     'No gateway administrator listener was created.');
@@ -551,9 +650,13 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     revision,
     close() {
       stopping ??= (async () => {
+        startupController.abort();
         try {
-          await chatRuntime.close();
+          const results = await Promise.allSettled([accounts.close(), chatRuntime.close()]);
+          const failed = results.find(result => result.status === 'rejected');
+          if (failed?.status === 'rejected') throw failed.reason;
         } finally {
+          await startup;
           await closeServer(server);
         }
       })();

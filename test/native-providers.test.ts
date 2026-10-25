@@ -115,6 +115,21 @@ test('provider requests reject invalid revisions, flags, keys and URLs with sani
   assert.deepEqual(await invoke(setup.routes, 'GET'), initial)
 })
 
+test('provider catalog persists DSH api identifiers and explicit HTTP consent without contacting DSH or models', async context => {
+  const setup = fixture(context)
+  const fetch = context.mock.method(globalThis, 'fetch', () => { throw new Error('Unexpected external request') })
+  const { type: ignoredType, ...fields } = provider
+  void ignoredType
+  const value = { ...fields, api: 'openai-responses', baseUrl: 'http://operator-gateway.example.test/v1',
+    allowInsecureHttp: true, apiKey: 'fixture-responses-private-key' }
+  const saved = await saveProviders(setup.routes, [value])
+  assert.deepEqual(saved.providers, [{ ...fields, api: value.api, baseUrl: value.baseUrl,
+    allowInsecureHttp: true, apiKeyConfigured: true }])
+  const reopened = createNativeRuntimeRoutes({ directory: setup.directory })
+  assert.deepEqual(await invoke(reopened, 'GET'), saved)
+  assert.equal(fetch.mock.callCount(), 0)
+})
+
 test('provider CAS serializes independent route instances and respects cross-process directory locks', async context => {
   const setup = fixture(context)
   const other = createNativeRuntimeRoutes({ directory: setup.directory })

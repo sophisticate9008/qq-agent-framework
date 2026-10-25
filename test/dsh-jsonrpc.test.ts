@@ -30,6 +30,30 @@ test('DSH preset declarations are bounded and cannot reuse an ambiguous preset i
   })) }), { code: 'DSH_INVALID_OPTIONS' })
 })
 
+test('DSH serializer preserves selected work identity and cannot collapse distinct selections into one registry binding', async context => {
+  const fake = await fixture(context, { rpc(request, response) {
+    const input = request.payload.args.request
+    const value = request.method === 'session/create' ? { sessionId: 'session-1', agentPreset: input.agentPreset }
+      : { selected: { provider: input.provider, model: input.model, reasoningEffort: input.reasoningEffort } }
+    response.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: { ok: true, value } }))
+    return true
+  } })
+  const first = { ...sessionDefinition, capabilitySelection: { schema: 1 as const, presetId: 'work', revision: 'a'.repeat(64) } }
+  const second = { ...first, capabilitySelection: { ...first.capabilitySelection, revision: 'b'.repeat(64) } }
+  const bindings = [{ agentPreset: 'work-first', definition: first }, { agentPreset: 'work-second', definition: second },
+    { agentPreset: 'text-null', definition: { ...sessionDefinition, capabilitySelection: null } },
+    { agentPreset: 'text-legacy', definition: sessionDefinition }]
+  for (const binding of bindings) {
+    const client = fake.port({ sessionDefinition: binding.definition, presetBindings: bindings })
+    assert.equal((await client.createSession(createRequest())).ok, true)
+  }
+  assert.deepEqual(fake.requests.filter(request => request.method === 'session/create').map(request => request.payload.args.request.agentPreset),
+    bindings.map(binding => binding.agentPreset))
+  const missing = fake.port({ sessionDefinition: second, presetBindings: [bindings[0]!] })
+  assert.deepEqual(await missing.createSession(createRequest()), { ok: false, error: { code: 'DSH_INSTRUCTIONS_UNSUPPORTED' } })
+  assert.equal(fake.requests.filter(request => request.method === 'session/create').length, 4)
+})
+
 test('DSH deployment inspection uses only fixed authenticated read-only APIs and direct Typert arguments', async context => {
   const fake = await fixture(context, { rpc(request, response) {
     assert(['settings/describe', 'agentPresets/list', 'agentPresets/read', 'credentials/describe'].includes(request.method))
@@ -85,6 +109,7 @@ async function fixture(context: TestContext, overrides: {
   rpc?: (request: WireRequest, response: ServerResponse) => boolean
   connect?: (response: ServerResponse) => void
   snapshot?: Record<string, unknown>
+  autoPong?: boolean
 } = {}) {
   const requests: WireRequest[] = []
   const httpCookies: Array<string | undefined> = []
@@ -92,7 +117,7 @@ async function fixture(context: TestContext, overrides: {
   const exchanges: URL[] = []
   const streams: Array<{ socket: WebSocket; id: string; input: Record<string, unknown> }> = []
   const cancellations: string[] = []
-  const sockets = new WebSocketServer({ noServer: true })
+  const sockets = new WebSocketServer({ noServer: true, autoPong: overrides.autoPong ?? true })
   const server = createServer(async (request, response) => {
     const url = new URL(request.url!, 'http://fake.invalid')
     if (url.pathname === '/mount/connect') {
@@ -176,6 +201,135 @@ test('DSH authenticates using launch-token operator exchange and exact official 
   assert(fake.requests.every(request => request.type === 'client-request'))
   assert(fake.httpCookies.every(cookie => cookie === 'dsh_fake=signed.operator'))
   assert.equal(new Set(fake.requests.map(request => request.rpcId)).size, 4)
+})
+
+test('DSH off selection uses complete official metadata and never inherits a reasoning default', async context => {
+  const complete = {
+    default: { provider: 'test-provider', model: 'test-model' }, routableProviders: ['test-provider'],
+    groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'test-model', name: 'Model' }] }], failures: [],
+  }
+  let catalog: unknown = complete
+  let drift = false
+  let unavailable = false
+  const fake = await fixture(context, { rpc(request, response) {
+    if (request.method !== 'session/modelCatalog' && request.method !== 'session/selectModel') return false
+    if (request.method === 'session/modelCatalog') assert.deepEqual(request.payload.args, {})
+    const selected = request.payload.args.request
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result: unavailable
+      ? { ok: false, error: { code: 'gateway/method-unavailable', message: 'Not supported', details: {} } }
+      : { ok: true, value: request.method === 'session/modelCatalog' ? catalog
+        : { selected: { ...selected, ...(drift ? { reasoningEffort: 'high' } : {}) } } } }))
+    return true
+  } })
+  const off = { ...sessionDefinition, model: { ...sessionDefinition.model, reasoningEffort: 'off' as const } }
+  const client = fake.port({ sessionDefinition: off, presetBindings: [{ agentPreset: 'framework-chat', definition: off }] })
+  assert.equal((await client.createSession(createRequest())).ok, true)
+  assert.deepEqual(fake.requests.map(request => request.method), ['session/modelCatalog', 'session/create', 'session/selectModel', 'session/modelCatalog'])
+  assert.deepEqual(fake.requests[2]!.payload.args.request, { sessionId: 'session-1', provider: 'test-provider', model: 'test-model' })
+  catalog = { ...complete, groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'test-model', name: 'Model', reasoning: {
+    efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], defaultEffort: 'high',
+  } }] }] }
+  assert.equal((await client.createSession(createRequest())).ok, true)
+  assert.equal(fake.requests.at(-2)!.payload.args.request.reasoningEffort, 'off')
+  for (const invalid of [
+    {},
+    { ...complete, default: undefined },
+    { ...complete, routableProviders: [] },
+    { ...complete, groups: [] },
+    { ...complete, failures: undefined },
+    { ...complete, failures: [{ id: 'test-provider', name: 'Fixture', message: 'Unavailable' }] },
+    { ...complete, groups: [...complete.groups, ...complete.groups] },
+    { ...complete, groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'different-model', name: 'Other' }] }] },
+    ...[null, {}, { efforts: [] }, { efforts: [{ id: 'off' }] }, { efforts: [{ id: 'off', name: 'Off' }], defaultEffort: 'high' }].map(reasoning => ({
+      ...complete, groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'test-model', name: 'Model', reasoning }] }],
+    })),
+  ]) {
+    catalog = invalid
+    const before = fake.requests.length
+    assert.deepEqual(await client.createSession(createRequest()), { ok: false, error: { code: 'DSH_MODEL_CAPABILITIES_UNVERIFIED' } })
+    assert.deepEqual(fake.requests.slice(before).map(request => request.method), ['session/modelCatalog'])
+  }
+  catalog = { ...complete, groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'test-model', name: 'Model', reasoning: {
+    efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high',
+  } }] }] }
+  assert.deepEqual(await client.createSession(createRequest()), { ok: false, error: { code: 'DSH_REASONING_UNSUPPORTED' } })
+  catalog = complete
+  drift = true
+  const before = fake.requests.length
+  await assert.rejects(client.createSession(createRequest()), { code: 'DSH_CREATE_CONFIGURATION_UNKNOWN' })
+  assert.deepEqual(fake.requests.slice(before).map(request => request.method), ['session/modelCatalog', 'session/create', 'session/selectModel'])
+  assert(!fake.requests.some(request => request.method === 'session/prompt'))
+  unavailable = true
+  assert.deepEqual(await client.createSession(createRequest()), { ok: false, error: { code: 'DSH_MODEL_CAPABILITIES_UNVERIFIED' } })
+})
+
+test('DSH rechecks the off classification after selection and treats failed evidence as unknown', async context => {
+  const complete = {
+    default: { provider: 'test-provider', model: 'test-model' }, routableProviders: ['test-provider'],
+    groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'test-model', name: 'Model' }] }], failures: [],
+  }
+  const withReasoning = (reasoning: unknown) => ({ ...complete,
+    groups: [{ id: 'test-provider', name: 'Fixture', models: [{ id: 'test-model', name: 'Model', reasoning }] }],
+  })
+  let before: unknown = complete
+  let after: unknown = complete
+  let selected = false
+  let readFailure: 'none' | 'unavailable' | 'http' | 'invalid-json' = 'none'
+  const fake = await fixture(context, { rpc(request, response) {
+    if (request.method === 'session/create') selected = false
+    if (request.method === 'session/selectModel') selected = true
+    if (request.method !== 'session/modelCatalog' && request.method !== 'session/selectModel') return false
+    if (request.method === 'session/modelCatalog' && selected && readFailure === 'http') {
+      response.writeHead(503).end()
+      return true
+    }
+    if (request.method === 'session/modelCatalog' && selected && readFailure === 'invalid-json') {
+      response.end('{')
+      return true
+    }
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ type: 'server-response', rpcId: request.rpcId, result:
+      request.method === 'session/modelCatalog' && selected && readFailure === 'unavailable'
+        ? { ok: false, error: { code: 'gateway/method-unavailable', message: 'Unavailable', details: {} } }
+        : { ok: true, value: request.method === 'session/modelCatalog' ? selected ? after : before
+          : { selected: request.payload.args.request } },
+    }))
+    return true
+  } })
+  const off = { ...sessionDefinition, model: { ...sessionDefinition.model, reasoningEffort: 'off' as const } }
+  const client = fake.port({ sessionDefinition: off, presetBindings: [{ agentPreset: 'framework-chat', definition: off }] })
+  const explicit = withReasoning({ efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], defaultEffort: 'high' })
+  for (const changed of [
+    withReasoning({ efforts: [{ id: 'high', name: 'High' }] }),
+    explicit,
+    withReasoning({ efforts: [] }),
+    { ...complete, groups: [...complete.groups, ...complete.groups] },
+    { ...complete, groups: [], routableProviders: [] },
+  ]) {
+    selected = false
+    after = changed
+    const start = fake.requests.length
+    await assert.rejects(client.createSession(createRequest()), { code: 'DSH_CREATE_CONFIGURATION_UNKNOWN' })
+    assert.deepEqual(fake.requests.slice(start).map(request => request.method),
+      ['session/modelCatalog', 'session/create', 'session/selectModel', 'session/modelCatalog'])
+    assert.equal(fake.requests[start + 2]!.payload.args.request.reasoningEffort, undefined)
+  }
+  after = complete
+  for (const mode of ['unavailable', 'http', 'invalid-json'] as const) {
+    selected = false
+    readFailure = mode
+    await assert.rejects(client.createSession(createRequest()), { code: 'DSH_CREATE_CONFIGURATION_UNKNOWN' })
+  }
+  readFailure = 'none'
+  before = explicit
+  for (const changed of [complete, withReasoning({ efforts: [{ id: 'high', name: 'High' }] })]) {
+    selected = false
+    after = changed
+    await assert.rejects(client.createSession(createRequest()), { code: 'DSH_CREATE_CONFIGURATION_UNKNOWN' })
+    assert.equal(fake.requests.at(-2)!.payload.args.request.reasoningEffort, 'off')
+  }
+  assert(!fake.requests.some(request => request.method === 'session/prompt'))
 })
 
 test('DSH rejects unmapped instructions and missing definitions before any network side effect', async context => {
@@ -406,14 +560,14 @@ test('DSH slow callbacks are serialized and overflow terminates follow without u
   assert.equal(events.at(-1)?.type, 'stream/error')
 })
 
-test('DSH enforces follow idle deadline, duplicate-follow exclusion and abort cleanup', async context => {
-  const fake = await fixture(context)
+test('DSH bounds unanswered idle probes, excludes duplicate follows and cleans up on abort', async context => {
+  const fake = await fixture(context, { autoPong: false })
   const events: DshFollowEvent[] = []
   const client = fake.port({ followIdleTimeoutMs: 35 })
   await client.follow({ sessionId: 'session-1', signal: signal(), onEvent(event) { events.push(event) } })
   await assert.rejects(client.follow({ sessionId: 'session-1', signal: signal(), onEvent() {} }), { code: 'DSH_FOLLOW_ALREADY_ACTIVE' })
   await until(() => events.length === 1)
-  assert.deepEqual(events[0], { type: 'stream/error', sessionId: 'session-1', error: { code: 'DSH_FOLLOW_IDLE_TIMEOUT' } })
+  assert.deepEqual(events[0], { type: 'stream/error', sessionId: 'session-1', error: { code: 'DSH_FOLLOW_PONG_TIMEOUT' } })
   const controller = new AbortController()
   const stop = await client.follow({ sessionId: 'session-1', signal: controller.signal, onEvent(event) { events.push(event) } })
   controller.abort()
@@ -422,6 +576,65 @@ test('DSH enforces follow idle deadline, duplicate-follow exclusion and abort cl
   assert.equal(events.length, 1)
   await client.close()
   await assert.rejects(client.prompt(promptRequest()), { code: 'DSH_ABORTED' })
+})
+
+test('DSH silent live follow survives repeated matching websocket pongs and still delivers contiguous events', async context => {
+  const fake = await fixture(context)
+  const events: DshFollowEvent[] = []
+  const client = fake.port({ followIdleTimeoutMs: 25 })
+  const stop = await client.follow({ sessionId: 'session-1', signal: signal(), onEvent(event) { events.push(event) } })
+  let probes = 0
+  fake.streams[0]!.socket.on('ping', () => { probes++ })
+  await until(() => probes >= 3)
+  assert.equal(events.length, 0)
+  assert.equal(fake.streams.length, 1)
+  assert.equal(fake.cancellations.length, 0)
+  fake.event(4)
+  await until(() => events.length === 1)
+  assert.equal(events[0]!.type, 'session/event')
+  await stop()
+  const stoppedProbes = probes
+  await delay(60)
+  assert.equal(probes, stoppedProbes)
+  assert.equal(events.length, 1)
+})
+
+test('DSH wrong pongs and continuing user events cannot extend an unanswered probe deadline', async context => {
+  const fake = await fixture(context, { autoPong: false })
+  const events: DshFollowEvent[] = []
+  const client = fake.port({ followIdleTimeoutMs: 25, timeoutMs: 150 })
+  await client.follow({ sessionId: 'session-1', signal: signal(), onEvent(event) { events.push(event) } })
+  let sequence = 4
+  let traffic: ReturnType<typeof setInterval> | undefined
+  context.after(() => clearInterval(traffic))
+  fake.streams[0]!.socket.on('ping', () => {
+    fake.streams[0]!.socket.pong('not-the-current-probe')
+    traffic = setInterval(() => {
+      if (fake.streams[0]!.socket.readyState === 1) fake.event(sequence++)
+    }, 10)
+  })
+  await until(() => events.some(event => event.type === 'stream/error'))
+  clearInterval(traffic)
+  assert(events.some(event => event.type === 'session/event'))
+  assert.deepEqual(events.at(-1), { type: 'stream/error', sessionId: 'session-1', error: { code: 'DSH_FOLLOW_PONG_TIMEOUT' } })
+  await delay(30)
+  assert.equal(events.filter(event => event.type === 'stream/error').length, 1)
+  assert.equal(fake.streams.length, 1)
+})
+
+test('DSH abort during outstanding pong wait cancels timers without reporting stream failure', async context => {
+  const fake = await fixture(context, { autoPong: false })
+  const events: DshFollowEvent[] = []
+  const controller = new AbortController()
+  const client = fake.port({ followIdleTimeoutMs: 20, timeoutMs: 60 })
+  const stop = await client.follow({ sessionId: 'session-1', signal: controller.signal, onEvent(event) { events.push(event) } })
+  let probed = false
+  fake.streams[0]!.socket.on('ping', () => { probed = true })
+  await until(() => probed)
+  controller.abort()
+  await stop()
+  await delay(100)
+  assert.deepEqual(events, [])
 })
 
 test('DSH rejects dangerous endpoint/credential and nonfinite limits synchronously', () => {

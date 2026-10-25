@@ -1,10 +1,23 @@
-import { useEffect, useState } from 'react';
-import { Boxes, Check, LoaderCircle, RefreshCw, ServerOff, Wrench } from 'lucide-react';
+import { parseNativeRuntimeProjection, type NativeRuntimeProjection } from '../../src/contracts/native-runtime-projection.ts';
+import { PackageConfigurationManager } from '../components/package-configuration-manager.tsx';
+import { ForwardAuthorizationManager } from '../components/forward-authorization-manager.tsx';
+import { readResource } from '../lib/resource-reader.ts';
+import { ChatInputSettings } from '../components/chat-input-settings.tsx';
+import { ReminderManager } from '../components/reminder-manager.tsx';
+import { NativeToolStatus } from '../components/native-tool-status.tsx';
+import { NativeBootstrapSummary } from '../components/native-bootstrap-summary.tsx';
+import { MemoryManager } from '../components/memory-manager.tsx';
+import { useEffect, useRef, useState } from 'react';
+import { Boxes, LoaderCircle, RefreshCw, ServerOff } from 'lucide-react';
 import { ConfigurationEditor } from '../components/configuration-editor.tsx';
-import { ConnectPrompt, EmptyState, PageHeading, Section, StatusPill } from '../components/management.tsx';
+import { ChatTools } from '../components/chat-tools.tsx';
+import { ConnectPrompt, EmptyState, PageHeading, Section } from '../components/management.tsx';
 import { Badge } from '../components/ui/badge.tsx';
 import { Button } from '../components/ui/button.tsx';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.tsx';
+import { VirtualList } from '../components/virtual-list.tsx';
 import { asRecord, errorMessage } from '../lib/api.ts';
+import { featureLabel, featureStatusLabel, readDeclaredCapabilities } from '../lib/feature-labels.ts';
 import type { PageProps } from '../lib/types.ts';
 
 interface CapabilityState {
@@ -17,6 +30,7 @@ interface FeatureState {
   readonly name: string;
   readonly description: string;
   readonly status: string;
+  readonly capabilities: readonly string[] | null;
 }
 
 interface NativeFeatures {
@@ -24,6 +38,7 @@ interface NativeFeatures {
   readonly editableResources: boolean;
   readonly capabilities: readonly CapabilityState[];
   readonly features: readonly FeatureState[];
+  readonly projection: NativeRuntimeProjection | null;
 }
 
 function parseFeature(value: unknown): FeatureState | null {
@@ -31,9 +46,10 @@ function parseFeature(value: unknown): FeatureState | null {
   if (typeof record.id !== 'string') return null;
   return {
     id: record.id,
-    name: typeof record.name === 'string' ? record.name : record.id,
+    name: featureLabel(record.id, typeof record.name === 'string' ? record.name : undefined),
     description: typeof record.description === 'string' ? record.description : '本地装配功能',
-    status: typeof record.status === 'string' ? record.status : 'installed',
+    status: typeof record.status === 'string' ? record.status : 'unknown',
+    capabilities: readDeclaredCapabilities(record.capabilities),
   };
 }
 
@@ -47,9 +63,12 @@ function parseFeatures(value: unknown): NativeFeatures | null {
       ? { id: capability.id, installed: capability.installed }
       : null;
   });
+  const projection = record.projection === undefined ? null : parseNativeRuntimeProjection(record.projection);
+  if (record.projection !== undefined && !projection) return null;
   const features = record.features.map(parseFeature);
   if (capabilities.some(capability => capability === null) || features.some(feature => feature === null)) return null;
   return {
+    projection,
     runtimeConnected: record.runtimeConnected,
     editableResources: record.editableResources,
     capabilities: capabilities as CapabilityState[],
@@ -63,49 +82,65 @@ export function FeaturesPage(props: PageProps) {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [reloadVersion, setReloadVersion] = useState(0);
+  const epoch = useRef(0);
+  const connection = useRef({ api, connected });
+  const previousConnection = useRef({ api, connected: false });
+  connection.current = { api, connected };
 
   useEffect(() => {
-    if (!connected) {
-      setFeatures(null);
-      setLoadError('');
-      return;
-    }
+    const generation = ++epoch.current;
     const controller = new AbortController();
-    setLoading(true);
+    const current = () => !controller.signal.aborted && generation === epoch.current
+      && connection.current.api === api && connection.current.connected;
+    if (previousConnection.current.api !== api || !previousConnection.current.connected || !connected) setFeatures(null);
+    previousConnection.current = { api, connected };
+    setLoading(connected);
     setLoadError('');
-    void api.get('/api/chat/features', controller.signal).then(value => {
+    if (!connected) {
+      return () => { controller.abort(); epoch.current++; };
+    }
+    void readResource(api, '/api/chat/features', controller.signal).then(value => {
+      if (!current()) return;
       const next = parseFeatures(value);
       if (!next) throw new Error('invalid_features_response');
       setFeatures(next);
     }).catch(error => {
-      if (!controller.signal.aborted) {
-        setFeatures(null);
+      if (current()) {
         setLoadError(errorMessage(error));
       }
     }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (current()) setLoading(false);
     });
-    return () => controller.abort();
+    return () => { controller.abort(); epoch.current++; };
   }, [api, connected, reloadVersion]);
 
-  if (!connected) return <div className="page-stack" data-page="features"><PageHeading title="功能与触发" description="查看本机装配的能力与功能。" /><ConnectPrompt connect={connect} /></div>;
+  if (!connected) return <div className="page-stack" data-page="features"><PageHeading title="功能与触发" description="配置聊天功能和触发方式。" /><ConnectPrompt connect={connect} /></div>;
 
-  const installedCapabilities = features?.capabilities.filter(capability => capability.installed) ?? [];
   return <div className="page-stack" data-page="features">
-    <PageHeading title="功能与触发" description="查看本机实际装配的能力与功能。聊天方案、人设、访问授权和用户偏好仍分别管理。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>} />
-    {loading && !features ? <Section title="本地装配"><div className="flex min-h-44 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取本地能力</div></Section>
-      : !features ? <Section title="本地装配不可用" description={loadError || '服务没有返回可识别的功能数据。'}><EmptyState locked title="无法读取本机能力" description="暂时无法读取能力与功能清单，请稍后重试。" /></Section>
+    <PageHeading title="功能与触发" description="配置聊天功能和触发方式。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>} />
+    <ChatInputSettings api={api} connected={connected} setDirty={props.setDirty} />
+    <PackageConfigurationManager api={api} connected={connected} setDirty={props.setDirty} onlyIds={['chat-output']} />
+    <ForwardAuthorizationManager api={api} connected={connected} setDirty={props.setDirty} navigate={props.navigate} />
+    <ReminderManager api={api} connected={connected} setDirty={props.setDirty} />
+    <details className="rounded-xl border bg-card p-3"><summary className="cursor-pointer px-2 py-1 text-sm font-medium">记忆与偏好管理</summary><div className="mt-3"><MemoryManager api={api} connected={connected} setDirty={props.setDirty} /></div></details>
+    <Tabs defaultValue="framework" className="gap-4">
+      <TabsList aria-label="功能分类" className="h-10 w-full justify-start sm:w-fit"><TabsTrigger value="framework" className="px-5">聊天工具</TabsTrigger><TabsTrigger value="extensions" className="px-5">功能设置</TabsTrigger></TabsList>
+      <TabsContent value="framework" keepMounted><ChatTools api={api} connected={connected} /><NativeToolStatus api={api} connected={connected} navigate={props.navigate} /></TabsContent>
+      <TabsContent value="extensions" keepMounted className="grid gap-4 [&[hidden]]:hidden">
+        <PackageConfigurationManager api={api} connected={connected} setDirty={props.setDirty} excludeIds={['chat-input', 'chat-output']} />
+        <NativeBootstrapSummary api={api} connected={connected} />
+    {features && loadError && <p role="alert" className="rounded-lg border border-amber-500/30 p-3 text-xs leading-5 text-muted-foreground">读取失败，暂时显示上次的结果。未保存的设置仍然保留。</p>}
+    {loading && !features ? <Section title="功能设置"><div className="flex min-h-44 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取功能设置</div></Section>
+      : !features ? <Section title="功能设置"><EmptyState locked title="暂时无法读取功能设置" description="请重新读取，或检查服务连接。" /></Section>
         : <>
-          {!features.runtimeConnected && <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5"><ServerOff className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" /><p><strong>原生聊天宿主未接入。</strong><span className="mt-1 block text-muted-foreground">可以查看和配置本地资源，但这些能力当前不会参与真实聊天。</span></p></div>}
-          <div className="grid gap-5 lg:grid-cols-2">
-            <Section title="能力装配" description="显示本机当前可提供的受控动作。" actions={<StatusPill tone={installedCapabilities.length > 0 ? 'success' : 'neutral'}>{installedCapabilities.length} 项已安装</StatusPill>}>
-              <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1">{features.capabilities.length === 0 ? <EmptyState title="没有已声明能力" description="当前版本没有报告任何本机能力。" /> : <div className="grid gap-2">{features.capabilities.map(capability => <div key={capability.id} className="flex min-h-12 items-center justify-between gap-3 rounded-lg border px-3 py-2.5"><span className="flex min-w-0 items-center gap-2"><Wrench className="size-4 shrink-0 text-muted-foreground" /><code className="truncate text-xs">{capability.id}</code></span><Badge variant={capability.installed ? 'secondary' : 'outline'}>{capability.installed ? <><Check className="size-3" />已安装</> : '未安装'}</Badge></div>)}</div>}</div>
-            </Section>
-            <Section title="已装配功能" description="显示使用上述能力的本机功能；空列表表示尚未装配。" actions={<StatusPill>{features.features.length} 项</StatusPill>}>
-              <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1">{features.features.length === 0 ? <EmptyState title="尚未装配功能" description="当前没有报告可运行功能。" /> : <div className="grid gap-2">{features.features.map(feature => <div key={feature.id} className="flex items-start gap-3 rounded-lg border p-3"><span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><Boxes className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="text-xs font-medium">{feature.name}</strong><Badge variant="outline">{feature.status}</Badge></div><p className="mt-1 text-[11px] leading-5 text-muted-foreground">{feature.description}</p><code className="mt-1 block truncate text-[10px] text-muted-foreground">{feature.id}</code></div></div>)}</div>}</div>
-            </Section>
-          </div>
+          {!features.runtimeConnected && <div className="flex flex-wrap items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5"><ServerOff className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" /><p className="min-w-0 flex-1"><strong>聊天暂未就绪。</strong><span className="mt-1 block text-muted-foreground">请到连接页查看连接和启动状态。</span></p><Button variant="outline" onClick={() => props.navigate('adapters')}>查看聊天连接</Button></div>}
+          {features.features.length > 0 && <Section title="聊天功能">
+            <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1" role="region" aria-label="功能清单"><VirtualList items={features.features} getItemKey={feature => feature.id} estimateSize={120}>{feature => <div className="flex items-start gap-3 rounded-lg border p-3"><span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><Boxes className="size-4" /></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><strong className="break-words text-xs font-medium">{feature.name}</strong><Badge variant="outline">{featureStatusLabel(feature.status)}</Badge>{features.projection && (() => { const actual = features.projection.features.find(item => item.id === feature.id); return actual ? <><Badge variant="outline">已声明</Badge><Badge variant="outline">{actual.installed ? '已安装' : '未安装'}</Badge><Badge variant="outline">{actual.ready ? '运行就绪' : '尚未就绪'}</Badge><span className="text-[11px] text-muted-foreground">授权由会话独立核验</span></> : <span className="text-[11px] text-muted-foreground">当前宿主未报告此项安装状态</span>; })()}</div><p className="mt-1 break-words text-[11px] leading-5 text-muted-foreground">{feature.description}</p></div></div>}</VirtualList></div>
+          </Section>}
+          {features.runtimeConnected && features.features.length === 0 && !features.editableResources && <p className="text-xs text-muted-foreground">当前没有可调整的额外功能。</p>}
           {features.editableResources && <ConfigurationEditor {...props} category="features" />}
         </>}
+      </TabsContent>
+    </Tabs>
   </div>;
 }

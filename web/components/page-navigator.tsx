@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowUp, ChevronDown, ListTree } from 'lucide-react';
 import { Button } from './ui/button.tsx';
-import { indexPage, type PageIndexEntry } from '../lib/page-index.ts';
+import { indexPage, resolvePageFocusTarget, resolvePageSearchTarget, type PageIndexEntry } from '../lib/page-index.ts';
 
 export interface PageNavigationTarget {
   readonly title: string;
   readonly sectionTitle?: string;
+  readonly sectionId?: string;
+  readonly fallbackSectionId?: string;
+  readonly unavailableMessage?: string;
   readonly kind: 'page' | 'section' | 'field';
   readonly nonce?: number;
 }
@@ -13,7 +16,7 @@ export interface PageNavigationTarget {
 function sameIndex(left: readonly PageIndexEntry[], right: readonly PageIndexEntry[]): boolean {
   return left.length === right.length && left.every((entry, index) => {
     const other = right[index];
-    return other?.element === entry.element && other.title === entry.title && other.sectionTitle === entry.sectionTitle;
+    return other?.element === entry.element && other.title === entry.title && other.sectionTitle === entry.sectionTitle && other.sectionId === entry.sectionId;
   });
 }
 
@@ -27,6 +30,8 @@ export function PageNavigator({ children, target, onIndexChange, onTargetHandled
   const [entries, setEntries] = useState<readonly PageIndexEntry[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [active, setActive] = useState('');
+  const [searchNotice, setSearchNotice] = useState('');
+  const fallbackTarget = useRef<PageNavigationTarget | null>(null);
   const highlight = useRef<HTMLElement | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const navigationFrame = useRef<number | undefined>(undefined);
@@ -34,15 +39,39 @@ export function PageNavigator({ children, target, onIndexChange, onTargetHandled
   useEffect(() => { onIndexChange?.(entries); }, [entries, onIndexChange]);
 
   useEffect(() => {
-    if (!target) return;
+    if (!target) {
+      setSearchNotice('');
+      fallbackTarget.current = null;
+      return;
+    }
     if (target.kind === 'page') {
+      setSearchNotice('');
+      fallbackTarget.current = null;
       root.current?.scrollIntoView({ block: 'start', behavior: 'auto' });
       onTargetHandled?.();
       return;
     }
-    const match = entries.find(entry => entry.kind === target.kind && entry.title === target.title
-      && (!target.sectionTitle || entry.sectionTitle === target.sectionTitle));
-    if (match) { jump(match); onTargetHandled?.(); }
+    const destination = target.sectionId ? root.current?.querySelector<HTMLElement>(`#${CSS.escape(target.sectionId)}`) : null;
+    const hiddenPanel = destination?.closest<HTMLElement>('[role="tabpanel"][hidden]');
+    const tab = hiddenPanel?.getAttribute('aria-labelledby')?.split(/\s+/).map(id => document.getElementById(id))
+      .find(element => element?.getAttribute('role') === 'tab');
+    if (tab instanceof HTMLElement && !tab.matches(':disabled, [aria-disabled="true"]')) {
+      tab.click();
+      return;
+    }
+    const { match, section } = resolvePageSearchTarget(entries, target);
+    if (match) {
+      setSearchNotice('');
+      fallbackTarget.current = null;
+      jump(match);
+      onTargetHandled?.();
+    } else if (target.sectionId) {
+      setSearchNotice(`“${target.title}”尚不可聚焦。${target.unavailableMessage ?? '请先读取配置并检查前置条件。'}`);
+      if (section && fallbackTarget.current !== target) {
+        jump(section);
+        fallbackTarget.current = target;
+      }
+    }
   }, [entries, target, onTargetHandled]);
 
   useEffect(() => {
@@ -57,7 +86,7 @@ export function PageNavigator({ children, target, onIndexChange, onTargetHandled
     const schedule = () => { frame ??= requestAnimationFrame(update); };
     const observer = new MutationObserver(schedule);
     observer.observe(content, { childList: true, subtree: true, characterData: true, attributes: true,
-      attributeFilter: ['class', 'hidden', 'open', 'aria-label', 'aria-hidden'] });
+      attributeFilter: ['id', 'class', 'hidden', 'open', 'aria-label', 'aria-hidden'] });
     update();
     return () => { observer.disconnect(); if (frame !== undefined) cancelAnimationFrame(frame); };
   }, []);
@@ -115,13 +144,17 @@ export function PageNavigator({ children, target, onIndexChange, onTargetHandled
         return;
       }
       navigationFrame.current = undefined;
-      const previous = entry.element.getAttribute('tabindex');
-      entry.element.tabIndex = -1;
-      entry.element.focus({ preventScroll: true });
-      entry.element.addEventListener('blur', () => {
-        if (previous === null) entry.element.removeAttribute('tabindex');
-        else entry.element.setAttribute('tabindex', previous);
-      }, { once: true });
+      if (!entry.element.isConnected) return;
+      const focusTarget = resolvePageFocusTarget(entry);
+      if (focusTarget === entry.element) {
+        const previous = entry.element.getAttribute('tabindex');
+        entry.element.tabIndex = -1;
+        entry.element.addEventListener('blur', () => {
+          if (previous === null) entry.element.removeAttribute('tabindex');
+          else entry.element.setAttribute('tabindex', previous);
+        }, { once: true });
+      }
+      focusTarget.focus({ preventScroll: true });
       entry.element.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
       highlightTimer.current = setTimeout(() => entry.element.removeAttribute('data-page-nav-target'), 2200);
     };
@@ -141,6 +174,11 @@ export function PageNavigator({ children, target, onIndexChange, onTargetHandled
         </nav>
       </div>
     </aside>
-    <div ref={root} className="page-explorer-content">{children}</div>
+    <div className="page-explorer-content">
+      {searchNotice && <div role="status" className="mb-4 rounded-lg border px-4 py-3 text-xs leading-6">
+        <span>{searchNotice}</span><Button size="xs" variant="ghost" className="ml-2" onClick={() => { setSearchNotice(''); onTargetHandled?.(); }}>关闭定位提示</Button>
+      </div>}
+      <div ref={root}>{children}</div>
+    </div>
   </div>;
 }

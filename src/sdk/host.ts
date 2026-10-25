@@ -1,0 +1,37 @@
+export { createBridgeHost } from '../host/bridge.ts';
+export type { BridgeHostOptions, AgentInputPreparation, AgentMessagePreparation, InboundReceipt } from '../host/bridge.ts';
+export { defineNativeBootstrap, createNativeBootstrapMount } from '../host/native-bootstrap.ts';
+export type { NativeBootstrapDefinition, NativeBootstrapContext, NativeBootstrapExtension,
+  NativeBootstrapHost, LoadedNativeBootstrap } from '../host/native-bootstrap.ts';
+export { createNativePackages } from '../host/native-packages.ts';
+export type { NativePackageInputProvider } from '../host/native-package-bindings.ts';
+export type { NativePackageDefinition, NativePackageContext } from '../host/native-packages.ts';
+export { createPackageConfigurationRegistry } from '../host/package-configuration.ts';
+export type { PackageConfigurationContribution, PackageConfigurationRegistry } from '../host/package-configuration.ts';
+export { createLifecycleHooks } from '../host/lifecycle-hooks.ts';
+export type { LifecycleCheckpoint, LifecycleHookDefinition } from '../host/lifecycle-hooks.ts';
+export { createControlCommands } from '../host/control-commands.ts';
+export type { ControlCommandDefinition, ControlCommandContext } from '../host/control-commands.ts';
+export { createTaskQueue } from '../host/tasks.ts';
+export type { TaskInput, TaskExecution, TaskHandler, TaskMetadata } from '../host/tasks.ts';
+export { createCalendarTriggerService, nextCalendarTriggerAt } from '../host/triggers.ts';
+export type { CalendarTriggerInput, CalendarTriggerOccurrence, CalendarSchedule } from '../host/triggers.ts';
+export { composeAgentInputPreparation } from '../host/input-preparation.ts';
+export { createFrameworkToolRegistry } from '../host/framework-tools.ts';
+export type { NativeMessageSourceReader, NativeMessageSource } from '../host/native-message-sources.ts';
+export { createNativeServicesPackage, requireNativeHostService } from '../host/native-services.ts';
+export type { NativeHostServicePorts, NativeHostServiceMap, NativeAgentService, NativeInteractionsService,
+  NativeExecutionsService, NativeToolsService, NativeWorkService, NativeWorkServiceCaller,
+  NativeServiceInteractionsSnapshot, NativeServiceExecutionQuery, NativeServiceExecutionList } from '../host/native-services.ts';
+export { NATIVE_HOST_SERVICE_IDS, NATIVE_HOST_SERVICE_VERSION, NATIVE_HOST_SERVICES_PACKAGE_ID } from '../contracts/native-services.ts';
+export type { NativeServiceAvailability, NativeServiceAgentBinding, NativeHostServiceId } from '../contracts/native-services.ts';
+export { createNativePackageConfigurationRegistry } from '../host/native-package-configuration.ts';
+export { createNativePackageState } from '../host/native-package-state.ts';
+export type { NativePackageState } from '../host/native-package-state.ts';
+export type { NativePackageStateIdentity, NativePackageStateEntry, NativePackageStateMigration, NativePackageStateSnapshot } from '../contracts/native-package-state.ts';
+export type { NativePackageContent } from '../host/native-package-content.ts';
+export type { NativePackageContentIdentity, NativePackageContentManifest } from '../contracts/native-package-content.ts';
+export { createNativeEventObserver } from '../host/native-events.ts';
+export { createNativeAccounts, nativeAccountId } from '../host/native-accounts.ts';
+export type { NativeAccounts, NativeAccountProtocol, NativeAccountRuntime, NativeLegacyAdoptionPreview } from '../host/native-accounts.ts';
+export { normalizeAccountScope, assertAccountScope } from '../core/account-scope.ts';

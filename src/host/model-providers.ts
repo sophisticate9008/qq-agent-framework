@@ -1,6 +1,7 @@
 import { validateAdapterEndpoint } from './adapter-configuration.ts'
+import { validModelProviderApi, type ModelProviderApi, type ModelProviderType } from './model-provider-protocols.ts'
 
-export type ModelProviderType = 'openai' | 'anthropic'
+export type { ModelProviderType, ModelProviderApi } from './model-provider-protocols.ts'
 
 export interface NamedModel {
   readonly id: string
@@ -10,7 +11,9 @@ export interface NamedModel {
 export interface NativeModelProvider {
   readonly id: string
   readonly name: string
-  readonly type: ModelProviderType
+  readonly type?: ModelProviderType
+  readonly api?: ModelProviderApi
+  readonly allowInsecureHttp?: boolean
   readonly baseUrl: string
   readonly enabled: boolean
   readonly apiKey: string
@@ -21,7 +24,7 @@ export interface PublicModelProvider extends Omit<NativeModelProvider, 'apiKey'>
   readonly apiKeyConfigured: boolean
 }
 
-const PROVIDER_KEYS = ['id', 'name', 'type', 'baseUrl', 'enabled', 'models'] as const
+const PROVIDER_KEYS = ['id', 'name', 'baseUrl', 'enabled', 'models'] as const
 const MAX_ENTRIES = 128
 
 function invalid(): never {
@@ -66,11 +69,19 @@ function uniqueEntries<Value extends { readonly id: string; readonly name: strin
 }
 
 function provider(value: unknown): NativeModelProvider {
-  const parsed = keys(value, [...PROVIDER_KEYS, 'apiKey'])
-  if (parsed.type !== 'openai' && parsed.type !== 'anthropic' || typeof parsed.enabled !== 'boolean') return invalid()
+  const parsed = keys(value, [...PROVIDER_KEYS, 'apiKey'], ['type', 'api', 'allowInsecureHttp'])
+  if (Object.hasOwn(parsed, 'type') && parsed.type !== 'openai' && parsed.type !== 'anthropic'
+    || typeof parsed.enabled !== 'boolean') return invalid()
+  if (Object.hasOwn(parsed, 'api') ? !validModelProviderApi(parsed.api) : parsed.type === undefined) return invalid()
+  if (parsed.api !== undefined && parsed.type !== undefined
+    && (parsed.type === 'openai' ? !String(parsed.api).startsWith('openai-') : parsed.api !== 'anthropic-messages')) return invalid()
+  if (Object.hasOwn(parsed, 'allowInsecureHttp') && typeof parsed.allowInsecureHttp !== 'boolean') return invalid()
   let baseUrl: string
   try {
-    baseUrl = validateAdapterEndpoint(parsed.baseUrl)
+    if (parsed.allowInsecureHttp === true && typeof parsed.baseUrl === 'string' && parsed.baseUrl.startsWith('http://')) {
+      validateAdapterEndpoint(parsed.baseUrl.replace(/^http:/, 'https:'))
+      baseUrl = parsed.baseUrl
+    } else baseUrl = validateAdapterEndpoint(parsed.baseUrl)
   } catch {
     return invalid()
   }
@@ -80,7 +91,10 @@ function provider(value: unknown): NativeModelProvider {
     return Object.freeze({ id: identifier(model.id, true), name: name(model.name) })
   })
   return Object.freeze({
-    id: identifier(parsed.id), name: name(parsed.name), type: parsed.type, baseUrl,
+    id: identifier(parsed.id), name: name(parsed.name), baseUrl,
+    ...(parsed.type === undefined ? {} : { type: parsed.type as ModelProviderType }),
+    ...(parsed.api === undefined ? {} : { api: parsed.api as string }),
+    ...(parsed.allowInsecureHttp === undefined ? {} : { allowInsecureHttp: parsed.allowInsecureHttp as boolean }),
     enabled: parsed.enabled, apiKey: apiKey(parsed.apiKey), models
   })
 }
@@ -96,13 +110,16 @@ export function updateModelProviders(
   const previous = new Map(validateModelProviders(current).map(entry => [entry.id, entry]))
   if (!Array.isArray(value) || value.length > MAX_ENTRIES) return invalid()
   return validateModelProviders(value.map(entry => {
-    const parsed = keys(entry, PROVIDER_KEYS, ['apiKey', 'clearApiKey'])
+    const parsed = keys(entry, PROVIDER_KEYS, ['type', 'apiKey', 'clearApiKey', 'api', 'allowInsecureHttp'])
     const nextKey = Object.hasOwn(parsed, 'apiKey') ? apiKey(parsed.apiKey) : ''
     if (Object.hasOwn(parsed, 'clearApiKey') && typeof parsed.clearApiKey !== 'boolean'
       || parsed.clearApiKey === true && nextKey !== '') return invalid()
     return {
-      id: parsed.id, name: parsed.name, type: parsed.type, baseUrl: parsed.baseUrl,
+      id: parsed.id, name: parsed.name, baseUrl: parsed.baseUrl,
+      ...(Object.hasOwn(parsed, 'type') ? { type: parsed.type } : {}),
       enabled: parsed.enabled, models: parsed.models,
+      ...(Object.hasOwn(parsed, 'api') ? { api: parsed.api } : {}),
+      ...(Object.hasOwn(parsed, 'allowInsecureHttp') ? { allowInsecureHttp: parsed.allowInsecureHttp } : {}),
       apiKey: parsed.clearApiKey === true ? '' : nextKey || previous.get(identifier(parsed.id))?.apiKey || ''
     }
   }))
@@ -110,7 +127,10 @@ export function updateModelProviders(
 
 export function publicModelProviders(value: readonly NativeModelProvider[]): readonly PublicModelProvider[] {
   return Object.freeze(validateModelProviders(value).map(entry => Object.freeze({
-    id: entry.id, name: entry.name, type: entry.type, baseUrl: entry.baseUrl,
-    enabled: entry.enabled, apiKeyConfigured: entry.apiKey !== '', models: entry.models
+    id: entry.id, name: entry.name, baseUrl: entry.baseUrl,
+    ...(entry.type === undefined ? {} : { type: entry.type }),
+    enabled: entry.enabled, apiKeyConfigured: entry.apiKey !== '', models: entry.models,
+    ...(entry.api === undefined ? {} : { api: entry.api }),
+    ...(entry.allowInsecureHttp === undefined ? {} : { allowInsecureHttp: entry.allowInsecureHttp })
   })))
 }

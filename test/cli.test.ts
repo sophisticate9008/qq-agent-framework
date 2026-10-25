@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 
 import {
   browserSmokeFiles,
@@ -21,9 +22,23 @@ import { registerBrowserToolchainResolver } from '../scripts/browser-toolchain.t
 import { loadGatewayAdminConfiguration, startGatewayAdmin } from '../src/admin/gateway.ts';
 import { loadOneBotGatewayConfiguration, startOneBotGateway } from '../src/host/onebot-gateway.ts';
 import { isRecord } from '../src/core/values.ts';
+import { projectNativeDiagnostics } from '../src/host/native-diagnostics.ts';
 
 const ADMIN_SECRET = 'cli-administrator-secret-0123456789';
 const GATEWAY_SECRET = 'cli-gateway-secret-0123456789';
+
+test('test CLI selects explicit suites and built output without mixing browser options', () => {
+  assert.equal(parseCliArguments(['test']).suite, undefined);
+  for (const suite of ['all', 'fast', 'deadline', 'integration']) {
+    const parsed = parseCliArguments(['test', '--suite', suite, '--built']);
+    assert.equal(parsed.suite, suite);
+    assert.equal(parsed.built, true);
+  }
+  for (const argumentsList of [['test', '--suite', 'missing'], ['test', '--browser', '--suite', 'fast'],
+    ['test', '--browser', '--built'], ['start', '--suite', 'fast'], ['build', '--built']]) {
+    assert.throws(() => parseCliArguments(argumentsList));
+  }
+});
 
 function privateFile(filename: string, value: string): void {
   writeFileSync(filename, value, { mode: 0o600 });
@@ -100,6 +115,25 @@ test('init rejects removed bridge directory options', () => {
   assert.throws(() => parseCliArguments(['init', '--legacy-root', '/tmp/bridge']), /无法识别/);
 });
 
+test('bootstrap is an explicit start-only local TypeScript option, never an initialization or status setting', async () => {
+  const filename = '/root/framework-local-extension.ts';
+  assert.equal(parseCliArguments(['start', '--admin-only', '--bootstrap', filename]).bootstrap, filename);
+  for (const command of ['init', 'status', 'test', 'install', 'uninstall', 'build']) {
+    assert.throws(() => parseCliArguments([command, '--bootstrap', filename]), /不支持/);
+  }
+  for (const value of ['extension.ts', 'file:///root/extension.ts', 'https://example.test/extension.ts',
+    '/root/extension.js', '/root/../root/extension.ts', '/root/extension.ts?version=1', '/root/extension.ts#loaded',
+    '/root/extension\n.ts']) {
+    assert.throws(() => parseCliArguments(['start', '--bootstrap', value]), /绝对路径/);
+  }
+  assert.throws(() => parseCliArguments(['start', '--bootstrap']), /缺少值/);
+  assert.throws(() => parseCliArguments(['start', '--bootstrap', filename, '--bootstrap', filename]), /不能重复/);
+  const captured = capturedIo('/');
+  assert.equal(await runCli(['start', '--help'], captured.io), 0);
+  assert.match(captured.stdout.join('\n'), /--bootstrap <可信本机TS绝对路径>/);
+  assert.match(captured.stdout.join('\n'), /未指定时读取管理配置旁的固定版本选择，不自动授予权限/);
+});
+
 test('browser dependency commands and targeted tests require explicit valid options', () => {
   assert.equal(parseCliArguments(['install', '--browser']).command, 'install');
   assert.equal(parseCliArguments(['install', '--browser', '--skip-browser-download']).skipBrowserDownload, true);
@@ -122,7 +156,8 @@ test('each browser alias selects exactly its named test and the default selects 
     'test:management': 'management', 'test:page-navigation': 'page-navigation',
     'test:activity': 'activity', 'test:usage': 'usage',
     'test:markdown-smoke': 'markdown', 'test:presentation-smoke': 'presentation',
-    'test:virtual-list-perf': 'virtual-list-perf', 'test:native-chat-ui': 'native-chat-ui'
+    'test:virtual-list-perf': 'virtual-list-perf', 'test:native-chat-ui': 'native-chat-ui',
+    'test:execution-journal': 'execution-journal'
   };
   for (const [alias, target] of Object.entries(aliases)) {
     const command: unknown = packageValue.scripts[alias];
@@ -131,14 +166,47 @@ test('each browser alias selects exactly its named test and the default selects 
     assert.deepEqual(browserSmokeFiles(parsed.target), [`scripts/${target}-smoke.ts`]);
   }
   assert.equal(packageValue.scripts['test:browser'], 'node scripts/cli.ts test --browser');
-  assert.equal(browserSmokeFiles().length, 9);
-  assert.equal(new Set(browserSmokeFiles()).size, 9);
+  assert.equal(browserSmokeFiles().length, 10);
+  assert.equal(new Set(browserSmokeFiles()).size, 10);
   assert(browserSmokeFiles().includes('scripts/browser-smoke.ts'));
   assert.equal(packageValue.scripts.test, 'node scripts/cli.ts test');
   for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
     const dependencies = packageValue[section];
-    if (isRecord(dependencies)) assert(Object.keys(dependencies).every(name => !name.includes('playwright')));
+    if (isRecord(dependencies)) {
+      assert(Object.keys(dependencies).every(name => !name.includes('playwright') && !name.startsWith('@deepseek-ai/')));
+    }
   }
+});
+
+test('execution browser target keeps both TypeScript runners inside the isolated no-emit typecheck', () => {
+  const root = dirname(dirname(browserToolchainPaths().directory));
+  assert.deepEqual(browserSmokeFiles('execution-journal'), ['scripts/execution-journal-smoke.ts']);
+  const configuration: unknown = JSON.parse(readFileSync(join(root, 'tsconfig.browser.json'), 'utf8'));
+  assert(isRecord(configuration) && isRecord(configuration.compilerOptions));
+  assert.equal(configuration.compilerOptions.noEmit, true);
+  assert.deepEqual(configuration.include, ['scripts/**/*-smoke.ts']);
+  for (const filename of ['scripts/execution-journal-smoke.ts', 'scripts/execution-runtime-browser-smoke.ts']) {
+    assert(filename.endsWith('-smoke.ts'));
+    assert.equal(existsSync(join(root, filename)), true);
+  }
+  assert.match(readFileSync(join(root, 'scripts/execution-journal-smoke.ts'), 'utf8'),
+    /import \{ verifyExecutionRuntimeUi, verifyExecutionThemes \} from '\.\/execution-runtime-browser-smoke\.ts'/);
+});
+
+test('optional SDK CI installs, tests and verifies the package tarball in its own locked job', () => {
+  const root = dirname(dirname(browserToolchainPaths().directory));
+  const workflow: unknown = parseYaml(readFileSync(join(root, '.github/workflows/verify.yml'), 'utf8'));
+  assert(isRecord(workflow) && isRecord(workflow.jobs));
+  const job = workflow.jobs['dsh-bridge-plugin'];
+  assert(isRecord(job) && isRecord(job.defaults) && isRecord(job.defaults.run) && Array.isArray(job.steps));
+  assert.equal(job.defaults.run['working-directory'], 'packages/dsh-bridge-plugin');
+  const commands = job.steps.flatMap((step: unknown) => isRecord(step) && typeof step.run === 'string' ? [step.run] : []);
+  assert.deepEqual(commands, ['npm ci --ignore-scripts --no-audit --no-fund', 'npm ci --ignore-scripts --no-audit --no-fund',
+    'npm test', 'npm run test:framework', 'npm run test:pack']);
+  const integration = job.steps.find((step: unknown) => isRecord(step) && step.run === 'npm run test:framework');
+  assert(isRecord(integration) && isRecord(integration.env));
+  assert.equal(integration.env.QQ_FRAMEWORK_DSH_PORT_MODULE, '${{ github.workspace }}/src/adapters/dsh-jsonrpc.ts');
+  assert.equal(existsSync(join(root, 'packages/dsh-bridge-plugin/package-lock.json')), true);
 });
 
 test('browser resolver handles static imports from the isolated package, not the project package', async () => {
@@ -526,4 +594,48 @@ test('status performs read-only health requests and does not print administrator
   assert.equal(requests[0]?.authorization, undefined);
   assert.equal(requests[1]?.authorization, `Bearer ${ADMIN_SECRET}`);
   assert.doesNotMatch([...output.stdout, ...output.stderr].join('\n'), new RegExp(`${ADMIN_SECRET}|${GATEWAY_SECRET}`));
+});
+
+test('doctor requires one canonical conversation and accepts only read configuration options', () => {
+  assert.equal(parseCliArguments(['doctor', '--conversation', 'group:123']).conversation, 'group:123');
+  assert.equal(parseCliArguments(['doctor', '--conversation', 'private:123', '--config', '/tmp/admin.json']).command, 'doctor');
+  assert.equal(parseCliArguments(['doctor', '--conversation', 'private:123', '--account', 'a'.repeat(64)]).account, 'a'.repeat(64));
+  for (const args of [['doctor'], ['doctor', '--conversation', 'group:0'], ['doctor', '--conversation', 'group:123', '--admin-only'],
+    ['status', '--conversation', 'group:123'], ['doctor', '--conversation', 'private:123', '--account', '123'],
+    ['status', '--account', 'a'.repeat(64)]]) assert.throws(() => parseCliArguments(args));
+});
+
+test('doctor sends authenticated read-only requests for the exact conversation and optional account and rejects invalid evidence', async context => {
+  const values = fixture();
+  const requests: { method: string | undefined; url: URL; authorization: string | undefined }[] = [];
+  let invalid = false;
+  const diagnosis = projectNativeDiagnostics({ conversationId: 'group:123', running: false, globalReasons: [],
+    accessAllowed: false, authorized: null, input: null, history: null, historyState: 'absent', pendingInteractions: 0 });
+  const server = createServer((request, response) => {
+    requests.push({ method: request.method, url: new URL(request.url!, 'http://localhost'), authorization: request.headers.authorization });
+    request.resume(); response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(invalid ? { secret: ADMIN_SECRET, state: 'ready' } : diagnosis));
+  });
+  context.after(async () => { await close(server); rmSync(values.directory, { recursive: true, force: true }); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  privateFile(join(values.directory, 'admin.token'), ADMIN_SECRET);
+  const filename = join(values.directory, 'admin.json');
+  privateFile(filename, JSON.stringify({ host: '127.0.0.1', port: (server.address() as AddressInfo).port,
+    tokenFile: './admin.token', gatewayConfiguration: './gateway.json' }));
+  const output = capturedIo(values.directory);
+  const args = ['doctor', '--conversation', 'group:123', '--config', filename];
+  assert.equal(await runCli(args, output.io), 0);
+  assert.deepEqual(JSON.parse(output.stdout[0]), diagnosis);
+  assert.equal(await runCli([...args, '--account', 'a'.repeat(64)], output.io), 0);
+  assert.equal(requests[0].url.pathname, '/api/chat/diagnostics');
+  assert.equal(requests[1].url.pathname, '/api/accounts/dispatch');
+  assert.equal(requests[1].url.searchParams.get('account'), 'a'.repeat(64));
+  assert.equal(requests[1].url.searchParams.get('path'), '/api/chat/diagnostics');
+  for (const request of requests) {
+    assert.equal(request.method, 'GET'); assert.equal(request.url.searchParams.get('conversationId'), 'group:123');
+    assert.equal(request.authorization, `Bearer ${ADMIN_SECRET}`);
+  }
+  invalid = true;
+  assert.equal(await runCli(args, output.io), 1);
+  assert.doesNotMatch([...output.stdout, ...output.stderr].join('\n'), new RegExp(ADMIN_SECRET));
 });

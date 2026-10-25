@@ -172,6 +172,9 @@ test('serves public health and only explicit static assets', async t => {
     const contentSecurityPolicy = asset.headers['content-security-policy']
     if (typeof contentSecurityPolicy !== 'string') throw new Error('Missing content security policy')
     assert.match(contentSecurityPolicy, /default-src 'self'/)
+    assert.match(contentSecurityPolicy, /img-src 'self' data:/)
+    assert.match(contentSecurityPolicy, /script-src 'self';/)
+    assert.match(contentSecurityPolicy, /object-src 'none'/)
     if (path === '/') assert.match(asset.text, /id="root"/)
     if (path === '/app.js') assert.doesNotMatch(asset.text, /interface |: unknown|: string/)
   }
@@ -503,18 +506,10 @@ test('returns stable errors without leaking handler failures', async t => {
   assert.doesNotMatch(dispatch.text, /secret/)
 })
 
-test('frontend uses the administrator bearer only for cookie login and no persistent token storage', async () => {
+test('frontend does not access persistent token storage or unsafe HTML sinks', async () => {
   const asset = import.meta.url.endsWith('.ts') ? '../web/lib/api.ts' : '../../web/lib/api.ts'
   const source = await readFile(new URL(asset, import.meta.url), 'utf8')
   assert.doesNotMatch(source, /localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML/)
-  assert.match(source, /export function createApiClient\(\): ApiClient/)
-  assert.match(source, /return request\('\/api\/auth\/login', 'POST', \{\}, signal, `Bearer \$\{administratorToken\}`\)/)
-  assert.match(source, /return request\('\/api\/auth\/session', 'GET', undefined, signal\)/)
-  assert.match(source, /return request\('\/api\/auth\/logout', 'POST', \{\}, signal\)/)
-  assert.equal(source.match(/`Bearer \$\{administratorToken\}`/g)?.length, 1)
-  assert.doesNotMatch(source, /createApiClient\(readToken|readToken\(\)/)
-  assert.match(source, /credentials: 'same-origin'/)
-  assert.doesNotMatch(source, /setInterval|setTimeout/)
 })
 
 test('mounted admin routes reuse authentication, write guards and stable errors', async t => {

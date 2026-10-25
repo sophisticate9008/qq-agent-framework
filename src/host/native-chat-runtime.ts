@@ -1,3 +1,24 @@
+import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
+import type { AccountScope } from '../contracts/account-scope.ts'
+import { normalizeAccountScope } from '../core/account-scope.ts'
+import { assertAccountStore, bindAccountStore } from '../storage/account-scope.ts'
+import { mapOneBotConnectionObservation } from './native-event-mapping.ts'
+import { createNativeUsageMaintenance } from './native-usage-maintenance.ts'
+import type { NativeUsageMaintenanceRequest, NativeUsageMaintenanceScope } from '../contracts/native-usage-maintenance.ts'
+import { createNativeInteractionAssembly } from './native-interaction-assembly.ts'
+import { createNativeExecutionRecovery, readNativeExecutionRecovery } from './native-execution-recovery.ts'
+import { projectNativeDiagnostics } from './native-diagnostics.ts'
+import { readNativeMediaDiagnostics, recordNativeQuoteRead } from './native-media-diagnostics.ts'
+import type { NativeMediaDiagnostics } from '../contracts/native-media-diagnostics.ts'
+import { readChatInputConfiguration } from './chat-input-configuration.ts'
+import { createNativeExecutionReconciliation } from './native-execution-reconciliation.ts'
+import { drainNativeRun, type NativeRunningRunResources } from './native-run-resources.ts'
+import { createNativeAgentCoordinator } from './native-agent-coordinator.ts'
+import { createNativeOutputService, createNativeOutputPackage } from './native-output.ts'
+import { createNativeInboundController } from './native-inbound.ts'
+import { createNativeAppearanceService } from './native-appearance.ts'
+import { createNativeAppearanceEffect, NATIVE_APPEARANCE_TOOLS } from './native-appearance-tools.ts'
+import { deriveDshMigrationTargetSelection } from '../adapters/dsh-migration-selection.ts'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, unlink } from 'node:fs/promises'
@@ -5,7 +26,11 @@ import { isAbsolute, join } from 'node:path'
 
 import { createDshAdapter } from '../adapters/dsh.ts'
 import { createDshJsonRpcPort, type DshPresetBinding } from '../adapters/dsh-jsonrpc.ts'
-import { createOneBotTransport, normalizeOneBotMessage } from '../adapters/onebot.ts'
+import { createOneBotActionPort, ONEBOT_READ_ACTIONS } from '../adapters/onebot-actions.ts'
+import { createOneBotMediaReader } from '../adapters/onebot-media.ts'
+import type { NativeMediaTranscriber } from '../contracts/native-media.ts'
+import { ONEBOT_PROTOCOL_EVENT_TYPES, validateOneBotProtocolEventData } from '../adapters/onebot-events.ts'
+import { createOneBotTransport } from '../adapters/onebot.ts'
 import { classifyOneBotResponse } from '../adapters/onebot-response.ts'
 import { createContextStore } from '../core/context.ts'
 import { FrameworkError, errorCode, snapshot } from '../core/values.ts'
@@ -16,9 +41,63 @@ import { buildChatSessionDefinition, type ChatSessionDefinition } from './chat-p
 import { withDeadline } from './deadlines.ts'
 import type { NativeChatConfiguration } from './native-chat-configuration.ts'
 import { createOneBotConnectionManager } from './onebot-connection.ts'
-import type { AgentAdapter, InboundMessage } from './types.ts'
+import type { InboundMessage } from './types.ts'
 import type { AgentEvent } from './types.ts'
 import { createNativeUsage, type NativeUsageTokens } from './native-usage.ts'
+import { digest, json, object } from './data.ts'
+import { createNativeExecutionController } from './native-execution.ts'
+import { createNativeExecutionClaims } from './native-execution-claims.ts'
+import { createNativeExecutionPolicyActions } from './native-execution-actions.ts'
+import { createNativePersonaIdentity } from './native-persona-identity.ts'
+import { createNativeBootstrapMount, type LoadedNativeBootstrap, type NativeBootstrapMount } from './native-bootstrap.ts'
+import { readNativeHistory, type NativeHistoryReader } from './native-history.ts'
+import { captureNativeConfigurationBaseline, hasActiveNativeSessions, inspectNativeConfigurationCompatibility,
+  nativeSessionMigrationEligibility, readNativeConfigurationBaseline } from './native-chat-compatibility.ts'
+import { createNativeMessageSources } from './native-message-sources.ts'
+import { nativeAuthorizationFallback, nativeAuthorizationMode, nativeChatGrantAvailable, nativeChatGrantId, nativeWhitelistCapabilities } from './native-access.ts'
+import { createNativeActivity } from './native-activity.ts'
+import { createNativeInteractions } from './native-interactions.ts'
+import type { createNativeInteractionMessages } from './native-interaction-messages.ts'
+import { readDshToolCatalog } from '../adapters/dsh-tool-catalog.ts'
+import { createDshAuthenticationOptions } from '../adapters/dsh-authentication.ts'
+import { commitNativeSessionMigration, previewNativeSessionMigration,
+  type NativeSessionMigrationCommit, type NativeSessionMigrationResult } from './native-session-migration.ts'
+import { listMigrationPlans, readMigrationAuthorizationIdentity } from './native-session-migration-state.ts'
+import { createLifecycleHooks, type LifecycleCheckpoint, type LifecycleHookDefinition } from './lifecycle-hooks.ts'
+import { createControlCommands, type ControlCommandDefinition } from './control-commands.ts'
+import { createDurableTransport } from './outbox.ts'
+import { applyNativeAccessGrants, rememberNativeAccessGrants, restoredNativeAccessGrants } from './native-access-application.ts'
+import type { JsonObject } from '../core/types.ts'
+import { composeAgentInputPreparation } from './input-preparation.ts'
+import { prepareNativeChatInput } from './native-chat-input.ts'
+import { createNativeQuotedContext } from './native-quoted-context.ts'
+import { normalizeContent } from '../core/content.ts'
+import { createNativeInbox } from './native-inbox.ts'
+import { createNativeMediaRegistry } from './native-media.ts'
+import { analyzeNativeConfigurationImpact } from './native-configuration-impact.ts'
+import { createNativeConfigurationGuard } from './native-configuration-guard.ts'
+import { createNativePackages } from './native-packages.ts'
+import { createChatInputNativePackage, createMediaNativePackage, createRemindersNativePackage, createMemoryNativePackage,
+  type NativeChatInputPackageService, type NativeMediaPackageService, type NativeMemoryPackageService } from './default-native-packages.ts'
+import type { PackageConfigurationRegistry } from './package-configuration.ts'
+import { createNativePackageConfigurationRegistry } from './native-package-configuration.ts'
+import { createNativeFrameworkTools, NATIVE_TOOL_EVENT, validateNativeToolEvent } from './native-framework-tools.ts'
+import { createNativeReminderRuntime } from './native-reminder-runtime.ts'
+import type { NativeReminderReadOptions } from './native-reminders.ts'
+import { createNativeToolPolicy } from './native-tool-policy.ts'
+import { createNativeMemoryRuntime } from './native-memory-runtime.ts'
+import type { NativeMemoryReadOptions, NativeMemorySource } from '../contracts/native-memory.ts'
+import { createNativeMemoryCommand } from './native-memory-commands.ts'
+import { createNativeMemoryEffects } from './native-memory-effects.ts'
+import { NATIVE_REMINDER_TOOLS, NATIVE_MEMORY_TOOLS } from './native-package-tools.ts'
+import type { NativeAssistantTargetResolution } from './native-assistant-target.ts'
+import { createNativeWorkExecutor } from './native-work.ts'
+import { createNativeWorkHistoryReader } from './native-work-history.ts'
+import { createDshNativeWorkBackend } from './dsh-native-work.ts'
+import { createNativeWorkAssets } from './native-work-assets.ts'
+import { createNativeWorkDelivery } from './native-work-delivery.ts'
+import { createNativeWorkEffects, NATIVE_WORK_TOOLS } from './native-work-tools.ts'
+import { createNativeServicesPackage } from './native-services.ts'
 
 export interface NativeChatDeploymentResolution {
   readonly missingReasons: readonly string[]
@@ -29,10 +108,19 @@ export interface NativeChatDeploymentResolution {
 }
 
 export interface NativeChatRuntimeOptions {
+  readonly accountScope?: AccountScope
+  readonly expectedSelfId?: string
   readonly directory: string
   readonly loadConfiguration: () => Promise<NativeChatConfiguration>
   readonly resolveDeployment: (configuration: NativeChatConfiguration, definition: ChatSessionDefinition)
     => Promise<NativeChatDeploymentResolution>
+  readonly resolveWorkTarget?: (signal: AbortSignal) => Promise<NativeAssistantTargetResolution>
+  readonly mediaTranscriber?: NativeMediaTranscriber
+  readonly packageConfigurationRegistry?: PackageConfigurationRegistry
+  readonly bootstrap?: LoadedNativeBootstrap
+  readonly prepareAuthorization?: () => Promise<void>
+  readonly lifecycleHooks?: readonly LifecycleHookDefinition[]
+  readonly controlCommands?: readonly ControlCommandDefinition[]
 }
 
 export type NativeChatRuntime = ReturnType<typeof createNativeChatRuntime>
@@ -61,6 +149,10 @@ function allowed(configuration: NativeChatConfiguration, conversationId: string)
   return configuration.access.allow.includes(conversationId) && !configuration.access.deny.includes(conversationId)
 }
 
+function compatibleConfiguration(previous: NativeChatConfiguration, next: NativeChatConfiguration): boolean {
+  return analyzeNativeConfigurationImpact(previous, next).canContinue
+}
+
 function configuredDefinition(configuration: NativeChatConfiguration): ChatSessionDefinition | null {
   const plan = configuration.catalog.plans.find(value => value.id === configuration.catalog.activePlanId)
   const persona = configuration.personas.find(value => value.id === plan?.personaId)
@@ -72,7 +164,43 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     || typeof options.loadConfiguration !== 'function' || typeof options.resolveDeployment !== 'function') {
     throw new TypeError('Native chat requires an absolute private directory and explicit configuration loaders.')
   }
+  const accountScope = options.accountScope === undefined ? undefined : normalizeAccountScope(options.accountScope)
+  const expectedSelfId = options.expectedSelfId ?? accountScope?.accountId
+  if (expectedSelfId !== undefined && (!/^[1-9][0-9]{0,31}$/.test(expectedSelfId)
+    || accountScope && accountScope.accountId !== expectedSelfId)) throw new TypeError('The expected QQ identity must match its account scope.')
+  function readHistorySnapshot<Result>(read: (history: NativeHistoryReader) => Result): Result {
+    return readNativeHistory(options.directory, read, accountScope)
+  }
+  function verifyPersistedAccount() {
+    let reader: ReturnType<typeof openReadonlySqliteStore>
+    try { reader = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite')) }
+    catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return; throw error }
+    try { assertAccountStore(reader, accountScope) } finally { reader.close() }
+  }
   let state: RuntimeState = 'stopped'
+  const packageConfigurationRegistry = options.packageConfigurationRegistry ?? createNativePackageConfigurationRegistry({ directory: options.directory,
+    contributions: options.bootstrap?.packageConfigurations })
+  const output = createNativeOutputService(packageConfigurationRegistry)
+  const activity = createNativeActivity()
+  const appearance = createNativeAppearanceService({ directory: options.directory })
+  const interactions = createNativeInteractions({ state: () => state,
+    sensitiveValues: () => active ? [...active.providers.map(provider => provider.apiKey),
+      active.adapters.onebotHttp.secret, active.adapters.onebotWs.secret, active.adapters.dshAgent.auth,
+      active.adapters.onebotWebhook.hmac].filter((value): value is string => typeof value === 'string' && value.length > 0) : [] })
+  let stopInteractions: (() => Promise<void>) | undefined
+  let releaseInteractions: (() => void) | undefined
+  let interactionMessages: ReturnType<typeof createNativeInteractionMessages> | undefined
+  let media: ReturnType<typeof createNativeMediaRegistry> | undefined
+  let packages: ReturnType<typeof createNativePackages> | undefined
+  let packageUnknown = false
+  let inputPackage: NativeChatInputPackageService | undefined
+  let memoryPackage: NativeMemoryPackageService | undefined
+  let work: ReturnType<typeof createNativeWorkExecutor> | undefined
+  let workMissingReasons: readonly string[] = ['native_work_backend_unavailable']
+  let workAssets: ReturnType<typeof createNativeWorkAssets> | undefined
+  let frameworkTools: ReturnType<typeof createNativeFrameworkTools> | undefined
+  let quotedContext: ReturnType<typeof createNativeQuotedContext> | undefined
+  let inbox: ReturnType<typeof createNativeInbox> | undefined
   let host: BridgeHost | undefined
   let store: SqliteStore | undefined
   let usage: ReturnType<typeof createNativeUsage> | undefined
@@ -80,48 +208,141 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let lastUsageError: string | null = null
   let dsh: ReturnType<typeof createDshJsonRpcPort> | undefined
   let active: NativeChatConfiguration | undefined
+  let activePresetBindings: readonly DshPresetBinding[] = []
   let lifetime: AbortController | undefined
   let starting: Promise<void> | undefined
   let stopping: Promise<void> | undefined
   let adapterOperation = false
+  let migrationOperation: Promise<NativeSessionMigrationResult> | undefined
   let closed = false
+  let closePromise: Promise<void> | undefined
   let lastError: string | null = null
-  let received = 0
-  let rejected = 0
-  let unknown = 0
-  let droppedWhileStopped = 0
-  let lastReceipt: { status: string; errorCode: string | null } | null = null
   let releaseLease: (() => Promise<void>) | undefined
   let deployedProviders = new Map<string, string>()
-
-  const connection = createOneBotConnectionManager({
-    async onEvent(event, context) {
-      const current = host
-      const generation = lifetime
-      if (state !== 'running' || current === undefined || generation?.signal.aborted || context.signal.aborted) {
-        droppedWhileStopped++
-        return
-      }
-      const message = await normalizeOneBotMessage(event, { selfId: context.selfId, signal: context.signal })
-      if (!message || current !== host || lifetime !== generation || context.signal.aborted) return
-      const content = message.content.filter(part => part.type !== 'mention' || part.userId !== context.selfId)
-      if (content.length === 0 || content.some(part => part.type !== 'text')) {
-        rejected++
-        lastReceipt = { status: 'rejected', errorCode: 'NATIVE_CHAT_TEXT_ONLY' }
-        return
-      }
-      received++
-      try {
-        const receipt = await current.receive({ ...message, content })
-        if (receipt.status === 'rejected') rejected++
-        if (receipt.status === 'unknown') unknown++
-        lastReceipt = { status: receipt.status, errorCode: receipt.errorCode ?? null }
-      } catch (error) {
-        unknown++
-        lastReceipt = { status: 'unknown', errorCode: safeCode(error) }
-      }
-    }
+  let executions: ReturnType<typeof createNativeExecutionController> | undefined
+  let claims: ReturnType<typeof createNativeExecutionClaims> | undefined
+  let claimTimer: ReturnType<typeof setInterval> | undefined
+  let claimOffset = 0
+  let pluginEpoch: string | null = null
+  let bootstrapMount: NativeBootstrapMount | undefined
+  let bootstrapUnknown = false
+  let messageSources: ReturnType<typeof createNativeMessageSources> | undefined
+  const managerDefinitions = [...(options.lifecycleHooks ?? []), ...(options.bootstrap?.lifecycleHooks ?? [])]
+  const controlDefinitions = [...(options.controlCommands ?? []), ...(options.bootstrap?.controlCommands ?? [])]
+  const managerHooks = createLifecycleHooks(managerDefinitions)
+  let lifecycleHooks = managerHooks
+  let activeIdentity: string | undefined
+  let applyingAccess = false
+  const controlLifetime = new AbortController()
+  let controlStore: SqliteStore | undefined
+  let controlCommands: ReturnType<typeof createControlCommands> | undefined
+  let preparingControl: Promise<ReturnType<typeof createControlCommands>> | undefined
+  const configurationGuard = createNativeConfigurationGuard({
+    current: () => ({ state, signal: lifetime?.signal, configuration: active, bindings: activePresetBindings }),
+    loadConfiguration: options.loadConfiguration, resolveDeployment: options.resolveDeployment, definition: configuredDefinition
   })
+  const frozenRecoveryConversations = new Set<string>()
+  let recoveringExecution = false
+  let recoveryPending: Promise<void> | undefined
+  const guard: typeof configurationGuard.check = async (...args) => {
+    if (frozenRecoveryConversations.has(args[0])) failure('NATIVE_EXECUTION_RECOVERY_RESTART_REQUIRED')
+    await configurationGuard.check(...args)
+    if (frozenRecoveryConversations.has(args[0])) failure('NATIVE_EXECUTION_RECOVERY_RESTART_REQUIRED')
+  }
+  const toolPolicy = createNativeToolPolicy({ directory: options.directory, currentHost: () => host,
+    available: () => (state === 'starting' || state === 'running') && frameworkTools?.describe().available === true,
+    signal: () => lifetime?.signal })
+  const reminders = createNativeReminderRuntime({ directory: options.directory,
+    currentHost: () => host, running: () => state === 'running' && lifetime?.signal.aborted === false,
+    async authorizeConfiguration(conversationId, signal) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      signal.throwIfAborted()
+      const configuration = await options.loadConfiguration()
+      signal.throwIfAborted()
+      if (!allowed(configuration, conversationId)) failure('REMINDER_ACCESS_DENIED')
+    },
+    guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery'),
+    async authorizeToolRequest(request) {
+      if (!messageSources) failure('NATIVE_MESSAGE_SOURCE_MISSING')
+      await messageSources.reader.requireOwner(request.scope, request.signal)
+    } })
+  async function memorySource(source: NativeMemorySource, signal: AbortSignal, owner: boolean) {
+    if (source.kind === 'operator' || !messageSources) failure('MEMORY_SOURCE_INVALID')
+    const binding = host?.sessions.get(source.conversationId)
+    const scope = { ...(accountScope ? { accountScope } : {}), conversationId: source.conversationId, eventId: source.messageId,
+      featureId: 'memory', version: '1.0.0', ...(binding ? { sessionId: binding.sessionId, generation: binding.generation } : {}) }
+    const proof = await (owner ? messageSources.reader.requireOwner(scope, signal) : messageSources.reader.lookup(scope, signal))
+    if (proof.userId !== source.userId || proof.sourceMessageId !== source.messageId) failure('MEMORY_SOURCE_INVALID')
+  }
+  const memory = createNativeMemoryRuntime({ directory: options.directory,
+    async authorizeSource(source, _scope, signal) { await memorySource(source, signal, source.kind === 'owner-message') },
+    async authorizeOwner(authority, signal) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      signal.throwIfAborted()
+      if (authority.kind !== 'operator') await memorySource(authority, signal, true)
+    },
+    authorizeRead: (conversationId, _userId, signal) => guard(conversationId, signal, true, 'resource') })
+  controlDefinitions.push(createNativeMemoryCommand({ service: () => memory.service(), owner: () => active?.access.owner ?? null,
+    async withSource(message, signal, run) {
+      await guard(message.conversationId, signal, true, 'resource')
+      if (!messageSources || !active || message.userId !== active.access.owner) failure('MEMORY_OWNER_REQUIRED')
+      const receivedAt = Date.now()
+      const release = messageSources.capture(message, { receivedAt, expiresAt: receivedAt + 10_000, signal })
+      try { await run() } finally { release() }
+    } }))
+
+  function checkpoint(point: LifecycleCheckpoint, data: JsonObject, signal: AbortSignal): Promise<void> {
+    const selected = point === 'message.normalized' && state !== 'running' ? managerHooks : lifecycleHooks
+    return withDeadline({ signal, timeoutMs: 2_000, code: 'NATIVE_CHAT_HOOK_TIMEOUT',
+      run: combined => selected.run(point, data, combined) }).catch(error => {
+      if (signal.aborted || ['runtime.starting', 'message.admitted', 'agent.submitting', 'send.before'].includes(point)) throw error
+    })
+  }
+
+  function getControlCommands(): Promise<ReturnType<typeof createControlCommands>> {
+    return preparingControl ??= (async () => {
+      const directory = await lstat(options.directory)
+      if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o777) !== 0o700) failure('NATIVE_CHAT_STORAGE_INVALID')
+      controlLifetime.signal.throwIfAborted()
+      controlStore = createSqliteStore({ filename: join(options.directory, 'native-control.sqlite'), maxRecords: 16_384 })
+      bindAccountStore(controlStore, accountScope)
+      const transport = createDurableTransport({ store: controlStore, accountScope, transport: { async send(request) {
+        const configuration = await options.loadConfiguration()
+        const protocol = observeConnection()
+        if (closed || protocol.state !== 'connected' || protocol.selfId === null
+          || !configuration.adapters.onebotHttp.enabled) failure('NATIVE_CONTROL_PROTOCOL_UNAVAILABLE')
+        await verifyHttpIdentity(protocol.selfId, configuration, request.signal)
+        const latest = await options.loadConfiguration()
+        if (latest.revisions.adapters !== configuration.revisions.adapters) failure('NATIVE_CHAT_CONFIGURATION_CHANGED')
+        request.signal.throwIfAborted()
+        return createOneBotTransport({ endpoint: configuration.adapters.onebotHttp.endpoint,
+          accessToken: configuration.adapters.onebotHttp.secret, timeoutMs: 5_000 }).send(request)
+      } } })
+      controlCommands = createControlCommands({ store: controlStore, accountScope, commands: controlDefinitions,
+        signal: controlLifetime.signal, send: request => transport.send({ ...request, ...(accountScope ? { scope: { accountScope, persona: { id: 'native-control', version: '1' } } } : {}) }) })
+      return controlCommands
+    })()
+  }
+
+  const inbound = createNativeInboundController({ resources: {
+    get state() { return state }, get closed() { return closed }, get host() { return host },
+    get lifetime() { return lifetime }, get configuration() { return active }, get media() { return media },
+    get executions() { return executions }, get inbox() { return inbox }, get messageSources() { return messageSources },
+    get interactionMessages() { return interactionMessages }, get quotedContext() { return quotedContext },
+    get inputPackage() { return inputPackage }
+  }, accountScope, expectedSelfId, activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode })
+  const connection = createOneBotConnectionManager({ ...inbound.handlers, ...(accountScope ? { accountId: accountScope.accountId } : {}) })
+  let lastObservedConnection = ''
+  function observeConnection() {
+    const current = connection.connectionStatus()
+    const signature = digest([current.state, current.selfId])
+    if (signature !== lastObservedConnection) {
+      lastObservedConnection = signature
+      const observation = mapOneBotConnectionObservation(current, current.selfId ?? undefined)
+      if (observation) activity.observe(observation)
+    }
+    return current
+  }
 
   function safeCode(error: unknown): string {
     const code = errorCode(error, 'NATIVE_CHAT_FAILED')
@@ -129,17 +350,28 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       ? code : 'NATIVE_CHAT_FAILED'
   }
 
-  async function inspect() {
+
+
+  async function inspect(observeStorageFailure = false) {
+    let storageUnavailable = false
+    try { verifyPersistedAccount() }
+    catch (error) {
+      if (!observeStorageFailure || !(error instanceof FrameworkError) || !error.code.startsWith('STORE_')) throw error
+      storageUnavailable = true
+    }
     const configuration = await options.loadConfiguration()
     const definition = configuredDefinition(configuration)
     const missingReasons: string[] = []
+    if (storageUnavailable) missingReasons.push('persisted_configuration_unavailable')
     if (!definition) missingReasons.push('active_plan_or_persona_missing')
     if (!configuration.adapters.onebotWs.enabled) missingReasons.push('onebot_ws_not_enabled')
     if (!configuration.adapters.onebotHttp.enabled) missingReasons.push('onebot_http_not_enabled')
     if (!configuration.adapters.dshAgent.enabled) missingReasons.push('dsh_agent_not_enabled')
-    if (configuration.adapters.dshAgent.auth === '') missingReasons.push('dsh_auth_missing')
+    if (configuration.adapters.dshAgent.auth === '' && !configuration.adapters.dshAgent.localCredentialsPath) missingReasons.push('dsh_auth_missing')
     if (!configuration.access.allow.some(scope => allowed(configuration, scope))) missingReasons.push('access_allow_missing')
-    if (!configuration.authorization.grants.some(grant => allowed(configuration, grant.conversationId)
+    if (configuration.authorizationSource === 'missing-with-history') missingReasons.push('authorization_document_missing_with_history')
+    if (nativeAuthorizationMode(configuration.authorization) === 'counted'
+      && !configuration.authorization.grants.some(grant => allowed(configuration, grant.conversationId)
       && grant.submitUses > 0 && grant.sendUses > 0 && (grant.expiresAt === null || grant.expiresAt > Date.now()))) {
       missingReasons.push('explicit_authorization_missing')
     }
@@ -159,54 +391,79 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   }
 
   async function status() {
-    const current = await inspect()
-    const protocol = connection.connectionStatus()
+    const current = await inspect(true)
+    const migrationCandidate = {
+      definition: current.definition, persona: current.configuration.personas.find(value => value.id === current.definition?.personaId) ?? null,
+      endpoint: current.configuration.adapters.dshAgent.endpoint, bindings: current.deployment.presetBindings }
+    const configurationCompatibility = inspectNativeConfigurationCompatibility(options.directory, migrationCandidate)
+    const migrationReasons = [...nativeSessionMigrationEligibility(readNativeConfigurationBaseline(options.directory), migrationCandidate, true)]
+    if (nativeAuthorizationMode(current.configuration.authorization) !== 'whitelist') migrationReasons.push('migration_counted_mode_unsupported')
+    const protocol = observeConnection()
     const protocolConnected = protocol.state === 'connected' && protocol.selfId !== null
-    const missingReasons = [...current.missingReasons]
-    if (active && !sameRevisions(active.revisions, current.configuration.revisions)) missingReasons.push('configuration_changed')
+    const configurationIssues = [...current.missingReasons, ...configurationCompatibility.reasons]
+    const missingReasons = [...configurationIssues]
+    const configurationImpact = active ? analyzeNativeConfigurationImpact(active, current.configuration,
+      { previousBindings: activePresetBindings, nextBindings: current.deployment.presetBindings }) : null
+    if (configurationImpact && !configurationImpact.canContinue) missingReasons.push('configuration_changed')
     if (state !== 'running') missingReasons.push('runtime_not_started')
     if (!protocolConnected) missingReasons.push('onebot_protocol_not_connected')
     const metrics = host?.metrics() ?? null
     if (state === 'running' && metrics?.startupState !== 'ready') missingReasons.push('host_not_ready')
     if (state === 'running' && metrics && metrics.unhealthyFollows > 0) missingReasons.push('agent_follow_unavailable')
-    if (state === 'running' && !host?.policy.describe().grants.some(grant => grant.active
-      && allowed(current.configuration, grant.conversationId)
-      && grant.maxUses['agent.submit'] > grant.used['agent.submit']
-      && grant.maxUses['messaging.send'] > grant.used['messaging.send'])) missingReasons.push('authorization_budget_unavailable')
+    if (executions?.metrics().faulted) missingReasons.push('execution_controller_unavailable')
+    if (packageUnknown) missingReasons.push('package_cleanup_unknown')
+    if (state === 'running' && pluginEpoch === null) missingReasons.push('execution_correlation_unavailable')
+    if (state === 'running' && !host?.policy.describe().grants.some(grant => nativeChatGrantAvailable(grant)
+      && allowed(current.configuration, grant.conversationId))) missingReasons.push('authorization_budget_unavailable')
     const chatReady = state === 'running' && missingReasons.length === 0 && host !== undefined && dsh !== undefined
     return snapshot({ state, chatReady, runtimeConnected: chatReady, protocolConnected,
-      configurationIssues: current.missingReasons,
-      canStart: !closed && !starting && !stopping && !adapterOperation
-        && (state === 'stopped' || state === 'error') && current.missingReasons.length === 0,
+      configurationIssues, configurationCompatibility, configurationImpact, guard: configurationGuard.describe(),
+      packages: packages?.describe() ?? [], frameworkTools: frameworkTools?.describe() ?? null,
+      reminders: reminders.status(),
+      memory: memory.status(),
+      sessionMigration: { eligible: !closed && state === 'stopped' && !adapterOperation && !starting && !stopping
+        && current.missingReasons.length === 0 && migrationReasons.length === 0,
+        availability: 'requires-preview', requiresPreview: true, missingReasons: migrationReasons },
+      canStart: !closed && !starting && !stopping && !adapterOperation && !bootstrapUnknown && !packageUnknown && releaseLease === undefined
+        && (state === 'stopped' || state === 'error') && configurationIssues.length === 0,
       canApplyDeployment: !closed && !starting && !stopping && !adapterOperation && releaseLease === undefined
         && (state === 'stopped' || state === 'error'),
       missingReasons: [...new Set(missingReasons)], revisions: current.configuration.revisions,
       activeRevisions: active?.revisions ?? null, lastError,
       connection: { ...protocol, chatReady }, host: metrics,
-      ingress: { received, rejected, unknown, droppedWhileStopped, lastReceipt },
+      ingress: { ...inbound.status(), queue: inbox?.summary() ?? null },
       usage: { available: usage !== undefined, faults: usageFaults, lastError: lastUsageError },
+      execution: { available: executions !== undefined, policy: current.configuration.execution,
+        metrics: executions?.metrics() ?? null, correlationVerified: pluginEpoch !== null },
+      chatAccess: { mode: nativeAuthorizationMode(current.configuration.authorization),
+        quota: nativeAuthorizationMode(current.configuration.authorization) === 'whitelist' ? 'none' : 'counted',
+        authorizationSource: current.configuration.authorizationSource ?? 'stored', denyOverridesAllow: true,
+        groupScope: 'conversation-not-member-filter', privateScope: 'direct-conversation' },
+      taskDelegationAvailable: false,
+      toolDelegation: { available: true, selected: current.definition?.capabilitySelection ?? null,
+        currentCompositionReady: current.definition?.capabilitySelection ? current.missingReasons.length === 0 : null,
+        scopeVerification: 'on-demand-per-turn', baselineMeaning: 'observed-inventory-not-source-attribution',
+        requiredForOrdinaryChat: nativeAuthorizationMode(current.configuration.authorization) === 'counted',
+        externalToolAuthorizationVerified: false, declarationRevisionVerified: false },
+      bootstrap: bootstrapUnknown ? { ...(bootstrapMount?.metadata() ?? options.bootstrap?.metadata), state: 'unknown', unsettledLifecycle: true }
+        : bootstrapMount?.metadata() ?? (options.bootstrap ? { ...options.bootstrap.metadata, state: 'not-started' } : null),
       readinessScope: current.deployment.verificationScope ?? 'verified-protocol-dsh-configuration-and-local-file-provenance',
       credentialValueIdentityVerified: false,
       unverified: current.deployment.unverified ?? ['credential_loaded_value_identity'],
+      lifecycleHooks: { manager: managerHooks.describe(), chat: lifecycleHooks.describe() },
+      controlCommands: controlCommands?.metrics() ?? { commands: controlDefinitions.length, pendingRaw: 0, inflight: 0,
+        records: 0, closed: controlLifetime.signal.aborted },
       modelExecutionVerified: false })
   }
 
   function bindingForSession(sessionId: string) {
-    let after: string | undefined
-    while (host) {
-      const page = host.sessions.list({ limit: 1_000, ...(after === undefined ? {} : { after }) })
-      const binding = page.find(entry => entry.sessionId === sessionId)
-      if (binding) return binding
-      if (page.length < 1_000) return undefined
-      after = page.at(-1)!.conversationId
-    }
-    return undefined
+    return host?.sessions.findBySessionId(sessionId) ?? undefined
   }
 
   function recordUsage(event: AgentEvent) {
     if (!usage || !active || (event.type !== 'completed' && event.type !== 'failed')) return
     const binding = bindingForSession(event.sessionId)
-    if (!binding || binding.state !== 'ready') return
+    if (!binding) return
     const data = event.data ?? {}
     if (data.terminal === true || !(typeof data.turn === 'string' && data.turn.length > 0
       || typeof data.turn === 'number' && Number.isSafeInteger(data.turn) && data.turn >= 0)) return
@@ -235,16 +492,6 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     }
   }
 
-  async function guard(conversationId: string, signal: AbortSignal): Promise<void> {
-    if (lifetime?.signal.aborted || signal.aborted || !['starting', 'running'].includes(state)) failure('NATIVE_CHAT_STOPPED')
-    const latest = await options.loadConfiguration()
-    if (!active || !sameRevisions(active.revisions, latest.revisions)) failure('NATIVE_CHAT_CONFIGURATION_CHANGED')
-    if (!allowed(latest, conversationId)) failure('NATIVE_CHAT_ACCESS_DENIED')
-    const deployment = await options.resolveDeployment(latest, configuredDefinition(latest)!)
-    if (deployment.missingReasons.length > 0 || deployment.presetBindings.length === 0) failure('NATIVE_CHAT_DEPLOYMENT_CHANGED')
-    signal.throwIfAborted()
-  }
-
   function applyAuthorization(configuration: NativeChatConfiguration, identity: string) {
     if (!host || !store) failure('NATIVE_CHAT_NOT_ASSEMBLED')
     const authorization = configuration.authorization
@@ -255,22 +502,78 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       || Array.isArray(previous.value) || previous.value.signature !== signature)) failure('NATIVE_CHAT_AUTHORIZATION_VERSION_CONFLICT')
     if (!previous) store.write('native-chat.authorization', key, { signature }, { expectedRevision: null })
     const desired = new Set<string>()
+    if (nativeAuthorizationMode(authorization) === 'whitelist') {
+      if (authorization.grants.length !== 0) failure('NATIVE_CHAT_WHITELIST_POLICY_INVALID')
+      const capabilities = nativeWhitelistCapabilities(configuration)
+      const signature = fingerprint([identity, authorization.version, configuration.revisions.access,
+        configuration.revisions.execution, capabilities])
+      const prior = store.read('native-chat.whitelist-policy', 'current')
+      const metadata = prior ? object(prior.value) : null
+      if (metadata && (metadata.schema !== 1 || typeof metadata.signature !== 'string'
+        || !/^[a-f0-9]{64}$/.test(metadata.signature) || !Number.isSafeInteger(metadata.generation)
+        || Number(metadata.generation) < 1)) failure('NATIVE_CHAT_WHITELIST_POLICY_INVALID')
+      const generation = metadata?.signature === signature ? Number(metadata.generation) : Number(metadata?.generation ?? 0) + 1
+      if (!Number.isSafeInteger(generation)) failure('NATIVE_CHAT_WHITELIST_POLICY_INVALID')
+      if (metadata?.signature !== signature) store.write('native-chat.whitelist-policy', 'current',
+        { schema: 1, signature, generation }, { expectedRevision: prior?.revision ?? null })
+      const restored = restoredNativeAccessGrants(store, configuration, identity, host)
+      const mapping: Record<string, string> = {}
+      for (const conversationId of configuration.access.allow) {
+        if (!allowed(configuration, conversationId)) continue
+        const id = restored?.[conversationId] ?? nativeChatGrantId(configuration, identity, conversationId, generation)
+        mapping[conversationId] = id
+        desired.add(id)
+        if (store.read('policy.grants', id)) continue
+        const capabilities = nativeWhitelistCapabilities(configuration, conversationId)
+        host.policy.grant({ ...(accountScope ? { accountScope } : {}), id, featureId: 'agent-relay', conversationId,
+          capabilities: [...capabilities], maxUses: Object.fromEntries(capabilities.map(capability => [capability, null])), expiresAt: null })
+      }
+      rememberNativeAccessGrants(store, configuration, identity, mapping)
+    }
     for (const grant of authorization.grants) {
       if (!allowed(configuration, grant.conversationId)) continue
-      const id = `native-chat:${fingerprint([identity, authorization.version, grant.conversationId])}`
+      const id = nativeChatGrantId(configuration, identity, grant.conversationId)
       desired.add(id)
       if (store.read('policy.grants', id)) continue
       if (grant.expiresAt !== null && grant.expiresAt <= Date.now()) continue
-      host.policy.grant({ id, featureId: 'agent-relay', conversationId: grant.conversationId,
-        capabilities: ['agent.submit', 'messaging.send'],
-        maxUses: { 'agent.submit': grant.submitUses, 'messaging.send': grant.sendUses }, expiresAt: grant.expiresAt })
+      host.policy.grant({ ...(accountScope ? { accountScope } : {}), id, featureId: 'agent-relay', conversationId: grant.conversationId,
+        capabilities: ['agent.submit', 'messaging.send', ...((grant.forwardUses ?? 0) > 0 ? ['messaging.forward'] : []), ...((grant.cancelUses ?? 0) > 0 ? ['agent.cancel'] : []),
+          ...((grant.toolDelegationUses ?? 0) > 0 ? ['agent.tools.delegate'] : [])],
+        maxUses: { 'agent.submit': grant.submitUses, 'messaging.send': grant.sendUses,
+          ...((grant.forwardUses ?? 0) > 0 ? { 'messaging.forward': grant.forwardUses! } : {}),
+          ...((grant.cancelUses ?? 0) > 0 ? { 'agent.cancel': grant.cancelUses! } : {}),
+          ...((grant.toolDelegationUses ?? 0) > 0 ? { 'agent.tools.delegate': grant.toolDelegationUses! } : {}) }, expiresAt: grant.expiresAt })
     }
     for (const grant of host.policy.describe().grants) {
-      if (grant.id.startsWith('native-chat:') && !desired.has(grant.id)) host.policy.revoke(grant.id)
+      if ((grant.id.startsWith('native-chat:') || grant.id.startsWith('native-chat-whitelist:'))
+        && !desired.has(grant.id)) host.policy.revoke(grant.id)
     }
   }
 
+  async function applyAccessChange(previousRevision: string, nextRevision: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
+    if (closed || starting || stopping || applyingAccess) failure('NATIVE_CHAT_BUSY')
+    if (state === 'stopped') return
+    if (state !== 'running' || !active || !host || !store || !activeIdentity) failure('NATIVE_CHAT_ACCESS_RELOAD_REQUIRED')
+    const previous = active
+    const currentHost = host
+    if (previous.revisions.access !== previousRevision) failure('NATIVE_CHAT_REVISION_CONFLICT')
+    applyingAccess = true
+    try {
+      const next = await options.loadConfiguration()
+      signal.throwIfAborted()
+      if (active !== previous || host !== currentHost || state !== 'running'
+        || next.revisions.access !== nextRevision || !sameRevisions(previous.revisions,
+          { ...next.revisions, access: previousRevision })) failure('NATIVE_CHAT_REVISION_CONFLICT')
+      applyNativeAccessGrants({ store, host: currentHost, previous, next, identity: activeIdentity })
+      active = snapshot(next)
+    } finally { applyingAccess = false }
+    await checkpoint('access.changed', { previousRevision, revision: nextRevision,
+      allowedConversations: active!.access.allow.length }, signal).catch(() => {})
+  }
+
   async function verifyHttpIdentity(selfId: string, configuration: NativeChatConfiguration, signal: AbortSignal) {
+    if (expectedSelfId !== undefined && selfId !== expectedSelfId) failure('NATIVE_ACCOUNT_IDENTITY_MISMATCH')
     await withDeadline({ signal, timeoutMs: 5_000, code: 'NATIVE_CHAT_HTTP_VERIFY_TIMEOUT', async run(combined) {
       const endpoint = configuration.adapters.onebotHttp
       const base = new URL(endpoint.endpoint.endsWith('/') ? endpoint.endpoint : `${endpoint.endpoint}/`)
@@ -299,13 +602,36 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   }
 
   async function cleanup() {
-    lifetime?.abort()
-    await connection.disconnect()
-    await dsh?.close()
-    await host?.stop()
+    frozenRecoveryConversations.clear()
+    const resources = { lifetime, host, dsh, work, claims, executions, bootstrap: bootstrapMount,
+      tools: frameworkTools, packages, inbox, quotedContext, reminders, memory,
+      releaseInteractions, closeInteractions: stopInteractions, claimTimer,
+      clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
+    releaseInteractions = undefined
+    stopInteractions = undefined
+    interactionMessages = undefined
+    messageSources = undefined
+    media = undefined
+    inputPackage = undefined
+    memoryPackage = undefined
+    quotedContext = undefined
+    inbox = undefined
+    claimTimer = undefined
+    const result = await drainNativeRun(resources)
+    frameworkTools = undefined
+    work = undefined
+    workAssets = undefined
     dsh = undefined
-    await releaseLease?.()
-    releaseLease = undefined
+    claims = undefined
+    pluginEpoch = null
+    packageUnknown ||= result.packageUnknown
+    bootstrapUnknown ||= result.bootstrapUnknown
+    if (!bootstrapUnknown && !packageUnknown) {
+      await releaseLease?.()
+      releaseLease = undefined
+    }
+    if (bootstrapUnknown) failure('NATIVE_CHAT_BOOTSTRAP_UNKNOWN')
+    if (result.errors.length) throw result.errors[0]
   }
 
   async function acquireLease() {
@@ -321,11 +647,94 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     }
   }
 
+  function migrate(revisions: Readonly<Record<string, string>>, signal: AbortSignal,
+    input?: NativeSessionMigrationCommit): Promise<NativeSessionMigrationResult> {
+    if (closed || state !== 'stopped' || starting || stopping || adapterOperation || migrationOperation || releaseLease) failure('NATIVE_CHAT_BUSY')
+    signal.throwIfAborted()
+    adapterOperation = true
+    const operation = (async () => {
+      let migrationDsh: ReturnType<typeof createDshJsonRpcPort> | undefined
+      let ownsLease = false
+      try {
+        const deadline = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+        const selected = await inspect()
+        if (!sameRevisions(revisions, selected.configuration.revisions)) failure('NATIVE_CHAT_REVISION_CONFLICT')
+        if (selected.missingReasons.length > 0 || !selected.definition) failure('NATIVE_CHAT_CONFIGURATION_INCOMPLETE')
+        const configuration = selected.configuration
+        const definition = selected.definition
+        const persona = configuration.personas.find(value => value.id === definition.personaId)
+        if (!persona) failure('NATIVE_CHAT_CONFIGURATION_INCOMPLETE')
+        const directory = await lstat(options.directory)
+        const filename = join(options.directory, 'native-chat.sqlite')
+        const database = await lstat(filename)
+        if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o777) !== 0o700
+          || !database.isFile() || database.isSymbolicLink() || database.nlink !== 1 || (database.mode & 0o777) !== 0o600) {
+          failure('NATIVE_CHAT_STORAGE_INVALID')
+        }
+        await acquireLease()
+        ownsLease = true
+        store ??= createSqliteStore({ filename })
+        bindAccountStore(store, accountScope)
+        migrationDsh = createDshJsonRpcPort({ endpoint: configuration.adapters.dshAgent.endpoint,
+          ...createDshAuthenticationOptions(configuration.adapters.dshAgent), sessionDefinition: definition,
+          presetBindings: selected.deployment.presetBindings, timeoutMs: 5_000 })
+        if (!migrationDsh.sessionMigration) failure('NATIVE_SESSION_MIGRATION_UNSUPPORTED')
+        const candidate = { definition, persona, endpoint: configuration.adapters.dshAgent.endpoint,
+          bindings: selected.deployment.presetBindings }
+        const migrationPort = migrationDsh
+        const migrationOptions = { store, configuration, candidate, port: migrationDsh.sessionMigration, signal: deadline,
+          async resolveTargetSelection(conversationId: string, targetPreset: string, signal: AbortSignal) {
+            const kind = conversationId.startsWith('group:') ? 'group' : 'private'
+            const matches = selected.deployment.presetBindings.filter(binding => binding.agentPreset === targetPreset
+              && (binding.conversationKind === undefined || binding.conversationKind === kind)
+              && digest(binding.definition) === digest(definition))
+            if (matches.length !== 1) failure('NATIVE_SESSION_MIGRATION_PRESET_AMBIGUOUS')
+            const [catalog, inspection] = await Promise.all([
+              migrationPort.readModelCatalog(signal),
+              migrationPort.inspectDeployment({ agentPresets: [targetPreset], credentialRefs: [], signal })
+            ])
+            signal.throwIfAborted()
+            return deriveDshMigrationTargetSelection({ provider: matches[0].externalProvider ?? definition.model.provider,
+              model: definition.model.name, reasoningEffort: definition.model.reasoningEffort, agentPreset: targetPreset,
+              catalog, settings: inspection.settings, presetDocument: inspection.documents[0] ?? null })
+          },
+          async recheck() {
+            deadline.throwIfAborted()
+            if (closed || state !== 'stopped' || starting || stopping || !releaseLease) failure('NATIVE_CHAT_BUSY')
+            const latest = await inspect()
+            if (!sameRevisions(revisions, latest.configuration.revisions)) failure('NATIVE_CHAT_REVISION_CONFLICT')
+            if (latest.missingReasons.length > 0 || digest(latest.definition) !== digest(definition)
+              || digest(latest.deployment.presetBindings) !== digest(selected.deployment.presetBindings)) {
+              failure('NATIVE_CHAT_DEPLOYMENT_CHANGED')
+            }
+          },
+          finalize() {
+            if (!captureNativeConfigurationBaseline(store!, candidate, [...configuration.providers.map(provider => provider.apiKey),
+              configuration.adapters.onebotHttp.secret, configuration.adapters.onebotWs.secret,
+              configuration.adapters.dshAgent.auth, configuration.adapters.onebotWebhook.hmac])) {
+              failure('NATIVE_SESSION_MIGRATION_BASELINE_UNAVAILABLE')
+            }
+          } }
+        return input ? await commitNativeSessionMigration(migrationOptions, input) : await previewNativeSessionMigration(migrationOptions)
+      } finally {
+        try { await migrationDsh?.close() } finally {
+          if (ownsLease) { await (releaseLease as (() => Promise<void>) | undefined)?.(); releaseLease = undefined }
+          adapterOperation = false
+        }
+      }
+    })()
+    migrationOperation = operation
+    void operation.finally(() => { if (migrationOperation === operation) migrationOperation = undefined }).catch(() => undefined)
+    return operation
+  }
+
   async function start(revisions: Readonly<Record<string, string>>, signal: AbortSignal): Promise<void> {
     if (closed) failure('NATIVE_CHAT_CLOSED')
     if (starting || stopping || adapterOperation || state === 'running') failure('NATIVE_CHAT_BUSY')
+    if (lifecycleHooks !== managerHooks && lifecycleHooks.describe().pendingRaw > 0) failure('NATIVE_CHAT_HOOK_PENDING_UNKNOWN')
     signal.throwIfAborted()
     state = 'starting'
+    activity.record('starting')
     lastError = null
     const controller = new AbortController()
     lifetime = controller
@@ -335,8 +744,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     let ownsResources = false
     const operation = (async () => {
       try {
+        await options.prepareAuthorization?.()
+        controller.signal.throwIfAborted()
         const selected = await withDeadline({ signal: controller.signal, timeoutMs: 15_000,
-          code: 'NATIVE_CHAT_CONFIGURATION_TIMEOUT', run: inspect })
+          code: 'NATIVE_CHAT_CONFIGURATION_TIMEOUT', run: () => inspect() })
         if (!sameRevisions(revisions, selected.configuration.revisions)) failure('NATIVE_CHAT_REVISION_CONFLICT')
         if (selected.missingReasons.length > 0 || !selected.definition) failure('NATIVE_CHAT_CONFIGURATION_INCOMPLETE')
         controller.signal.throwIfAborted()
@@ -353,13 +764,18 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         })
         if (database && (!database.isFile() || database.isSymbolicLink() || database.nlink !== 1
           || (database.mode & 0o777) !== 0o600)) failure('NATIVE_CHAT_STORAGE_INVALID')
+        if (!database && (await nativeAuthorizationFallback(options.directory)).source === 'missing-with-history') failure('NATIVE_CHAT_STORAGE_INVALID')
         store ??= createSqliteStore({ filename })
+        bindAccountStore(store, accountScope)
         usage ??= createNativeUsage({ store })
         const identity = fingerprint({ definition, endpoint: configuration.adapters.dshAgent.endpoint,
           bindings: selected.deployment.presetBindings })
         const prior = store.read('native-chat.meta', 'session-definition')
+        if (listMigrationPlans(store).some(plan => ['committing', 'unknown', 'partial'].includes(plan.state))) {
+          failure('NATIVE_SESSION_MIGRATION_RECONCILIATION_REQUIRED')
+        }
         if (prior && (typeof prior.value !== 'object' || prior.value === null || Array.isArray(prior.value)
-          || prior.value.identity !== identity) && store.list('host.sessions', { limit: 1 }).length > 0) {
+          || prior.value.identity !== identity) && hasActiveNativeSessions(store)) {
           failure('NATIVE_CHAT_SESSION_CONFIGURATION_CONFLICT')
         }
         if (!prior || typeof prior.value !== 'object' || prior.value === null || Array.isArray(prior.value)
@@ -367,60 +783,413 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           store.write('native-chat.meta', 'session-definition', { identity }, { expectedRevision: prior?.revision ?? null })
         }
         active = configuration
+        activePresetBindings = snapshot(selected.deployment.presetBindings)
         deployedProviders = new Map(selected.deployment.presetBindings.map(binding =>
           [binding.externalProvider ?? binding.definition.model.provider, binding.definition.model.provider]))
         dsh = createDshJsonRpcPort({ endpoint: configuration.adapters.dshAgent.endpoint,
-          auth: configuration.adapters.dshAgent.auth, sessionDefinition: definition,
+          ...createDshAuthenticationOptions(configuration.adapters.dshAgent), sessionDefinition: definition,
           presetBindings: selected.deployment.presetBindings, timeoutMs: 5_000 })
-        const sourceAgent = createDshAdapter(dsh)
-        const agent: AgentAdapter = {
-          async createSession(request) { await guard(request.conversationId, request.signal); return sourceAgent.createSession(request) },
-          async submit(request) {
-            const binding = bindingForSession(request.sessionId)
-            if (!binding) failure('SESSION_STALE')
-            await guard(binding.conversationId, request.signal)
-            return sourceAgent.submit(request)
-          },
-          follow: request => sourceAgent.follow({ ...request, async onEvent(event) {
-            if (controller.signal.aborted || lifetime !== controller || request.signal.aborted) return
-            try { recordUsage(event) } catch (error) { usageFaults++; lastUsageError = safeCode(error) }
-            await request.onEvent(event)
-          } }),
-          cancel: sourceAgent.cancel
-        }
-        const sourceTransport = createOneBotTransport({ endpoint: configuration.adapters.onebotHttp.endpoint,
-          accessToken: configuration.adapters.onebotHttp.secret, timeoutMs: 5_000 })
+        const sourceAgent = createDshAdapter(dsh, { onObservation(observation) {
+          const sessionId = observation.correlation.sessionId
+          const binding = sessionId ? bindingForSession(sessionId) : null
+          activity.observe({ ...observation, correlation: { ...observation.correlation,
+            ...(binding ? { conversationId: binding.conversationId, generation: binding.generation } : {}),
+            ...(accountScope ? { protocolId: accountScope.protocolId, accountId: accountScope.accountId } : {}) } })
+        } })
+        const agent = createNativeAgentCoordinator({ sourceAgent, dsh, store, controller, definition, configuration, identity,
+          presetBindings: selected.deployment.presetBindings, activity, bindingForSession, admittedAt: inbound.admittedAt, checkpoint, guard,
+          resources: { get lifetime() { return lifetime }, get configuration() { return active }, get host() { return host },
+            get executions() { return executions }, get claims() { return claims }, get frameworkTools() { return frameworkTools },
+            get messageSources() { return messageSources }, get pluginEpoch() { return pluginEpoch } },
+          recordUsage(event) { try { recordUsage(event) } catch (error) {
+            usageFaults++; lastUsageError = safeCode(error); activity.record('usage_error')
+          } } })
         const context = createContextStore()
         const persona = configuration.personas.find(value => value.id === definition.personaId)!
-        const contextPersonaId = `native-${fingerprint(persona.id).slice(0, 32)}`
-        context.registerPersona({ ...persona, id: contextPersonaId, version: fingerprint(definition) })
-        host = createBridgeHost({ store, agent, context, persona: `${contextPersonaId}@${fingerprint(definition)}`,
-          transport: { capabilities: () => sourceTransport.capabilities!(), async send(request) {
-            await guard(request.conversationId, request.signal)
-            return sourceTransport.send(request)
-          } },
-          authorizeIncoming: async (message: InboundMessage) => {
-            try { await guard(message.conversationId, controller.signal); return !message.isSelf } catch { return false }
-          }, taskTickMs: 25, replyTimeoutNotice: null,
-          timeouts: { createSessionMs: 6_000, followMs: 6_000, submitMs: 6_000, sendMs: 6_000, startMs: 15_000 },
-          onFault(code) { lastError = safeCode(new FrameworkError(code, 'Native host operation failed.')) } })
-        applyAuthorization(configuration, identity)
+        const contentIdentity = createNativePersonaIdentity(persona)
+        const priorPersona = store.read('native-chat.meta', 'persona-identity')
+        const hasLegacyData = !priorPersona && prior && (store.list('host.sessions', { limit: 1 }).length > 0
+          || store.list('outbox', { limit: 1 }).length > 0)
+        if (hasLegacyData && object(prior.value).identity !== identity) failure('NATIVE_CHAT_PERSONA_VERSION_MIGRATION_REQUIRED')
+        const personaMetadata = priorPersona ? object(priorPersona.value) : { schema: 1, nativeId: persona.id,
+          contentVersion: contentIdentity.version, scopeVersion: hasLegacyData ? fingerprint(definition) : contentIdentity.version,
+          source: hasLegacyData ? 'preserved-v15-definition-version' : 'persona-content-v1' }
+        if (personaMetadata.schema !== 1 || personaMetadata.nativeId !== persona.id || personaMetadata.contentVersion !== contentIdentity.version
+          || typeof personaMetadata.scopeVersion !== 'string' || !/^[a-f0-9]{64}$/.test(personaMetadata.scopeVersion)) failure('NATIVE_CHAT_PERSONA_IDENTITY_CONFLICT')
+        const outgoingPersona = Object.freeze({ id: contentIdentity.contextId, version: personaMetadata.scopeVersion })
+        if (!priorPersona) store.write('native-chat.meta', 'persona-identity', json(personaMetadata), { expectedRevision: null })
+        const personaReference = context.registerPersona({ ...contentIdentity.persona, version: personaMetadata.scopeVersion })
+        messageSources = createNativeMessageSources({ accountScope, owner: configuration.access.owner, signal: controller.signal,
+          validateExecution(execution, source) {
+            if (lifetime !== controller || controller.signal.aborted || state !== 'running') failure('NATIVE_CHAT_STOPPED')
+            const binding = host?.sessions.get(source.conversationId)
+            const current = executions?.forConversation(source.conversationId)
+            if (!binding || binding.sessionId !== execution.sessionId
+              || binding.generation !== execution.generation) failure('SESSION_STALE')
+            if (!current || !executions?.active().some(record => record.id === current.id)
+              || current.requestId !== execution.requestId || current.binding.conversationId !== source.conversationId
+              || current.binding.sessionId !== execution.sessionId || current.binding.generation !== execution.generation
+              || current.admittedAt !== source.receivedAt || current.deadlineAt !== source.expiresAt
+              || current.deadlineReached || Date.now() >= current.deadlineAt || current.isolated !== true
+              || current.cancelStatus !== 'not-requested'
+              || !(current.status === 'submitting' && current.externalStatus === 'submitting'
+                || current.status === 'running' && current.externalStatus === 'accepted')) failure('NATIVE_MESSAGE_SOURCE_EXECUTION_INVALID')
+          },
+          async validate(scope, signal) {
+            if (lifetime !== controller || state !== 'running') failure('NATIVE_CHAT_STOPPED')
+            await guard(scope.conversationId, signal, true, 'resource')
+            if (lifetime !== controller || state !== 'running') failure('NATIVE_CHAT_STOPPED')
+            if (scope.sessionId !== undefined || scope.generation !== undefined) {
+              const binding = host?.sessions.get(scope.conversationId)
+              if (!binding || scope.sessionId !== binding.sessionId || scope.generation !== binding.generation) failure('SESSION_STALE')
+            }
+          } })
+        bootstrapMount = options.bootstrap ? await createNativeBootstrapMount({ bootstrap: options.bootstrap,
+          context: { directory: options.directory, store, context, persona: personaReference, signal: controller.signal,
+            messageSources: messageSources.reader } }) : undefined
+        if (lifecycleHooks !== managerHooks) lifecycleHooks.close()
+        lifecycleHooks = createLifecycleHooks([...managerDefinitions, ...(bootstrapMount?.lifecycleHooks ?? [])])
+        await checkpoint('runtime.starting', { state: 'starting', planId: definition.planId }, controller.signal)
         await connection.connect(configuration.adapters, controller.signal)
-        const selfId = connection.connectionStatus().selfId
+        const selfId = observeConnection().selfId
         if (!selfId) failure('NATIVE_CHAT_PROTOCOL_UNVERIFIED')
         await verifyHttpIdentity(selfId, configuration, controller.signal)
+        const sourceTransport = createOneBotTransport({ endpoint: configuration.adapters.onebotHttp.endpoint,
+          accessToken: configuration.adapters.onebotHttp.secret, timeoutMs: 5_000,
+          forward: { senderId: selfId, senderName: persona.name.slice(0, 100), group: true, private: true }, ...bootstrapMount?.onebotOptions,
+          resolveAsset(request) {
+            if (request.assetId.startsWith('media-')) {
+              if (!media) failure('NATIVE_MEDIA_UNAVAILABLE')
+              const binding = host?.sessions.get(request.conversationId)
+              if (!binding || binding.sessionId !== request.sessionId || binding.generation !== request.generation) failure('SESSION_STALE')
+              return media.resolveOutgoing(request)
+            }
+            if (request.assetId.startsWith('work-asset-')) {
+              if (!workAssets) failure('WORK_ASSET_UNAVAILABLE')
+              return workAssets.resolve(request)
+            }
+            const onebotOptions: Pick<import('../adapters/onebot.ts').OneBotTransportOptions, 'resolveAsset'> | undefined = bootstrapMount?.onebotOptions
+            const resolver = onebotOptions && 'resolveAsset' in onebotOptions ? onebotOptions.resolveAsset : undefined
+            if (!resolver) failure('NATIVE_ASSET_UNAVAILABLE')
+            return resolver(request)
+          } })
+        const reminderService = reminders.service()
+        const workEffects = createNativeWorkEffects({ executor: () => work, sources: () => messageSources?.reader })
+        const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
+        if (['native.media.inspect', 'native.media.read', 'native.role.read', ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
+          failure('NATIVE_CHAT_RESERVED_CAPABILITY')
+        }
+        if ([...ONEBOT_PROTOCOL_EVENT_TYPES, NATIVE_TOOL_EVENT, ...Object.keys(reminderService.eventValidators)].some(type => bootstrapMount?.bridgeOptions.eventValidators?.[type])) {
+          failure('NATIVE_CHAT_RESERVED_PROTOCOL_EVENT')
+        }
+        const protocolValidators = Object.fromEntries(ONEBOT_PROTOCOL_EVENT_TYPES.map(type => [type, (data: JsonObject) => {
+          const selfId = observeConnection().selfId
+          return selfId !== null && data.selfId === selfId && data.accountId === selfId
+            && validateOneBotProtocolEventData(type, data)
+        }]))
+        host = createBridgeHost({ store, accountScope, agent, context, persona: personaReference,
+          ...bootstrapMount?.bridgeOptions,
+          eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
+          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects,
+            'native.role.read': createNativeAppearanceEffect({ service: appearance, personaId: () => active ? configuredDefinition(active)?.personaId ?? null : null,
+              sources: () => messageSources?.reader, guard: (conversationId, signal) => guard(conversationId, signal, true, 'resource') }),
+            'native.media.inspect': { execute(request) {
+            if (!media) failure('NATIVE_MEDIA_UNAVAILABLE')
+            return media.inspect.execute(request)
+          } }, 'native.media.read': { execute(request) {
+            if (!media) failure('NATIVE_MEDIA_UNAVAILABLE')
+            return media.read.execute(request)
+          } } },
+          agentInputPreparation: composeAgentInputPreparation([
+            { id: 'native-context', order: 0, capabilities: [], async prepare(execution, event) {
+              if (!host || !active) failure('NATIVE_CHAT_STOPPED')
+              const history = host.history.snapshot(event.conversationId, { afterSequence: 0, limit: 100 })
+              const unread = host.history.snapshot(event.conversationId, { limit: 100 })
+              const owner = active.access.owner
+              const quotedMessages = await quotedContext?.read({ conversationId: event.conversationId,
+                content: normalizeContent(event.data.content) }, history.messages, execution.signal)
+              const memoryContext = event.userId ? await memoryPackage?.context({ conversationId: event.conversationId,
+                userId: event.userId, limit: 8, maxCharacters: 2000, maxBytes: 6000 }, execution.signal) : undefined
+              inbound.preparedReadCursor(digest([event.conversationId, event.id, 'prompt']), history.latestSequence)
+              return prepareNativeChatInput(event, history.messages, { owner, partial: history.partial,
+                unread: { ids: unread.messages.filter(item => item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
+                  through: unread.latestSequence, partial: unread.partial },
+                quotedMessages, memory: memoryContext, tools: await frameworkTools?.context(event.conversationId, execution.signal),
+                output: { ...await output.context(execution.signal), forwardAuthorized: !host.policy.describe().paused && host.policy.describe().grants.some(grant =>
+                  grant.active && grant.featureId === 'agent-relay' && grant.conversationId === event.conversationId
+                  && grant.capabilities.includes('messaging.forward') && (grant.expiresAt === null || grant.expiresAt > Date.now())
+                  && (grant.maxUses['messaging.forward'] === null || (grant.maxUses['messaging.forward'] ?? 0) > (grant.used['messaging.forward'] ?? 0))) }, appearance: await appearance.context(definition.personaId, execution.signal),
+                participation: inbound.participation(digest([event.conversationId, event.id, 'prompt'])) })
+            } },
+            ...(bootstrapMount?.bridgeOptions.agentInputPreparation
+              ? [{ id: 'bootstrap-input', order: 100, ...bootstrapMount.bridgeOptions.agentInputPreparation }] : [])
+          ]),
+          agentMessagePreparation: { capabilities: bootstrapMount?.bridgeOptions.agentMessagePreparation?.capabilities ?? [],
+            async prepare(execution, event) {
+              const prepared = bootstrapMount?.bridgeOptions.agentMessagePreparation
+                ? await bootstrapMount.bridgeOptions.agentMessagePreparation.prepare(execution, event) : event.data.content
+              return prepared === null ? null : output.prepare(prepared, event, execution.signal)
+            } },
+          splitAgentMessage: output.split,
+          followPool: { maxSessions: 16, isIdle: binding => executions?.forConversation(binding.conversationId) === null },
+          transport: { capabilities: () => sourceTransport.capabilities!(), async send(request) {
+            const activityContent = request.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
+            try {
+              await guard(request.conversationId, request.signal, false, 'delivery')
+              await checkpoint('send.before', { conversationId: request.conversationId, idempotencyKey: request.idempotencyKey,
+                content: json(request.content) }, request.signal)
+              await guard(request.conversationId, request.signal, false, 'delivery')
+              const receipt = await sourceTransport.send(request)
+              await checkpoint('send.after', { conversationId: request.conversationId, status: receipt.status,
+                idempotencyKey: request.idempotencyKey }, request.signal).catch(() => {})
+              activity.record(receipt.status === 'confirmed' ? 'send_confirmed'
+                : receipt.status === 'rejected' ? 'send_rejected' : 'send_unknown', request.conversationId, activityContent)
+              return receipt
+            } catch (error) {
+              activity.record('send_failed', request.conversationId, activityContent)
+              throw error
+            }
+          } },
+          authorizeIncoming: async (message: InboundMessage, signal: AbortSignal) => {
+            try {
+              await guard(message.conversationId, signal, false, 'admission')
+              return !message.isSelf && (!message.directed || executions?.forConversation(message.conversationId) === null)
+            } catch { return false }
+          }, taskTickMs: 25, replyTimeoutNotice: null, replyRecovery: 'record-only',
+          replyTimeoutMs: configuration.execution.turnTimeoutMs, eventTimeoutMs: configuration.execution.turnTimeoutMs,
+          timeouts: { createSessionMs: 6_000, followMs: 6_000, submitMs: 6_000, sendMs: 6_000, startMs: 15_000 },
+          onFault(code) {
+            lastError = safeCode(new FrameworkError(code, 'Native host operation failed.'))
+            activity.record(code.includes('TIMEOUT') ? 'deadline' : 'error')
+          } })
+        const authorizationIdentity = readMigrationAuthorizationIdentity(store, identity)
+        applyAuthorization(configuration, authorizationIdentity)
+        activeIdentity = authorizationIdentity
+        await bootstrapMount?.install(host)
+        const executionFault = (code: string) => {
+          lastError = safeCode(new FrameworkError(code, 'Execution state is unavailable.')); state = 'error'
+          activity.record('error')
+        }
+        executions = createNativeExecutionController({ store, policy: configuration.execution, onFault: executionFault,
+          ...createNativeExecutionPolicyActions({ policy: host.policy, transport: host.outbox,
+            persona: { id: contentIdentity.contextId, version: personaMetadata.scopeVersion }, cancel: sourceAgent.cancel,
+            async guard(request) {
+              await guard(request.execution.binding.conversationId, request.signal)
+              const binding = host?.sessions.get(request.execution.binding.conversationId)
+              if (!binding || binding.sessionId !== request.execution.binding.sessionId
+                || binding.generation !== request.execution.binding.generation) failure('SESSION_STALE')
+            } }) })
+        executions.start()
+        const readProtocol = createOneBotActionPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
+          ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}),
+          allowedActions: ONEBOT_READ_ACTIONS })
+        media = createNativeMediaRegistry({ store: store!, accountId: selfId,
+          protocol: readProtocol, transcriber: options.mediaTranscriber,
+          contentReader: createOneBotMediaReader({ actions: readProtocol,
+            trustedOrigins: [new URL(configuration.adapters.onebotHttp.endpoint).origin], maxBytes: 1024 * 1024, timeoutMs: 8000 }),
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+        packages = createNativePackages({ packages: [createChatInputNativePackage({ directory: options.directory }),
+          createMediaNativePackage({ registry: media }), createRemindersNativePackage({ service: reminderService }),
+          createMemoryNativePackage({ service: memory.start() }), createNativeOutputPackage(output), createNativeServicesPackage({ ports: {
+            agent: { status: () => ({ available: state === 'running' && dsh !== undefined && pluginEpoch !== null,
+              missingReasons: state === 'running' && dsh && pluginEpoch ? [] : ['native_agent_not_ready'] }),
+              binding(conversationId) { const binding = host?.sessions.get(conversationId); return binding?.sessionId
+                ? { conversationId, sessionId: binding.sessionId, generation: binding.generation } : null } },
+            interactions: { snapshot: () => interactions.snapshot() },
+            executions: { read: id => executions?.get(id) ?? null, list: query => executions?.list(query) ?? [] },
+            tools: { catalog: signal => runtime.tools(signal) },
+            work: { status: () => runtime.workStatus(), read: id => runtime.readWork(id), list: query => runtime.listWork(query) }
+          } }), ...(bootstrapMount?.packageDefinitions ?? [])], signal: controller.signal,
+          configurationRegistry: packageConfigurationRegistry, stateStore: store,
+          ...(options.bootstrap ? { bootstrapContent: {
+            identity: options.bootstrap.metadata.contentIdentity ?? { fingerprint: options.bootstrap.metadata.codeFingerprint, coverage: 'entry-only' as const, files: 1 },
+            packageIds: bootstrapMount?.packageDefinitions.map(definition => definition.manifest.id) ?? [],
+            verify: signal => options.bootstrap!.verifyContent?.(signal) ?? Promise.resolve()
+          } } : {}) })
+        const packageStates = await packages.start()
+        packageUnknown = packageStates.some(item => item.state === 'unknown')
+        if (packageStates.some(item => item.state !== 'running')) failure('NATIVE_CHAT_PACKAGE_START_FAILED')
+        await bootstrapMount?.bindPackages(host, packages)
+        inputPackage = packages.service('chat-input', 1) as NativeChatInputPackageService
+        media = packages.service('media', 1) as NativeMediaPackageService
+        memoryPackage = packages.service('memory', 1) as NativeMemoryPackageService
+        host.engine.install(reminderService.feature)
+        quotedContext = createNativeQuotedContext({ protocol: readProtocol, selfId, register: media.register,
+          observe(conversationId, result) { if (store) recordNativeQuoteRead(store, conversationId, result) },
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         await dsh.verify(controller.signal)
+        if (!dsh.bridgePlugin) failure('NATIVE_CHAT_CORRELATION_PLUGIN_UNAVAILABLE')
+        const plugin = await dsh.bridgePlugin.describe(controller.signal).catch(() => failure('NATIVE_CHAT_CORRELATION_PLUGIN_UNAVAILABLE'))
+        pluginEpoch = plugin.issuerEpoch
+        claims = createNativeExecutionClaims({ store, port: dsh.bridgePlugin, issuerEpoch: pluginEpoch, executions,
+          signal: controller.signal, onFault: executionFault, onCorrelationFault(code) {
+            if (controller.signal.aborted || lifetime !== controller) return
+            pluginEpoch = null
+            lastError = safeCode(new FrameworkError(code, 'Trusted turn correlation is unavailable.'))
+            activity.record('error')
+          } })
+        const workTarget = options.resolveWorkTarget ? await options.resolveWorkTarget(controller.signal) : null
+        workMissingReasons = workTarget?.missingReasons ?? ['native_work_target_unavailable']
+        if (plugin.workProtocol === 'qq-agent-framework.work/1' && dsh.work && options.resolveWorkTarget
+          && workTarget?.configuration.enabled && workTarget.missingReasons.length === 0) {
+          const workHost = host
+          const resolveTarget = options.resolveWorkTarget
+          const workPort = dsh.work
+          const workInteractions = dsh
+          workAssets = createNativeWorkAssets({ directory: options.directory, store, accountId: selfId, port: workPort,
+            parent(sessionId) { const binding = bindingForSession(sessionId); return binding ?? null },
+            authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+          const backend = createDshNativeWorkBackend({ port: workPort, issuerEpoch: pluginEpoch,
+            generation: sessionId => bindingForSession(sessionId)?.generation ?? null,
+            async resolveTarget(configuration, signal) {
+              const resolved = await resolveTarget(signal)
+              if (resolved.missingReasons.length || !resolved.externalProvider || !resolved.agentPreset
+                || digest(configuration) !== digest(resolved.configuration)) failure('NATIVE_WORK_TARGET_UNVERIFIED')
+              return { modelProvider: resolved.externalProvider, model: resolved.configuration.model!, agentPreset: resolved.agentPreset,
+                ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }) }
+            }, registerResultAsset: workAssets.register })
+          work = createNativeWorkExecutor({ store, onObservation(event) { activity.observe({ ...event, correlation: { ...event.correlation,
+              ...(accountScope ? { protocolId: accountScope.protocolId, accountId: accountScope.accountId } : {}) } }) }, messageSources: messageSources.reader, backend,
+            registerChild(binding) { return workInteractions.registerInteractionSession(binding.childId) },
+            async loadConfiguration() { return (await resolveTarget(controller.signal)).configuration },
+            async authorize(scope, signal) {
+              await guard(scope.conversationId, signal, true, 'resource')
+              const binding = workHost.sessions.get(scope.conversationId)
+              if (!binding || binding.sessionId !== scope.sessionId || binding.generation !== scope.generation) failure('SESSION_STALE')
+            },
+            isCurrentParent(binding) {
+              const current = workHost.sessions.get(binding.conversationId)
+              return lifetime === controller && !controller.signal.aborted && current?.sessionId === binding.sessionId
+                && current.generation === binding.generation
+            },
+            onResult: createNativeWorkDelivery({ host: workHost, store, persona: outgoingPersona,
+              owner: () => active?.access.owner ?? null,
+              guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') }),
+            onFault(code) { lastError = code; activity.record('error') } })
+        }
+        if (plugin.frameworkToolProtocol === 'qq-agent-framework.tools/1' && dsh.frameworkTools) {
+          frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
+            tools: [...NATIVE_APPEARANCE_TOOLS, ...NATIVE_REMINDER_TOOLS, ...NATIVE_MEMORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
+            async unavailableCapabilities(signal) {
+              if (!work || !options.resolveWorkTarget) return NATIVE_WORK_TOOLS.map(tool => tool.definition.capability)
+              const target = await options.resolveWorkTarget(signal)
+              return target.configuration.enabled && target.missingReasons.length === 0 ? [] : NATIVE_WORK_TOOLS.map(tool => tool.definition.capability)
+            },
+            signal: controller.signal, async guard(scope, signal) {
+              await guard(scope, signal, true, 'resource')
+              await toolPolicy.sync(signal)
+            },
+            async resolveScope(call, signal) {
+              const binding = bindingForSession(call.sessionId)
+              if (!binding || binding.generation !== call.generation || !executions || !claims || !host || !messageSources) return null
+              let execution = executions.forConversation(binding.conversationId)
+              if (!execution || execution.requestId !== call.requestId) return null
+              await claims.poll(execution.id)
+              await guard(binding.conversationId, signal, true, 'resource')
+              execution = executions.forConversation(binding.conversationId)
+              if (!execution || execution.requestId !== call.requestId || execution.binding.generation !== call.generation
+                || execution.binding.sessionId !== call.sessionId || execution.turn?.id !== String(call.turn)
+                || execution.userMessage?.messageId !== call.userMessageId || execution.deadlineReached
+                || execution.cancelStatus !== 'not-requested' || !['submitting', 'running'].includes(execution.status)) return null
+              const source = host.history.snapshot(binding.conversationId, { afterSequence: 0, limit: 100 }).messages.find(item =>
+                digest([binding.conversationId, item.id, 'prompt']) === call.requestId)
+              if (!source) return null
+              const scope = { ...(accountScope ? { accountScope } : {}), eventId: source.id, conversationId: binding.conversationId, sessionId: call.sessionId,
+                generation: call.generation, featureId: 'framework-tools', version: '1.0.0' }
+              await messageSources.reader.lookup(scope, signal)
+              const eventId = digest(['framework-tool', plugin.issuerEpoch, call.sessionId, call.generation, call.id])
+              await messageSources.alias(scope, eventId, signal)
+              return { ...scope, eventId }
+            } })
+          host.engine.install(frameworkTools.feature)
+          await toolPolicy.sync(controller.signal)
+        }
         await host.start()
+        const interactionAssembly = createNativeInteractionAssembly({ interactions, port: dsh, signal: controller.signal,
+          epoch: fingerprint([identity, Date.now(), configuration.revisions]), persona: outgoingPersona, bindingForSession,
+          guard: (conversationId, signal) => guard(conversationId, signal, true, 'interaction'), resources: {
+            get host() { return host }, get work() { return work }, get executions() { return executions },
+            get owner() { return active?.access.owner ?? null }
+          } })
+        interactionMessages = interactionAssembly.messages
+        releaseInteractions = interactionAssembly.release
+        stopInteractions = await interactionAssembly.connect()
+        await bootstrapMount?.start(host, controller.signal)
         controller.signal.throwIfAborted()
         if (host.metrics().startupState !== 'ready' || host.metrics().faults > 0) failure('NATIVE_CHAT_HOST_NOT_READY')
         const latest = await options.loadConfiguration()
         if (!sameRevisions(configuration.revisions, latest.revisions)) failure('NATIVE_CHAT_REVISION_CONFLICT')
+        captureNativeConfigurationBaseline(store!, { definition, persona, endpoint: configuration.adapters.dshAgent.endpoint,
+          bindings: selected.deployment.presetBindings }, [...configuration.providers.map(provider => provider.apiKey),
+          configuration.adapters.onebotHttp.secret, configuration.adapters.onebotWs.secret,
+          configuration.adapters.dshAgent.auth, configuration.adapters.onebotWebhook.hmac])
+        inbox = createNativeInbox({ store: store!,
+          readiness(conversationId) {
+            if (state !== 'running' || controller.signal.aborted || !host || !executions) return 'blocked'
+            const execution = executions.forConversation(conversationId)
+            if (execution) return execution.deadlineReached || execution.status === 'unknown'
+              || execution.externalStatus === 'unknown' || execution.cancelStatus !== 'not-requested' ? 'blocked' : 'busy'
+            const reply = host.replies.get(conversationId)
+            if (reply?.status === 'waiting') return 'busy'
+            if (reply?.status === 'timed-out') return 'blocked'
+            return 'ready'
+          },
+          async deliver(entries) {
+            const entry = entries.at(-1)!
+            const definition = active ? configuredDefinition(active) : undefined
+            const persona = active?.personas.find(value => value.id === definition?.personaId)
+            const { effective } = await inbound.readInputConfiguration(entry.message.conversationId, persona?.name)
+            if (!effective.enabled || entries.some(item => item.trigger === 'mention' && !effective.wakeOnMention
+              || item.trigger === 'reply' && !effective.wakeOnReply
+              || item.trigger === 'continuation' && effective.continuationMs === 0
+              || item.trigger === 'nickname' && !effective.names.some(name => item.message.content.some(part =>
+                part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase()))))) {
+              return { status: 'rejected', errorCode: 'NATIVE_CHAT_INPUT_DISABLED' }
+            }
+            const admittedAt = Math.min(...entries.map(item => item.admittedAt))
+            inbound.continuation(digest([entry.message.conversationId, entry.message.id, 'prompt']))
+            return inbound.dispatchIncoming(entry.message, entry.message, admittedAt, controller.signal)
+          },
+          onFault: executionFault,
+        })
+        inbox.recover()
+        const runningResources: NativeRunningRunResources = { lifetime: controller, host, dsh, work, claims, executions,
+          bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, releaseInteractions,
+          closeInteractions: stopInteractions, claimTimer, clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
+        runningResources.lifetime.signal.throwIfAborted()
         state = 'running'
+        await reminderService.start()
+        await checkpoint('runtime.ready', { state: 'running', planId: definition.planId }, controller.signal)
+        activity.record('running')
+        const reportedTimeouts = new Set<string>()
+        claimTimer = setInterval(() => {
+          if (state !== 'running' || controller.signal.aborted || !executions || !claims) return
+          try {
+            const pending = executions.active()
+            try {
+              const ids = new Set(pending.map(execution => execution.id))
+              for (const id of reportedTimeouts) if (!ids.has(id)) reportedTimeouts.delete(id)
+              for (const execution of pending) if (execution.deadlineReached && !reportedTimeouts.has(execution.id)) {
+                activity.record('execution_timeout', execution.binding.conversationId)
+                reportedTimeouts.add(execution.id)
+              }
+            } catch {}
+            for (let offset = 0; offset < Math.min(4, pending.length); offset++) {
+              const execution = pending[(claimOffset + offset) % pending.length]
+              void claims.poll(execution.id)
+            }
+            claimOffset = pending.length === 0 ? 0 : (claimOffset + 4) % pending.length
+            executions.tick()
+            void inbox?.tick()
+          } catch (error) { executionFault(safeCode(error)) }
+        }, 250)
       } catch (error) {
         lastError = safeCode(error)
+        if (lastError.includes('BOOTSTRAP') && lastError.includes('UNKNOWN')) bootstrapUnknown = true
         controller.abort()
         if (ownsResources) await cleanup().catch(() => undefined)
         state = 'error'
+        activity.record('start_failed')
         throw new FrameworkError(lastError, 'Native chat did not start. Check runtime status.')
       } finally {
         clearTimeout(timer)
@@ -432,18 +1201,27 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   }
 
   async function stop() {
+    if (migrationOperation) failure('NATIVE_CHAT_BUSY')
     if (stopping) return stopping
     lifetime?.abort()
     state = 'stopping'
+    activity.record('stopping')
     const operation = (async () => {
       await starting?.catch(() => undefined)
+      await recoveryPending
       try {
+        await checkpoint('runtime.stopping', { state: 'stopping' }, new AbortController().signal).catch(() => {})
         await withDeadline({ signal: new AbortController().signal, timeoutMs: 20_000,
           code: 'NATIVE_CHAT_STOP_UNKNOWN', run: cleanup })
         state = 'stopped'
+        await checkpoint('runtime.stopped', { state: 'stopped' }, new AbortController().signal).catch(() => {})
+        if (lifecycleHooks !== managerHooks) lifecycleHooks.close()
+        if (lifecycleHooks.describe().pendingRaw === 0) lifecycleHooks = managerHooks
+        activity.record('stopped')
       } catch (error) {
         state = 'error'
         lastError = safeCode(error)
+        activity.record('stop_failed')
         throw error
       }
     })()
@@ -471,15 +1249,309 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     }
   })
 
-  const runtime = Object.freeze({ status, start, stop, adapterRuntime,
-    host() { return host },
-    usage() { return usage },
-    async close() {
+  async function reconcileExecution(id: string, signal: AbortSignal) {
+    const currentHost = host
+    const currentExecutions = executions
+    const currentStore = store
+    const generation = lifetime
+    const port = dsh?.bridgePlugin
+    if (closed || state !== 'running' || !currentHost || !currentExecutions || !currentStore || !generation || generation.signal.aborted || !port) {
+      failure('NATIVE_EXECUTION_RECONCILIATION_UNAVAILABLE')
+    }
+    const combined = AbortSignal.any([signal, generation.signal])
+    const description = await port.describe(combined)
+    combined.throwIfAborted()
+    const service = createNativeExecutionReconciliation({ store: currentStore, port, issuerEpoch: description.issuerEpoch,
+      executions: currentExecutions, signal: combined, isCurrentBinding(binding) {
+        const current = currentHost.sessions.get(binding.conversationId)
+        return !closed && state === 'running' && lifetime === generation && host === currentHost && !combined.aborted
+          && current?.sessionId === binding.sessionId && current.generation === binding.generation
+      } })
+    const result = await service.reconcile(id, combined)
+    if (result.state === 'released') {
+      combined.throwIfAborted()
+      const reply = currentHost.replies.get(result.execution.binding.conversationId)
+      if (reply && ['waiting', 'timed-out'].includes(reply.status)
+        && digest([result.execution.binding.conversationId, reply.requestId, 'prompt']) === result.execution.requestId) {
+        currentHost.replies.suppress(result.execution.binding, reply.requestId)
+      }
+      activity.record('execution_reconciled', result.execution.binding.conversationId)
+    }
+    return { ...result, restartRequired: pluginEpoch !== description.issuerEpoch }
+  }
+
+  async function recoverExecution(id: string, signal: AbortSignal, revision?: string) {
+    const currentHost = host
+    const currentExecutions = executions
+    const currentStore = store
+    const currentLifetime = lifetime
+    const port = dsh
+    if (state !== 'running' || closed || recoveringExecution || !currentHost || !currentExecutions || !currentStore || !currentLifetime
+      || !port?.bridgePlugin || !port.sessionMigration) failure('NATIVE_EXECUTION_RECOVERY_UNAVAILABLE')
+    const execution = currentExecutions.get(id)
+    if (!execution) failure('EXECUTION_NOT_FOUND')
+    const conversationId = execution.binding.conversationId
+    recoveringExecution = true
+    let completeRecovery!: () => void
+    recoveryPending = new Promise<void>(resolve => { completeRecovery = resolve })
+    const previouslyFrozen = frozenRecoveryConversations.has(conversationId)
+    frozenRecoveryConversations.add(conversationId)
+    const combined = AbortSignal.any([signal, currentLifetime.signal, controlLifetime.signal])
+    let preserveFreeze = previouslyFrozen || revision !== undefined
+    try {
+      const description = await port.bridgePlugin.describe(combined)
+      const service = createNativeExecutionRecovery({ store: currentStore, evidencePort: port.bridgePlugin,
+        migrationPort: port.sessionMigration, issuerEpoch: description.issuerEpoch, executions: currentExecutions, signal: combined,
+        async resolvePreset(binding, checkSignal) {
+          checkSignal.throwIfAborted()
+          const definition = active && configuredDefinition(active)
+          const kind = binding.conversationId.startsWith('group:') ? 'group' : 'private'
+          const selected = activePresetBindings.filter(item => definition && digest(item.definition) === digest(definition)
+            && (item.conversationKind === undefined || item.conversationKind === kind))
+          if (selected.length !== 1) failure('EXECUTION_RECOVERY_PRESET_UNAVAILABLE')
+          return selected[0]!.agentPreset
+        },
+        async recheck(binding, checkSignal) {
+          if (state !== 'running' || host !== currentHost || lifetime !== currentLifetime || closed) failure('NATIVE_EXECUTION_RECOVERY_UNAVAILABLE')
+          await configurationGuard.check(binding.conversationId, checkSignal, true, 'resource')
+          const actual = currentHost.sessions.get(binding.conversationId)
+          if (!actual || actual.sessionId !== binding.sessionId || actual.generation !== binding.generation) failure('EXECUTION_RECOVERY_BINDING_CHANGED')
+          if (!currentHost.policy.describe().grants.some(grant => grant.conversationId === binding.conversationId && nativeChatGrantAvailable(grant))) failure('EXECUTION_RECOVERY_AUTHORIZATION_UNAVAILABLE')
+        } })
+      const result = revision === undefined ? await service.preview(id, combined) : await service.commit(id, revision, combined)
+      if (result.state === 'completed') {
+        const reply = currentHost.replies.get(conversationId)
+        if (reply && digest([conversationId, reply.requestId, 'prompt']) === execution.requestId) currentHost.replies.suppress(execution.binding, reply.requestId)
+        pluginEpoch = null
+        preserveFreeze = true
+        activity.record('execution_recovered', conversationId)
+      }
+      return result
+    } finally {
+      recoveringExecution = false
+      completeRecovery()
+      recoveryPending = undefined
+      if (!preserveFreeze) frozenRecoveryConversations.delete(conversationId)
+    }
+  }
+
+  async function diagnostics(conversationId: string) {
+    const current = await status()
+    const configuration = await options.loadConfiguration()
+    const persona = configuration.personas.find(item => item.id === configuration.catalog.plans.find(plan => plan.id === configuration.catalog.activePlanId)?.personaId)
+    const input = await readChatInputConfiguration(options.directory, conversationId, persona?.name).catch(() => null)
+    let history: ReturnType<NativeHistoryReader['diagnostics']> | null = null
+    let historyState: 'present' | 'absent' | 'unavailable' = 'present'
+    try { history = readHistorySnapshot(value => value.diagnostics(conversationId)) }
+    catch (error) { historyState = error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND' ? 'absent' : 'unavailable' }
+    const binding = host?.sessions.get(conversationId)
+    const appliedDefinition = active && configuredDefinition(active)
+    const appliedLimit = appliedDefinition?.contextLimits?.[conversationId.startsWith('group:') ? 'group' : 'private']
+    const context = current.chatReady && binding && appliedLimit ? {
+      source: 'active-session' as const, limit: appliedLimit, headroomTokens: null, modelWindow: null, maxOutput: null
+    } : null
+    return { ...projectNativeDiagnostics({ conversationId, running: state === 'running', globalReasons: current.missingReasons,
+      accessAllowed: allowed(configuration, conversationId), authorized: host ? host.policy.describe().grants.some(grant =>
+        grant.conversationId === conversationId && nativeChatGrantAvailable(grant)) : null,
+      input: input?.effective ?? null, history, historyState,
+      pendingInteractions: interactions.snapshot().items.filter(item => item.conversationId === conversationId
+        && ['pending', 'submitting', 'unknown'].includes(item.status)).length }), context }
+  }
+
+  function mediaDiagnostics(conversationId: string, limit = 100): NativeMediaDiagnostics {
+    const settings = { conversationId, limit, running: state === 'running' && media !== undefined, transcriber: options.mediaTranscriber !== undefined }
+    const empty = readNativeMediaDiagnostics({ read: () => null, list: () => [] }, settings)
+    try { return store ? readNativeMediaDiagnostics(store, settings) : readHistorySnapshot(value => value.media(settings)) }
+    catch (error) { return { ...empty, coverage: error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND' ? 'absent' : 'unavailable' } }
+  }
+
+  const runtime = Object.freeze({ status, start, stop, adapterRuntime, applyAccessChange, reconcileExecution, recoverExecution, diagnostics, mediaDiagnostics,
+    applicationSignal() { return controlLifetime.signal },
+    isClosed() { return closed },
+    previewSessionMigration(revisions: Readonly<Record<string, string>>, signal: AbortSignal) {
+      return migrate(revisions, signal)
+    },
+    migrateSessions(input: NativeSessionMigrationCommit, signal: AbortSignal) {
+      return migrate(input.revisions, signal, input)
+    },
+    async synchronizeProtocol(configuration: NativeAdapterConfiguration, signal: AbortSignal): Promise<void> {
+      if (closed || state !== 'stopped' || starting || stopping || adapterOperation) return
+      if (configuration.onebotWs.enabled) await adapterRuntime.connect?.(configuration, signal)
+      else await adapterRuntime.disconnect?.()
+    },
+    activity() { return activity.read(state) },
+    interactions() { return closed ? undefined : interactions },
+    async tools(signal: AbortSignal) {
+      const generation = lifetime
+      const currentHost = host
+      const configuration = active
+      const liveSessions: { sessionId: string; agentPreset: string; conversationId: string; generation: number }[] = []
+      let limited = false
+      if (state === 'running' && !closed && currentHost && configuration) {
+        const definition = configuredDefinition(configuration)
+        const bindings = currentHost.sessions.list({ limit: 1_000 })
+        limited = bindings.length >= 1_000
+        const seen = new Set<string>()
+        for (const binding of bindings) {
+          if (binding.state !== 'ready') continue
+          const kind = binding.conversationId.startsWith('group:') ? 'group' : 'private'
+          const matches = activePresetBindings.filter(candidate => definition && digest(candidate.definition) === digest(definition)
+            && (candidate.conversationKind === undefined || candidate.conversationKind === kind))
+          if (!binding.sessionId || matches.length !== 1 || seen.has(binding.sessionId)) {
+            return { state: 'unavailable' as const, scope: null, items: [], limited,
+              missingReasons: ['native_tool_session_binding_unverified'], externalToolAuthorizationVerified: false as const }
+          }
+          if (liveSessions.length >= 128) { limited = true; break }
+          seen.add(binding.sessionId)
+          liveSessions.push({ sessionId: binding.sessionId, agentPreset: matches[0]!.agentPreset,
+            conversationId: binding.conversationId, generation: binding.generation })
+        }
+      }
+      const catalog = await readDshToolCatalog({ running: state === 'running' && !closed, scopes: [],
+        sessions: liveSessions.map(binding => ({ sessionId: binding.sessionId, agentPreset: binding.agentPreset })),
+        port: dsh?.bridgePlugin, signal: generation ? AbortSignal.any([signal, generation.signal]) : signal })
+      if (generation !== lifetime || currentHost !== host || configuration !== active
+        || liveSessions.some(observed => {
+          const binding = currentHost?.sessions.get(observed.conversationId)
+          return !binding || binding.sessionId !== observed.sessionId || binding.generation !== observed.generation
+        })) failure('NATIVE_CHAT_CONFIGURATION_CHANGED')
+      return { ...catalog, limited: limited || catalog.limited }
+    },
+    configurationBaseline() {
+      try {
+        if (closed) failure('NATIVE_CHAT_CLOSED')
+        verifyPersistedAccount()
+        return readNativeConfigurationBaseline(options.directory)
+      } catch {
+        return { schema: 1 as const, state: 'unavailable' as const, capturedAt: null, values: null,
+          unavailableReason: 'storage-unavailable' as const }
+      }
+    },
+    async verifyProtocolIdentity(expected: string, signal: AbortSignal) {
+      if (closed || state !== 'stopped' || starting || stopping || adapterOperation || migrationOperation) failure('NATIVE_CHAT_BUSY')
+      if (!/^[1-9][0-9]{0,31}$/.test(expected)) failure('NATIVE_ACCOUNT_IDENTITY_MISMATCH')
+      const configuration = await options.loadConfiguration()
+      const current = connection.connectionStatus()
+      if (current.state !== 'connected') {
+        if (!adapterRuntime.connect) failure('NATIVE_CONTROL_PROTOCOL_UNAVAILABLE')
+        await adapterRuntime.connect(configuration.adapters, signal)
+      }
+      const connected = connection.connectionStatus()
+      if (connected.state !== 'connected' || connected.selfId !== expected) failure('NATIVE_ACCOUNT_IDENTITY_MISMATCH')
+      await verifyHttpIdentity(expected, configuration, signal)
+      const latest = await options.loadConfiguration()
+      if (latest.revisions.adapters !== configuration.revisions.adapters || state !== 'stopped') failure('NATIVE_CHAT_CONFIGURATION_CHANGED')
+      return { verified: true as const, selfId: expected, evidence: digest(['onebot-handshake', expected, configuration.revisions.adapters]) }
+    },
+    host() { return closed ? undefined : host },
+    usage() { return closed ? undefined : usage },
+    inboxSummary() {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      return inbox?.summary() ?? readHistorySnapshot(history => history.inbox.summary())
+    },
+    readReminders(readOptions: NativeReminderReadOptions = {}) { return reminders.read(readOptions) },
+    readReminderHistory(readOptions: NativeReminderReadOptions & { readonly ruleId?: string } = {}) { return reminders.history(readOptions) },
+    reminderService() { return reminders.service() },
+    workStatus() { return { available: state === 'running' && work !== undefined && pluginEpoch !== null,
+      missingReasons: state !== 'running' ? ['native_chat_not_running'] : !work ? (workMissingReasons.length ? workMissingReasons : ['native_work_backend_unavailable']) : pluginEpoch === null ? ['native_work_channel_unknown'] : [] } },
+    readUsageMaintenance(id: string) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      try { return store ? createNativeUsageMaintenance({ store }).get(id) : readHistorySnapshot(history => history.usageMaintenance.get(id)) }
+      catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return null; throw error }
+    },
+    listUsageMaintenance(query: Parameters<ReturnType<typeof createNativeUsageMaintenance>['list']>[0] = {}) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      try { return store ? createNativeUsageMaintenance({ store }).list(query) : readHistorySnapshot(history => history.usageMaintenance.list(query)) }
+      catch (error) {
+        if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return { schema: 1 as const, operations: [], next: null, partial: false }
+        throw error
+      }
+    },
+    exportUsage(scope: NativeUsageMaintenanceScope, source: 'active' | 'archive') {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      return store ? createNativeUsageMaintenance({ store }).export(scope, source) : readHistorySnapshot(history => history.usageMaintenance.export(scope, source))
+    },
+    maintainUsage(input: NativeUsageMaintenanceRequest) {
+      if (closed || starting || stopping) failure('NATIVE_USAGE_MAINTENANCE_BUSY')
+      const writer = store ?? createSqliteStore({ filename: join(options.directory, 'native-chat.sqlite'), requireExisting: true })
+      try {
+        bindAccountStore(writer, accountScope)
+        const service = createNativeUsageMaintenance({ store: writer })
+        return input.action === 'preview' ? service.preview(input) : service.confirm(input)
+      } finally { if (writer !== store) writer.close() }
+    },
+    readExecutionRecovery(id: string) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      if (store) return readNativeExecutionRecovery(store, id)
+      try { return readHistorySnapshot(history => history.executionRecovery(id)) }
+      catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return null; throw error }
+    },
+    readWork(id: string) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      if (store) return createNativeWorkHistoryReader(store).read(id)
+      try { return readHistorySnapshot(history => history.work.read(id)) }
+      catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return null; throw error }
+    },
+    listWork(query: { readonly conversationId?: string; readonly limit?: number; readonly after?: string } = {}) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      if (store) return createNativeWorkHistoryReader(store).list(query)
+      try { return readHistorySnapshot(history => history.work.list(query)) }
+      catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return { records: [], next: null }; throw error }
+    },
+    readMemory(readOptions: NativeMemoryReadOptions = {}) { return memory.read(readOptions) },
+    readMemoryEntry(id: string) { return memory.entry(id) },
+    memoryService() { return memory.service() },
+    toolPermissionStatus(revision: string) { return toolPolicy.status(revision) },
+    async applyToolPermissions(revision: string) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      const signal = lifetime?.signal
+      if (signal && state === 'running' && frameworkTools) {
+        await toolPolicy.sync(signal)
+        await frameworkTools.refresh(signal)
+      }
+      return toolPolicy.status(revision)
+    },
+    readEvents(query: Parameters<typeof activity.events>[0] = {}) { observeConnection(); return activity.events(query) },
+    subscribeEvents(query: Parameters<typeof activity.subscribeEvents>[0] = {}) { return activity.subscribeEvents(query) },
+    executions() { return closed ? undefined : executions },
+    readHistory<Result>(read: (history: NativeHistoryReader) => Result): Result {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      if (starting || stopping) failure('NATIVE_HISTORY_BUSY')
+      return readHistorySnapshot(read)
+    },
+    close(): Promise<void> {
+      if (closePromise) return closePromise
       closed = true
-      await stop()
-      await connection.close()
-      store?.close()
-      store = undefined
+      closePromise = Promise.resolve().then(async () => {
+        const errors: unknown[] = []
+        async function phase(operations: readonly (() => unknown | Promise<unknown>)[]) {
+          const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)))
+          for (const result of results) if (result.status === 'rejected') errors.push(result.reason)
+        }
+        controlLifetime.abort()
+        let controlStopped: { readonly pendingRaw: number } | undefined
+        await phase([async () => {
+          await preparingControl?.catch(() => undefined)
+          controlStopped = await controlCommands?.stop()
+        }])
+        await migrationOperation?.catch(() => undefined)
+        let runDrained = false
+        await phase([async () => { await stop(); runDrained = true }])
+        await phase([() => reminders.close(), () => memory.close(), () => connection.close()])
+        await phase([observeConnection, () => activity.closeEvents(),
+          () => lifecycleHooks.close(), () => managerHooks.close()])
+        const heldStore = controlStore
+        await phase([() => {
+          if (controlCommands && (!controlStopped || controlStopped.pendingRaw > 0)) {
+            void controlCommands.drain().then(() => heldStore?.close(), () => heldStore?.close()).catch(() => undefined)
+          } else heldStore?.close()
+        }, () => {
+          // Unsettled run callbacks retain their store and recovery evidence.
+          if (runDrained) { store?.close(); store = undefined }
+        }])
+        if (errors.length) throw errors[0]
+      })
+      return closePromise
     }
   })
   nativeRuntimes.add(runtime)

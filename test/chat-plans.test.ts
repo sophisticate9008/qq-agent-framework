@@ -101,3 +101,21 @@ test('chat plans normalize legacy context limits and validate independent explic
   const legacyCatalog = validateChatPlanCatalog({ activePlanId: plan.id, plans: [plan] })
   assert.deepEqual(selectChatPlan(legacyCatalog)?.contextLimits, { group: 128_000, private: 128_000 })
 })
+
+test('capability selection is independently versioned, explicit and part of session identity, never persona or grant', () => {
+  const capabilitySelection = { schema: 1, presetId: 'operator-work', revision: 'a'.repeat(64) } as const
+  const selected = validateChatPlan({ ...plan, capabilitySelection })
+  const definition = buildChatSessionDefinition(selected, persona)
+  assert.deepEqual(definition.capabilitySelection, capabilitySelection)
+  assert.deepEqual(definition.persona, buildChatSessionDefinition(plan, persona).persona)
+  assert.notDeepEqual(definition, buildChatSessionDefinition(plan, persona))
+  assert.equal(Object.hasOwn(definition, 'grants'), false)
+  assert.equal(Object.hasOwn(validateChatPlan(plan), 'capabilitySelection'), false)
+  assert.equal(buildChatSessionDefinition({ ...plan, capabilitySelection: null }, persona).capabilitySelection, null)
+  assert(Object.isFrozen(selected.capabilitySelection))
+  for (const selection of [undefined, {}, { ...capabilitySelection, schema: 2 }, { ...capabilitySelection, revision: 'latest' },
+    { ...capabilitySelection, approved: true }, { ...capabilitySelection, tools: ['work'] }]) {
+    assert.throws(() => validateChatPlan({ ...plan, capabilitySelection: selection }))
+  }
+  assert.throws(() => validateChatPersonas([{ ...persona, capabilitySelection }]))
+})

@@ -1,3 +1,5 @@
+import { readBuiltBrowserApplication } from './browser-assets-smoke.ts';
+import { navigateConsolePage } from './browser-navigation-smoke.ts';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
@@ -889,8 +891,8 @@ async function connect(page: Page): Promise<void> {
   assert.equal(await page.locator('#token').count(), 0);
 }
 
-async function navigate(page: Page, label: string, pageId: string): Promise<void> {
-  await page.getByRole('button', { name: label, exact: true }).first().click();
+async function navigate(page: Page, label: string, pageId: 'usage' | 'overview'): Promise<void> {
+  await navigateConsolePage(page, pageId);
   await page.locator(`[data-page="${pageId}"]`).waitFor();
 }
 
@@ -1013,7 +1015,7 @@ async function closeResetDialog(page: Page): Promise<void> {
 async function assertBuiltUsageContract(): Promise<void> {
   let application: string;
   try {
-    application = await readFile(builtApplication, 'utf8');
+    application = await readBuiltBrowserApplication();
   } catch {
     throw new Error('Built UI is missing. Wait for the main thread build before running usage smoke.');
   }
@@ -1180,10 +1182,10 @@ async function run(): Promise<void> {
     for (const metric of ['estimated-cost', 'total-tokens', 'cache-hit-rate']) {
       assert.equal(await page.locator(`[data-usage-metric="${metric}"]`).innerText().then(text => text.includes('不可用')), false);
     }
-    const averages = page.locator('#usage-summary > .panel-body > dl');
+    await expandDetails(page.locator('#usage-summary details'));
+    const averages = page.locator('#usage-summary details dl').first();
     assert.deepEqual(await averages.locator('dt').allTextContents(), ['平均每轮', '平均每步', '高峰 / 空闲', '未逐轮归属']);
     assert.deepEqual(await averages.locator('dd').allTextContents(), ['CN¥0.10', 'CN¥0.057143', 'CN¥0.40 / CN¥0.80', 'CN¥0.15']);
-    await expandDetails(page.locator('#usage-summary details'));
     const summaryText = await page.locator('#usage-summary').innerText();
     assert(summaryText.includes('CN¥'));
     assert(summaryText.includes('最近写入 / 压缩'));

@@ -217,7 +217,8 @@ async function main(): Promise<void> {
     const grants = policy.grants.map(grant => ({
       id: grant.id,
       used: Object.values(grant.used).reduce((total, used) => total + used, 0),
-      budget: Object.values(grant.maxUses).reduce((total, maximum) => total + maximum, 0)
+      budget: Object.values(grant.maxUses).reduce<number | null>((total, maximum) =>
+        total === null || maximum === null ? null : total + maximum, 0)
     }));
     const hostMetrics = host.metrics();
     await host.stop();

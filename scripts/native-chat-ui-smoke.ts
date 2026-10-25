@@ -1,6 +1,8 @@
+import { readBuiltBrowserApplication } from './browser-assets-smoke.ts';
 import assert from 'node:assert/strict';
+import { navigateConsolePage } from './browser-navigation-smoke.ts';
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +12,9 @@ import { AdminRequestError, createAdminServer, type AdminRoute } from '../src/ad
 import { createConfigurationRoutes } from '../src/admin/configuration.ts';
 import { createSettingsRoutes } from '../src/admin/settings.ts';
 import { isRecord } from '../src/core/values.ts';
+import { validateNativeChatAuthorization } from '../src/host/native-chat-configuration.ts';
+import { parseNativeApplicationRequest, type NativeApplicationSnapshot } from '../src/contracts/native-application.ts';
+import { createNativeCapabilityRuntimeFixture } from '../test/fixtures/native-capability-runtime.ts';
 
 type Outcome = 'success' | 'unknown' | 'conflict';
 type RuntimeCondition = 'healthy' | 'budget-exhausted' | 'budget-expired' | 'follow' | 'configuration-changed' | 'protocol';
@@ -40,6 +45,8 @@ interface FixtureState {
   deploymentCapabilityChecked: boolean;
   runningApplyBlocked: boolean;
   readonly posts: Array<{ readonly pathname: string; readonly body: unknown }>;
+  application: NativeApplicationSnapshot | null;
+  reconciliationVerified: boolean;
 }
 
 interface FixtureFiles {
@@ -55,7 +62,7 @@ const administratorToken = 'native-chat-ui-synthetic-administrator-1234567890';
 const hostname = 'native-chat-ui.invalid';
 const output = new URL('../runtime/native-chat-ui-smoke/', import.meta.url);
 const runId = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
-const revisionKeys = ['plans', 'personas', 'access', 'adapters', 'providers', 'authorization', 'deployment'];
+const revisionKeys = ['plans', 'personas', 'access', 'adapters', 'providers', 'authorization', 'deployment', 'execution'];
 
 function revision(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -76,7 +83,8 @@ function fixtureState(): FixtureState {
     running: false, pendingReload: false, approvedTargetRevision: null,
     previewCount: 0, appliedCount: 0, applyUnknown: false, gatewayScopeEvidence: null,
     runtimeCondition: 'healthy', runtimeStatusCases: [], runtimeTransition: null,
-    deploymentBusy: false, deploymentCapabilityChecked: false, runningApplyBlocked: false, posts: []
+    deploymentBusy: false, deploymentCapabilityChecked: false, runningApplyBlocked: false, posts: [], application: null,
+    reconciliationVerified: true
   };
 }
 
@@ -163,6 +171,34 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
       connection: { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false }
     })),
     get('/api/chat/runtime', () => runtimeStatus(state)),
+    get('/api/chat/application', () => {
+      if (state.application?.state === 'running') {
+        state.running = true;
+        state.pendingReload = false;
+        state.application = { ...state.application, state: 'completed', phase: 'start', phaseState: 'confirmed', updatedAt: Date.now() };
+      }
+      return { schema: 1, operation: state.application };
+    }),
+    post('/api/chat/application', body => {
+      const request = parseNativeApplicationRequest(body);
+      assert(request, 'Application must carry a UUID, exact revisions and deploy choice.');
+      assert.deepEqual(request.revisions, state.revisions);
+      const now = Date.now();
+      state.application = { schema: 1, id: request.operationId, state: 'running', phase: 'prepare', phaseState: 'in-flight',
+        revisions: request.revisions, createdAt: now, updatedAt: now, reasons: [] };
+      if (state.startOutcome === 'unknown') state.application = { ...state.application, state: 'unknown', phase: 'start',
+        reasons: ['native_start_unknown'] };
+      return { schema: 1, operation: state.application };
+    }),
+    post('/api/chat/application/reconcile', body => {
+      assert.deepEqual(Object.keys(body), ['operationId']);
+      assert.equal(body.operationId, state.application?.id);
+      assert(state.application);
+      state.application = { ...state.application, state: 'completed', phase: 'start', phaseState: 'confirmed',
+        updatedAt: Date.now(), reasons: [] };
+      state.running = true;
+      return { schema: 1, operation: state.application };
+    }),
     get('/api/chat/authorization', () => state.authorization),
     get('/api/chat/deployment', () => state.deployment),
     post('/api/chat/authorization', body => {
@@ -196,7 +232,7 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
       checkRevisions(body);
       state.approvedTargetRevision = revision({ revisions: state.revisions, preview: ++state.previewCount });
       return { state: 'prepared', targetRevision: state.approvedTargetRevision,
-        summary: { ready: true, missingReasons: [] }, preview: { providerCount: 1, presetCount: 2 } };
+        summary: { ready: true, missingReasons: [] }, preview: null };
     }),
     post('/api/chat/deployment/apply', body => {
       checkRevisions(body, true);
@@ -216,7 +252,9 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
     post('/api/chat/deployment/reconcile', body => {
       checkRevisions(body);
       state.pendingReload = false;
-      return { verified: true, missingReasons: [], presets: [{ agentPreset: 'fixture-group' }, { agentPreset: 'fixture-private' }] };
+      return { verified: state.reconciliationVerified, missingReasons: [],
+        verificationScope: 'provider-preset-and-managed-file-provenance', credentialValueIdentityVerified: false,
+        unverified: ['credential_loaded_value_identity'], presets: state.reconciliationVerified ? [{ agentPreset: 'fixture-group' }] : [] };
     }),
     post('/api/chat/runtime/start', body => {
       checkRevisions(body);
@@ -241,9 +279,8 @@ function input(scope: Locator, label: string): Locator {
   return scope.getByText(label, { exact: true }).locator('xpath=ancestor::label[1]').locator('input');
 }
 
-async function navigate(page: Page, destination: 'access' | 'adapters'): Promise<void> {
-  const label = destination === 'access' ? '访问范围' : '适配器';
-  await page.getByRole('button', { name: label, exact: true }).first().click();
+async function navigate(page: Page, destination: 'access' | 'adapters' | 'model'): Promise<void> {
+  await navigateConsolePage(page, destination);
   await page.locator(`[data-page="${destination}"]`).waitFor();
 }
 
@@ -252,24 +289,28 @@ async function enabled(locator: Locator, expected: boolean): Promise<void> {
   await locator.and(locator.page().locator(expected ? 'button:enabled' : 'button:disabled')).waitFor({ timeout: 15_000 });
 }
 
-async function assertBounded(section: Locator, height: number): Promise<void> {
-  const dimensions = await section.evaluate(element => {
+async function assertBounded(section: Locator, height: number, options: { readonly footer?: 'required' | 'absent' } = {}): Promise<void> {
+  const requiresFooter = options.footer !== 'absent';
+  const dimensions = await section.evaluate((element, requiresFooter) => {
     const card = element.querySelector('[data-bounded-card]');
     const footer = element.querySelector('.panel-footer');
-    assertElement(card); assertElement(footer);
+    assertElement(card);
+    if (requiresFooter) assertElement(footer);
     function assertElement(candidate: Element | null): asserts candidate is HTMLElement {
       if (!(candidate instanceof HTMLElement)) throw new Error('bounded_card_or_footer_missing');
     }
     return { height: card.getBoundingClientRect().height, overflow: getComputedStyle(card).overflowY,
-      footerAfter: footer.getBoundingClientRect().top >= card.getBoundingClientRect().bottom - 1 };
-  });
+      footerPresent: footer !== null,
+      footerAfter: footer instanceof HTMLElement ? footer.getBoundingClientRect().top >= card.getBoundingClientRect().bottom - 1 : null };
+  }, requiresFooter);
   assert(Math.abs(dimensions.height - height) <= 2, JSON.stringify(dimensions));
   assert(['auto', 'scroll'].includes(dimensions.overflow));
-  assert.equal(dimensions.footerAfter, true);
+  assert.equal(dimensions.footerPresent, requiresFooter);
+  assert.equal(dimensions.footerAfter, requiresFooter ? true : null);
 }
 
 async function assertDirtyNavigation(page: Page, destination: 'access' | 'adapters', discard: boolean): Promise<void> {
-  const label = destination === 'access' ? '访问范围' : '适配器';
+  const label = destination === 'access' ? '安全' : '连接';
   await page.getByRole('button', { name: label, exact: true }).first().click();
   const dialog = page.getByRole('dialog', { name: '还有未保存的更改', exact: true });
   await dialog.waitFor();
@@ -278,9 +319,39 @@ async function assertDirtyNavigation(page: Page, destination: 'access' | 'adapte
   if (discard) await page.locator(`[data-page="${destination}"]`).waitFor();
 }
 
+async function showCountedAuthorization(page: Page): Promise<void> {
+  const summary = page.getByText('高级：旧模式授权与次数', { exact: true });
+  await summary.waitFor();
+  if (!await summary.evaluate(element => element.closest('details')?.open === true)) await summary.click();
+  await page.locator('#chat-authorization input').first().waitFor();
+}
+
+async function showAdvancedDeployment(page: Page): Promise<void> {
+  const summary = page.locator('#dsh-deployment').getByText('手动部署/远程 DSH（高级）', { exact: true });
+  await summary.waitFor();
+  if (!await summary.evaluate(element => element.closest('details')?.open === true)) await summary.click();
+}
+
+async function acknowledgeDeploymentRecovery(page: Page, state: FixtureState): Promise<void> {
+  const card = page.locator('#dsh-deployment');
+  await enabled(card.getByRole('button', { name: '预览变更', exact: true }), false);
+  const acknowledge = card.getByRole('button', { name: '我已核对，允许新的管理操作', exact: true });
+  await enabled(acknowledge, false);
+  state.reconciliationVerified = false;
+  await card.getByRole('button', { name: '检查是否生效', exact: true }).click();
+  await card.getByRole('alert').filter({ hasText: '缺少已核验的实际预设与配置来源证据' }).waitFor();
+  await enabled(acknowledge, false);
+  state.reconciliationVerified = true;
+  await card.getByRole('button', { name: '检查是否生效', exact: true }).click();
+  await enabled(acknowledge, true);
+  await acknowledge.click();
+}
+
 async function exerciseAuthorization(page: Page, state: FixtureState): Promise<void> {
   await navigate(page, 'access');
+  await showCountedAuthorization(page);
   const card = page.locator('#chat-authorization');
+  const accessMode = page.getByRole('region', { name: '访问模式', exact: true });
   await input(card, '群号').waitFor();
   await assertBounded(card, 384);
   await card.getByRole('button', { name: '添加会话授权', exact: true }).click();
@@ -297,24 +368,26 @@ async function exerciseAuthorization(page: Page, state: FixtureState): Promise<v
   await enabled(save, false);
   await card.getByRole('checkbox').check();
   await save.click();
-  await card.getByText(/授权已保存/).waitFor();
+  await accessMode.getByText(/授权已保存/).waitFor();
   assert.equal(state.authorization.grants.length, 2);
   assert.equal(state.authorization.grants[1]?.sendUses, 16);
   assert.equal(countPosts(state, '/api/chat/authorization'), 1);
   await assertBounded(card, 384);
   await input(card, '模型提交次数').first().fill('31');
-  await assertDirtyNavigation(page, 'adapters', false);
-  assert.equal(await input(card, '模型提交次数').first().inputValue(), '31');
-  await assertDirtyNavigation(page, 'adapters', true);
+  await navigate(page, 'adapters');
+  assert.equal(await page.getByRole('dialog', { name: '还有未保存的更改', exact: true }).count(), 0);
   assert.equal(countPosts(state, '/api/chat/authorization'), 1);
   await navigate(page, 'access');
+  await showCountedAuthorization(page);
+  assert.equal(await input(card, '模型提交次数').first().inputValue(), '31');
+  await card.getByRole('button', { name: '撤销更改', exact: true }).click();
   for (const outcome of ['unknown', 'conflict'] as const) {
     state.authorizationOutcome = outcome;
     await input(card, '模型提交次数').first().fill('32');
     await card.getByRole('checkbox').check();
     const before = countPosts(state, '/api/chat/authorization');
     await save.click();
-    await card.getByRole('alert').filter({ hasText: outcome === 'unknown' ? '无法确认' : '其他窗口更新' }).waitFor();
+    await accessMode.getByRole('alert').filter({ hasText: outcome === 'unknown' ? '无法确认' : '其他窗口更新' }).waitFor();
     await enabled(save, false);
     assert.equal(await input(card, '模型提交次数').first().isDisabled(), true);
     await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), false);
@@ -327,7 +400,15 @@ async function exerciseAuthorization(page: Page, state: FixtureState): Promise<v
     const response = await reread;
     assert.equal(response.status(), 200, `${outcome}: authorization reread failed`);
     assert.deepEqual(await response.json(), state.authorization, `${outcome}: authorization reread DTO differs`);
+    await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), false);
+    const recoveryPosts = countPosts(state, '/api/chat/authorization');
+    const acknowledge = accessMode.getByRole('button', { name: '我已核对，允许新的管理操作', exact: true });
+    await enabled(acknowledge, true);
+    await acknowledge.click();
+    assert.equal(countPosts(state, '/api/chat/authorization'), recoveryPosts);
     await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), true);
+    assert.equal(await input(card, '模型提交次数').first().inputValue(), '32');
+    await card.getByRole('button', { name: '撤销更改', exact: true }).click();
     assert.equal(await input(card, '模型提交次数').first().inputValue(), '20');
   }
 }
@@ -335,13 +416,14 @@ async function exerciseAuthorization(page: Page, state: FixtureState): Promise<v
 async function exerciseDeployment(page: Page, state: FixtureState): Promise<void> {
   await navigate(page, 'adapters');
   const card = page.locator('#dsh-deployment');
+  await showAdvancedDeployment(page);
   await input(card, 'DSH 配置文件').fill('/fixture/dsh/selected.patch.yml');
   await input(card, 'DSH 凭据文件').fill('/fixture/dsh/selected.credentials.yaml');
   await input(card, '模型上下文容量').fill('131072');
   await input(card, '模型最大输出').fill('4096');
   await card.getByRole('switch', { name: '模型支持推理档位', exact: true }).click();
-  await input(card, '低档位的接口值').fill('low');
-  await input(card, '高档位的接口值').fill('high');
+  await input(card, 'low 接口值').fill('low');
+  await input(card, 'high 接口值').fill('high');
   await assertBounded(card, 384);
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), false);
   await assertDirtyNavigation(page, 'access', false);
@@ -356,9 +438,8 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   });
   await card.getByRole('button', { name: '预览变更', exact: true }).click();
   await card.getByText(/预览通过/).waitFor();
-  const apply = card.getByRole('button', { name: '备份并应用', exact: true });
-  await enabled(apply, false);
-  await card.getByRole('checkbox').check();
+  const apply = card.getByRole('button', { name: '应用聊天设置', exact: true });
+  await enabled(apply, true);
   const applyBeforeCapabilityCheck = countPosts(state, '/api/chat/deployment/apply');
   state.deploymentBusy = true;
   await apply.click();
@@ -374,8 +455,7 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   await card.getByRole('alert').filter({ hasText: '设置已变化' }).waitFor();
   assert.equal(countPosts(state, '/api/chat/deployment/apply'), 0);
   await card.getByRole('button', { name: '预览变更', exact: true }).click();
-  await enabled(apply, false);
-  await card.getByRole('checkbox').check();
+  await enabled(apply, true);
   const approved = state.approvedTargetRevision;
   state.approvedTargetRevision = revision('another-tab-replaced-approved-preview');
   await apply.click();
@@ -386,20 +466,20 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   assert(isRecord(rejectedApply));
   assert.equal(rejectedApply.targetRevision, approved);
   await card.getByRole('button', { name: '重新读取', exact: true }).click();
+  await showAdvancedDeployment(page);
+  await acknowledgeDeploymentRecovery(page, state);
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), true);
   await card.getByRole('button', { name: '预览变更', exact: true }).click();
-  await enabled(apply, false);
-  await card.getByRole('checkbox').check();
+  await enabled(apply, true);
   await apply.click();
-  await card.getByRole('status').filter({ hasText: '配置已写入，等待 DSH 加载；不会擅自重启引擎。' }).waitFor();
+  await card.getByRole('status').filter({ hasText: '聊天设置已写入，等待 DSH 加载；不会自动重启。' }).waitFor();
   assert.equal(countPosts(state, '/api/chat/deployment/apply'), 2);
   assert.equal(state.appliedCount, 1);
   await card.getByRole('button', { name: '检查是否生效', exact: true }).click();
-  await card.getByText('DSH 配置与托管凭据来源检查通过。', { exact: true }).waitFor();
+  await card.getByText('当前设置已通过生效检查；不代表模型调用成功。', { exact: true }).waitFor();
   state.applyUnknown = true;
   await card.getByRole('button', { name: '预览变更', exact: true }).click();
-  await enabled(apply, false);
-  await card.getByRole('checkbox').check();
+  await enabled(apply, true);
   await apply.click();
   await card.getByRole('alert').waitFor();
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), false);
@@ -409,6 +489,8 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   assert.equal(state.appliedCount, 1);
   state.applyUnknown = false;
   await card.getByRole('button', { name: '重新读取', exact: true }).click();
+  await showAdvancedDeployment(page);
+  await acknowledgeDeploymentRecovery(page, state);
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), true);
   for (const outcome of ['unknown', 'conflict'] as const) {
     state.deploymentOutcome = outcome;
@@ -423,82 +505,12 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
     assert.equal(countPosts(state, '/api/chat/deployment'), before + 1);
     state.deploymentOutcome = 'success';
     await card.getByRole('button', { name: '重新读取', exact: true }).click();
+    await showAdvancedDeployment(page);
+    await acknowledgeDeploymentRecovery(page, state);
     await input(card, '模型最大输出').waitFor();
     await page.waitForFunction(() => !document.querySelector('#dsh-deployment [role="alert"]'));
     assert.equal(await input(card, '模型最大输出').inputValue(), '4096');
   }
-}
-
-async function exerciseGatewayScope(page: Page, state: FixtureState, files: FixtureFiles): Promise<void> {
-  const preserved = [files.admin, files.nativeAccess, files.gatewayToken, files.adminToken];
-  const before = new Map(await Promise.all(preserved.map(async filename => [filename, await readFile(filename, 'utf8')] as const)));
-  const filenamesBefore = (await readdir(files.directory)).sort();
-  const gatewayBeforeContent = await readFile(files.gateway, 'utf8');
-  const gatewayBefore: unknown = JSON.parse(gatewayBeforeContent);
-  assert(isRecord(gatewayBefore));
-  const authorizationBefore = JSON.stringify(state.authorization);
-  await navigate(page, 'adapters');
-  await page.getByRole('button', { name: '搜索工作台', exact: true }).click();
-  await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).fill('允许发送的会话');
-  await page.locator('[role="option"][data-search-title="允许发送的会话"]').first().click();
-  await page.locator('[data-page="access"]').waitFor();
-  const card = page.locator('section').filter({ has: page.getByRole('heading', { name: '消息发送范围', exact: true }) }).first();
-  await card.waitFor();
-  await page.locator('[aria-label="本页目录"]:visible').first().getByRole('button', { name: '消息发送范围', exact: true }).click();
-  const targets = card.getByText('允许发送的会话', { exact: true }).locator('xpath=ancestor::label[1]').locator('textarea');
-  assert.equal(await targets.inputValue(), 'group:430003');
-  await targets.fill('group:430004\nprivate:440005');
-  await card.getByRole('button', { name: '保存本组', exact: true }).click();
-  await card.getByRole('status').filter({ hasText: '已保存，等待应用' }).waitFor();
-  await enabled(card.getByRole('button', { name: '保存本组', exact: true }), false);
-  const gatewayAfterContent = await readFile(files.gateway, 'utf8');
-  const gatewayAfter: unknown = JSON.parse(gatewayAfterContent);
-  assert(isRecord(gatewayAfter));
-  assert.deepEqual(gatewayAfter.allowedConversations, ['group:430004', 'private:440005']);
-  assert.equal(typeof gatewayAfter.authorizationVersion, 'string');
-  assert.notEqual(gatewayAfter.authorizationVersion, gatewayBefore.authorizationVersion);
-  assert.deepEqual({ ...gatewayAfter, allowedConversations: gatewayBefore.allowedConversations,
-    authorizationVersion: gatewayBefore.authorizationVersion }, gatewayBefore);
-  for (const [filename, content] of before) assert.equal(await readFile(filename, 'utf8'), content);
-  assert.deepEqual((await readdir(files.directory)).sort(), filenamesBefore);
-  assert.equal(JSON.stringify(state.authorization), authorizationBefore);
-  const saved = state.posts.filter(request => request.pathname === '/api/configuration');
-  assert.equal(saved.length, 1);
-  assert(isRecord(saved[0]?.body));
-  assert.equal(saved[0].body.source, 'gateway');
-  assert.deepEqual(saved[0].body.changes, { allowedConversations: ['group:430004', 'private:440005'] });
-  assert.equal(countPosts(state, '/api/chat/access'), 0);
-  assert.equal(await page.getByText('允许名单', { exact: true }).locator('xpath=ancestor::label[1]')
-    .locator('textarea').inputValue(), 'group:410001\nprivate:420002');
-  assert.equal(await card.getByRole('button', { name: '应用消息网关设置', exact: true }).count(), 0);
-  const scopeScreenshot = new URL(`gateway-scope-${runId}.png`, output);
-  await page.screenshot({ path: scopeScreenshot.pathname, fullPage: true, animations: 'disabled' });
-  await chmod(scopeScreenshot, 0o600);
-  await page.getByRole('button', { name: '搜索工作台', exact: true }).click();
-  await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).fill('HTTPS 反向代理');
-  await page.locator('[role="option"][data-search-title="HTTPS 反向代理"]').first().click();
-  await page.locator('[data-page="settings"]').waitFor();
-  const proxy = page.locator('section').filter({ has: page.getByRole('heading', { name: 'HTTPS 反向代理', exact: true }) }).first();
-  await proxy.waitFor();
-  await input(proxy, '管理页公开 HTTPS 来源').waitFor();
-  assert.equal(await input(proxy, '管理页公开 HTTPS 来源').inputValue(), '');
-  assert.equal(await proxy.getByRole('switch', { name: '信任本机 TLS 代理', exact: true }).getAttribute('aria-checked'), 'false');
-  await enabled(proxy.getByRole('button', { name: '保存本组', exact: true }), false);
-  assert.equal(countPosts(state, '/api/configuration/apply'), 0);
-  assert.equal(countPosts(state, '/api/settings/apply'), 0);
-  assert.equal(await readFile(files.admin, 'utf8'), before.get(files.admin));
-  const proxyScreenshot = new URL(`proxy-schema-readonly-${runId}.png`, output);
-  await page.screenshot({ path: proxyScreenshot.pathname, fullPage: true, animations: 'disabled' });
-  await chmod(proxyScreenshot, 0o600);
-  state.gatewayScopeEvidence = {
-    allowedConversations: gatewayAfter.allowedConversations, authorizationVersionChanged: true,
-    nativeAccessUnchanged: true, adminUnchanged: true, credentialsUnchanged: true,
-    nativeAuthorizationUnchanged: true, proxySchemaReadOnly: true, applied: false,
-    gatewayHashBefore: createHash('sha256').update(gatewayBeforeContent).digest('hex'),
-    gatewayHashAfter: createHash('sha256').update(gatewayAfterContent).digest('hex'),
-    nativeAccessHash: createHash('sha256').update(before.get(files.nativeAccess)!).digest('hex'),
-    adminHash: createHash('sha256').update(before.get(files.admin)!).digest('hex')
-  };
 }
 
 async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
@@ -511,12 +523,12 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
   await start.click();
   await card.getByText('聊天已启用', { exact: true }).waitFor();
   await card.getByText(/当前就绪检查不验证真实模型调用/).waitFor();
-  assert.equal(countPosts(state, '/api/chat/runtime/start'), 1);
+  assert.equal(countPosts(state, '/api/chat/application'), 1);
+  assert.equal(countPosts(state, '/api/chat/runtime/start'), 0);
   const deployment = page.locator('#dsh-deployment');
   const appliesBeforeRunning = countPosts(state, '/api/chat/deployment/apply');
   await deployment.getByRole('button', { name: '预览变更', exact: true }).click();
-  assert.equal(await deployment.getByRole('checkbox').isDisabled(), true);
-  await enabled(deployment.getByRole('button', { name: '备份并应用', exact: true }), false);
+  await enabled(deployment.getByRole('button', { name: '应用聊天设置', exact: true }), false);
   assert.equal(countPosts(state, '/api/chat/deployment/apply'), appliesBeforeRunning);
   state.runningApplyBlocked = true;
   const capture = async (condition: RuntimeCondition): Promise<void> => {
@@ -546,7 +558,7 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
       assert.equal(await card.getByText('协议连接中断', { exact: true }).count(), 0);
       await card.getByRole('button', { name: '去设置', exact: true }).click();
       await page.locator('[data-page="access"]').waitFor();
-      await page.locator('#chat-authorization input').first().waitFor();
+      await showCountedAuthorization(page);
       await navigate(page, 'adapters');
       await card.getByText(scenario.badge, { exact: true }).waitFor();
     } else if (scenario.condition === 'follow') {
@@ -565,14 +577,20 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
   assert.equal(countPosts(state, '/api/chat/runtime/stop'), 1);
   state.startOutcome = 'unknown';
   await start.click();
-  await card.getByRole('alert').filter({ hasText: '不会自动重复操作' }).waitFor();
+  await card.getByRole('alert').waitFor();
   await enabled(start, false);
   await page.waitForTimeout(250);
-  assert.equal(countPosts(state, '/api/chat/runtime/start'), 2);
+  assert.equal(countPosts(state, '/api/chat/application'), 2);
+  assert.equal(countPosts(state, '/api/chat/runtime/start'), 0);
   state.startOutcome = 'success';
   await card.getByRole('button', { name: '重新检查', exact: true }).click();
+  await enabled(start, false);
+  await deployment.getByText('应用操作详情', { exact: true }).click();
+  await deployment.getByRole('button', { name: '核对实际结果', exact: true }).click();
+  await card.getByRole('button', { name: '重新检查', exact: true }).click();
+  await card.getByRole('button', { name: '停止聊天', exact: true }).click();
   await enabled(start, true);
-  await assertBounded(card, 256);
+  await assertBounded(card, 512);
 }
 
 async function exercisePresentation(page: Page): Promise<void> {
@@ -591,11 +609,12 @@ async function exercisePresentation(page: Page): Promise<void> {
       for (const destination of ['access', 'adapters'] as const) {
         await page.evaluate(target => { location.hash = `#${target}`; }, destination);
         await page.locator(`[data-page="${destination}"]`).waitFor();
-        await page.locator(destination === 'access' ? '#chat-authorization input' : '#dsh-deployment input').first().waitFor();
+        if (destination === 'access') await showCountedAuthorization(page);
+        else await page.locator('#dsh-deployment').getByRole('button', { name: '应用并启动／更新聊天', exact: true }).waitFor();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
         if (destination === 'access') await assertBounded(page.locator('#chat-authorization'), 384);
         else {
-          await assertBounded(page.locator('#chat-runtime'), 256);
+          await assertBounded(page.locator('#chat-runtime'), 512);
           await assertBounded(page.locator('#dsh-deployment'), 384);
         }
         if (viewport.width === 390) {
@@ -611,11 +630,342 @@ async function exercisePresentation(page: Page): Promise<void> {
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
   await navigate(page, 'access');
-  await page.locator('#chat-authorization input').first().waitFor();
+  await showCountedAuthorization(page);
   await page.getByRole('button', { name: '搜索工作台', exact: true }).click();
   await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).fill('消息处理授权');
   await page.locator('[role="option"][data-search-title="消息处理授权"]').first().click();
   await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).waitFor({ state: 'hidden' });
+}
+
+async function exerciseApplication(page: Page, state: FixtureState): Promise<void> {
+  await navigate(page, 'adapters');
+  const legacy = ['/api/chat/runtime/start', '/api/chat/runtime/stop', '/api/chat/deployment/prepare', '/api/chat/deployment/apply'];
+  const before = legacy.map(pathname => countPosts(state, pathname));
+  const applicationsBefore = countPosts(state, '/api/chat/application');
+  const card = page.locator('#dsh-deployment');
+  await card.getByRole('button', { name: '应用并启动／更新聊天', exact: true }).click();
+  await card.getByRole('status').filter({ hasText: '已应用已保存设置并启动／更新聊天' }).waitFor();
+  assert.equal(countPosts(state, '/api/chat/application'), applicationsBefore + 1);
+  assert.deepEqual(legacy.map(pathname => countPosts(state, pathname)), before,
+    'The browser submits one durable application, without orchestrating legacy writes.');
+  assert.equal(state.application?.state, 'completed');
+  assert.equal(state.running, true);
+  const runtime = page.locator('#chat-runtime');
+  await runtime.getByRole('button', { name: '重新检查', exact: true }).click();
+  await runtime.getByRole('button', { name: '停止聊天', exact: true }).click();
+  await runtime.getByRole('button', { name: '启动聊天', exact: true }).waitFor();
+}
+
+type NativeCapabilityFixture = Awaited<ReturnType<typeof createNativeCapabilityRuntimeFixture>>;
+
+function nativeRecords(value: unknown): Record<string, unknown>[] {
+  assert(Array.isArray(value));
+  return value.map(entry => { assert(isRecord(entry)); return entry; });
+}
+
+async function exerciseCapabilitySelection(page: Page, fixture: NativeCapabilityFixture): Promise<void> {
+  await navigate(page, 'model');
+  const before = await fixture.api('/api/chat/plans');
+  const plans = nativeRecords(before.plans);
+  const selected = plans.find(plan => plan.id === before.activePlanId);
+  assert(selected && isRecord(selected.contextLimits));
+  assert(typeof selected.contextLimits.group === 'number');
+  const nextLimit = selected.contextLimits.group + 1;
+  const card = page.locator('#native-plan-editor');
+  await input(card, '群聊上下文').fill(String(nextLimit));
+  await card.getByRole('button', { name: '保存聊天方案', exact: true }).click();
+  await card.getByRole('status').filter({ hasText: /^已保存。$/ }).waitFor();
+  const after = await fixture.api('/api/chat/plans');
+  assert.equal(after.activePlanId, before.activePlanId);
+  const saved = nativeRecords(after.plans);
+  assert.deepEqual(saved, plans.map(plan => plan.id === before.activePlanId
+    ? { ...plan, contextLimits: { ...selected.contextLimits as Record<string, unknown>, group: nextLimit } } : plan));
+  assert.deepEqual(saved.find(plan => plan.id === 'work-alternative')?.capabilitySelection, selected.capabilitySelection);
+  assert.equal(saved.find(plan => plan.id === 'text-alternative')?.capabilitySelection, null);
+  const legacy = saved.find(plan => plan.id === 'legacy-alternative');
+  assert(legacy && !Object.hasOwn(legacy, 'capabilitySelection'));
+}
+
+async function exerciseCapabilityApproval(page: Page, fixture: NativeCapabilityFixture, posts: readonly string[]): Promise<void> {
+  await page.getByText('高级工具设置', { exact: true }).click();
+  const card = page.locator('#native-chat-capabilities');
+  const preview = card.getByRole('button', { name: '检查方案', exact: true });
+  const approve = card.getByRole('button', { name: '确认使用', exact: true });
+  const revoke = card.getByRole('button', { name: '取消确认', exact: true });
+  const confirm = card.getByRole('checkbox', { name: '我确认使用这个工具组合', exact: true });
+  await card.getByRole('heading', { name: '聊天工具', exact: true }).waitFor();
+  const advanced = card.locator('details').filter({ has: card.page().getByText('高级设置', { exact: true }) });
+  assert.equal(await advanced.getAttribute('open'), null);
+  assert.equal(await card.getByText('外部工具授权未由桥核验', { exact: true }).isVisible(), false);
+  await advanced.locator('summary').click();
+  const authorization = await fixture.api('/api/chat/authorization');
+  const profile = await readFile(fixture.profilePath);
+  const credentials = await readFile(fixture.credentialsPath);
+  assert.equal((await fixture.api('/api/chat/capabilities')).approval, null);
+  await enabled(preview, true);
+  const count = posts.length;
+  await enabled(approve, false);
+  assert.equal(posts.length, count);
+  await preview.click();
+  await card.getByText(/群聊设置/).waitFor();
+  await card.getByText(/私聊设置/).waitFor();
+  await enabled(approve, false);
+  assert.equal(posts.filter(path => path === '/api/chat/capabilities/preview').length, 1);
+  assert.deepEqual(await readFile(fixture.profilePath), profile);
+  assert.deepEqual(await readFile(fixture.credentialsPath), credentials);
+  await confirm.check();
+  await approve.click();
+  await card.getByRole('status').filter({ hasText: '已确认，请到“连接与安全”应用。' }).waitFor();
+  const approved = await fixture.api('/api/chat/capabilities');
+  assert(isRecord(approved.approval));
+  assert.equal(approved.approval.authority, 'owner');
+  assert.equal(approved.approval.externalTools, 'separate-runtime-authorization-required');
+  assert(isRecord(approved.catalog));
+  assert.equal(approved.catalog.externalToolAuthorizationVerified, false);
+  assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization);
+  assert.deepEqual(await readFile(fixture.profilePath), profile);
+  assert.deepEqual(await readFile(fixture.credentialsPath), credentials);
+  await enabled(approve, false);
+  assert.equal(await confirm.isChecked(), false);
+  await preview.click();
+  await card.getByText(/已确认方案与本次检查一致/).waitFor();
+  await enabled(revoke, false);
+  await confirm.check();
+  await revoke.click();
+  await card.getByRole('status').filter({ hasText: '已取消确认，正在运行的工具不受影响。' }).waitFor();
+  assert.equal((await fixture.api('/api/chat/capabilities')).approval, null);
+  assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization);
+  assert.deepEqual(await readFile(fixture.profilePath), profile);
+  assert.deepEqual(await readFile(fixture.credentialsPath), credentials);
+  assert.deepEqual(posts.filter(path => path.startsWith('/api/chat/capabilities/')), [
+    '/api/chat/capabilities/preview', '/api/chat/capabilities/approval', '/api/chat/capabilities/preview', '/api/chat/capabilities/revoke'
+  ]);
+}
+
+async function exerciseToolDelegation(page: Page, fixture: NativeCapabilityFixture): Promise<void> {
+  const accessMode = page.getByRole('region', { name: '访问模式', exact: true });
+  const original = await fixture.api('/api/chat/authorization');
+  const legacy = { version: original.version, grants: nativeRecords(original.grants) };
+  for (const grant of legacy.grants) {
+    assert.equal(Object.hasOwn(grant, 'toolDelegationUses'), false);
+    assert.equal(Object.hasOwn(grant, 'cancelUses'), false);
+  }
+  assert.equal(revision(validateNativeChatAuthorization(legacy)), revision(legacy));
+  const rewritten = await fixture.api('/api/chat/authorization', { revision: original.revision, ...legacy });
+  assert.equal(rewritten.revision, original.revision);
+  const explicitZero = { ...legacy, grants: legacy.grants.map((grant, index) => index === 0 ? { ...grant, toolDelegationUses: 0 } : grant) };
+  assert.notEqual(revision(validateNativeChatAuthorization(explicitZero)), revision(validateNativeChatAuthorization(legacy)));
+  await navigate(page, 'access');
+  await showCountedAuthorization(page);
+  const card = page.locator('#chat-authorization');
+  const toggle = card.getByRole('checkbox', { name: /^启用有限工具委派/ }).first();
+  const confirm = card.getByRole('checkbox', { name: /^我确认这些数值/ });
+  const save = card.getByRole('button', { name: '保存新授权', exact: true });
+  await toggle.waitFor();
+  assert.equal(await toggle.isChecked(), false);
+  assert.equal(await card.getByText('工具委派尝试次数（按轮）', { exact: true }).count(), 0);
+  const sendUses = legacy.grants[0]?.sendUses;
+  assert(typeof sendUses === 'number');
+  await input(card, '回复发送次数').first().fill(String(sendUses + 1));
+  await enabled(save, false);
+  await confirm.check();
+  await save.click();
+  await accessMode.getByRole('status').filter({ hasText: '授权已保存' }).waitFor();
+  const unrelated = await fixture.api('/api/chat/authorization');
+  const unrelatedGrants = nativeRecords(unrelated.grants);
+  assert.notEqual(unrelated.version, original.version);
+  assert.deepEqual(unrelatedGrants, legacy.grants.map((grant, index) => index === 0 ? { ...grant, sendUses: sendUses + 1 } : grant));
+  await toggle.check();
+  assert.equal(await input(card, '工具委派尝试次数（按轮）').inputValue(), '0');
+  await input(card, '工具委派尝试次数（按轮）').fill('2');
+  await enabled(save, false);
+  await confirm.check();
+  await save.click();
+  await accessMode.getByRole('status').filter({ hasText: '授权已保存' }).waitFor();
+  const delegated = await fixture.api('/api/chat/authorization');
+  assert.notEqual(delegated.version, unrelated.version);
+  assert.deepEqual(nativeRecords(delegated.grants), unrelatedGrants.map((grant, index) => index === 0 ? { ...grant, toolDelegationUses: 2 } : grant));
+  await toggle.uncheck();
+  await confirm.check();
+  await save.click();
+  await accessMode.getByRole('status').filter({ hasText: '授权已保存' }).waitFor();
+  const disabled = await fixture.api('/api/chat/authorization');
+  assert.notEqual(disabled.version, delegated.version);
+  assert.deepEqual(disabled.grants, unrelated.grants);
+  assert.equal((await fixture.api('/api/chat/capabilities')).approval, null);
+}
+
+async function exercisePlanDeletion(page: Page, fixture: NativeCapabilityFixture, posts: readonly string[]): Promise<Record<string, boolean>> {
+  await navigate(page, 'model');
+  const editor = page.locator('#native-plan-editor');
+  const deletion = editor.getByText('删除此方案', { exact: true });
+  await deletion.waitFor();
+  if (await deletion.locator('xpath=ancestor::details[1]').getAttribute('open') === null) await deletion.click();
+  const remove = editor.getByRole('button', { name: '确认删除此方案', exact: true });
+  const confirm = editor.getByRole('checkbox', { name: /^我确认删除方案/ });
+  await enabled(remove, false);
+  await page.getByRole('button', { name: /^Work alternative/ }).click();
+  await input(editor, '方案名称').waitFor();
+  const before = await fixture.api('/api/chat/plans');
+  const count = posts.length;
+  await enabled(remove, false);
+  await confirm.check();
+  await confirm.uncheck();
+  await enabled(remove, false);
+  assert.equal(posts.length, count);
+  assert.deepEqual(await fixture.api('/api/chat/plans'), before);
+  await confirm.check();
+  await enabled(remove, true);
+  const staleDispatch = await page.evaluate(() => {
+    const editor = document.querySelector('#native-plan-editor');
+    const oldDelete = [...editor!.querySelectorAll('button')].find(button => button.textContent?.trim() === '确认删除此方案');
+    const oldConfirm = [...editor!.querySelectorAll('label')].find(label => label.textContent?.includes('我确认删除方案'))?.control;
+    const nextPlan = [...document.querySelectorAll('button')].find(button => button.textContent?.trim().startsWith('Text alternative'));
+    if (!oldDelete || !(oldConfirm instanceof HTMLInputElement) || !nextPlan) throw new Error('plan_deletion_controls_missing');
+    if (oldDelete.disabled || oldConfirm.disabled || nextPlan.disabled) throw new Error('plan_deletion_controls_not_enabled');
+    nextPlan.click();
+    const disabledAfterSelection = oldDelete.disabled;
+    oldDelete.click();
+    return { enabledAtEntry: true, disabledAfterSelection };
+  });
+  await page.waitForFunction(() => {
+    const input = [...document.querySelectorAll('#native-plan-editor label')].find(label => label.querySelector('.field-label')?.textContent === '方案名称')?.querySelector('input');
+    return input?.value === 'Text alternative';
+  });
+  await enabled(remove, false);
+  assert.equal(await confirm.isChecked(), false);
+  assert.equal(posts.length, count);
+  assert.deepEqual(await fixture.api('/api/chat/plans'), before);
+  await confirm.check();
+  await remove.click();
+  await editor.getByRole('status').filter({ hasText: /^已保存。$/ }).waitFor();
+  const after = await fixture.api('/api/chat/plans');
+  assert.equal(after.activePlanId, before.activePlanId);
+  assert.deepEqual(after.plans, nativeRecords(before.plans).filter(plan => plan.id !== 'text-alternative'));
+  assert.equal(posts.length, count + 1);
+  assert.equal(posts.at(-1), '/api/chat/plans');
+  return staleDispatch;
+}
+
+async function exerciseWhitelistDefaults(page: Page, fixture: NativeCapabilityFixture, posts: readonly string[]): Promise<void> {
+  const legacy = await fixture.api('/api/chat/authorization');
+  await fixture.save('authorization', { version: 'browser-whitelist-default', mode: 'whitelist', grants: [] });
+  const saved = await fixture.api('/api/chat/authorization');
+  assert.equal(saved.mode, 'whitelist');
+  assert.equal(saved.taskDelegationAvailable, false);
+  assert.deepEqual(saved.grants, []);
+  assert.notEqual(saved.version, legacy.version);
+  const capabilities = await fixture.api('/api/chat/capabilities');
+  assert.equal(capabilities.compositionApprovalRequired, false);
+  const beforePosts = posts.length;
+  const beforePlans = await fixture.api('/api/chat/plans');
+  const beforeAccess = await fixture.api('/api/chat/access');
+  await navigate(page, 'access');
+  const accessMode = page.getByRole('region', { name: '访问模式', exact: true });
+  await accessMode.getByText(/已保存白名单模式/).waitFor();
+  assert.equal(await accessMode.locator('input').count(), 0);
+  assert.equal(await accessMode.getByText('高级：旧模式授权与次数', { exact: true }).count(), 0);
+  await navigate(page, 'model');
+  const card = page.locator('#native-chat-capabilities');
+  await page.getByText('高级工具设置', { exact: true }).click();
+  await card.getByText('工具组合', { exact: true }).locator('xpath=ancestor::label[1]').locator('select').waitFor();
+  for (const title of ['检查方案', '确认使用', '取消确认']) {
+    assert.equal(await card.getByRole('button', { name: title, exact: true }).count(), 0);
+  }
+  assert.equal(await card.getByRole('checkbox').count(), 0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    for (const theme of ['light', 'dark'] as const) {
+      await page.getByRole('combobox', { name: '显示模式', exact: true }).selectOption(theme);
+      await page.waitForFunction(expected => document.documentElement.dataset.theme === expected, theme);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
+      await assertBounded(card, 384, { footer: 'absent' });
+    }
+  }
+  assert.equal(posts.length, beforePosts);
+  assert.deepEqual(await fixture.api('/api/chat/plans'), beforePlans);
+  assert.deepEqual(await fixture.api('/api/chat/access'), beforeAccess);
+  assert.deepEqual(await fixture.api('/api/chat/authorization'), saved);
+}
+
+async function exerciseNativeCapabilityManagement(browser: Browser): Promise<Record<string, unknown>> {
+  const cleanups: Array<() => void | Promise<void>> = [];
+  const posts: string[] = [];
+  const errors: string[] = [];
+  const external: string[] = [];
+  let context: BrowserContext | undefined;
+  let page: Page | undefined;
+  let stage = 'native-fixture';
+  try {
+    const fixture = await createNativeCapabilityRuntimeFixture({ after: cleanup => { cleanups.push(cleanup); } });
+    await fixture.login();
+    await fixture.configure(true);
+    const catalog = await fixture.api('/api/chat/plans');
+    const plans = nativeRecords(catalog.plans);
+    assert.equal(plans.length, 1);
+    const active = plans[0]!;
+    const { capabilitySelection, ...textPlan } = active;
+    assert(isRecord(capabilitySelection));
+    await fixture.save('plans', { activePlanId: catalog.activePlanId, plans: [active,
+      { ...active, id: 'work-alternative', name: 'Work alternative' },
+      { ...textPlan, id: 'text-alternative', name: 'Text alternative', capabilitySelection: null },
+      { ...textPlan, id: 'legacy-alternative', name: 'Legacy alternative' }
+    ] });
+    context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light' });
+    await context.route('**/*', route => {
+      const target = new URL(route.request().url());
+      if (['http:', 'https:', 'ws:', 'wss:'].includes(target.protocol) && target.origin !== fixture.origin) {
+        external.push(target.origin); return route.abort();
+      }
+      return route.continue();
+    });
+    await context.routeWebSocket('**/*', route => { external.push('websocket'); route.close(); });
+    page = await context.newPage();
+    page.setDefaultTimeout(15_000);
+    page.on('pageerror', error => errors.push(error.name));
+    page.on('request', request => { if (request.method() === 'POST') posts.push(new URL(request.url()).pathname); });
+    await page.goto(fixture.origin);
+    await page.locator('#token').fill(fixture.adminToken);
+    await page.locator('#connect').click();
+    await page.getByRole('button', { name: '断开连接', exact: true }).waitFor();
+    stage = 'native-selection';
+    await exerciseCapabilitySelection(page, fixture);
+    stage = 'native-composition-approval';
+    await exerciseCapabilityApproval(page, fixture, posts);
+    stage = 'native-tool-delegation';
+    await exerciseToolDelegation(page, fixture);
+    stage = 'native-plan-deletion';
+    const staleDeletionDispatch = await exercisePlanDeletion(page, fixture, posts);
+    stage = 'whitelist-defaults';
+    await exerciseWhitelistDefaults(page, fixture, posts);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(external, []);
+    assert.deepEqual(fixture.errors, []);
+    assert.equal(fixture.controls.creates, 0);
+    assert.equal(fixture.sends.length, 0);
+    assert.equal(fixture.calls.some(call => /prompt|submitRequest|session\/create|session\/selectModel|inspectScope/.test(call.method)), false);
+    assert(posts.every(path => path === '/api/auth/login' || ['/api/chat/plans', '/api/chat/authorization',
+      '/api/chat/capabilities/preview', '/api/chat/capabilities/approval', '/api/chat/capabilities/revoke'].includes(path)));
+    return { realDefaultGateway: true, localSyntheticDsh: true, modelCalls: 0, sessionCreates: 0,
+      selectionSiblingShapes: ['versioned', 'null', 'absent'], previewApprovalRevokeExplicit: true,
+      approvalDoesNotGrant: true, legacyOmissionHashPreserved: true, explicitZeroHashDistinct: true,
+      delegationExplicitNewVersion: true, whitelistNoLifetimeQuotaOrCompositionApproval: true,
+      deletionCancelPosts: 0, staleDeletionPosts: 0, staleDeletionDispatch,
+      browserPostPaths: posts, dshReadOnlyMethods: [...new Set(fixture.calls.map(call => call.method))] };
+  } catch (error) {
+    if (page && !page.isClosed()) {
+      const filename = new URL(`native-management-failure-${runId}.png`, output);
+      await page.screenshot({ path: filename.pathname, fullPage: true, animations: 'disabled' }).catch(() => undefined);
+      await chmod(filename, 0o600).catch(() => undefined);
+    }
+    await writeFile(new URL(`native-management-failure-${runId}.json`, output), JSON.stringify({
+      stage, error: error instanceof Error ? error.name : 'unknown', pageErrors: errors, externalRequests: external, browserPostPaths: posts
+    }, null, 2) + '\n', { mode: 0o600 });
+    throw error;
+  } finally {
+    try { await context?.close(); }
+    finally { for (const cleanup of cleanups.reverse()) await cleanup(); }
+  }
 }
 
 const state = fixtureState();
@@ -629,8 +979,8 @@ let page: Page | undefined;
 let files: FixtureFiles | undefined;
 let stage = 'startup';
 try {
-  const bundle = await readFile(new URL('../dist/admin-web/app.js', import.meta.url), 'utf8');
-  for (const pathname of ['/api/chat/authorization', '/api/chat/deployment', '/api/chat/runtime']) {
+  const bundle = await readBuiltBrowserApplication();
+  for (const pathname of ['/api/chat/authorization', '/api/chat/deployment', '/api/chat/runtime', '/api/chat/capabilities', 'capabilitySelection', 'toolDelegationUses']) {
     assert(bundle.includes(pathname), '请先在隔离副本构建当前管理页面；本测试不会自动构建。');
   }
   await mkdir(output, { recursive: true, mode: 0o700 });
@@ -681,12 +1031,12 @@ try {
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   stage = 'authorization';
   await exerciseAuthorization(page, state);
-  stage = 'gateway-scope';
-  await exerciseGatewayScope(page, state, files);
   stage = 'deployment';
   await exerciseDeployment(page, state);
   stage = 'runtime';
   await exerciseRuntime(page, state);
+  stage = 'durable-application';
+  await exerciseApplication(page, state);
   stage = 'presentation';
   await exercisePresentation(page);
   assert.deepEqual(errors, []);
@@ -696,13 +1046,17 @@ try {
   for (const pathname of ['/api/chat/access', '/api/configuration/apply', '/api/settings/apply']) {
     assert.equal(browserPostPaths.includes(pathname), false);
   }
+  stage = 'native-capability-management';
+  await context.close();
+  context = undefined;
+  const nativeCapabilityManagement = await exerciseNativeCapabilityManagement(browser);
   const report = { fixtureOnly: true, insecureContext: true, randomUUIDFallback: true, pageErrors: errors,
     externalRequests, browserPostPaths, postCounts: Object.fromEntries([...new Set(state.posts.map(request => request.pathname))]
       .map(pathname => [pathname, countPosts(state, pathname)])), gatewayScope: state.gatewayScopeEvidence,
     runtimeStatusCases: state.runtimeStatusCases, deploymentCapabilityChecked: state.deploymentCapabilityChecked,
-    runningApplyBlocked: state.runningApplyBlocked, screenshots: 10 + state.runtimeStatusCases.length };
+    runningApplyBlocked: state.runningApplyBlocked, screenshots: 10 + state.runtimeStatusCases.length, nativeCapabilityManagement };
   await writeFile(new URL(`report-${runId}.json`, output), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 });
-  console.log('原生聊天 UI 测试通过：授权、应用确认、未知结果、冲突、布局与非安全上下文。');
+  console.log('原生聊天 UI 测试通过：授权、应用确认、未知结果、布局，以及真实默认入口的能力选择、组合批准、有限委派和方案删除保护。');
 } catch (error: unknown) {
   if (page && !page.isClosed()) {
     const filename = new URL(`failure-${runId}.png`, output);

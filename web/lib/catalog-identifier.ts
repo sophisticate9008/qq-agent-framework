@@ -3,3 +3,9 @@ export function isCatalogIdentifier(value: unknown): value is string {
 }
 
 export const catalogIdentifierDescription = '内部标识只能使用字母、数字、冒号、点、下划线和短横线，且必须以字母或数字开头，不能超过 128 个字符。';
+
+export function newCatalogIdentifier(kind: 'persona' | 'plan' | 'provider'): string {
+  const suffix = typeof crypto.randomUUID === 'function' ? crypto.randomUUID()
+    : Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${kind}-${suffix}`;
+}

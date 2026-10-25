@@ -1,8 +1,12 @@
+import type { AccountScope } from '../contracts/account-scope.ts';
+import { assertAccountScope, normalizeAccountScope } from '../core/account-scope.ts';
+import { bindAccountStore } from './account-scope.ts';
 import { createHash, randomUUID } from 'node:crypto';
 
 import type { Clock, JsonObject } from '../core/types.ts';
 import { FrameworkError, assert, identifier, isRecord, reference, snapshot } from '../core/values.ts';
-import type { DurableStore, StoredRecord } from '../host/types.ts';
+import type { DurableStore, StoredRecord } from '../contracts/ports.ts';
+import { incrementPolicyUsage, isPolicyAttemptLimit, type PolicyAttemptLimits } from '../core/policy-limits.ts';
 
 const META_NAMESPACE = 'policy.meta';
 const META_KEY = 'global';
@@ -14,13 +18,14 @@ const INDEX_VERSION = 1;
 const MAX_ATTEMPTS = 12;
 const PAGE_SIZE = 1_000;
 
-interface EffectAuthorization {
+export interface EffectAuthorization {
+  accountScope?: Readonly<AccountScope>;
   featureId: string;
   conversationId: string;
   capability: string;
 }
 
-interface Reservation extends EffectAuthorization {
+export interface Reservation extends EffectAuthorization {
   id: string;
   grantId: string;
 }
@@ -31,11 +36,12 @@ interface PolicyMeta {
 }
 
 interface GrantRecord {
+  accountScope?: Readonly<AccountScope>;
   id: string;
   featureId: string;
   conversationId: string;
   capabilities: string[];
-  maxUses: Record<string, number>;
+  maxUses: PolicyAttemptLimits;
   expiresAt: number | null;
   active: boolean;
   used: Record<string, number>;
@@ -48,6 +54,7 @@ interface IndexedGrant {
 }
 
 export interface PersistentPolicyOptions {
+  accountScope?: AccountScope;
   store: DurableStore;
   clock?: Clock;
 }
@@ -88,8 +95,8 @@ function parseGrant(record: StoredRecord): GrantRecord {
     && value.capabilities.length > 0
     && value.capabilities.every(identifier)
     && new Set(value.capabilities).size === value.capabilities.length
-    && isRecord(value.maxUses)
-    && isRecord(value.used)
+    && Object.hasOwn(value, 'maxUses') && isRecord(value.maxUses)
+    && Object.hasOwn(value, 'used') && isRecord(value.used)
     && (value.expiresAt === null
       || typeof value.expiresAt === 'number' && Number.isFinite(value.expiresAt))
     && typeof value.active === 'boolean'
@@ -99,18 +106,20 @@ function parseGrant(record: StoredRecord): GrantRecord {
   const capabilities = value.capabilities as string[];
   storedData(Object.keys(value.maxUses).length === capabilities.length
     && Object.keys(value.used).length === capabilities.length);
-  const maxUses: Record<string, number> = {};
+  const maxUses: PolicyAttemptLimits = {};
   const used: Record<string, number> = {};
   for (const capability of capabilities) {
+    storedData(Object.hasOwn(value.maxUses, capability) && Object.hasOwn(value.used, capability));
     const maximum = value.maxUses[capability];
     const consumed = value.used[capability];
-    storedData(typeof maximum === 'number' && Number.isSafeInteger(maximum) && maximum >= 0
+    storedData(isPolicyAttemptLimit(maximum)
       && typeof consumed === 'number' && Number.isSafeInteger(consumed)
-      && consumed >= 0 && consumed <= maximum);
+      && consumed >= 0 && (maximum === null || consumed <= maximum));
     maxUses[capability] = maximum;
     used[capability] = consumed;
   }
   return {
+    ...(value.accountScope === undefined ? {} : { accountScope: normalizeAccountScope(value.accountScope) }),
     id: value.id,
     featureId: value.featureId,
     conversationId: value.conversationId,
@@ -126,6 +135,7 @@ function parseGrant(record: StoredRecord): GrantRecord {
 function grantValue(grant: GrantRecord): JsonObject {
   return {
     schema: 1,
+    ...(grant.accountScope ? { accountScope: { ...grant.accountScope } } : {}),
     id: grant.id,
     featureId: grant.featureId,
     conversationId: grant.conversationId,
@@ -174,7 +184,14 @@ function usable(grant: GrantRecord, currentTime: number): boolean {
   return grant.active && (grant.expiresAt === null || currentTime < grant.expiresAt);
 }
 
-export function createPersistentPolicy({ store, clock = Date.now }: PersistentPolicyOptions) {
+export function createPersistentPolicy({ store, clock = Date.now, accountScope: accountInput }: PersistentPolicyOptions) {
+  const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
+  const binding = bindAccountStore(store, accountScope);
+  function scopedGrant(record: StoredRecord): GrantRecord {
+    const grant = parseGrant(record);
+    if (!(binding.legacyAdopted && grant.accountScope === undefined)) assertAccountScope(accountScope, grant.accountScope);
+    return accountScope ? { ...grant, accountScope } : grant;
+  }
   assert(store && typeof store.read === 'function' && typeof store.write === 'function',
     'INVALID_POLICY', 'A durable store is required.');
   assert(typeof clock === 'function', 'INVALID_POLICY', 'Clock must be a function.');
@@ -227,7 +244,7 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
   function recoverGrantIndex(): void {
     const initial = store.read(INDEX_META_NAMESPACE, INDEX_META_KEY);
     if (currentIndexVersion(initial)) return;
-    for (const stored of allGrantRecords()) ensureGrantIndex(parseGrant(stored));
+    for (const stored of allGrantRecords()) ensureGrantIndex(scopedGrant(stored));
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       const current = store.read(INDEX_META_NAMESPACE, INDEX_META_KEY);
       if (currentIndexVersion(current)) return;
@@ -271,17 +288,16 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
     const value = snapshot(input);
     assert(isRecord(value) && reference(value.id) && identifier(value.featureId) && reference(value.conversationId),
       'INVALID_GRANT', 'Grant identity and scope are required.');
+    assertAccountScope(accountScope, value.accountScope);
     assert(Array.isArray(value.capabilities) && value.capabilities.length > 0
       && value.capabilities.every(identifier) && new Set(value.capabilities).size === value.capabilities.length,
     'INVALID_GRANT', 'Explicit capabilities are required.');
-    assert(isRecord(value.maxUses),
-      'INVALID_GRANT', 'Each capability needs an explicit finite attempt budget.');
+    assert(Object.hasOwn(value, 'maxUses') && isRecord(value.maxUses),
+      'INVALID_GRANT', 'Each capability needs an explicit attempt limit.');
     const maxUsesInput = value.maxUses;
     assert(Object.keys(maxUsesInput).length === value.capabilities.length
-      && value.capabilities.every((capability) => Number.isSafeInteger(maxUsesInput[capability])
-        && typeof maxUsesInput[capability] === 'number'
-        && maxUsesInput[capability] >= 0),
-    'INVALID_GRANT', 'Each capability needs an explicit finite attempt budget.');
+      && value.capabilities.every((capability) => Object.hasOwn(maxUsesInput, capability) && isPolicyAttemptLimit(maxUsesInput[capability])),
+    'INVALID_GRANT', 'Each capability needs a nonnegative finite attempt limit or explicit null.');
     const expiresAt = value.expiresAt ?? null;
     assert(expiresAt === null || (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > now()),
       'INVALID_GRANT', 'Grant expiry must be in the future.');
@@ -289,8 +305,9 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
     const capabilities = value.capabilities as string[];
     const maxUses = Object.fromEntries(
       capabilities.map((capability) => [capability, maxUsesInput[capability]])
-    ) as Record<string, number>;
+    ) as PolicyAttemptLimits;
     const record: GrantRecord = {
+      ...(accountScope ? { accountScope } : {}),
       id: value.id,
       featureId: value.featureId,
       conversationId: value.conversationId,
@@ -318,7 +335,7 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
       if (!grantId) continue;
       const stored = store.read(GRANT_NAMESPACE, grantId);
       if (!stored) continue;
-      const grantRecord = parseGrant(stored);
+      const grantRecord = scopedGrant(stored);
       if (grantRecord.featureId !== featureId
         || grantRecord.conversationId !== conversationId
         || !grantRecord.capabilities.includes(capability)) continue;
@@ -329,6 +346,7 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
   }
 
   function reserve(authorization: EffectAuthorization): Reservation {
+    assertAccountScope(accountScope, authorization.accountScope);
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       assert(!parseMeta(store.read(META_NAMESPACE, META_KEY)).paused, 'POLICY_PAUSED', 'Effects are paused.');
       const matches = matchingGrants(authorization);
@@ -339,12 +357,13 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
         const selected = match.grant;
         if (!usable(selected, now())) continue;
         authorized = true;
-        if (selected.used[authorization.capability] >= selected.maxUses[authorization.capability]) continue;
+        const maximum = selected.maxUses[authorization.capability];
+        if (maximum !== null && selected.used[authorization.capability] >= maximum) continue;
         const updated: GrantRecord = {
           ...selected,
           used: {
             ...selected.used,
-            [authorization.capability]: selected.used[authorization.capability] + 1
+            [authorization.capability]: incrementPolicyUsage(selected.used[authorization.capability])
           }
         };
         try {
@@ -359,6 +378,7 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
         assert(!parseMeta(store.read(META_NAMESPACE, META_KEY)).paused,
           'POLICY_PAUSED', 'Effects are paused.');
         const reservation = snapshot({
+          ...(accountScope ? { accountScope } : {}),
           id: randomUUID(),
           grantId: selected.id,
           featureId: authorization.featureId,
@@ -385,8 +405,10 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
     assert(!parseMeta(store.read(META_NAMESPACE, META_KEY)).paused,
       'POLICY_PAUSED', 'Effects are paused.');
     const record = store.read(GRANT_NAMESPACE, held.grantId);
-    assert(record && parseGrant(record).active, 'GRANT_REVOKED', 'The effect grant was revoked.');
-    const owner = parseGrant(record);
+    assert(record && scopedGrant(record).active, 'GRANT_REVOKED', 'The effect grant was revoked.');
+    const owner = scopedGrant(record);
+    assert(owner.featureId === held.featureId && owner.conversationId === held.conversationId
+      && owner.capabilities.includes(held.capability), 'POLICY_DENIED', 'The effect grant scope changed.');
     assert(owner.expiresAt === null || now() < owner.expiresAt,
       'GRANT_EXPIRED', 'The effect grant expired.');
   }
@@ -395,7 +417,7 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       const current = store.read(GRANT_NAMESPACE, id);
       if (!current) return false;
-      const grantRecord = parseGrant(current);
+      const grantRecord = scopedGrant(current);
       if (!grantRecord.active) return true;
       try {
         store.write(GRANT_NAMESPACE, id, grantValue({ ...grantRecord, active: false }), {
@@ -416,11 +438,12 @@ export function createPersistentPolicy({ store, clock = Date.now }: PersistentPo
 
   function describe() {
     const currentTime = now();
-    const grants = allGrantRecords().map(parseGrant)
+    const grants = allGrantRecords().map(scopedGrant)
       .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
     return snapshot({
       paused: parseMeta(store.read(META_NAMESPACE, META_KEY)).paused,
       grants: grants.map((grantRecord) => ({
+        ...(grantRecord.accountScope ? { accountScope: grantRecord.accountScope } : {}),
         id: grantRecord.id,
         featureId: grantRecord.featureId,
         conversationId: grantRecord.conversationId,

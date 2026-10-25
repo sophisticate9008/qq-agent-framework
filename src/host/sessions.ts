@@ -1,3 +1,6 @@
+import type { AccountScope } from '../contracts/account-scope.ts';
+import { normalizeAccountScope } from '../core/account-scope.ts';
+import { bindAccountStore } from '../storage/account-scope.ts';
 import { randomUUID } from 'node:crypto';
 
 import type { Clock, JsonObject } from '../core/types.ts';
@@ -6,6 +9,9 @@ import type { AgentAdapter, DurableStore, SessionBinding, StoredRecord } from '.
 
 const SESSION_NAMESPACE = 'host.sessions';
 const MAX_PAGE_SIZE = 1_000;
+const SESSION_IDS = 'host.session-ids';
+const sessionIndex = Object.freeze({ namespace: SESSION_NAMESPACE, field: 'sessionId', unique: true,
+  where: Object.freeze({ field: 'state', equals: 'ready' }) });
 
 export type SessionState = 'creating' | 'ready' | 'unknown' | 'retired';
 
@@ -20,6 +26,7 @@ export interface SessionMetadata {
 
 export interface SessionRegistry {
   get(conversationId: string): SessionBinding | null;
+  findBySessionId(sessionId: string, generation?: number): SessionBinding | null;
   resolve(conversationId: string, signal: AbortSignal): Promise<SessionBinding>;
   retire(conversationId: string): SessionMetadata;
   bind(conversationId: string, sessionId: string, generation?: number): SessionBinding;
@@ -27,9 +34,11 @@ export interface SessionRegistry {
 }
 
 export interface SessionRegistryOptions {
+  accountScope?: AccountScope;
   store: DurableStore;
   agent: AgentAdapter;
   clock?: Clock;
+  maxRecoveryRecords?: number;
 }
 
 interface PersistedSession {
@@ -105,6 +114,36 @@ function binding(conversationId: string, session: PersistedSession): SessionBind
   return snapshot({ conversationId, sessionId: session.sessionId, generation: session.generation });
 }
 
+export function readSessionMetadata(store: Pick<DurableStore, 'list'>,
+  options: { limit?: number; after?: string } = {}): readonly SessionMetadata[] {
+  return snapshot(store.list(SESSION_NAMESPACE, options).map(record => metadata(record.key, parseSession(record))));
+}
+
+/** Permanent ownership protects retired external IDs from being attached to a new conversation or generation. */
+export function reserveSessionId(store: DurableStore, conversationId: string, sessionId: string, generation: number): void {
+  assertReference(conversationId, 'conversation id');
+  assertReference(sessionId, 'session id');
+  if (!Number.isSafeInteger(generation) || generation < 1) fail('SESSION_INVALID_ARGUMENT', 'Expected a valid session generation.');
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const prior = store.read(SESSION_IDS, sessionId);
+    if (prior) {
+      if (!isRecord(prior.value) || prior.value.schema !== 1 || !reference(prior.value.conversationId)
+        || !Number.isSafeInteger(prior.value.generation) || typeof prior.value.generation !== 'number' || prior.value.generation < 1) {
+        fail('SESSION_DATA_CORRUPT', 'Session ID ownership metadata is invalid.');
+      }
+      if (prior.value.conversationId !== conversationId || prior.value.generation !== generation) {
+        fail('SESSION_ID_REUSED', 'An external session ID belongs to another conversation or generation.');
+      }
+      return;
+    }
+    try {
+      store.write(SESSION_IDS, sessionId, { schema: 1, conversationId, generation }, { expectedRevision: null });
+      return;
+    } catch (error) { if (!isRevisionConflict(error)) throw error; }
+  }
+  fail('SESSION_CONFLICT', 'Session ID ownership changed concurrently.');
+}
+
 export function createSessionRegistry(options: SessionRegistryOptions): SessionRegistry {
   if (!options || typeof options !== 'object'
     || !options.store || typeof options.store.read !== 'function' || typeof options.store.write !== 'function'
@@ -112,8 +151,30 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
     fail('SESSION_INVALID_OPTIONS', 'Expected valid session registry options.');
   }
   const { store, agent, clock = Date.now } = options;
+  const accountScope = options.accountScope === undefined ? undefined : normalizeAccountScope(options.accountScope);
+  bindAccountStore(store, accountScope);
   if (typeof clock !== 'function') fail('SESSION_INVALID_OPTIONS', 'Expected a clock function.');
   const inFlight = new Map<string, Promise<SessionBinding>>();
+  const reverse = new Map<string, SessionBinding>();
+  const indexed = typeof store.createIndex === 'function' && typeof store.lookup === 'function';
+  const maxRecoveryRecords = options.maxRecoveryRecords ?? 100_000;
+  if (!Number.isSafeInteger(maxRecoveryRecords) || maxRecoveryRecords < 1 || maxRecoveryRecords > 1_000_000) {
+    fail('SESSION_INVALID_OPTIONS', 'Session recovery needs a finite record bound.');
+  }
+  if (indexed) {
+    try { store.createIndex!(sessionIndex); }
+    catch (error) {
+      if (error instanceof FrameworkError && error.code === 'STORE_INDEX_CONFLICT') fail('SESSION_ID_CONFLICT', 'Persisted sessions contain duplicate external IDs.');
+      throw error;
+    }
+  }
+
+  function remember(conversationId: string, session: PersistedSession): SessionBinding {
+    const result = snapshot({ ...binding(conversationId, session), ...(accountScope ? { accountScope } : {}) });
+    reserveSessionId(store, conversationId, result.sessionId, result.generation);
+    if (!indexed) reverse.set(result.sessionId, result);
+    return result;
+  }
 
   function now(): number {
     const value = clock();
@@ -128,10 +189,13 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
 
   function recoverCreating(): void {
     let after: string | undefined;
+    let recovered = 0;
     do {
       const records = store.list(SESSION_NAMESPACE, { limit: MAX_PAGE_SIZE, ...(after === undefined ? {} : { after }) });
       for (const record of records) {
+        if (++recovered > maxRecoveryRecords) fail('SESSION_RECOVERY_LIMIT', 'Session recovery exceeded its record bound.');
         const session = parseSession(record);
+        if (session.state === 'ready') { remember(record.key, session); continue; }
         if (session.state !== 'creating') continue;
         const unknown: PersistedSession = { ...session, state: 'unknown', updatedAt: now() };
         try {
@@ -152,7 +216,21 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
   function get(conversationId: string): SessionBinding | null {
     assertReference(conversationId, 'conversation id');
     const entry = readEntry(conversationId);
-    return entry?.session.state === 'ready' ? binding(conversationId, entry.session) : null;
+    return entry?.session.state === 'ready' ? remember(conversationId, entry.session) : null;
+  }
+
+  function findBySessionId(sessionId: string, generation?: number): SessionBinding | null {
+    assertReference(sessionId, 'session id');
+    if (generation !== undefined && (!Number.isSafeInteger(generation) || generation < 1)) fail('SESSION_INVALID_ARGUMENT', 'Expected a valid session generation.');
+    const candidates = indexed ? store.lookup!({ namespace: SESSION_NAMESPACE, field: 'sessionId', equals: sessionId,
+      where: sessionIndex.where, limit: 2 }) : undefined;
+    if (candidates && candidates.length > 1) fail('SESSION_ID_CONFLICT', 'An external session ID has multiple active owners.');
+    const conversationId = candidates ? candidates[0]?.key : reverse.get(sessionId)?.conversationId;
+    if (!conversationId) return null;
+    const entry = readEntry(conversationId);
+    if (!entry || entry.session.state !== 'ready' || entry.session.sessionId !== sessionId
+      || generation !== undefined && entry.session.generation !== generation) return null;
+    return remember(conversationId, entry.session);
   }
 
   function markUnknown(conversationId: string, entry: SessionEntry): void {
@@ -207,15 +285,16 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
       updatedAt: now()
     };
     try {
+      reserveSessionId(store, conversationId, bound.sessionId!, bound.generation);
       store.write(SESSION_NAMESPACE, conversationId, sessionValue(bound), {
         expectedRevision: intent.record.revision
       });
-      return binding(conversationId, bound);
+      return remember(conversationId, bound);
     } catch (error: unknown) {
       const latest = readEntry(conversationId);
       if (latest?.session.state === 'ready'
         && latest.session.generation === intent.session.generation) {
-        return binding(conversationId, latest.session);
+        return remember(conversationId, latest.session);
       }
       if (isRevisionConflict(error) && latest !== null
         && latest.session.generation !== intent.session.generation) {
@@ -236,7 +315,7 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
 
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const current = readEntry(conversationId);
-      if (current?.session.state === 'ready') return Promise.resolve(binding(conversationId, current.session));
+      if (current?.session.state === 'ready') return Promise.resolve(remember(conversationId, current.session));
       if (current?.session.state === 'unknown') {
         return Promise.reject(new FrameworkError('SESSION_RECONCILIATION_REQUIRED',
           'Session creation requires explicit reconciliation.'));
@@ -303,6 +382,7 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
         store.write(SESSION_NAMESPACE, conversationId, sessionValue(retired), {
           expectedRevision: current?.record.revision ?? null
         });
+        if (!indexed && current?.session.sessionId) reverse.delete(current.session.sessionId);
         return metadata(conversationId, retired);
       } catch (error: unknown) {
         if (!isRevisionConflict(error)) throw error;
@@ -326,8 +406,9 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
         fail('SESSION_GENERATION_CONFLICT', 'Session generation does not match.');
       }
       if (current?.session.state === 'ready' && current.session.sessionId === sessionId) {
-        return binding(conversationId, current.session);
+        return remember(conversationId, current.session);
       }
+      if (current?.session.state === 'ready') fail('SESSION_BINDING_CHANGED', 'Retire the current binding before assigning another external session.');
       const bound: PersistedSession = {
         state: 'ready',
         generation,
@@ -336,10 +417,11 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
         updatedAt: now()
       };
       try {
+        reserveSessionId(store, conversationId, sessionId, generation);
         store.write(SESSION_NAMESPACE, conversationId, sessionValue(bound), {
           expectedRevision: current?.record.revision ?? null
         });
-        return binding(conversationId, bound);
+        return remember(conversationId, bound);
       } catch (error: unknown) {
         if (!isRevisionConflict(error)) throw error;
       }
@@ -351,9 +433,8 @@ export function createSessionRegistry(options: SessionRegistryOptions): SessionR
     if (!listOptions || typeof listOptions !== 'object') {
       fail('SESSION_INVALID_ARGUMENT', 'Expected valid list options.');
     }
-    const records = store.list(SESSION_NAMESPACE, listOptions);
-    return snapshot(records.map((record) => metadata(record.key, parseSession(record))));
+    return readSessionMetadata(store, listOptions);
   }
 
-  return { get, resolve, retire, bind, list };
+  return { get, findBySessionId, resolve, retire, bind, list };
 }

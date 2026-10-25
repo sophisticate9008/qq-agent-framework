@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { checkTypeScriptSyntax } from './typescript-syntax.ts';
+import { checkSourceRules } from './source-rules.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const excluded = new Set(['.git', 'node_modules', 'runtime', 'state', 'coverage', 'dist']);
@@ -24,9 +25,11 @@ function walk(directory: string) {
       if (pattern.test(source)) findings.push(`${relative}: possible credential format`);
     }
     if (/\.(?:mjs|js|cjs)$/.test(entry.name)) findings.push(`${relative}: authored JavaScript must be TypeScript`);
-    if (/\.ts$/.test(entry.name)) {
-      try { execFileSync(process.execPath, ['--check', location], { stdio: 'pipe' }); }
-      catch { findings.push(`${relative}: JavaScript syntax check failed`); }
+    if (/\.tsx?$/.test(entry.name)) {
+      if (!checkTypeScriptSyntax(source, relative)) findings.push(`${relative}: TypeScript syntax check failed`);
+      for (const finding of checkSourceRules(source, relative)) {
+        findings.push(`${relative}:${finding.line}:${finding.column}: ${finding.code}: ${finding.message}`);
+      }
     }
     checked++;
   }
@@ -36,4 +39,4 @@ walk(root);
 if (findings.length) {
   for (const finding of findings) console.error(finding);
   process.exitCode = 1;
-} else console.log(`Checked ${checked} public files: syntax and selected credential-format checks passed.`);
+} else console.log(`Checked ${checked} public files: syntax, authored TypeScript rules, architecture and selected credential-format checks passed.`);

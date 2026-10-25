@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { PersonaPage } from '../pages/persona.tsx';
 import { AccessPage } from '../pages/access.tsx';
 import { ChatPlanManager } from './chat-plan-manager.tsx';
+import { ConfigurationEditor } from './configuration-editor.tsx';
 import { ApiError, asRecord, type ApiClient } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 import '../console.css';
@@ -28,12 +29,15 @@ let holdPost = false;
 function publish() { dispatchEvent(new Event('fixture-request-change')); }
 
 function fixtureApi(generation: number): ApiClient {
-  let personas: unknown = { revision: `persona-${generation}`, personas: [{ id: 'persona:imported', name: `重连人设 ${generation}`, identity: '合成身份正文', style: '合成表达风格' }] };
-  let plans: unknown = { revision: `plan-${generation}`, activePlanId: 'plan:imported', plans: [{ id: 'plan:imported', name: `重连方案 ${generation}`, description: '', instructions: '合成方案指令', personaId: 'persona:imported', provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'low', contextLimits: { group: 128_000, private: 128_000 } }] };
+  const additional = new URLSearchParams(location.search).has('many') ? 127 : 0;
+  const basePersona = { id: 'persona:imported', name: `重连人设 ${generation}`, identity: '合成身份正文', style: '合成表达风格' };
+  const basePlan = { id: 'plan:imported', name: `重连方案 ${generation}`, description: '', instructions: '合成方案指令', personaId: 'persona:imported', provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'low', contextLimits: { group: 128_000, private: 128_000 } };
+  let personas: unknown = { revision: `persona-${generation}`, personas: [basePersona, ...Array.from({ length: additional }, (_, index) => ({ ...basePersona, id: `persona:${index + 1}`, name: `列表人设 ${index + 1}` }))] };
+  let plans: unknown = { revision: (generation * 2).toString(16).padStart(64, '0'), activePlanId: 'plan:imported', plans: [basePlan, ...Array.from({ length: additional }, (_, index) => ({ ...basePlan, id: `plan:${index + 1}`, name: `列表方案 ${index + 1}` }))] };
   let gatewayId = 'fixture-outbound';
   let access: unknown = { revision: `access-${generation}`, allow: ['private:123'], deny: [], owner: String(700_000 + generation) };
   function configuration() {
-    return { capabilities: { apply: false }, groups: [{ id: 'gateway-persona', title: '网关人格标识', description: '出站网关身份，与人设正文分开保存。', source: 'gateway', category: 'persona', revision: `gateway-${generation}`, fields: [{ id: 'persona.id', label: '人格 ID', description: '出站网关身份标识。', type: 'text', value: gatewayId }, { id: 'persona.version', label: '人格版本', description: '出站网关身份版本。', type: 'text', value: 'v1' }] }] };
+    return { capabilities: { apply: false }, groups: [{ id: 'gateway-persona', title: '网关人格标识', description: '出站网关身份，与人设正文分开保存。', source: 'gateway', category: 'settings', revision: `gateway-${generation}`, fields: [{ id: 'persona.id', label: '人格 ID', description: '出站网关身份标识。', type: 'text', value: gatewayId }, { id: 'persona.version', label: '人格版本', description: '出站网关身份版本。', type: 'text', value: 'v1' }] }] };
   }
   function delayed(value: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => { pending.push({ resolve: () => resolve(value), reject: () => reject(new ApiError('operation_unknown', 504)) }); publish(); });
@@ -53,6 +57,9 @@ function fixtureApi(generation: number): ApiClient {
       }
       if (path === '/api/chat/authorization') return { revision: '0'.repeat(64), version: 'fixture', grants: [] };
       if (path === '/api/chat/plans') return plans;
+      if (path === '/api/chat/deployment') return { revision: 'e'.repeat(64), deployment: { target: null, modelSettings: null, namespace: 'fixture' } };
+      if (path === '/api/chat/application') return { schema: 1, operation: null };
+      if (path === '/api/chat/appearance') return { schema: 1, revision: 'e'.repeat(64), assets: [], bindings: [] };
       if (path === '/api/chat/status') return { runtimeConnected: false };
       if (path === '/api/chat/providers') return { revision: 'fixture-providers', providers: [{ id: 'fixture-provider', name: '合成提供方', enabled: true, models: [{ id: 'fixture-model', name: '合成模型' }] }] };
       if (path === '/api/configuration') return configuration();
@@ -76,7 +83,7 @@ function fixtureApi(generation: number): ApiClient {
         return result;
       }
       if (path === '/api/chat/plans') {
-        plans = { revision: `saved-plan-${generation}`, activePlanId: record.activePlanId, plans: record.plans };
+        plans = { revision: (generation * 2 + 1).toString(16).padStart(64, '0'), activePlanId: record.activePlanId, plans: record.plans };
         return plans;
       }
       if (path === '/api/configuration') {
@@ -118,7 +125,7 @@ function Fixture() {
     </nav>
     <output id="fixture-requests" data-posts={posts.length} data-pending={pending.length} data-aborted={requests.filter(request => request.signal?.aborted).length} data-persona-signal={lastPersonaPost?.signal !== undefined} data-access-signal={lastAccessPost?.signal !== undefined} data-persona-id={String(asRecord((asRecord(lastPersonaPost?.body).personas as unknown[] | undefined)?.[0]).id ?? '')} data-plan-id={String(asRecord((asRecord(lastPlanPost?.body).plans as unknown[] | undefined)?.[0]).id ?? '')} />
     <div>{Object.entries(scopes).map(([scope, dirty]) => <output key={scope} data-dirty-scope={scope} data-dirty={dirty}>{scope}</output>)}</div>
-    {mounted && (page === 'persona' ? <PersonaPage {...props} /> : page === 'access' ? <AccessPage {...props} /> : <ChatPlanManager {...props} />)}
+    {mounted && (page === 'persona' ? <><PersonaPage {...props} /><ConfigurationEditor category="settings" {...props} /></> : page === 'access' ? <AccessPage {...props} /> : <ChatPlanManager {...props} />)}
   </main>;
 }
 

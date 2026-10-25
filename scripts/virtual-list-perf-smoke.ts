@@ -30,7 +30,7 @@ const server = await createServer({
       })().catch(() => { response.statusCode = 500; response.end(JSON.stringify({ error: 'isolated_fixture_failed' })); });
     });
   } }],
-  server: { host: '127.0.0.1', port: 0, hmr: false },
+  server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
 });
 let browser: Browser | undefined;
 try {
@@ -149,7 +149,7 @@ try {
   assert.ok(sessionsDom < 35);
   await page.locator('#session-filter').fill('100255');
   await page.waitForFunction(() => document.querySelectorAll('[data-session-key]').length === 1);
-  await page.locator('[data-session-key="group:100255"] button').click();
+  await page.locator('[data-session-key="group:100255"]').getByRole('button', { name: '100255', exact: true }).click();
   assert.equal(await page.locator('[data-selected-session]').getAttribute('data-selected-session'), 'group:100255');
   await page.locator('[data-fixture-page="usage"]').click();
   await page.locator('[data-usage-conversations-panel] summary').click();
@@ -213,6 +213,30 @@ try {
   assert.equal(await page.locator('#provider-api-key').inputValue(), 'isolated-fixture-only');
   assert.deepEqual(errors, []);
   const catalogUrl = `http://127.0.0.1:${address.port}/test/fixtures/catalog-lifecycle.html`;
+  await page.goto(`${catalogUrl}?many=1`);
+  await page.getByPlaceholder('日常伙伴').waitFor();
+  for (const kind of ['persona', 'plan'] as const) {
+    if (kind === 'plan') {
+      await page.locator('#fixture-plan').click();
+      await page.getByPlaceholder('日常聊天').waitFor();
+    }
+    const title = kind === 'persona' ? '人设库' : '聊天方案';
+    const card = page.getByRole('heading', { name: title, exact: true }).locator('xpath=ancestor::section[1]');
+    const list = card.locator('[data-virtualized="true"]');
+    await list.waitFor();
+    assert(await list.getByRole('listitem').count() < 60);
+    const viewport = card.locator('[data-bounded-card]');
+    const height = await viewport.evaluate(element => element.getBoundingClientRect().height);
+    assert(height > 0 && height <= 384);
+    await viewport.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    const last = card.getByRole('button', { name: kind === 'persona' ? /^列表人设 127/ : /^列表方案 127/ });
+    await last.waitFor();
+    await last.click();
+    assert.equal(await page.locator(kind === 'persona' ? '#chat-persona-id' : '#chat-plan-id').inputValue(), `${kind}:127`);
+    assert(await list.getByRole('listitem').count() < 60);
+    assert.equal(await viewport.evaluate(element => element.getBoundingClientRect().height), height);
+    assert.equal(await page.locator('#fixture-requests').getAttribute('data-posts'), '0');
+  }
   async function openCatalog() {
     await page.goto(catalogUrl);
     await page.getByPlaceholder('日常伙伴').waitFor();
@@ -237,7 +261,7 @@ try {
       await page.locator(`#fixture-${outcome}`).click();
       await page.waitForTimeout(50);
       assert.equal(await page.getByPlaceholder('日常伙伴').inputValue(), `新草稿-${method}-${outcome}`);
-      assert.equal(await page.getByRole('alert').count(), 0);
+      assert.deepEqual(await page.getByRole('alert').allTextContents(), []);
       assert.equal(await page.locator('[data-dirty-scope="personas"]').getAttribute('data-dirty'), 'true');
       assert.ok(Number(await page.locator('#fixture-requests').getAttribute('data-aborted')) > 0);
       assert.equal(await page.getByRole('button', { name: '保存人设', exact: true }).isEnabled(), true);
@@ -274,34 +298,35 @@ try {
   await page.waitForTimeout(50);
   assert.equal(await page.getByPlaceholder('日常伙伴').inputValue(), '重新挂载的草稿');
   await openCatalog();
-  assert.equal(await page.getByPlaceholder('persona-default').inputValue(), 'persona:imported');
-  assert.equal(await page.getByPlaceholder('persona-default').isDisabled(), true);
+  assert.equal(await page.locator('#chat-persona-id').inputValue(), 'persona:imported');
+  assert.equal(await page.locator('#chat-persona-id').isDisabled(), true);
   await page.getByPlaceholder('日常伙伴').fill('合法冒号人设编辑');
   const gatewayIdentity = page.getByRole('textbox', { name: /^人格 ID/ });
   await gatewayIdentity.fill('outbound:separate');
   assert.equal(await page.locator('[data-dirty-scope="personas"]').getAttribute('data-dirty'), 'true');
-  assert.equal(await page.locator('[data-dirty-scope="configuration:persona"]').getAttribute('data-dirty'), 'true');
+  assert.equal(await page.locator('[data-dirty-scope="configuration:settings"]').getAttribute('data-dirty'), 'true');
   await page.getByRole('button', { name: '保存人设', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-dirty-scope="personas"]')?.getAttribute('data-dirty') === 'false');
   assert.equal(await page.locator('#fixture-requests').getAttribute('data-persona-id'), 'persona:imported');
   assert.equal(await gatewayIdentity.inputValue(), 'outbound:separate');
-  assert.equal(await page.locator('[data-dirty-scope="configuration:persona"]').getAttribute('data-dirty'), 'true');
+  assert.equal(await page.locator('[data-dirty-scope="configuration:settings"]').getAttribute('data-dirty'), 'true');
   await page.getByPlaceholder('日常伙伴').fill('独立保留的人设草稿');
   await page.getByRole('button', { name: '保存本组', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('[data-dirty-scope="configuration:persona"]')?.getAttribute('data-dirty') === 'false');
+  await page.waitForFunction(() => document.querySelector('[data-dirty-scope="configuration:settings"]')?.getAttribute('data-dirty') === 'false');
   assert.equal(await page.locator('[data-dirty-scope="personas"]').getAttribute('data-dirty'), 'true');
   assert.equal(await page.getByPlaceholder('日常伙伴').inputValue(), '独立保留的人设草稿');
   await page.locator('#fixture-plan').click();
-  await page.getByPlaceholder('daily-chat').waitFor();
-  assert.equal(await page.getByPlaceholder('daily-chat').inputValue(), 'plan:imported');
-  assert.equal(await page.getByPlaceholder('daily-chat').isDisabled(), true);
+  await page.locator('#chat-plan-id').waitFor({ state: 'attached' });
+  assert.equal(await page.locator('#chat-plan-id').inputValue(), 'plan:imported');
+  assert.equal(await page.locator('#chat-plan-id').isDisabled(), true);
   await page.getByPlaceholder('日常聊天').fill('合法冒号方案编辑');
   await page.getByRole('button', { name: '保存聊天方案', exact: true }).click();
   await page.waitForFunction(() => document.getElementById('fixture-requests')?.dataset.planId === 'plan:imported');
   assert.equal(await page.getByRole('alert').count(), 0);
   await openCatalog();
   await page.getByRole('button', { name: '新建人设', exact: true }).click();
-  await page.getByPlaceholder('persona-default').fill('bad/id');
+  await page.locator('#chat-persona-id').locator('xpath=ancestor::details').locator('summary').click();
+  await page.locator('#chat-persona-id').fill('bad/id');
   await page.getByPlaceholder('日常伙伴').fill('非法 ID');
   await page.getByPlaceholder('描述这个角色是谁').fill('合成身份');
   await page.getByPlaceholder('描述这个角色如何表达').fill('合成风格');
@@ -325,7 +350,7 @@ try {
       await page.locator(`#fixture-hold-${method}`).click();
       if (method === 'post') {
         await page.getByPlaceholder('654321', { exact: true }).fill('800000');
-        await page.getByRole('button', { name: '保存授权', exact: true }).click();
+        await page.getByRole('button', { name: '保存名单', exact: true }).click();
         assert.equal(await page.locator('#fixture-requests').getAttribute('data-access-signal'), 'true');
       } else await page.getByRole('button', { name: '重新载入', exact: true }).first().click();
       await page.waitForFunction(() => document.getElementById('fixture-requests')?.dataset.pending === '1');
@@ -336,38 +361,42 @@ try {
       assert.equal(await page.getByPlaceholder('654321', { exact: true }).inputValue(), '800001');
       assert.equal(await page.getByRole('alert').count(), 0);
       assert.equal(await page.locator('[data-dirty-scope="chat-access"]').getAttribute('data-dirty'), 'true');
-      assert.equal(await page.getByRole('button', { name: '保存授权', exact: true }).isEnabled(), true);
+      assert.equal(await page.getByRole('button', { name: '保存名单', exact: true }).isEnabled(), true);
     }
   }
   await openAccess();
   await page.getByPlaceholder('654321', { exact: true }).fill('800000');
   await page.locator('#fixture-hold-post').click();
-  await page.getByRole('button', { name: '保存授权', exact: true }).click();
+  await page.getByRole('button', { name: '保存名单', exact: true }).click();
   await reconnectAccess();
   await page.getByPlaceholder('654321', { exact: true }).fill('800001');
   await page.locator('#fixture-hold-post').click();
-  await page.getByRole('button', { name: '保存授权', exact: true }).click();
+  await page.getByRole('button', { name: '保存名单', exact: true }).click();
   await page.locator('#fixture-resolve').click();
   await page.waitForTimeout(50);
   assert.equal(await page.getByRole('button', { name: '正在保存', exact: true }).isDisabled(), true);
   assert.equal(await page.getByPlaceholder('654321', { exact: true }).inputValue(), '800001');
   await page.locator('#fixture-reject').click();
-  await page.getByRole('button', { name: '保存授权', exact: true }).waitFor();
-  assert.equal(await page.getByRole('button', { name: '保存授权', exact: true }).isDisabled(), true);
+  await page.getByRole('button', { name: '保存名单', exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '保存名单', exact: true }).isDisabled(), true);
   assert.equal(await page.locator('#fixture-requests').getAttribute('data-posts'), '2');
   await page.setViewportSize({ width: 1100, height: 1000 });
   await page.goto(`http://127.0.0.1:${address.port}/test/fixtures/native-usage.html`);
+  await page.locator('#usage-summary details > summary').click();
   await page.waitForSelector('[data-native-usage-coverage]');
   assert.equal(await page.locator('[data-usage-metric="total-tokens"] > strong').innerText(), '未知');
-  assert.equal(await page.locator('[data-usage-metric="estimated-cost"] > strong').innerText(), '未知');
-  assert.ok((await page.locator('[data-native-usage-coverage]').innerText()).includes('覆盖不完整'));
+  assert.equal(await page.locator('[data-usage-metric="estimated-cost"] > strong').innerText(), 'USD 11.92');
+  assert.ok((await page.locator('[data-usage-metric="estimated-cost"]').innerText()).includes('已知金额小计'));
+  assert.match(await page.locator('[data-native-usage-coverage]').innerText(), /1 轮计数不完整，1 条费用未知/);
+  assert.ok((await page.locator('[data-native-usage-coverage]').innerText()).includes('未知费用不计入已记录金额，不按零补齐'));
   await page.waitForSelector('[data-chart-engine="recharts"] .recharts-surface');
   assert.ok((await page.locator('[data-usage-chart-coverage]').innerText()).includes('未知值留空'));
   await page.locator('[data-usage-conversations-panel] summary').click();
   await page.locator('[data-usage-key="private:123"] button').click();
   await page.waitForSelector('[data-usage-turn]');
   assert.ok(await page.locator('[data-usage-turn]').count() < 35);
-  assert.equal(await page.locator('#usage-reset-open').isDisabled(), true);
+  assert.equal(await page.locator('#usage-reset-open').count(), 0);
+  assert.equal(await page.getByRole('button', { name: '重置全部用量', exact: true }).count(), 0);
   await page.locator('[data-usage-recent-panel] summary').click();
   assert.equal(await page.locator('[data-usage-recent]').count(), 40);
   assert.ok((await page.locator('[data-usage-recent]').first().innerText()).includes('未知'));
@@ -385,6 +414,7 @@ try {
     await page.locator(`[data-native-seed="${kind}"]`).click();
     await page.waitForFunction(previous => Number(document.querySelector('[data-native-fixture-version]')?.getAttribute('data-native-fixture-version')) > previous, previous);
     await page.waitForFunction(() => document.querySelector('[data-native-usage-coverage]') !== null && document.querySelector('#usage-refresh')?.hasAttribute('disabled') === false);
+    await page.locator('#usage-summary details > summary').click();
     await page.locator('[data-usage-pricing-editor] summary').click();
   }
   await seedNative('empty');
@@ -421,6 +451,8 @@ try {
   await page.getByRole('button', { name: '重新读取单价', exact: true }).click();
   await page.getByRole('button', { name: '放弃草稿并重新读取', exact: true }).click();
   await page.waitForFunction(() => document.querySelector<HTMLInputElement>('#usage-price-inputPerMillion-0')?.value === '9');
+  assert.equal(await page.locator('#usage-price-inputPerMillion-0').isDisabled(), true);
+  await page.getByRole('button', { name: '已核对，允许新的保存', exact: true }).click();
   await page.locator('#usage-price-inputPerMillion-0').fill('5');
   await nativeControl({ action: 'write-mode', mode: 'unknown' });
   await page.getByRole('button', { name: '保存后续单价', exact: true }).click();
@@ -429,11 +461,16 @@ try {
   assert.equal(await page.locator('#usage-price-inputPerMillion-0').isDisabled(), true);
   await page.getByRole('button', { name: '重新读取单价', exact: true }).click();
   await page.getByRole('button', { name: '放弃草稿并重新读取', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector<HTMLInputElement>('#usage-price-inputPerMillion-0')?.value === '5' && document.querySelector<HTMLInputElement>('#usage-price-inputPerMillion-0')?.disabled === false);
+  await page.waitForFunction(() => document.querySelector<HTMLInputElement>('#usage-price-inputPerMillion-0')?.value === '5');
+  assert.equal(await page.locator('#usage-price-inputPerMillion-0').isDisabled(), true);
+  await page.getByRole('button', { name: '已核对，允许新的保存', exact: true }).click();
+  assert.equal(await page.locator('#usage-price-inputPerMillion-0').isDisabled(), false);
   assert.equal((await nativeState()).writes, 3);
   assert.equal(asRecord((await nativeState()).originalCost).amount, costBefore);
   await seedNative('mixed');
-  assert.equal(await page.locator('[data-usage-metric="estimated-cost"] > strong').innerText(), '未知');
+  const mixedCost = await page.locator('[data-usage-metric="estimated-cost"] > strong').innerText();
+  assert.ok(mixedCost.includes('USD 11.92') && mixedCost.includes('CNY 3'));
+  assert.ok((await page.locator('[data-usage-metric="estimated-cost"]').innerText()).includes('已知金额小计'));
   const nativeCosts = await page.locator('[data-native-usage-coverage] [data-usage-known-costs]').innerText();
   assert.ok(nativeCosts.includes('USD') && nativeCosts.includes('CNY') && nativeCosts.includes('不合并'));
   await nativeControl({ action: 'large-prices' });
@@ -469,7 +506,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('[data-session-key]').length === 0);
   assert.equal(await page.locator('[data-session-key]').count(), 0);
   for (let index = 0; index < 3; index++) await page.locator('#session-load-more').click();
-  await page.locator('[data-session-key="group:100319"] button').click();
+  await page.locator('[data-session-key="group:100319"]').getByRole('button', { name: '100319', exact: true }).click();
   assert.equal(await page.locator('[data-selected-session]').getAttribute('data-selected-session'), 'group:100319');
   assert.equal(await page.locator('#session-load-more').count(), 0);
   await page.locator('#session-filter').fill('');
@@ -477,7 +514,8 @@ try {
   await page.getByRole('button', { name: '刷新', exact: true }).click();
   await page.waitForSelector('[data-session-unconfirmed]');
   assert.equal(await page.locator('[data-selected-session]').getAttribute('data-selected-session'), 'group:100319');
-  assert.equal(await page.locator('#session-reset-open').isDisabled(), true);
+  assert.equal(await page.locator('#session-reset-open').count(), 0);
+  assert.equal(await page.getByRole('button', { name: '重新开始对话', exact: true }).evaluateAll(elements => elements.every(element => element instanceof HTMLButtonElement && element.disabled)), true);
   for (const outcome of ['resolve', 'reject']) {
     await openSessions();
     await page.locator('#session-fixture-hold').click();
@@ -518,9 +556,8 @@ try {
   assert.equal(await page.locator('#session-fixture-state').getAttribute('data-posts'), '0');
   await page.locator('#session-fixture-conflict').click();
   await page.locator('#session-reset-open').click();
-  await page.locator('#session-reset-confirm').fill('wrong-binding');
-  assert.equal(await page.locator('#session-reset-submit').isDisabled(), true);
-  await page.locator('#session-reset-confirm').fill('group:100000');
+  await page.getByRole('dialog').getByText('synthetic-session-0', { exact: true }).waitFor();
+  assert.equal(await page.locator('#session-reset-submit').isDisabled(), false);
   await page.locator('#session-reset-submit').click();
   await page.getByRole('button', { name: '关闭并刷新', exact: true }).waitFor();
   assert.equal(await page.locator('#session-reset-submit').isDisabled(), true);
@@ -528,7 +565,6 @@ try {
   await page.getByRole('button', { name: '关闭并刷新', exact: true }).click();
   await page.locator('#session-fixture-unknown').click();
   await page.locator('#session-reset-open').click();
-  await page.locator('#session-reset-confirm').fill('group:100000');
   await page.locator('#session-reset-submit').click();
   await page.getByRole('button', { name: '关闭并刷新', exact: true }).waitFor();
   assert.equal(await page.locator('#session-reset-submit').isDisabled(), true);
@@ -538,13 +574,14 @@ try {
   await page.getByRole('button', { name: '刷新', exact: true }).click();
   await page.waitForFunction(() => document.getElementById('session-reset-open')?.hasAttribute('disabled') === false);
   await page.locator('#session-reset-open').click();
-  await page.locator('#session-reset-confirm').fill('group:100000');
   await page.locator('#session-reset-submit').click();
   await page.waitForFunction(() => document.querySelector('[data-selected-session]')?.getAttribute('data-selected-session') === 'group:100001');
   const resetBody = JSON.parse(await page.locator('#session-fixture-state').getAttribute('data-last-post') ?? 'null') as unknown;
   assert.equal(asRecord(resetBody).key, 'group:100000');
   assert.equal(asRecord(resetBody).sessionId, 'synthetic-session-0');
-  assert.equal(asRecord(resetBody).revision, 'page-first-320-false');
+  assert.equal(asRecord(resetBody).generation, 1);
+  assert.equal(asRecord(resetBody).bindingRevision, '0'.repeat(64));
+  assert.equal('revision' in asRecord(resetBody), false);
   assert.equal(asRecord(resetBody).confirm, true);
   assert.equal(await page.locator('#session-fixture-state').getAttribute('data-posts'), '1');
   assert.deepEqual(errors, []);

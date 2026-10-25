@@ -17,7 +17,10 @@
     "build": "node scripts/build.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json",
     "test": "node scripts/cli.ts test",
-    "test:built": "npm run build && node --test dist/test/*.test.js",
+    "test:built": "node scripts/cli.ts test --built",
+    "test:fast": "node scripts/cli.ts test --suite fast",
+    "test:deadline": "node scripts/cli.ts test --suite deadline",
+    "test:integration": "node scripts/cli.ts test --suite integration",
     "test:browser": "node scripts/cli.ts test --browser",
     "test:management": "node scripts/cli.ts test --browser --target management",
     "test:page-navigation": "node scripts/cli.ts test --browser --target page-navigation",
@@ -27,6 +30,7 @@
     "test:presentation-smoke": "node scripts/cli.ts test --browser --target presentation",
     "test:virtual-list-perf": "node scripts/cli.ts test --browser --target virtual-list-perf",
     "test:native-chat-ui": "node scripts/cli.ts test --browser --target native-chat-ui",
+    "test:execution-journal": "node scripts/cli.ts test --browser --target execution-journal",
     "demo": "npm run build && node src/demo.ts",
     "check": "npm run typecheck && node scripts/check.ts",
     "bench:core": "node --expose-gc scripts/bench-core.ts",
@@ -34,7 +38,9 @@
     "bench:policy": "node scripts/bench-policy.ts",
     "bench:admin": "node scripts/bench-admin.ts",
     "bench:host": "node scripts/bench-host.ts",
-    "bench:soak": "node --expose-gc scripts/bench-soak.ts"
+    "bench:soak": "node --expose-gc scripts/bench-soak.ts",
+    "build:sdk": "node scripts/build-sdk.ts",
+    "test:sdk": "node scripts/verify-sdk-package.ts"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",
@@ -46,7 +52,6 @@
     "@vitejs/plugin-react": "6.1.2",
     "shadcn": "4.22.1",
     "tailwindcss": "4.3.3",
-    "typescript": "5.9.3",
     "vite": "8.3.5"
   },
   "dependencies": {
@@ -65,6 +70,7 @@
     "tailwind-merge": "3.7.0",
     "tw-animate-css": "1.4.0",
     "ws": "8.22.0",
-    "yaml": "2.9.1"
+    "yaml": "2.9.1",
+    "typescript": "5.9.3"
   }
 }

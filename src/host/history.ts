@@ -5,7 +5,7 @@ import type { DurableStore } from './types.ts';
 import { digest, json, object } from './data.ts';
 
 export interface HistoryMessage { id: string; actor: string; content: readonly MessageContent[]; receivedAt: number }
-interface HistoryEntry extends HistoryMessage { sequence: number }
+export interface HistoryEntry extends HistoryMessage { sequence: number }
 interface Timeline { sequence: number; readThrough: number; droppedThrough: number; messages: HistoryEntry[] }
 const namespace = 'history';
 

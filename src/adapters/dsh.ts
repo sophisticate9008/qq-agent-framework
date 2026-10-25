@@ -1,7 +1,9 @@
 import { snapshot } from '../core/values.ts'
 import { normalizeContent } from '../core/content.ts'
 import type { JsonObject, JsonValue, MessageContent } from '../core/types.ts'
-import type { AgentAdapter, AgentEvent } from '../host/types.ts'
+import type { AgentAdapter, AgentEvent } from '../contracts/ports.ts'
+import type { NativeEventInput } from '../contracts/native-events.ts'
+import { mapDshObservation } from './dsh-event-observation.ts'
 
 type MaybePromise<Value> = Value | Promise<Value>
 
@@ -60,6 +62,46 @@ export interface DshApprovalEvent {
   toolName?: string
   callId?: string
   reason?: string
+}
+
+export interface DshInteractionClosedEvent {
+  readonly type: 'interaction/closed'
+  readonly sessionId: string
+  readonly clientId?: string
+  readonly eventId?: string
+  readonly reason: string
+}
+
+export type DshInteractionEvent = DshQuestionEvent | DshApprovalEvent | DshInteractionClosedEvent
+
+export interface DshInteractionAnswer {
+  readonly id: string
+  readonly selected: readonly string[]
+  readonly custom?: string
+}
+
+export type DshInteractionOutcome = {
+  readonly kind: 'result'
+  readonly value: 'allowed-once' | 'rejected' | { readonly answers: readonly DshInteractionAnswer[] }
+}
+
+export interface DshInteractionResponseRequest {
+  readonly sessionId: string
+  readonly clientId: string
+  readonly eventId: string
+  readonly outcome: DshInteractionOutcome
+  readonly signal: AbortSignal
+}
+
+export interface DshInteractionConnectionRequest {
+  readonly signal: AbortSignal
+  readonly onEvent: (event: DshInteractionEvent) => void | Promise<void>
+}
+
+export interface DshInteractionPort {
+  registerInteractionSession(sessionId: string): () => void
+  connectInteractions(request: DshInteractionConnectionRequest): Promise<() => Promise<void>>
+  respondInteraction(request: DshInteractionResponseRequest): Promise<DshPortResult<JsonValue>>
 }
 
 export interface DshStreamErrorEvent {
@@ -508,7 +550,9 @@ export function createDshSdkPort(options: DshSdkPortOptions): DshClientPort {
   })
 }
 
-export function createDshAdapter(client: DshClientPort): AgentAdapter {
+export function createDshAdapter(client: DshClientPort, observations: {
+  readonly onObservation?: (event: NativeEventInput) => void
+} = {}): AgentAdapter {
   validatePort(client)
   const adapter: AgentAdapter = {
     async createSession(request) {
@@ -560,6 +604,12 @@ export function createDshAdapter(client: DshClientPort): AgentAdapter {
           signal: request.signal,
           async onEvent(frame) {
             if (frame.sessionId !== request.sessionId) return
+            if (frame.type === 'session/event' && observations.onObservation) {
+              try {
+                const observation = mapDshObservation(frame)
+                if (observation) void Promise.resolve(observations.onObservation(observation)).catch(() => {})
+              } catch {}
+            }
             if (frame.type === 'session/event') {
               if (frame.event.type === 'turn/start' || frame.event.type === 'step/start') pending = undefined
               if (frame.event.type === 'turn/start') {

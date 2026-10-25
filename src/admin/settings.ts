@@ -1,11 +1,10 @@
-import { constants } from 'node:fs';
-import { lstat, open, rename, unlink } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { dirname, resolve } from 'node:path';
 
 import { AdminRequestError, type AdminRoute } from './server.ts';
 import { withConfigurationWriteLock } from './configuration-lock.ts';
+import { readPrivateJson, replacePrivateJson } from './private-json-storage.ts';
 
 const MAX_CONFIGURATION_BYTES = 64 * 1024;
 const REVISION_PATTERN = /^[a-f0-9]{64}$/;
@@ -68,41 +67,13 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   return actual.length === keys.length && actual.every(key => keys.includes(key));
 }
 
-function revision(content: Uint8Array): string {
-  return createHash('sha256').update(content).digest('hex');
-}
-
-function sameFile(
-  left: { readonly dev: number; readonly ino: number },
-  right: { readonly dev: number; readonly ino: number }
-): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
 async function readConfiguration(filename: string): Promise<ConfigurationDocument> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const before = await handle.stat();
-    if (!before.isFile() || (before.mode & 0o077) !== 0 || before.size > MAX_CONFIGURATION_BYTES) {
-      requestError(500, 'settings_file_invalid');
-    }
-    const content = await handle.readFile();
-    const after = await handle.stat();
-    const pathname = await lstat(filename);
-    if (content.byteLength > MAX_CONFIGURATION_BYTES || !sameFile(before, after) || !sameFile(after, pathname)
-      || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
-      requestError(409, 'settings_conflict');
-    }
-    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(content));
-    if (!isRecord(parsed)) requestError(500, 'settings_file_invalid');
-    return { revision: revision(content), values: parsed };
-  } catch (error: unknown) {
-    if (error instanceof AdminRequestError) throw error;
-    throw new AdminRequestError(500, 'settings_file_invalid');
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
+  const document = await readPrivateJson(filename, { maxBytes: MAX_CONFIGURATION_BYTES,
+    invalidCode: 'settings_file_invalid', conflictCode: 'settings_conflict', validate(value) {
+      if (!isRecord(value)) requestError(500, 'settings_file_invalid');
+      return value;
+    } });
+  return { revision: document.revision, values: document.value };
 }
 
 function boundedInteger(value: unknown, lower: number, upper: number): value is number {
@@ -227,38 +198,10 @@ async function replaceConfiguration(
       requestError(500, 'settings_write_failed');
     }
     if (content.byteLength > MAX_CONFIGURATION_BYTES) requestError(413, 'settings_file_too_large');
-    const temporary = `${filename}.settings-${process.pid}-${randomUUID()}.tmp`;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-    let renamed = false;
-    try {
-      handle = await open(temporary,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      await handle.chmod(0o600);
-      await handle.writeFile(content);
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      const latest = await readConfiguration(filename);
-      if (latest.revision !== expectedRevision) requestError(409, 'settings_conflict');
-      await rename(temporary, filename);
-      renamed = true;
-      const directory = await open(dirname(filename), constants.O_RDONLY);
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
-      const written = await readConfiguration(filename);
-      if (written.revision !== revision(content)) requestError(500, 'settings_write_unknown');
-      return revision(content);
-    } catch (error: unknown) {
-      if (renamed) requestError(500, 'settings_write_unknown');
-      if (error instanceof AdminRequestError) throw error;
-      requestError(500, 'settings_write_failed');
-    } finally {
-      await handle?.close().catch(() => undefined);
-      await unlink(temporary).catch(() => undefined);
-    }
+    const written = await replacePrivateJson({ filename, directory: dirname(filename), expectedRevision, content,
+      temporary: `${filename}.settings-${process.pid}-${randomUUID()}.tmp`, read: () => readConfiguration(filename),
+      conflictCode: 'settings_conflict', writeFailedCode: 'settings_write_failed', writeUnknownCode: 'settings_write_unknown' });
+    return written.revision;
   });
 }
 

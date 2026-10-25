@@ -1,19 +1,23 @@
-import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual';
 import { ArrowRight, FileText, LoaderCircle, Search, SlidersHorizontal } from 'lucide-react';
 import { Button } from './ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog.tsx';
 import { Input } from './ui/input.tsx';
+import { includeVirtualPins } from './virtual-range.ts';
 import { errorMessage, type ApiClient } from '../lib/api.ts';
 import {
   applyCurrentPageVisibility,
   buildWorkspaceSearchTargets,
   groupWorkspaceSearchTargets,
+  isWorkspaceSearchShortcut,
   searchWorkspaceTargets,
   workspacePageTargets,
   workspaceSearchPath,
   type WorkspaceSearchTarget,
   type WorkspaceSearchVisibleEntry,
 } from '../lib/workspace-search.ts';
+import { nativeFormSearchTargets } from '../lib/native-form-metadata.ts';
 import type { PageId } from '../lib/types.ts';
 
 export interface WorkspaceSearchProps {
@@ -30,6 +34,7 @@ type LoadState =
   | { readonly status: 'error'; readonly message: string };
 
 const listboxId = 'workspace-search-results';
+const initialTargets = [...workspacePageTargets, ...nativeFormSearchTargets()];
 
 export function WorkspaceSearch({ api, connected, currentPage, onSelect, visibleEntries }: WorkspaceSearchProps) {
   const [open, setOpen] = useState(false);
@@ -37,10 +42,11 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
   const [activeIndex, setActiveIndex] = useState(0);
   const [loadVersion, setLoadVersion] = useState(0);
   const [loadState, setLoadState] = useState<LoadState>({ status: 'idle' });
+  const resultsViewport = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const openSearch = (event: KeyboardEvent) => {
-      if (event.key.toLocaleLowerCase() !== 'k' || (!event.ctrlKey && !event.metaKey) || event.altKey) return;
+      if (!isWorkspaceSearchShortcut(event)) return;
       event.preventDefault();
       setOpen(true);
     };
@@ -68,13 +74,12 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
     void Promise.allSettled([
       api.get('/api/configuration', controller.signal),
       api.get('/api/chat/status', controller.signal),
-      api.get('/api/settings', controller.signal),
-    ]).then(([configuration, runtimeStatus, settings]) => {
+    ]).then(([configuration, runtimeStatus]) => {
       if (controller.signal.aborted) return;
       if (configuration.status !== 'fulfilled') throw configuration.reason;
       const targets = buildWorkspaceSearchTargets({ configuration: configuration.value,
         runtimeStatus: runtimeStatus.status === 'fulfilled' ? runtimeStatus.value : undefined,
-        settings: settings.status === 'fulfilled' ? settings.value : undefined });
+        settings: undefined });
       setLoadState({ status: 'ready', targets });
     }).catch(error => {
       if (!controller.signal.aborted) {
@@ -91,17 +96,42 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
         : loadState.targets;
     }
     return visibleEntries
-      ? applyCurrentPageVisibility(workspacePageTargets, currentPage, visibleEntries)
-      : workspacePageTargets;
+      ? applyCurrentPageVisibility(initialTargets, currentPage, visibleEntries)
+      : initialTargets;
   }, [currentPage, loadState, visibleEntries]);
   const matches = useMemo(() => searchWorkspaceTargets(targets, query), [query, targets]);
   const groups = useMemo(() => groupWorkspaceSearchTargets(matches), [matches]);
   const displayedTargets = useMemo(() => groups.flatMap(group => group.targets), [groups]);
   const searching = query.trim() !== '';
+  const virtualized = open && searching && displayedTargets.length > 60;
+  const boundedActiveIndex = Math.min(activeIndex, Math.max(0, displayedTargets.length - 1));
+  const groupTitles = useMemo(() => new Map(groups.map(group => [group.page, group.title])), [groups]);
+  const getScrollElement = useCallback(() => resultsViewport.current, []);
+  const getItemKey = useCallback((index: number) => {
+    const target = displayedTargets[index];
+    return `${target.page}-${target.kind}-${target.sectionId ?? target.sectionTitle ?? ''}-${target.title}`;
+  }, [displayedTargets]);
+  const rangeExtractor = useCallback((range: Range) => includeVirtualPins(defaultRangeExtractor(range), [boundedActiveIndex], displayedTargets.length), [boundedActiveIndex, displayedTargets.length]);
+  const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+    count: displayedTargets.length,
+    getScrollElement,
+    getItemKey,
+    estimateSize: () => 80,
+    overscan: 6,
+    enabled: virtualized,
+    rangeExtractor,
+    useFlushSync: false,
+  });
+  const virtualItems = virtualized ? virtualizer.getVirtualItems() : [];
+  const renderedResults = virtualized
+    ? virtualItems.length > 0 ? virtualItems : [{ index: boundedActiveIndex, start: boundedActiveIndex * 80 }]
+    : displayedTargets.map((_target, index) => ({ index, start: 0 }));
 
-  useEffect(() => {
-    if (open) document.getElementById(`workspace-search-option-${activeIndex}`)?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex, open]);
+  useLayoutEffect(() => {
+    if (!open) return;
+    if (virtualized) virtualizer.scrollToIndex(boundedActiveIndex, { align: 'auto' });
+    else document.getElementById(`workspace-search-option-${boundedActiveIndex}`)?.scrollIntoView({ block: 'nearest' });
+  }, [boundedActiveIndex, displayedTargets, open, virtualized, virtualizer]);
 
   useEffect(() => {
     setActiveIndex(current => displayedTargets.length === 0 ? 0 : Math.min(current, displayedTargets.length - 1));
@@ -114,7 +144,7 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
   }
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
-    if (event.nativeEvent.isComposing) return;
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       setOpen(false);
@@ -128,9 +158,14 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
         : (current - 1 + displayedTargets.length) % displayedTargets.length);
       return;
     }
-    if (event.key === 'Enter' && displayedTargets[activeIndex]) {
+    if (event.key === 'Home' || event.key === 'End') {
       event.preventDefault();
-      choose(displayedTargets[activeIndex]);
+      setActiveIndex(event.key === 'Home' ? 0 : Math.max(0, displayedTargets.length - 1));
+      return;
+    }
+    if (event.key === 'Enter' && displayedTargets[boundedActiveIndex]) {
+      event.preventDefault();
+      choose(displayedTargets[boundedActiveIndex]);
     }
   }
 
@@ -172,7 +207,7 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
             aria-autocomplete="list"
             aria-controls={listboxId}
             aria-expanded={open}
-            aria-activedescendant={displayedTargets[activeIndex] ? `workspace-search-option-${activeIndex}` : undefined}
+            aria-activedescendant={displayedTargets[boundedActiveIndex] ? `workspace-search-option-${boundedActiveIndex}` : undefined}
             autoFocus
             autoComplete="off"
             spellCheck={false}
@@ -184,31 +219,44 @@ export function WorkspaceSearch({ api, connected, currentPage, onSelect, visible
           />
           <kbd className="shrink-0 rounded border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">Esc</kbd>
         </div>
-        {displayedTargets.length > 0 && <div id={listboxId} role="listbox" aria-label="搜索结果" className="max-h-[min(26rem,65vh)] overflow-y-auto p-2">
-          {searching ? groups.map(group => <div key={group.page} className="mb-2 last:mb-0">
-            <p className="px-2 py-1.5 text-[10px] font-medium tracking-wide text-muted-foreground">{group.title}</p>
-            {group.targets.map(target => {
-              const index = displayedTargets.indexOf(target);
-              const selected = index === activeIndex;
+        {displayedTargets.length > 0 && <div ref={resultsViewport} id={listboxId} role="listbox" aria-label="搜索结果" className="max-h-[min(26rem,65vh)] overflow-y-auto p-2">
+          {searching ? <div role="presentation" data-virtualized={virtualized || undefined} className="relative" style={virtualized ? { height: virtualizer.getTotalSize() } : undefined}>
+            {renderedResults.map(item => {
+              const index = item.index;
+              const target = displayedTargets[index];
+              const selected = index === boundedActiveIndex;
               const Icon = target.kind === 'page' ? FileText : SlidersHorizontal;
-              return <button
-                key={`${target.page}-${target.kind}-${target.sectionTitle ?? ''}-${target.title}`}
+              return <div
+                key={`${target.page}-${target.kind}-${target.sectionId ?? target.sectionTitle ?? ''}-${target.title}`}
+                ref={virtualized ? virtualizer.measureElement : undefined}
+                data-index={index}
+                role="presentation"
+                className={virtualized ? 'absolute top-0 left-0 w-full' : undefined}
+                style={virtualized ? { transform: `translateY(${item.start}px)` } : undefined}
+              >
+                {(index === 0 || displayedTargets[index - 1].page !== target.page) && <p className="px-2 py-1.5 text-[10px] font-medium tracking-wide text-muted-foreground">{groupTitles.get(target.page)}</p>}
+                <button
                 id={`workspace-search-option-${index}`}
                 type="button"
                 role="option"
                 aria-selected={selected}
+                aria-posinset={index + 1}
+                aria-setsize={displayedTargets.length}
                 data-search-title={target.title}
                 data-search-page={target.page}
+                data-search-kind={target.kind}
+                data-search-availability={target.availability}
                 className="flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left outline-none aria-selected:bg-accent aria-selected:text-accent-foreground"
                 onMouseMove={() => setActiveIndex(index)}
                 onClick={() => choose(target)}
               >
                 <Icon className="size-4 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{target.title}</strong><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{workspaceSearchPath(target)}</span></span>
+                <span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{target.title}</strong><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{workspaceSearchPath(target)}</span>{target.availability !== 'available' && target.unavailableMessage && <span className="mt-1 block text-[10px] text-muted-foreground">{target.unavailableMessage} 目标页将核对能否定位。</span>}</span>
                 <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" />
-              </button>;
+                </button>
+              </div>;
             })}
-          </div>) : <div>
+          </div> : <div>
             <p className="px-2 py-1.5 text-[10px] font-medium tracking-wide text-muted-foreground">页面快捷入口</p>
             <div className="grid gap-1 sm:grid-cols-2">{displayedTargets.map((target, index) => <button
               key={target.page}

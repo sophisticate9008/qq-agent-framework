@@ -1,10 +1,12 @@
-import { closeSync, fchmodSync, openSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, lstatSync, openSync } from 'node:fs';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 
 import type { Clock, JsonValue } from '../core/types.ts';
-import { FrameworkError, snapshot } from '../core/values.ts';
-import type { DurableStore, DurableStoreStats, DurableStoreStatsOptions, StoredRecord, WriteOptions } from '../host/types.ts';
+import { FrameworkError, isRecord, snapshot } from '../core/values.ts';
+import { openReadonlySqliteStore, validateExistingSqliteSchema } from './sqlite-readonly.ts';
+import type { DurableCasMutation, DurableIndexDefinition, DurableLookup, DurableStore, DurableStoreStats, DurableStoreStatsOptions, StoredRecord, WriteOptions } from '../contracts/ports.ts';
 
 const DEFAULT_MAX_RECORDS = 100_000;
 const DEFAULT_MAX_VALUE_BYTES = 1_048_576;
@@ -14,6 +16,8 @@ const MAX_SQLITE_INTEGER = Number.MAX_SAFE_INTEGER;
 
 export interface SqliteStoreOptions {
   filename: string;
+  /** Require a private, existing framework database; never create or repair its permissions/schema. */
+  requireExisting?: boolean;
   clock?: Clock;
   maxRecords?: number;
   maxValueBytes?: number;
@@ -38,6 +42,8 @@ interface StoreStatements {
 
 export interface SqliteStore extends DurableStore {
   stats(options?: DurableStoreStatsOptions): DurableStoreStats;
+  createIndex(definition: DurableIndexDefinition): void;
+  lookup(query: DurableLookup): readonly StoredRecord[];
 }
 
 interface ExistingRow {
@@ -218,7 +224,27 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
   if (typeof clock !== 'function') fail('STORE_INVALID_OPTIONS', 'Expected a clock function.');
   assertPositiveInteger(maxRecords, 'STORE_INVALID_OPTIONS', 'Expected a positive record limit.');
   assertPositiveInteger(maxValueBytes, 'STORE_INVALID_OPTIONS', 'Expected a positive value size limit.');
-  secureFile(filename);
+  if (options.requireExisting !== undefined && typeof options.requireExisting !== 'boolean') fail('STORE_INVALID_OPTIONS', 'Expected an existing-storage flag.');
+  let existingDescriptor: number | undefined;
+  function checkExistingIdentity(): void {
+    if (existingDescriptor === undefined) return;
+    const opened = fstatSync(existingDescriptor);
+    const current = lstatSync(filename);
+    if (!current.isFile() || current.nlink !== 1 || (current.mode & 0o777) !== 0o600
+      || typeof process.getuid === 'function' && current.uid !== process.getuid()
+      || current.dev !== opened.dev || current.ino !== opened.ino) fail('STORE_READONLY_UNSAFE', 'Existing storage identity changed.');
+  }
+  if (options.requireExisting) {
+    // Reuse the read boundary's canonical path, owner, sidecar and original-schema validation.
+    const reader = openReadonlySqliteStore(filename);
+    try {
+      existingDescriptor = openSync(filename, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      checkExistingIdentity();
+    } catch (error) {
+      if (existingDescriptor !== undefined) { closeSync(existingDescriptor); existingDescriptor = undefined; }
+      redact(error, 'STORE_OPEN_FAILED', 'Could not open existing durable store.');
+    } finally { reader.close(); }
+  } else secureFile(filename);
 
   let database!: DatabaseSync;
   try {
@@ -228,7 +254,12 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       enableForeignKeyConstraints: true,
       timeout: 5_000
     });
-    database.exec(`
+    checkExistingIdentity();
+    if (options.requireExisting) validateExistingSqliteSchema(database);
+    database.exec(options.requireExisting ? `
+      PRAGMA synchronous = FULL;
+      PRAGMA trusted_schema = OFF;
+    ` : `
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       PRAGMA trusted_schema = OFF;
@@ -255,6 +286,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       if (database?.isOpen) database.close();
     } catch {
     }
+    if (existingDescriptor !== undefined) closeSync(existingDescriptor);
     redact(error, 'STORE_OPEN_FAILED', 'Could not initialize durable store.');
   }
 
@@ -266,12 +298,73 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       database.close();
     } catch {
     }
+    if (existingDescriptor !== undefined) closeSync(existingDescriptor);
     redact(error, 'STORE_OPEN_FAILED', 'Could not initialize durable store.');
   }
   let closed = false;
+  const lookupStatements = new Map<string, StatementSync>();
 
   function assertOpen(): void {
     if (closed) fail('STORE_CLOSED', 'Durable store is closed.');
+    checkExistingIdentity();
+  }
+
+  function scalar(value: unknown): string {
+    if (value === null) return 'NULL';
+    if (typeof value === 'boolean') return value ? '1' : '0';
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    if (typeof value === 'string' && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value)) return `'${value.replaceAll("'", "''")}'`;
+    fail('STORE_INVALID_INDEX', 'An index equality requires a bounded JSON scalar.');
+  }
+
+  function indexSql(definition: DurableIndexDefinition): { key: string; predicate: string; expression: string } {
+    if (!definition || typeof definition !== 'object' || Array.isArray(definition)
+      || Object.keys(definition).some(key => !['namespace', 'field', 'unique', 'where'].includes(key))
+      || typeof definition.field !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(definition.field)
+      || definition.unique !== undefined && typeof definition.unique !== 'boolean') fail('STORE_INVALID_INDEX', 'Invalid index definition.');
+    assertReference(definition.namespace, 'namespace');
+    const expression = `json_extract(value, '$.${definition.field}')`;
+    let predicate = `namespace = ${scalar(definition.namespace)}`;
+    if (definition.where !== undefined) {
+      if (!definition.where || typeof definition.where !== 'object' || Array.isArray(definition.where)
+        || Object.keys(definition.where).length !== 2 || !Object.hasOwn(definition.where, 'equals')
+        || typeof definition.where.field !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(definition.where.field)) fail('STORE_INVALID_INDEX', 'Invalid index filter.');
+      predicate += ` AND json_extract(value, '$.${definition.where.field}') IS ${scalar(definition.where.equals)}`;
+    }
+    return { key: `${predicate}:${expression}`, predicate, expression };
+  }
+
+  function createIndex(definition: DurableIndexDefinition): void {
+    assertOpen();
+    const parsed = indexSql(definition);
+    if (lookupStatements.size >= 64 && !lookupStatements.has(parsed.key)) fail('STORE_INDEX_LIMIT', 'The index registration bound was reached.');
+    const name = `durable_json_${createHash('sha256').update(`${parsed.key}:${definition.unique === true}`).digest('hex').slice(0, 32)}`;
+    try {
+      database.exec(`CREATE ${definition.unique === true ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS ${name} ON durable_records(${parsed.expression}) WHERE ${parsed.predicate}`);
+      lookupStatements.set(parsed.key, database.prepare(`SELECT namespace, key, value, revision, updated_at AS updatedAt, expires_at AS expiresAt
+        FROM durable_records WHERE ${parsed.predicate} AND ${parsed.expression} IS ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT ?`));
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ERR_SQLITE_ERROR'
+        && 'errcode' in error && error.errcode === 2067) fail('STORE_INDEX_CONFLICT', 'Existing records violate the unique index.');
+      redact(error, 'STORE_INDEX_UNAVAILABLE', 'The requested index could not be installed.');
+    }
+  }
+
+  function lookup(query: DurableLookup): readonly StoredRecord[] {
+    assertOpen();
+    if (!query || typeof query !== 'object' || Array.isArray(query)
+      || Object.keys(query).some(key => !['namespace', 'field', 'equals', 'where', 'limit'].includes(key))
+      || !Object.hasOwn(query, 'equals')) fail('STORE_INVALID_INDEX', 'Invalid indexed lookup.');
+    scalar(query.equals);
+    const parsed = indexSql({ namespace: query.namespace, field: query.field, ...(query.where === undefined ? {} : { where: query.where }) });
+    const statement = lookupStatements.get(parsed.key);
+    if (!statement) fail('STORE_INDEX_UNAVAILABLE', 'The lookup requires a registered index.');
+    const limit = query.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) fail('STORE_INVALID_INDEX', 'Indexed lookup limit is invalid.');
+    try {
+      const equals = typeof query.equals === 'boolean' ? Number(query.equals) : query.equals;
+      return snapshot(statement.all(equals, now(), limit).map(decodeRecord));
+    } catch (error) { redact(error); }
   }
 
   function now(): number {
@@ -375,6 +468,67 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     });
   }
 
+  function compareAndSetBatch(input: readonly DurableCasMutation[]): readonly (StoredRecord | null)[] {
+    assertOpen();
+    if (!Array.isArray(input) || input.length < 1 || input.length > 128 || Object.keys(input).length !== input.length)
+      fail('STORE_INVALID_ARGUMENT', 'A CAS batch requires between one and 128 mutations.');
+    const mutations: readonly DurableCasMutation[] = snapshot(input);
+    const currentTime = now();
+    const seen = new Set<string>();
+    let bytes = 0;
+    const prepared = mutations.map(mutation => {
+      const candidate: unknown = mutation;
+      if (!isRecord(candidate) || typeof candidate.kind !== 'string' || !['write', 'delete', 'check'].includes(candidate.kind)
+        || Object.keys(candidate).some(key => !['kind', 'namespace', 'key', 'expectedRevision',
+          ...(candidate.kind === 'write' ? ['value', 'expiresAt'] : [])].includes(key))
+        || !Object.hasOwn(candidate, 'expectedRevision') || candidate.expectedRevision !== null
+          && (typeof candidate.expectedRevision !== 'number' || !Number.isSafeInteger(candidate.expectedRevision) || candidate.expectedRevision <= 0)
+        || candidate.kind === 'delete' && candidate.expectedRevision === null) fail('STORE_INVALID_ARGUMENT', 'A CAS mutation requires an exact expected revision.');
+      assertReference(mutation.namespace, 'namespace');
+      assertReference(mutation.key, 'key');
+      const identity = JSON.stringify([mutation.namespace, mutation.key]);
+      if (seen.has(identity)) fail('STORE_INVALID_ARGUMENT', 'A record may appear only once in a CAS batch.');
+      seen.add(identity);
+      const serialized = mutation.kind === 'write' ? JSON.stringify(mutation.value) : null;
+      const expiresAt = mutation.kind === 'write' ? mutation.expiresAt ?? null : null;
+      if (serialized === undefined || serialized !== null && Buffer.byteLength(serialized) > maxValueBytes
+        || expiresAt !== null && !Number.isSafeInteger(expiresAt)) fail('STORE_INVALID_ARGUMENT', 'A CAS mutation exceeds storage limits.');
+      bytes += serialized === null ? 0 : Buffer.byteLength(serialized);
+      if (bytes > 8 * 1024 * 1024) fail('STORE_VALUE_TOO_LARGE', 'A CAS batch exceeds its byte limit.');
+      return { mutation, serialized, expiresAt };
+    });
+    return transaction(() => {
+      // Check the complete read set before changing either business records or their journal.
+      const current = prepared.map(({ mutation }) => {
+        const value = existingRow(statements.selectRevision.get(mutation.namespace, mutation.key));
+        const active = value !== null && (value.expiresAt === null || value.expiresAt > currentTime);
+        if (mutation.expectedRevision === null ? active : !active || value!.revision !== mutation.expectedRevision)
+          fail('STORE_CONFLICT', 'Durable store revision does not match.');
+        return value;
+      });
+      const count = integerField(statements.countRecords.get()!, 'count');
+      const additions = prepared.filter((entry, index) => entry.mutation.kind === 'write' && current[index] === null).length;
+      const deletions = prepared.filter(entry => entry.mutation.kind === 'delete').length;
+      if (count + additions - deletions > maxRecords) fail('STORE_CAPACITY_EXCEEDED', 'Durable store record limit was reached.');
+      const result: (StoredRecord | null)[] = [];
+      for (const [index, entry] of prepared.entries()) {
+        const mutation = entry.mutation;
+        if (mutation.kind === 'delete') { statements.deleteRecordAtRevision.run(mutation.namespace, mutation.key, mutation.expectedRevision); result.push(null); continue; }
+        if (mutation.kind === 'check') {
+          const row = mutation.expectedRevision === null ? null : statements.selectRecord.get(mutation.namespace, mutation.key);
+          result.push(row ? decodeRecord(row) : null);
+          continue;
+        }
+        const revision = nextRevision();
+        if (current[index] === null) statements.insertRecord.run(mutation.namespace, mutation.key, entry.serialized, revision, currentTime, entry.expiresAt);
+        else statements.updateRecord.run(entry.serialized, revision, currentTime, entry.expiresAt, mutation.namespace, mutation.key);
+        result.push(snapshot({ namespace: mutation.namespace, key: mutation.key, revision, updatedAt: currentTime,
+          expiresAt: entry.expiresAt, value: mutation.value }));
+      }
+      return snapshot(result);
+    });
+  }
+
   function deleteRecord(namespace: string, key: string, expectedRevision?: number): boolean {
     assertOpen();
     assertReference(namespace, 'namespace');
@@ -475,8 +629,8 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       database.close();
     } catch (error: unknown) {
       redact(error, 'STORE_CLOSE_FAILED', 'Could not close durable store.');
-    }
+    } finally { if (existingDescriptor !== undefined) closeSync(existingDescriptor); }
   }
 
-  return { read, write, delete: deleteRecord, list, purgeExpired, stats, close };
+  return { read, write, delete: deleteRecord, list, compareAndSetBatch, purgeExpired, stats, createIndex, lookup, close };
 }

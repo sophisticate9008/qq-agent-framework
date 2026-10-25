@@ -1,10 +1,14 @@
+import type { AccountScope } from '../contracts/account-scope.ts';
+import { assertAccountScope, normalizeAccountScope } from '../core/account-scope.ts';
+import { bindAccountStore } from '../storage/account-scope.ts';
+import { isConfirmedMessageReceipt } from '../core/delivery.ts';
 import { setInterval, clearInterval } from 'node:timers';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { normalizeContent } from '../core/content.ts';
 import { createContextStore } from '../core/context.ts';
 import { createEngine } from '../core/engine.ts';
 import type { EngineOptions } from '../core/engine.ts';
-import { FrameworkError, assert, errorCode, reference, snapshot } from '../core/values.ts';
+import { FrameworkError, assert, errorCode, reference, snapshot, identifier } from '../core/values.ts';
 import type { Clock, FeatureExecution, FrameworkEvent, JsonObject, MessageContent, TransportAdapter } from '../core/types.ts';
 import { createPersistentPolicy } from '../storage/policy.ts';
 import { createPersistentFeatureState } from '../storage/state.ts';
@@ -27,14 +31,23 @@ export interface AgentMessagePreparation {
     readonly MessageContent[] | null | Promise<readonly MessageContent[] | null>;
 }
 
+export interface AgentInputPreparation {
+  capabilities: readonly string[];
+  prepare(execution: Pick<FeatureExecution, 'context' | 'signal' | 'invoke' | 'generate'>, event: FrameworkEvent):
+    readonly MessageContent[] | null | Promise<readonly MessageContent[] | null>;
+}
+
 export interface BridgeHostOptions {
+  accountScope?: AccountScope;
   store: DurableStore;
   agent: AgentAdapter;
   transport: TransportAdapter;
   context: ReturnType<typeof createContextStore>;
   persona: string;
-  authorizeIncoming(message: InboundMessage): boolean | Promise<boolean>;
+  authorizeIncoming(message: InboundMessage, signal: AbortSignal): boolean | Promise<boolean>;
+  followPool?: { readonly maxSessions: number; isIdle(binding: SessionBinding): boolean };
   routeIncoming?: MessageRouter;
+  agentInputPreparation?: AgentInputPreparation;
   agentMessagePreparation?: AgentMessagePreparation;
   model?: EngineOptions['model'];
   observer?: EngineOptions['observer'];
@@ -47,7 +60,9 @@ export interface BridgeHostOptions {
   timeouts?: Partial<BridgeTimeouts>;
   replyTimeoutMs?: number;
   replyTimeoutNotice?: string | null;
+  replyRecovery?: 'notify' | 'record-only';
   selectAgentMessage?(event: AgentEvent, binding: SessionBinding): readonly MessageContent[] | null;
+  splitAgentMessage?(content: readonly MessageContent[], event: FrameworkEvent): readonly (readonly MessageContent[])[];
   onFault?(code: string): void;
 }
 export interface InboundReceipt { status: 'accepted' | 'rejected' | 'unknown'; eventId: string; errorCode?: string }
@@ -75,8 +90,10 @@ function storedReceipt(record: StoredRecord): InboundReceipt {
 export function createBridgeHost({ store, agent: sourceAgent, transport: sourceTransport, context, persona, authorizeIncoming, clock = Date.now,
   taskTickMs = 250, maxConcurrentSends = 1, eventTimeoutMs = 30000, timeouts: timeoutInput,
   replyTimeoutMs = 30000, replyTimeoutNotice = '请求已提交，但尚未收到回复。结果尚未确认，未自动重复提交。',
-  selectAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
-  agentMessagePreparation }: BridgeHostOptions) {
+  selectAgentMessage, splitAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
+  agentInputPreparation, agentMessagePreparation, followPool, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
+  const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
+  bindAccountStore(store, accountScope);
   assert(typeof authorizeIncoming === 'function' && Number.isSafeInteger(taskTickMs) && taskTickMs >= 10 && taskTickMs <= 60000,
     'INVALID_HOST', 'Explicit ingress authorization and a bounded task tick are required.');
   context.resolve({ persona });
@@ -85,6 +102,9 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   assert(selectAgentMessage === undefined || typeof selectAgentMessage === 'function'
     && !['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(selectAgentMessage.constructor.name),
   'INVALID_HOST', 'Agent output selection must be synchronous.');
+  assert(splitAgentMessage === undefined || typeof splitAgentMessage === 'function'
+    && !['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(splitAgentMessage.constructor.name),
+  'INVALID_HOST', 'Agent message splitting must be a trusted synchronous decision.');
   assertExtensionNames(eventValidators, effectAdapters);
   assert(routeIncoming === undefined || typeof routeIncoming === 'function'
     && !['AsyncFunction', 'GeneratorFunction', 'AsyncGeneratorFunction'].includes(routeIncoming.constructor.name),
@@ -96,17 +116,26 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     && new Set(agentMessagePreparation.capabilities).size === agentMessagePreparation.capabilities.length,
   'INVALID_HOST', 'Agent message preparation requires bounded declared capabilities.');
   const prepareAgentMessage = agentMessagePreparation?.prepare;
+  assert(agentInputPreparation === undefined || agentInputPreparation && typeof agentInputPreparation.prepare === 'function'
+    && Array.isArray(agentInputPreparation.capabilities) && agentInputPreparation.capabilities.length <= 32
+    && agentInputPreparation.capabilities.every(capability => typeof capability === 'string')
+    && new Set(agentInputPreparation.capabilities).size === agentInputPreparation.capabilities.length,
+  'INVALID_HOST', 'Agent input preparation requires bounded declared capabilities.');
+  const prepareAgentInput = agentInputPreparation?.prepare;
+  assert(followPool === undefined || Number.isSafeInteger(followPool.maxSessions) && followPool.maxSessions >= 1
+    && followPool.maxSessions <= 256 && typeof followPool.isIdle === 'function',
+  'INVALID_HOST', 'A follow pool requires bounded capacity and an explicit idle predicate.');
   const timeouts = bridgeTimeouts(timeoutInput);
   const boundaryFault = (code: string) => fault(new FrameworkError(code, 'An external operation is unresolved.'));
   const agent = createBoundedAgent({ agent: sourceAgent, timeouts, onFault: boundaryFault });
   const transport = createBoundedTransport({ transport: sourceTransport, timeoutMs: timeouts.sendMs, onFault: boundaryFault });
-  const policy = createPersistentPolicy({ store, clock });
+  const policy = createPersistentPolicy({ store, clock, accountScope });
   const state = createPersistentFeatureState({ store });
-  const sessions = createSessionRegistry({ store, agent, clock });
-  const outbox = createDurableTransport({ store, transport, clock });
+  const sessions = createSessionRegistry({ store, agent, clock, accountScope });
+  const outbox = createDurableTransport({ store, transport, clock, accountScope });
   const tasks = createTaskQueue({ store, clock });
   const history = createConversationHistory({ store });
-  const replies = createReplyWatchdog({ store, clock, timeoutMs: replyTimeoutMs, onFault: boundaryFault,
+  const replies = createReplyWatchdog({ store, clock, timeoutMs: replyTimeoutMs, recovery: replyRecovery, onFault: boundaryFault,
     async onTimeout(notice, signal) {
       const current = sessions.get(notice.conversationId);
       if (!current || current.generation !== notice.generation || current.sessionId !== notice.sessionId) return;
@@ -120,6 +149,8 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   const retiringFollows = new Map<string, { binding: SessionBinding; controller: AbortController; dispose?: () => void | Promise<void> }>();
   const unhealthyFollows = new Set<string>();
   const following = new Map<string, Promise<void>>();
+  const followUsers = new Map<string, number>();
+  let followAdmission = Promise.resolve();
   const pending = new Map<string, { fingerprint: string; promise: Promise<InboundReceipt> }>();
   let timer: ReturnType<typeof setInterval> | undefined;
   let started: Promise<void> | null = null;
@@ -138,32 +169,45 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     try { onFault(code); } catch {}
   }
 
-  const engine = createEngine({ persona, context, policy, state, transport: outbox, model, observer, clock, maxConcurrentSends, eventTimeoutMs,
+  const engine = createEngine({ accountScope, persona, context, policy, state, transport: outbox, model, observer, clock, maxConcurrentSends, eventTimeoutMs,
     eventValidators: { ...eventValidators, 'agent.message': data => {
       try { normalizeContent(data.content); return true; } catch { return false; }
     }, 'agent.completed': () => true, 'agent.failed': () => true, 'agent.question': () => true, 'agent.approval': () => true,
     'agent.reply-timeout': data => reference(data.requestId) && Number.isSafeInteger(data.generation) && Number.isFinite(data.deadlineAt) },
     effectAdapters: { ...effectAdapters, 'agent.submit': { async execute(request) {
       const content = normalizeContent(object(request.input).content);
-      const binding = await sessions.resolve(request.scope.conversationId, request.signal);
-      await ensureFollow(binding);
-      assert(!request.signal.aborted && sessions.get(binding.conversationId)?.generation === binding.generation,
-        'SESSION_STALE', 'The agent session is no longer current.');
-      assert(follows.get(binding.conversationId)?.binding.sessionId === binding.sessionId
-        && !follows.get(binding.conversationId)?.controller.signal.aborted,
-      'AGENT_FOLLOW_UNAVAILABLE', 'A live agent follow is required before submitting new work.');
-      return json(await agent.submit({ sessionId: binding.sessionId,
-        requestId: digest([request.scope.conversationId, request.scope.eventId, 'prompt']), content, signal: request.signal }));
+      const conversationId = request.scope.conversationId;
+      const binding = await admitFollow(conversationId, request.signal, async () => {
+        request.signal.throwIfAborted();
+        const binding = await sessions.resolve(conversationId, request.signal);
+        request.signal.throwIfAborted();
+        await ensureFollow(binding, request.signal);
+        return binding;
+      });
+      try {
+        assert(!request.signal.aborted && sessions.get(binding.conversationId)?.generation === binding.generation,
+          'SESSION_STALE', 'The agent session is no longer current.');
+        assert(follows.get(binding.conversationId)?.binding.sessionId === binding.sessionId
+          && !follows.get(binding.conversationId)?.controller.signal.aborted,
+        'AGENT_FOLLOW_UNAVAILABLE', 'A live agent follow is required before submitting new work.');
+        return json(await agent.submit({ sessionId: binding.sessionId,
+          requestId: digest([request.scope.conversationId, request.scope.eventId, 'prompt']), content, signal: request.signal }));
+      } finally { releaseFollowUser(conversationId); }
     } } } });
 
   engine.install({ id: 'agent-relay', version: '1.0.0', apiVersion: 1,
-    capabilities: [...new Set(['agent.submit', 'messaging.send', 'messaging.forward', ...(agentMessagePreparation?.capabilities ?? [])])],
+    capabilities: [...new Set(['agent.submit', 'messaging.send', 'messaging.forward',
+      ...(agentInputPreparation?.capabilities ?? []), ...(agentMessagePreparation?.capabilities ?? [])])],
     subscriptions: ['message.received', 'agent.message', 'agent.reply-timeout'],
     setup(services) {
       services.on('message.received', async (execution, event) => {
         if (event.data.directed !== true || event.data.isSelf === true) return;
         if (event.data.routing !== undefined && !routedMessageRelaysToAgent(event)) return;
-        const result = object(await execution.invoke('agent.submit', { content: json(normalizeContent(event.data.content)) }));
+        const prepared = prepareAgentInput ? await prepareAgentInput(Object.freeze({ context: execution.context,
+          signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), snapshot(event)) : event.data.content;
+        if (prepared === null) return;
+        execution.signal.throwIfAborted();
+        const result = object(await execution.invoke('agent.submit', { content: json(normalizeContent(prepared)) }));
         assert(result.status === 'accepted', result.status === 'rejected' ? 'AGENT_REJECTED' : 'AGENT_UNKNOWN',
           'The agent did not confirm prompt acceptance.');
         const binding = sessions.get(event.conversationId);
@@ -179,12 +223,20 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
           signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), event) : event.data.content;
         if (prepared === null) return;
         const content = normalizeContent(prepared);
-        const result = await execution.send(content);
-        assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
-          'The transport did not confirm delivery.');
-        history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content, receivedAt: clock() });
-        const binding = sessions.get(event.conversationId);
-        if (binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation) replies.responded(binding);
+        const selected = splitAgentMessage ? splitAgentMessage(content, snapshot(event)) : [content];
+        assert(Array.isArray(selected) && selected.length > 0 && selected.length <= 4,
+          'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
+        const messages = selected.map(message => normalizeContent(message));
+        for (const [index, message] of messages.entries()) {
+          const result = await execution.send(message);
+          assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
+            'The transport did not confirm delivery.');
+          if (isConfirmedMessageReceipt(result)) history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content: message, receivedAt: clock() });
+          if (index === 0) {
+            const binding = sessions.get(event.conversationId);
+            if (binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation) replies.responded(binding);
+          }
+        }
       });
       services.on('agent.reply-timeout', async (execution, event) => {
         if (replyTimeoutNotice === null) return;
@@ -193,7 +245,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         const binding = sessions.get(event.conversationId);
         if (!binding || binding.sessionId !== event.sessionId || binding.generation !== event.data.generation) return;
         const result = await execution.send([{ type: 'text', text: replyTimeoutNotice }]);
-        assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
+        assert(isConfirmedMessageReceipt(result), result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
           'The timeout notice was not confirmed.');
         history.append(event.conversationId, { id: result.messageId, actor: 'system', receivedAt: clock(),
           content: [{ type: 'text', text: replyTimeoutNotice }] });
@@ -226,7 +278,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     const work = (async (): Promise<InboundReceipt> => {
       let result: InboundReceipt;
       try {
-        const report = await engine.emit(event, { signal });
+        const report = await engine.emit({ ...event, ...(accountScope ? { accountScope } : {}) }, { signal });
         const failed = report.outcomes.find(outcome => outcome.status === 'failed');
         result = failed ? { status: failed.errorCode?.includes('UNKNOWN') ? 'unknown' : 'rejected',
           eventId: event.id, errorCode: failed.errorCode ?? 'FEATURE_FAILED' } : { status: 'accepted', eventId: event.id };
@@ -384,12 +436,68 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     return work;
   }
 
+  function releaseFollowUser(conversationId: string) {
+    const users = followUsers.get(conversationId) ?? 0;
+    if (users <= 1) followUsers.delete(conversationId);
+    else followUsers.set(conversationId, users - 1);
+  }
+
+  function admitFollow<Value>(conversationId: string, signal: AbortSignal, operation: () => Promise<Value>): Promise<Value> {
+    if (!followPool) return operation();
+    const work = followAdmission.then(async () => {
+      signal.throwIfAborted();
+      const previous = follows.get(conversationId);
+      if (!previous || previous.controller.signal.aborted) {
+        if (follows.size + retiringFollows.size >= followPool.maxSessions) {
+          const idle = [...follows.values()].find(entry => !followUsers.has(entry.binding.conversationId)
+            && entry.dispose && !entry.controller.signal.aborted && followPool.isIdle(entry.binding) === true);
+          assert(idle, 'AGENT_FOLLOW_BACKPRESSURE', 'All agent follow slots are busy.');
+          const idleId = idle.binding.conversationId;
+          follows.delete(idleId);
+          retiringFollows.set(idleId, idle);
+          idle.controller.abort();
+          const faultsBeforeDispose = faultCount;
+          await idle.dispose!();
+          assert(faultCount === faultsBeforeDispose, 'AGENT_FOLLOW_BACKPRESSURE', 'An idle follow has not drained.');
+          if (retiringFollows.get(idleId) === idle) retiringFollows.delete(idleId);
+        }
+        signal.throwIfAborted();
+        assert(follows.size + retiringFollows.size < followPool.maxSessions,
+          'AGENT_FOLLOW_BACKPRESSURE', 'All agent follow slots are busy.');
+      }
+      followUsers.set(conversationId, (followUsers.get(conversationId) ?? 0) + 1);
+      try {
+        const result = await operation();
+        const current = follows.get(conversationId);
+        if (current) { follows.delete(conversationId); follows.set(conversationId, current); }
+        return result;
+      } catch (error) { releaseFollowUser(conversationId); throw error; }
+    });
+    followAdmission = work.then(() => undefined, () => undefined);
+    return work;
+  }
+
   return Object.freeze({
-    engine, policy, sessions, outbox, tasks, history, replies,
+    accountScope, engine, policy, sessions, outbox, tasks, history, replies,
     storageStats(options?: DurableStoreStatsOptions) { return store.stats?.(options) ?? null; },
-    async receive(input: InboundMessage): Promise<InboundReceipt> {
+    async dispatchEvent(input: FrameworkEvent, options: { signal?: AbortSignal } = {}): Promise<InboundReceipt> {
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
+      const event = snapshot(input);
+      assertAccountScope(accountScope, event.accountScope);
+      assert(reference(event.id) && reference(event.conversationId) && identifier(event.type)
+        && !event.type.startsWith('agent.') && !coreEventTypes.has(event.type)
+        && Object.hasOwn(eventValidators, event.type),
+      'INVALID_EXTERNAL_EVENT', 'External events require a registered non-core event type.');
+      const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+      signal.throwIfAborted();
+      return processEvent(event, signal);
+    },
+    async receive(input: InboundMessage, options: { signal?: AbortSignal } = {}): Promise<InboundReceipt> {
+      assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
+      const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+      signal.throwIfAborted();
       const message = snapshot({ ...snapshot(input), content: normalizeContent(input.content) });
+      assertAccountScope(accountScope, message.accountScope);
       assert(reference(message.id) && reference(message.conversationId) && reference(message.userId)
         && Number.isFinite(message.receivedAt) && typeof message.directed === 'boolean' && typeof message.isSelf === 'boolean',
       'INVALID_INBOUND', 'A normalized authenticated message is required.');
@@ -398,11 +506,11 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         return snapshot({ status: 'rejected', eventId: message.id, errorCode: 'INBOUND_BACKPRESSURE' });
       }
       try {
-        allowed = await withDeadline({ signal: controller.signal, timeoutMs: timeouts.authorizeMs, code: 'INBOUND_AUTH_TIMEOUT',
-          run: () => {
+        allowed = await withDeadline({ signal, timeoutMs: timeouts.authorizeMs, code: 'INBOUND_AUTH_TIMEOUT',
+          run: authorizationSignal => {
             unsettledAuthorizations++;
             let result: boolean | Promise<boolean>;
-            try { result = authorizeIncoming(message); }
+            try { result = authorizeIncoming(message, authorizationSignal); }
             catch (error) { unsettledAuthorizations--; throw error; }
             return Promise.resolve(result).then(value => { unsettledAuthorizations--; return value; }, error => {
               unsettledAuthorizations--;
@@ -415,6 +523,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       }
       if (allowed !== true) return snapshot({ status: 'rejected', eventId: message.id, errorCode: 'INBOUND_DENIED' });
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
+      signal.throwIfAborted();
       let routed: FrameworkEvent | undefined;
       if (routeIncoming) {
         try { routed = createRoutedMessageEvent(message, routeIncoming(message)); }
@@ -423,7 +532,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       history.append(message.conversationId, { id: message.id, actor: message.userId, content: message.content, receivedAt: message.receivedAt });
       return processEvent(routed ?? { id: message.id, type: 'message.received', conversationId: message.conversationId, userId: message.userId,
         data: { content: json(message.content), text: message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
-          directed: message.directed, isSelf: message.isSelf } });
+          directed: message.directed, isSelf: message.isSelf } }, signal);
     },
     start() {
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
@@ -467,7 +576,12 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
               await Promise.all(batch.map(async session => {
                 if (session.state !== 'ready') return;
                 const binding = sessions.get(session.conversationId);
-                if (binding) { try { await ensureFollow(binding, signal); } catch (error) { fault(error); } }
+                if (!binding || followPool?.isIdle(binding) === true) return;
+                if (followPool && follows.size + retiringFollows.size >= followPool.maxSessions) return;
+                try {
+                  await admitFollow(binding.conversationId, signal, async () => { await ensureFollow(binding, signal); });
+                  releaseFollowUser(binding.conversationId);
+                } catch (error) { if (errorCode(error) !== 'AGENT_FOLLOW_BACKPRESSURE') fault(error); }
               }));
               if (batch.length < 4) break;
               after = batch[batch.length - 1].conversationId;

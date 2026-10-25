@@ -1,3 +1,6 @@
+import { assertAccountScope, normalizeAccountScope } from './account-scope.ts';
+import type { AccountScope } from '../contracts/account-scope.ts';
+import { normalizeDeliveryReceipt } from './delivery.ts';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { setImmediate as nextTurn } from 'node:timers/promises';
@@ -12,6 +15,7 @@ import type { AuditEntry, AuditRecord, Clock, DeliveryReceipt, EffectAdapter, Ev
 import type { FeatureStateScope } from './context.ts';
 
 export interface EngineOptions {
+  accountScope?: AccountScope;
   clock?: Clock;
   transport: TransportAdapter;
   model?: ModelAdapter;
@@ -45,7 +49,7 @@ interface FeatureRecord {
   faultCodes: string[];
   stopPromise?: Promise<boolean>;
 }
-interface OutboxEntry {
+export interface OutboxEntry {
   id: string;
   eventId: string;
   conversationId: string;
@@ -54,6 +58,9 @@ interface OutboxEntry {
   status: 'queued' | 'sending' | 'confirmed' | 'unknown' | 'rejected' | 'denied';
   contentTypes: string[];
   messageId?: string;
+  kind?: 'file-upload';
+  fileId?: string;
+  name?: string;
   errorCode?: string;
 }
 interface EffectRecord { fingerprint: string; settled: boolean; view: OutboxEntry; promise: Promise<DeliveryReceipt> }
@@ -149,9 +156,11 @@ function featureDefinition(feature: FeatureDefinition, supportedEvents: Set<stri
 }
 
 export function createEngine({ clock = Date.now, transport, model, context = createContextStore({ clock }), state = createFeatureState(),
-  policy = createPolicy({ clock }), persona, observer = () => {}, historyLimit = 500,
+  accountScope: accountInput, policy: policyInput, persona, observer = () => {}, historyLimit = 500,
   maxPendingEvents = 256, maxPendingEffects = 512, yieldEvery = 64, yieldAfterMs = 8, maxConcurrentSends = 1,
   eventTimeoutMs = 30000, eventValidators = {}, effectAdapters = {} }: EngineOptions) {
+  const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
+  const policy = policyInput ?? createPolicy({ clock, accountScope });
   assert(transport && typeof transport.send === 'function', 'INVALID_ADAPTER', 'A transport adapter is required.');
   assert(reference(persona) && Number.isSafeInteger(historyLimit) && historyLimit > 0,
     'INVALID_ENGINE', 'A persona reference and a positive history limit are required.');
@@ -346,10 +355,10 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
 
   function executionFor(record: FeatureRecord, event: FrameworkEvent, deadline: EventDeadline): Execution {
     const featureId = record.definition.id;
-    const base = { eventId: event.id, conversationId: event.conversationId, featureId, version: record.definition.version };
+    const base = { ...(accountScope ? { accountScope } : {}), eventId: event.id, conversationId: event.conversationId, featureId, version: record.definition.version };
     const resolved = context.resolve({ persona, conversationId: event.conversationId, userId: event.userId,
       sessionId: event.sessionId, taskId: event.taskId });
-    const outboundScope = normalizeOutboundScope({ persona: { id: resolved.persona.id, version: resolved.persona.version },
+    const outboundScope = normalizeOutboundScope({ ...(accountScope ? { accountScope } : {}), persona: { id: resolved.persona.id, version: resolved.persona.version },
       ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
       ...(event.sessionId !== undefined && Number.isSafeInteger(event.data.generation) && Number(event.data.generation) > 0
         ? { generation: event.data.generation } : {}) });
@@ -387,7 +396,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     function authorize(capability: string) {
       accessible();
       assert(record.definition.capabilities.includes(capability), 'UNDECLARED_CAPABILITY', 'The feature did not declare this effect.');
-      const reservation = policy.reserve({ featureId, conversationId: event.conversationId, capability });
+      const reservation = policy.reserve({ featureId, conversationId: event.conversationId, capability, ...(accountScope ? { accountScope } : {}) });
       policy.begin(reservation);
     }
 
@@ -458,7 +467,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
     function send(content: readonly MessageContent[]): Promise<DeliveryReceipt> {
       accessible();
       const message = normalizeContent(content);
-      const effectId = digest([event.conversationId, event.id, featureId, ordinal++]);
+      const effectId = digest([...(accountScope ? [accountScope] : []), event.conversationId, event.id, featureId, ordinal++]);
       const fingerprint = digest(message);
       const prior = effects.get(effectId);
       if (prior) {
@@ -503,9 +512,7 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
             let receipt: DeliveryReceipt;
             try { receipt = await beforeDeadline(operation, deadline, true); }
             finally { activeExternalEffects--; }
-            result = receipt?.status === 'confirmed' && reference(receipt.messageId)
-              ? { status: 'confirmed', messageId: receipt.messageId }
-              : receipt?.status === 'rejected' ? { status: 'rejected' } : { status: 'unknown' };
+            result = normalizeDeliveryReceipt(receipt);
           } catch (error) {
             result = { status: 'unknown' };
             const code = errorCode(error, 'SEND_UNKNOWN');
@@ -629,7 +636,8 @@ export function createEngine({ clock = Date.now, transport, model, context = cre
       try { valid = validators.get(event.type)!(event.data) === true; } catch {}
       assert(valid, 'INVALID_EVENT', 'The custom event data did not satisfy its host contract.');
     }
-    const key = JSON.stringify([event.conversationId, event.id]);
+    assertAccountScope(accountScope, event.accountScope);
+    const key = JSON.stringify([...(accountScope ? [accountScope] : []), event.conversationId, event.id]);
     const fingerprint = digest(event);
     const prior = events.get(key);
     if (prior) {

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
+import { parseNativeConversationDiagnostics } from '../src/contracts/native-diagnostics.ts';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
 import { connect, isIP } from 'node:net';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
@@ -19,6 +20,8 @@ import {
   startOneBotGateway,
   type OneBotGatewayConfiguration
 } from '../src/host/onebot-gateway.ts';
+import { loadSelectedNativeBootstrap } from './bootstrap-loader.ts';
+import { discoverTestFiles, testConcurrency, testExecutionBatches, TEST_SUITES, type TestSuite } from './test-discovery.ts';
 
 const PLAYWRIGHT_VERSION = '1.61.1';
 const BROWSER_TYPESCRIPT_VERSION = '5.9.3';
@@ -33,10 +36,11 @@ const BROWSER_TARGETS = Object.freeze({
   markdown: 'scripts/markdown-smoke.ts',
   presentation: 'scripts/presentation-smoke.ts',
   'virtual-list-perf': 'scripts/virtual-list-perf-smoke.ts',
-  'native-chat-ui': 'scripts/native-chat-ui-smoke.ts'
+  'native-chat-ui': 'scripts/native-chat-ui-smoke.ts',
+  'execution-journal': 'scripts/execution-journal-smoke.ts'
 });
 
-type CliCommand = 'init' | 'start' | 'status' | 'test' | 'build' | 'install' | 'uninstall';
+type CliCommand = 'init' | 'start' | 'status' | 'doctor' | 'test' | 'build' | 'install' | 'uninstall';
 type BrowserTarget = keyof typeof BROWSER_TARGETS;
 
 export interface ParsedCliArguments {
@@ -44,12 +48,17 @@ export interface ParsedCliArguments {
   readonly help: boolean;
   readonly config?: string;
   readonly gatewayConfig?: string;
+  readonly conversation?: string;
+  readonly account?: string;
   readonly serviceManager?: string;
+  readonly bootstrap?: string;
   readonly host?: string;
   readonly port?: number;
   readonly browser: boolean;
   readonly withDeps: boolean;
   readonly adminOnly: boolean;
+  readonly suite?: TestSuite;
+  readonly built?: boolean;
   readonly target?: BrowserTarget;
   readonly skipBrowserDownload?: boolean;
 }
@@ -76,9 +85,11 @@ const GENERAL_HELP = `QQ Agent Framework 命令行
 用法：
   npm run cli -- init [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]
   npm run cli -- init --gateway-config <网关配置> [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]
-  npm run cli -- start [--config <管理配置>] [--admin-only]
+  npm run cli -- start [--config <管理配置>] [--admin-only] [--bootstrap <可信本机TS绝对路径>]
   npm run cli -- status [--config <管理配置>]
-  npm run cli -- test [--browser [--target <项目>] [--with-deps]]
+  npm run cli -- doctor --conversation <group:群号|private:QQ号> [--account <账号ID>] [--config <管理配置>]
+  npm run cli -- test [--suite all|fast|deadline|integration] [--built]
+  npm run cli -- test --browser [--target <项目>] [--with-deps]
   npm run cli -- install --browser [--skip-browser-download] [--with-deps]
   npm run cli -- uninstall --browser
   npm run cli -- build
@@ -89,7 +100,10 @@ init 默认创建独立的本机 OneBot HTTP 网关配置；--gateway-config 可
 新配置不允许任何会话发送；请首次访问管理网页生成管理令牌，再显式配置外部 OneBot 和发送范围。
 只有显式提供 --service-manager 时才启用服务管理，不会自动猜测或执行脚本。
 start 默认启动或复用配置匹配的 gateway；--admin-only 仅启动管理界面。
+--bootstrap 在本次 start 显式选择可信本机 TypeScript 扩展；未指定时读取管理配置旁的固定版本选择，不自动授予权限。
 普通安装、构建、启动和单元测试不需要 Playwright。
+test 默认构建并递归执行全部源码与编译后测试；--built 仅执行编译后测试。
+--suite fast 排除独立集成与六十秒真实时限场景；deadline 和 integration 可单独执行，省略为 all。
 install --browser 或 test --browser 才准备 runtime/testing/ 内的独立浏览器测试工具。
 --skip-browser-download 只安装测试包；--with-deps 额外安装系统库，可能需要管理员权限。
 --target 可选：${Object.keys(BROWSER_TARGETS).join('、')}；省略时执行全部浏览器测试。
@@ -112,7 +126,7 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     if (argumentsList.length !== 1) usage('帮助命令不接受其他参数。');
     return { command: 'start', help: true, browser: false, withDeps: false, adminOnly: false };
   }
-  if (!['init', 'start', 'status', 'test', 'build', 'install', 'uninstall'].includes(first)) usage('未知命令。');
+  if (!['init', 'start', 'status', 'doctor', 'test', 'build', 'install', 'uninstall'].includes(first)) usage('未知命令。');
   const command = first as CliCommand;
   const values = new Map<string, string>();
   const flags = new Set<string>();
@@ -122,12 +136,12 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
       if (argumentsList.length !== 2) usage('帮助参数不能与其他参数同时使用。');
       return { command, help: true, browser: false, withDeps: false, adminOnly: false };
     }
-    if (['--browser', '--with-deps', '--admin-only', '--skip-browser-download'].includes(argument)) {
+    if (['--browser', '--with-deps', '--admin-only', '--skip-browser-download', '--built'].includes(argument)) {
       if (flags.has(argument)) usage(`参数 ${argument} 不能重复。`);
       flags.add(argument);
       continue;
     }
-    if (['--config', '--gateway-config', '--service-manager', '--host', '--port', '--target'].includes(argument)) {
+    if (['--config', '--gateway-config', '--service-manager', '--host', '--port', '--target', '--bootstrap', '--suite', '--conversation', '--account'].includes(argument)) {
       if (values.has(argument)) usage(`参数 ${argument} 不能重复。`);
       values.set(argument, optionValue(argumentsList, index, argument));
       index += 1;
@@ -138,36 +152,54 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
 
   const allowed = command === 'init'
     ? new Set(['--config', '--gateway-config', '--service-manager', '--host', '--port'])
-    : command === 'start' ? new Set(['--config', '--admin-only'])
+    : command === 'start' ? new Set(['--config', '--admin-only', '--bootstrap'])
+      : command === 'doctor' ? new Set(['--config', '--conversation', '--account'])
       : command === 'status' ? new Set(['--config'])
-      : command === 'test' ? new Set(['--browser', '--with-deps', '--target'])
+      : command === 'test' ? new Set(['--browser', '--with-deps', '--target', '--suite', '--built'])
         : command === 'install' ? new Set(['--browser', '--with-deps', '--skip-browser-download'])
           : command === 'uninstall' ? new Set(['--browser']) : new Set<string>();
   for (const option of [...values.keys(), ...flags]) {
     if (!allowed.has(option)) usage(`命令 ${command} 不支持参数 ${option}。`);
   }
   if (flags.has('--with-deps') && !flags.has('--browser')) usage('--with-deps 只能与 --browser 一起使用。');
+  const suite = values.get('--suite');
+  if (suite !== undefined && !TEST_SUITES.some(value => value === suite)) usage(`--suite 可选：${TEST_SUITES.join('、')}。`);
+  if (flags.has('--browser') && (suite !== undefined || flags.has('--built'))) usage('--browser 不能与 --suite 或 --built 同时使用。');
   if ((command === 'install' || command === 'uninstall') && !flags.has('--browser')) usage('请指定 --browser，只管理可选的浏览器测试工具。');
   if (flags.has('--skip-browser-download') && flags.has('--with-deps')) usage('--skip-browser-download 不能与 --with-deps 同时使用。');
   const target = values.get('--target');
   if (target !== undefined && (!flags.has('--browser') || !Object.hasOwn(BROWSER_TARGETS, target))) {
     usage(`--target 必须与 --browser 一起使用，可选：${Object.keys(BROWSER_TARGETS).join('、')}。`);
   }
+  const conversation = values.get('--conversation');
+  if (command === 'doctor' && (!conversation || !/^(?:group|private):[1-9][0-9]{0,31}$/.test(conversation))) usage('doctor 需要 --conversation group:群号 或 private:QQ号。');
+  const account = values.get('--account');
+  if (account !== undefined && !/^[0-9a-f]{64}$/.test(account)) usage('--account 需要账号管理中的完整账号ID。');
   const portText = values.get('--port');
   if (portText !== undefined && !/^[1-9]\d{0,4}$/.test(portText)) usage('--port 必须是 1 到 65535 的整数。');
   const port = portText === undefined ? undefined : Number(portText);
   if (port !== undefined && port > 65_535) usage('--port 必须是 1 到 65535 的整数。');
+  const bootstrap = values.get('--bootstrap');
+  if (bootstrap !== undefined && (!isAbsolute(bootstrap) || resolve(bootstrap) !== bootstrap
+    || !bootstrap.endsWith('.ts') || bootstrap.length > 4096 || /[\x00-\x1f\x7f?#]/.test(bootstrap))) {
+    usage('--bootstrap 必须是明确的本机 .ts 文件绝对路径，不能使用 URL、相对路径或查询参数。');
+  }
   return {
     command,
     help: false,
+    ...(conversation === undefined ? {} : { conversation }),
+    ...(account === undefined ? {} : { account }),
     ...(values.has('--config') ? { config: values.get('--config')! } : {}),
     ...(values.has('--gateway-config') ? { gatewayConfig: values.get('--gateway-config')! } : {}),
     ...(values.has('--service-manager') ? { serviceManager: values.get('--service-manager')! } : {}),
+    ...(bootstrap === undefined ? {} : { bootstrap }),
     ...(values.has('--host') ? { host: values.get('--host')! } : {}),
     ...(port === undefined ? {} : { port }),
     browser: flags.has('--browser'),
     withDeps: flags.has('--with-deps'),
     adminOnly: flags.has('--admin-only'),
+    ...(suite === undefined ? {} : { suite: suite as TestSuite }),
+    ...(flags.has('--built') ? { built: true } : {}),
     ...(target === undefined ? {} : { target: target as BrowserTarget }),
     ...(flags.has('--skip-browser-download') ? { skipBrowserDownload: true } : {})
   };
@@ -453,20 +485,20 @@ export function uninstallBrowserToolchain(root = PROJECT_ROOT): void {
   rmSync(paths.directory, { recursive: true, force: true });
 }
 
-function testFiles(directory: string, extension: '.ts' | '.js'): readonly string[] {
-  const root = resolve(PROJECT_ROOT, directory);
-  return readdirSync(root, { withFileTypes: true })
-    .filter(entry => entry.isFile() && entry.name.endsWith(`.test${extension}`))
-    .map(entry => join(root, entry.name))
-    .sort();
-}
-
 async function runTests(parsed: ParsedCliArguments, io: CliIo): Promise<void> {
   const { browser, withDeps, target } = parsed;
   if (!browser) {
+    const concurrency = testConcurrency(process.env.QQ_TEST_CONCURRENCY);
     await build();
-    await runProcess(process.execPath, ['--test', '--test-concurrency=4', ...testFiles('test', '.ts')]);
-    await runProcess(process.execPath, ['--test', '--test-concurrency=4', ...testFiles('dist/test', '.js')]);
+    const suite = parsed.suite ?? 'all';
+    for (const [directory, extension] of (parsed.built ? [['dist/test', '.js']] : [['test', '.ts'], ['dist/test', '.js']]) as Array<[string, '.ts' | '.js']>) {
+      const files = discoverTestFiles(resolve(PROJECT_ROOT, directory), extension, suite);
+      if (files.length === 0) throw new CliOperationError(`测试集合 ${suite} 未发现测试：${directory}`);
+      io.stdout(`执行 ${suite} 测试：${directory}（${files.length} 个文件）`);
+      for (const batch of testExecutionBatches(files)) {
+        await runProcess(process.execPath, ['--test', `--test-concurrency=${concurrency}`, ...batch]);
+      }
+    }
     return;
   }
   await prepareBrowser(withDeps, true, io);
@@ -589,14 +621,37 @@ async function status(configurationFilename: string, output: (message: string) =
   output(`管理服务运行正常：${address}`);
 }
 
-async function start(configurationFilename: string, adminOnly: boolean, output: (message: string) => void): Promise<void> {
+async function doctor(configurationFilename: string, conversationId: string, output: (message: string) => void, account?: string): Promise<void> {
   const configuration = loadGatewayAdminConfiguration(configurationFilename);
+  if (!existsSync(configuration.tokenFile)) throw new CliOperationError('请先完成管理端初始化，才能读取逐会话诊断。');
+  const token = readFileSync(configuration.tokenFile, 'utf8').trim();
+  let response: Response;
+  const endpoint = new URL(account ? '/api/accounts/dispatch' : '/api/chat/diagnostics', gatewayAdminAddress(configuration));
+  endpoint.searchParams.set('conversationId', conversationId);
+  if (account) { endpoint.searchParams.set('account', account); endpoint.searchParams.set('path', '/api/chat/diagnostics'); }
+  try {
+    response = await fetch(endpoint, {
+      headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(15_000)
+    });
+  } catch { throw new CliOperationError('无法读取逐会话诊断；请检查管理服务。'); }
+  const result = await readJson(response);
+  const parsed = parseNativeConversationDiagnostics(result);
+  if (!response.ok || !parsed || parsed.conversationId !== conversationId) {
+    throw new CliOperationError('逐会话诊断不可用，尚未确认会话正常。');
+  }
+  output(JSON.stringify(parsed, null, 2));
+}
+
+async function start(configurationFilename: string, adminOnly: boolean, output: (message: string) => void,
+  bootstrapFilename?: string): Promise<void> {
+  const configuration = loadGatewayAdminConfiguration(configurationFilename);
+  const bootstrap = await loadSelectedNativeBootstrap(configurationFilename, bootstrapFilename);
   await build(true);
   let gateway: PreparedGateway | undefined;
   let service: Awaited<ReturnType<typeof startGatewayAdmin>>;
   try {
     if (!adminOnly) gateway = await prepareGatewayForStart(configuration.gatewayConfiguration);
-    service = await startGatewayAdmin(configuration, { configurationFilename });
+    service = await startGatewayAdmin(configuration, { configurationFilename, ...(bootstrap === undefined ? {} : { bootstrap }) });
   } catch (error: unknown) {
     if (gateway?.started) await gateway.close();
     throw error;
@@ -605,6 +660,9 @@ async function start(configurationFilename: string, adminOnly: boolean, output: 
     ...configuration,
     port: service.address.port
   })}`);
+  if (bootstrap !== undefined) {
+    output(`可信启动扩展已加载：${bootstrap.metadata.manifest.id}@${bootstrap.metadata.manifest.version}；功能权限仍需独立授权。`);
+  }
   await new Promise<void>((resolvePromise, rejectPromise) => {
     let closing = false;
     const handlers = new Map<NodeJS.Signals, () => void>();
@@ -687,7 +745,9 @@ export async function runCli(argumentsList: readonly string[], io: CliIo = DEFAU
       const address = gatewayAdminAddress(loadGatewayAdminConfiguration(configurationFilename));
       io.stdout(`启动后访问 ${address}，首次网页访问将生成管理令牌。`);
     } else if (parsed.command === 'start') {
-      await start(resolveConfigurationFilename(parsed.config, io.env, io.cwd), parsed.adminOnly, io.stdout);
+      await start(resolveConfigurationFilename(parsed.config, io.env, io.cwd), parsed.adminOnly, io.stdout, parsed.bootstrap);
+    } else if (parsed.command === 'doctor') {
+      await doctor(resolveConfigurationFilename(parsed.config, io.env, io.cwd), parsed.conversation!, io.stdout, parsed.account);
     } else if (parsed.command === 'status') {
       await status(resolveConfigurationFilename(parsed.config, io.env, io.cwd), io.stdout);
     } else if (parsed.command === 'test') {

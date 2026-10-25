@@ -1,9 +1,12 @@
 import type { Clock } from '../core/types.ts'
-import { assert, snapshot } from '../core/values.ts'
+import { assert, reference, snapshot } from '../core/values.ts'
 import { digest } from './data.ts'
-import type { createNativeUsage, NativeUsageQuery } from './native-usage.ts'
+import type { createNativeUsage, NativeUsagePrice, NativeUsageQuery } from './native-usage.ts'
+import { DEFAULT_USAGE_PRICE_TABLE, defaultUsagePriceAt, type DefaultUsagePriceTable } from './default-usage-prices.ts'
 
-type Usage = ReturnType<typeof createNativeUsage>
+type Usage = Pick<ReturnType<typeof createNativeUsage>, 'snapshot' | 'summary' | 'recent'> & {
+  pricing(): { readonly revision: number | null; readonly prices: readonly NativeUsagePrice[]; readonly builtin?: DefaultUsagePriceTable }
+}
 type UsageRecord = ReturnType<Usage['snapshot']>['items'][number]
 
 function symbol(currency: string): string {
@@ -17,12 +20,15 @@ function numericId(value: string): number | null {
 function currencies(items: readonly UsageRecord[], prices: ReturnType<Usage['pricing']>): string {
   const reported = new Set(items.flatMap(item => item.cost ? [item.cost.currency] : []))
   const catalog = new Set(prices.prices.map(price => price.currency))
-  const selected = reported.size > 0 ? reported : catalog
+  const selected = reported.size > 0 ? reported : catalog.size > 0 ? catalog : new Set([(prices.builtin ?? DEFAULT_USAGE_PRICE_TABLE).currency])
   return selected.size === 1 ? [...selected][0] : selected.size === 0 ? 'UNKNOWN' : 'MULTI'
 }
 
-function totals(items: readonly UsageRecord[], partial: boolean, currency: string) {
-  const complete = !partial && items.every(item => item.coverage === 'complete')
+function totals(records: readonly UsageRecord[], partial: boolean, currency: string, includeDetails = false) {
+  const items = includeDetails ? records : records.filter(item => item.recordKind !== 'detail-only')
+  const modelRecords = records.filter(item => item.recordKind !== 'opening-balance')
+  const totalModelRecords = items.filter(item => item.recordKind !== 'opening-balance')
+  const complete = !partial && totalModelRecords.every(item => item.coverage === 'complete')
   const sum = (key: keyof UsageRecord['tokens']) => items.length > 0 && complete && items.every(item => item.tokens[key] !== null && item.tokens[key] !== undefined)
     ? items.reduce((amount, item) => amount + item.tokens[key]!, 0) : null
   const cost = items.length > 0 && complete && items.every(item => item.cost?.currency === currency)
@@ -31,26 +37,31 @@ function totals(items: readonly UsageRecord[], partial: boolean, currency: strin
   const cacheHit = sum('cacheRead')
   const cacheWrite = sum('cacheWrite')
   const input = cacheMiss !== null && cacheHit !== null && cacheWrite !== null ? cacheMiss + cacheHit + cacheWrite : null
-  const turns = new Set(items.map(item => digest([item.sessionId, item.generation, item.turnId]))).size
+  const turns = new Set(modelRecords.map(item => digest([item.sessionId, item.generation, item.turnId]))).size
+  const totalModelTurns = new Set(totalModelRecords.map(item => digest([item.sessionId, item.generation, item.turnId]))).size
+  const modelCost = totalModelRecords.length > 0 && !partial
+    && totalModelRecords.every(item => item.coverage === 'complete' && item.cost?.currency === currency)
+    ? totalModelRecords.reduce((amount, item) => amount + item.cost!.amount, 0) : null
   return { totalTokens: sum('total'), inputTokens: input, outputTokens: sum('output'),
     cacheHitTokens: cacheHit, cacheMissTokens: cacheMiss, cacheWriteTokens: cacheWrite, reasoningTokens: sum('reasoning'),
     cost, estimated: items.some(item => item.cost?.source === 'operator-price-estimate') || !complete,
-    conversations: new Set(items.map(item => item.conversationId)).size, turns, steps: items.length,
+    conversations: new Set(records.map(item => item.conversationId)).size, turns, steps: modelRecords.length,
     attributedCost: cost, unattributedCost: 0,
     buckets: { cacheMiss, cacheHit, cacheWrite, output: sum('output'), reasoning: sum('reasoning') },
     byTier: null, cacheHitRate: input === null || cacheHit === null ? null : input > 0 ? cacheHit / input : 0,
-    avgCostPerTurn: cost === null ? null : turns > 0 ? cost / turns : 0,
-    avgCostPerStep: cost === null ? null : items.length > 0 ? cost / items.length : 0,
+    avgCostPerTurn: modelCost === null ? null : totalModelTurns > 0 ? modelCost / totalModelTurns : 0,
+    avgCostPerStep: modelCost === null ? null : totalModelRecords.length > 0 ? modelCost / totalModelRecords.length : 0,
     coverage: items.length === 0 ? 'unknown' : complete ? 'complete' : 'partial',
     knownCosts: Object.fromEntries([...new Set(items.flatMap(item => item.cost ? [item.cost.currency] : []))]
       .map(unit => [unit, items.reduce((amount, item) => amount + (item.cost?.currency === unit ? item.cost.amount : 0), 0)])),
-    missingCostTurns: new Set(items.filter(item => !item.cost).map(item => digest([item.sessionId, item.generation, item.turnId]))).size,
+    missingCostTurns: new Set(totalModelRecords.filter(item => !item.cost).map(item => digest([item.sessionId, item.generation, item.turnId]))).size,
     currencies: [...new Set(items.flatMap(item => item.cost ? [item.cost.currency] : []))] }
 }
 
 function groupTurns(items: readonly UsageRecord[], partial: boolean, currency: string) {
   const groups = new Map<string, UsageRecord[]>()
   for (const item of items) {
+    if (item.recordKind === 'opening-balance') continue
     const key = digest([item.conversationId, item.sessionId, item.generation, item.turnId])
     const group = groups.get(key) ?? []
     group.push(item)
@@ -58,16 +69,19 @@ function groupTurns(items: readonly UsageRecord[], partial: boolean, currency: s
   }
   return [...groups.values()].map(group => {
     const first = group[0]
-    const summary = totals(group, partial, currency)
+    const summary = totals(group, partial, currency, true)
     const providers = [...new Set(group.map(item => item.provider))]
     const models = [...new Set(group.map(item => item.model))]
+    const tiers = [...new Set(group.map(item => item.priceSnapshot?.tier ?? 'flat'))]
     return { sessionId: first.sessionId, key: first.conversationId, generation: first.generation,
       turn: numericId(first.turnId), turnId: first.turnId, steps: group.length, attempts: group.length,
+      status: group.some(item => item.status === 'failed') ? 'failed'
+        : group.some(item => item.status === 'unknown') ? 'unknown' : 'completed',
       attemptsSource: 'observed-model-response-events',
       startedAt: Math.min(...group.map(item => item.recordedAt)), endedAt: Math.max(...group.map(item => item.recordedAt)),
       timeSource: 'framework-observed', model: models.length === 1 ? models[0] : null,
       provider: providers.length === 1 ? providers[0] : null,
-      buckets: summary.buckets, cost: summary.cost, tier: 'flat', coverage: summary.coverage,
+      buckets: summary.buckets, cost: summary.cost, tier: tiers.length === 1 ? tiers[0] : 'mixed', coverage: summary.coverage,
       knownCosts: Object.fromEntries([...new Set(group.flatMap(item => item.cost ? [item.cost.currency] : []))]
         .map(unit => [unit, group.reduce((amount, item) => amount + (item.cost?.currency === unit ? item.cost.amount : 0), 0)])) }
   }).sort((left, right) => right.endedAt - left.endedAt || left.sessionId.localeCompare(right.sessionId))
@@ -78,6 +92,8 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
     summary(query: NativeUsageQuery = {}) {
       const page = usage.snapshot(query)
       const prices = usage.pricing()
+      const generatedAt = clock()
+      const builtin = prices.builtin ?? DEFAULT_USAGE_PRICE_TABLE
       const currency = currencies(page.items, prices)
       const aggregate = totals(page.items, page.truncated, currency)
       const limit = Math.min(query.limit ?? 200, 500)
@@ -92,30 +108,45 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
           ...totals(rows, page.truncated, currency), models: [...new Set(rows.map(item => item.model))],
           firstAt: Math.min(...rows.map(item => item.recordedAt)), lastAt: Math.max(...rows.map(item => item.recordedAt)) }
       }).sort((left, right) => right.lastAt - left.lastAt || left.key.localeCompare(right.key)).slice(0, limit)
-      const compatiblePrices = prices.prices.length > 0 && new Set(prices.prices.map(price => price.currency)).size === 1
-      const priceTable = compatiblePrices ? { version: `native:${prices.revision}`, currency: prices.prices[0].currency,
-        symbol: symbol(prices.prices[0].currency), unit: 1_000_000, pricingMode: 'flat', peakMultiplier: 1,
+      const observed = page.items.filter(item => item.recordKind !== 'opening-balance')
+        .reduce<UsageRecord | null>((prior, item) => prior === null || item.recordedAt > prior.recordedAt ? item : prior, null)
+      const model = query.model ?? observed?.model ?? (prices.prices.length === 1 ? prices.prices[0].model : builtin.referenceModel)
+      const provider = query.provider ?? observed?.provider
+      const matchingPrices = prices.prices.filter(price => price.model === model && (provider === undefined || price.provider === provider))
+      const nowPrice = matchingPrices.length === 1 ? matchingPrices[0] : null
+      const manualPrices = nowPrice ? prices.prices.filter(price => price.currency === nowPrice.currency) : []
+      const priceTable = nowPrice ? { version: `native:${prices.revision}`, currency: nowPrice.currency,
+        symbol: symbol(nowPrice.currency), unit: 1_000_000, pricingMode: 'flat', peakMultiplier: 1,
         peakWindows: [], peakWeekdays: [], holidayCount: 0,
-        models: Object.fromEntries(prices.prices.map(price => [`${price.provider}/${price.model}`, {
+        models: Object.fromEntries(manualPrices.map(price => [`${price.provider}/${price.model}`, {
           label: `${price.provider} / ${price.model}`, provider: price.provider, model: price.model,
           off: { cacheMiss: price.inputPerMillion, cacheHit: price.cacheReadPerMillion,
-            cacheWrite: price.cacheWritePerMillion, output: price.outputPerMillion } }])) } : null
-      const nowPrice = compatiblePrices ? prices.prices[0] : null
+            cacheWrite: price.cacheWritePerMillion, output: price.outputPerMillion } }])) } : builtin
       const nowTier = nowPrice ? { model: nowPrice.model, label: nowPrice.model, tier: 'flat', tierLabel: '固定单价',
+        requestedModel: nowPrice.model, referenceModel: nowPrice.model, fallbackUsed: false,
         currency: nowPrice.currency, symbol: symbol(nowPrice.currency), unit: 1_000_000, estimated: true,
         cacheMiss: nowPrice.inputPerMillion, cacheHit: nowPrice.cacheReadPerMillion,
-        cacheWrite: nowPrice.cacheWritePerMillion, output: nowPrice.outputPerMillion } : null
+        cacheWrite: nowPrice.cacheWritePerMillion, output: nowPrice.outputPerMillion }
+        : matchingPrices.length === 0 ? defaultUsagePriceAt(model, generatedAt, builtin) : null
       return snapshot({ ...usage.summary(query), source: 'chat-ledger', native: true,
-        revision: digest(page.items.map(item => [item.cursor, item.pricingRevision])), generatedAt: clock(), currency, symbol: symbol(currency),
+        revision: digest(page.items.map(item => [item.cursor, item.pricingRevision])), generatedAt, currency, symbol: symbol(currency),
         totals: aggregate, conversations, limit, limited: page.truncated || conversationRows.size > limit,
-        unavailable: compatiblePrices ? [] : ['pricing'], priceVersion: prices.revision === null ? null : `native:${prices.revision}`,
-        nowTier, priceTable, pricingMode: 'flat', prices, resetAvailable: false,
+        unavailable: [], priceVersion: priceTable.version,
+        pricingEstimateAvailable: nowTier !== null,
+        pricingEstimateMissingReasons: nowTier ? [] : ['model_pricing_unavailable'],
+        nowTier, priceTable, pricingMode: priceTable.pricingMode, prices, resetAvailable: false,
+        priceSelection: { model, provider: provider ?? null,
+          source: query.model ? 'query' : observed ? 'observed-history'
+            : prices.prices.length === 1 ? 'operator-example' : 'builtin-reference' },
         ledger: { journalLines: page.items.length, maxLines: null, droppedLines: null,
-          sessions: new Set(page.items.map(item => item.sessionId)).size, baselines: null, samples: page.items.length,
+          sessions: new Set(page.items.map(item => item.sessionId)).size,
+          baselines: page.items.some(item => item.recordKind === 'opening-balance')
+            ? page.items.filter(item => item.recordKind === 'opening-balance').length : null,
+          samples: page.items.filter(item => item.recordKind !== 'opening-balance').length,
           lastIngestAt: page.items.length > 0 ? Math.max(...page.items.map(item => item.recordedAt)) : null, lastCompactedAt: null } })
     },
     conversation(key: string, query: NativeUsageQuery = {}) {
-      assert(typeof key === 'string' && /^(group|private):[1-9][0-9]{0,15}$/.test(key), 'USAGE_INVALID_QUERY', 'An explicit native conversation is required.')
+      assert(reference(key), 'USAGE_INVALID_QUERY', 'An explicit native conversation is required.')
       const page = usage.snapshot({ ...query, conversationId: key })
       const currency = currencies(page.items, usage.pricing())
       const aggregate = totals(page.items, page.truncated, currency)
@@ -134,14 +165,15 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
     },
     recent(query: NativeUsageQuery = {}) {
       const page = usage.recent({ ...query, limit: Math.min(query.limit ?? 40, 500) })
-      const currency = currencies(page.items, usage.pricing())
-      return snapshot({ ...page, native: true, currency, symbol: symbol(currency),
-        entries: page.items.map(item => ({ time: item.recordedAt, key: item.conversationId, sid: item.sessionId,
-          turn: numericId(item.turnId), turnId: item.turnId, step: item.stepNumber ?? null, retry: null,
+      const items = page.items.filter(item => item.recordKind !== 'opening-balance')
+      const currency = currencies(items, usage.pricing())
+      return snapshot({ ...page, items, native: true, currency, symbol: symbol(currency),
+        entries: items.map(item => ({ time: item.recordedAt, key: item.conversationId, sid: item.sessionId,
+          turn: numericId(item.turnId), turnId: item.turnId, step: item.stepNumber ?? null, retry: item.retryNumber ?? null,
           model: item.model, provider: item.provider, tokens: item.tokens.total, cacheMiss: item.tokens.input,
           cacheHit: item.tokens.cacheRead, cacheWrite: item.tokens.cacheWrite, output: item.tokens.output,
           reasoning: item.tokens.reasoning ?? null, cost: item.cost?.currency === currency ? item.cost.amount : null,
-          currency: item.cost?.currency ?? null, knownCost: item.cost, tier: 'flat',
+          currency: item.cost?.currency ?? null, knownCost: item.cost, tier: item.priceSnapshot?.tier ?? 'flat',
           estimated: item.cost?.source === 'operator-price-estimate', coverage: item.coverage,
           pricingRevision: item.pricingRevision })) })
     },
@@ -153,20 +185,22 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
       const to = Math.floor(generatedAt / bucketMs) * bucketMs + bucketMs
       const from = to - bucketMs * bucketCount
       const page = usage.snapshot(query)
-      const currency = currencies(page.items, usage.pricing())
-      const selected = page.items.filter(item => item.recordedAt >= from && item.recordedAt < to)
+      const modelRecords = page.items.filter(item => item.recordKind !== 'opening-balance')
+      const currency = currencies(modelRecords, usage.pricing())
+      const selected = modelRecords.filter(item => item.recordedAt >= from && item.recordedAt < to)
       const buckets = Array.from({ length: bucketCount }, (_unused, index) => {
         const t = from + index * bucketMs
         const rows = selected.filter(item => item.recordedAt >= t && item.recordedAt < t + bucketMs)
-        const aggregate = totals(rows, page.truncated, currency)
+        const aggregate = totals(rows, page.truncated, currency, true)
         const keys = [...new Set(rows.map(item => item.conversationId))]
+        const tiers = [...new Set(rows.map(item => item.priceSnapshot?.tier ?? 'flat'))]
         return { t, cost: aggregate.cost, tokens: aggregate.totalTokens, cacheMiss: aggregate.cacheMissTokens,
           cacheHit: aggregate.cacheHitTokens, cacheWrite: aggregate.cacheWriteTokens, output: aggregate.outputTokens,
-          turns: aggregate.turns, steps: rows.length, tier: 'flat', keys: keys.slice(0, 500),
+          turns: aggregate.turns, steps: rows.length, tier: tiers.length === 1 ? tiers[0] : tiers.length > 1 ? 'mixed' : 'flat', keys: keys.slice(0, 500),
           keysLimited: keys.length > 500, coverage: aggregate.coverage }
       })
-      const aggregate = totals(selected, page.truncated, currency)
-      const outside = totals(page.items.filter(item => item.recordedAt < from || item.recordedAt >= to), page.truncated, currency)
+      const aggregate = totals(selected, page.truncated, currency, true)
+      const outside = totals(modelRecords.filter(item => item.recordedAt < from || item.recordedAt >= to), page.truncated, currency, true)
       const busiest = buckets.reduce<(typeof buckets)[number] | null>((prior, item) =>
         prior === null || (item.cost ?? 0) > (prior.cost ?? 0) || item.cost === prior.cost && (item.tokens ?? 0) > (prior.tokens ?? 0)
           ? item : prior, null)
@@ -175,7 +209,7 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
         busiest: busiest ? { t: busiest.t, cost: busiest.cost, tokens: busiest.tokens } : null,
         estimated: aggregate.estimated, countedSamples: selected.length, offChartCost: outside.cost,
         offChartTokens: outside.totalTokens, partial: page.truncated, next: page.next,
-        knownCosts: usage.summary({ ...query, since: Math.max(from, 0), until: to }).knownCosts })
+        knownCosts: aggregate.knownCosts })
     }
   })
 }

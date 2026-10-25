@@ -24,7 +24,7 @@ export function normalizeContent(input: unknown): readonly MessageContent[] {
     } else if (block.type === 'text') {
       assert(typeof block.text === 'string' && block.text.length > 0 && block.text.length <= 8000,
         'INVALID_CONTENT', 'Text must be nonempty and bounded.');
-    } else if (block.type === 'image' || block.type === 'audio' || block.type === 'file') {
+    } else if (block.type === 'image' || block.type === 'audio' || block.type === 'file' || block.type === 'forward-reference') {
       assert(reference(block.assetId), 'INVALID_CONTENT', 'Media requires a registered asset reference.');
       if (block.type === 'file') assert(typeof block.name === 'string' && block.name.length > 0 && block.name.length <= 255
         && !/[\x00-\x1f\x7f/\\]/.test(block.name), 'INVALID_CONTENT', 'A bounded filename is required.');

@@ -11,7 +11,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      QQ_TEST_CONCURRENCY: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -25,10 +27,13 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
+      - run: npm run test:sdk
       - name: Browser tests
         id: browser
         run: npm run cli -- test --browser --with-deps
         if: matrix.node == '24'
+        env:
+          QQ_AGENT_UI_EVIDENCE_DIR: ${{ github.workspace }}/runtime/execution-journal-smoke
       - name: Prepare browser failure diagnostics
         id: diagnostics
         if: ${{ failure() && steps.browser.outcome == 'failure' }}
@@ -44,3 +49,26 @@ jobs:
           retention-days: 3
           if-no-files-found: warn
           include-hidden-files: false
+  dsh-bridge-plugin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/dsh-bridge-plugin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/dsh-bridge-plugin/package-lock.json
+      - name: Install framework client dependencies
+        working-directory: .
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - name: Framework client with the real offline DSH SDK and plugin
+        run: npm run test:framework
+        env:
+          QQ_FRAMEWORK_DSH_PORT_MODULE: ${{ github.workspace }}/src/adapters/dsh-jsonrpc.ts
+      - run: npm run test:pack

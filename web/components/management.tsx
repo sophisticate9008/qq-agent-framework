@@ -19,7 +19,7 @@ export function Field({ label, description, error, children, className }: { labe
 }
 
 export function ToggleField({ label, description, checked, onChange, disabled = false }: { label: string; description?: string; checked: boolean; onChange(value: boolean): void; disabled?: boolean }) {
-  return <div className="flex items-center justify-between gap-6 py-3"><div><p className="field-label">{label}</p>{description && <p className="field-hint mt-1 max-w-xl">{description}</p>}</div><Switch checked={checked} onCheckedChange={onChange} disabled={disabled} aria-label={label} /></div>;
+  return <div data-page-field className="flex items-center justify-between gap-6 py-3"><div><p className="field-label">{label}</p>{description && <p className="field-hint mt-1 max-w-xl">{description}</p>}</div><Switch checked={checked} onCheckedChange={onChange} disabled={disabled} aria-label={label} /></div>;
 }
 
 export function NumberField({ label, value, onChange, description, unit, min = 0, max, disabled }: { label: string; value: number | null; onChange(value: number | null): void; description?: string; unit?: string; min?: number; max?: number; disabled?: boolean }) {
@@ -32,11 +32,11 @@ export function EmptyState({ title, description, action, locked = false }: { tit
 }
 
 export function ConnectPrompt({ connect }: { connect(): void }) {
-  return <div className="panel"><EmptyState title="连接后管理你的设置" description="使用本机保存的访问令牌登录，读取当前配置并保存更改。" locked action={<Button onClick={connect}>连接工作台</Button>} /></div>;
+  return <div className="panel"><EmptyState title="连接后管理你的设置" description="使用本机文件中的管理员令牌创建访问会话，再读取配置和保存更改。" locked action={<Button onClick={connect}>连接工作台</Button>} /></div>;
 }
 
 export function SaveBar({ dirty, saving, message, onSave, onReset, label = '保存设置', disabled = false, children }: { dirty: boolean; saving: boolean; message?: string; onSave(): void; onReset?(): void; label?: string; disabled?: boolean; children?: ReactNode }) {
-  return <><span className="mr-auto text-xs text-muted-foreground" role="status">{message ?? (dirty ? '有尚未保存的更改' : '没有未保存的更改')}</span>{children}{onReset && <Button variant="ghost" disabled={!dirty || saving} onClick={onReset}>撤销更改</Button>}<Button disabled={!dirty || saving || disabled} onClick={onSave}>{saving && <LoaderCircle className="size-4 animate-spin" />}{saving ? '正在保存' : label}</Button></>;
+  return <><span className="w-full min-w-0 text-xs text-muted-foreground" role="status">{message ?? (dirty ? '有尚未保存的更改' : '没有未保存的更改')}</span>{children}{onReset && <Button variant="ghost" disabled={!dirty || saving} onClick={onReset}>撤销更改</Button>}<Button disabled={!dirty || saving || disabled} onClick={onSave}>{saving && <LoaderCircle className="size-4 animate-spin" />}{saving ? '正在保存' : label}</Button></>;
 }
 
 export function StatusPill({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'success' | 'warning' | 'neutral' }) {

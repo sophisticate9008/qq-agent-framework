@@ -1,8 +1,14 @@
+import type { AccountScope } from '../src/contracts/account-scope.ts'
+import { isRecord } from '../src/core/values.ts'
+import { awaitCondition } from './fixtures/await-condition.ts'
+import { handleDshControlFrame } from './fixtures/dsh-wire.ts'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { setTimeout as delay } from 'node:timers/promises'
 import test, { type TestContext } from 'node:test'
 import { WebSocketServer, type WebSocket } from 'ws'
@@ -12,6 +18,23 @@ import type { AdminRoute } from '../src/admin/server.ts'
 import { buildChatSessionDefinition } from '../src/host/chat-plans.ts'
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts'
 import { bindSyntheticPaginationSessions } from './fixtures/native-session-pages.ts'
+import { createDshClaimPluginFixture } from './fixtures/dsh-claim-plugin.ts'
+import { DEFAULT_NATIVE_EXECUTION_POLICY } from '../src/host/native-execution.ts'
+import { isNativeEventPage } from '../src/contracts/native-events.ts'
+import { parseExecutionJournalPage } from '../web/lib/execution-journal.ts'
+import { createNativePersonaIdentity } from '../src/host/native-persona-identity.ts'
+import { createSqliteStore } from '../src/storage/sqlite.ts'
+import { createSessionRegistry } from '../src/host/sessions.ts'
+import { createDurableTransport } from '../src/host/outbox.ts'
+import { createAdminServer } from '../src/admin/server.ts'
+import { parseSessionSnapshot, parseUsageSnapshot } from '../web/lib/activity.ts'
+import { parseUsageConversation, parseUsageRecent, parseUsageSeries } from '../web/lib/usage-details.ts'
+import { normalizeContent } from '../src/core/content.ts'
+import type { JsonValue } from '../src/core/types.ts'
+import type { LoadedNativeBootstrap } from '../src/host/native-bootstrap.ts'
+import { capabilityLabel, featureLabel } from '../web/lib/feature-labels.ts'
+import type { DshWorkSnapshot } from '../src/contracts/dsh-work.ts'
+import type { FrameworkToolPendingCall, FrameworkToolResult } from '../src/contracts/framework-tools.ts'
 
 const persona = { id: 'native', name: 'Native', identity: 'A test-only identity.', style: 'Concise.' }
 const plan = { id: 'daily', name: 'Daily', description: '', instructions: 'Test behavior.',
@@ -19,11 +42,7 @@ const plan = { id: 'daily', name: 'Daily', description: '', instructions: 'Test 
   contextLimits: { group: 100_000, private: 120_000 } }
 
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) {
-    if (await predicate()) return
-    await delay(5)
-  }
-  assert.fail('Local pipeline condition did not settle')
+  await awaitCondition(predicate, { message: 'Local native pipeline condition did not settle', timeoutMs: 1_500, intervalMs: 5 })
 }
 
 async function invoke(routes: readonly AdminRoute[], method: 'GET' | 'POST', pathname: string,
@@ -36,24 +55,59 @@ async function invoke(routes: readonly AdminRoute[], method: 'GET' | 'POST', pat
 }
 
 async function fixture(context: TestContext, options: {
+  accountScope?: AccountScope
+  expectedSelfId?: string
+  protocolSelfId?: number
   authFails?: boolean
   wrongHttpIdentity?: boolean
   unknownSend?: boolean
   holdCreate?: boolean
+  pluginMissing?: boolean
+  holdPrompt?: boolean
+  suppressClaims?: boolean
+  failFollow?: boolean
+  bootstrap?: LoadedNativeBootstrap
   uses?: number
+  forwardMessages?: readonly Record<string, unknown>[]
+  quotedMessages?: Readonly<Record<string, Record<string, unknown>>>
+  frameworkToolChannel?: boolean
+  workChannel?: boolean
+  mediaBytes?: boolean
+  executionCheckpoint?: boolean
+  migrationChannel?: boolean
+  unknownCancel?: boolean
+  unknownFork?: boolean
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'native-chat-pipeline-'))
   const wire = new WebSocketServer({ noServer: true })
   const onebots = new Set<WebSocket>()
+  const interactions: Array<{ socket: WebSocket; id: string }> = []
   const follows: Array<{ socket: WebSocket; id: string; sequence: number }> = []
   const rpc: Array<{ method: string; request: Record<string, unknown> }> = []
   const sends: Record<string, unknown>[] = []
+  const plugin = createDshClaimPluginFixture()
+  const toolCalls: FrameworkToolPendingCall[] = []
+  const toolResults = new Map<string, FrameworkToolResult>()
+  const toolLeases = new Map<string, { sessionId: string; generation: number; leaseId: string; names: string[] }>()
+  const works = new Map<string, DshWorkSnapshot>()
+  const migrations = new Map<string, Record<string, unknown>>()
+  const workAsset = { type: 'media-reference' as const, kind: 'file' as const, attachmentId: 'report', bytes: 11, name: 'report.txt' }
   let creates = 0
+  let checkpointSettled = false
   let heldCreate: { response: ServerResponse; rpcId: string } | undefined
+  let heldPrompt: { response: ServerResponse; rpcId: string } | undefined
   let httpReads = 0
   let exchanges = 0
   const server = createServer(async (request, response) => {
     const url = new URL(request.url!, 'http://local.test')
+    if (options.mediaBytes && url.pathname.startsWith('/fixture-assets/')) {
+      assert.equal(request.headers.authorization, undefined)
+      const image = url.pathname.endsWith('image')
+      const audio = url.pathname.endsWith('audio')
+      response.setHeader('content-type', image ? 'image/png' : audio ? 'audio/mpeg' : 'text/plain; charset=utf-8')
+      response.end(image ? Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=', 'base64') : audio ? 'verified-audio-bytes' : '默认读取器取得的文本文件正文')
+      return
+    }
     if (url.pathname.startsWith('/onebot/')) {
       assert.equal(request.headers.authorization, 'Bearer http-test-secret')
       let body = ''
@@ -61,10 +115,22 @@ async function fixture(context: TestContext, options: {
       if (url.pathname === '/onebot/get_login_info') {
         httpReads++
         response.end(JSON.stringify({ status: 'ok', retcode: 0,
-          data: { user_id: options.wrongHttpIdentity ? 998 : 999 } }))
+          data: { user_id: options.wrongHttpIdentity ? 998 : options.protocolSelfId ?? 999 } }))
+      } else if (options.mediaBytes && ['/onebot/get_image', '/onebot/get_record', '/onebot/get_private_file_url'].includes(url.pathname)) {
+        const input = JSON.parse(body) as Record<string, unknown>
+        if (url.pathname === '/onebot/get_private_file_url') { assert.equal(String(input.user_id), '123'); assert.equal(input.file_id, 'file-token') }
+        response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { url: `${base}/fixture-assets/${url.pathname.endsWith('get_image') ? 'image' : url.pathname.endsWith('get_record') ? 'audio' : 'file'}` } }))
+      } else if (url.pathname === '/onebot/get_forward_msg') {
+        assert.deepEqual(JSON.parse(body), { id: 'forward-token' })
+        response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { messages: options.forwardMessages ?? [] } }))
+      } else if (url.pathname === '/onebot/get_msg') {
+        const input = JSON.parse(body) as { message_id: string | number }
+        const data = options.quotedMessages?.[String(input.message_id)]
+        response.end(JSON.stringify(data ? { status: 'ok', retcode: 0, data } : { status: 'failed', retcode: 100 }))
       } else {
         sends.push(JSON.parse(body) as Record<string, unknown>)
         if (options.unknownSend) { response.destroy(); return }
+        if (url.pathname === '/onebot/upload_private_file') { response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { file_id: 'uploaded-report' } })); return }
         response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 1000 + sends.length } }))
       }
       return
@@ -80,16 +146,84 @@ async function fixture(context: TestContext, options: {
     let body = ''
     for await (const chunk of request) body += String(chunk)
     const envelope = JSON.parse(body) as { rpcId: string; method: string; payload: { args: { request?: Record<string, unknown> } } }
-    const input = envelope.payload.args.request ?? {}
+    const input: Record<string, unknown> = envelope.payload.args.request ?? envelope.payload.args
     rpc.push({ method: envelope.method, request: input })
+    if (envelope.method.startsWith('bridgePlugin/') && options.pluginMissing) {
+      response.end(JSON.stringify({ type: 'server-response', rpcId: envelope.rpcId,
+        result: { ok: false, error: { code: 'unknown-method', message: 'Optional plugin is not installed.' } } }))
+      return
+    }
     let value: unknown = {}
-    if (envelope.method === 'session/create') {
+    if (envelope.method === 'session/modelCatalog') value = { default: { provider: 'external-provider', model: 'model', reasoningEffort: 'off' },
+      routableProviders: ['external-provider'], groups: [{ id: 'external-provider', name: 'Local fixture provider',
+        models: [{ id: 'model', name: 'Model', reasoning: { efforts: [{ id: 'off', name: 'Off' }], defaultEffort: 'off' } }, ...(options.migrationChannel ? [{ id: 'next-model', name: 'Next', reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }] : [])] }], failures: [] }
+    else if ((options.frameworkToolChannel || options.executionCheckpoint || options.migrationChannel) && envelope.method === 'bridgePlugin/describe') value = {
+      ...plugin.invoke(envelope.method, input) as Record<string, unknown>, ...(options.executionCheckpoint ? { executionEvidenceProtocol: 'qq-agent-framework.execution-evidence/1' } : {}), ...(options.migrationChannel ? { migrationProtocol: 'qaf-session-migration/1', migrationApiVersion: 2 } : {}), methods: [...(options.executionCheckpoint ? ['bridgePlugin/inspectExecution'] : []), ...(options.migrationChannel ? ['bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration'] : [])], ...(options.frameworkToolChannel ? { frameworkToolProtocol: 'qq-agent-framework.tools/1' } : {}), ...(options.workChannel ? { workProtocol: 'qq-agent-framework.work/1' } : {}) }
+    else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/inspectFrameworkTools') value = {
+      schema: 1, issuerEpoch: input.issuerEpoch, projection: toolLeases.get(String(input.sessionId)) ?? null }
+    else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/installFrameworkTools') {
+      assert(!toolLeases.has(String(input.sessionId)))
+      const lease = { sessionId: String(input.sessionId), generation: Number(input.generation), leaseId: `lease-${toolLeases.size + 1}`,
+        names: (input.tools as { name: string }[]).map(tool => tool.name) }
+      toolLeases.set(lease.sessionId, lease); value = { schema: 1, issuerEpoch: input.issuerEpoch, ...lease }
+    } else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/withdrawFrameworkTools') {
+      const lease = toolLeases.get(String(input.sessionId))
+      const withdrawn = lease?.leaseId === input.leaseId
+      if (withdrawn) toolLeases.delete(String(input.sessionId))
+      value = { schema: 1, withdrawn }
+    } else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/pollFrameworkTools') value = {
+      schema: 1, issuerEpoch: input.issuerEpoch, calls: toolCalls.filter(call => !toolResults.has(call.ticket)) }
+    else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/completeFrameworkTool') {
+      toolResults.set(String(input.ticket), input.result as FrameworkToolResult); value = { schema: 1, accepted: true }
+    } else if (options.workChannel && envelope.method === 'bridgePlugin/verifyWork') value = { schema: 1, issuerEpoch: input.issuerEpoch,
+      available: true, provider: 'spawn', continuable: true, externalToolAuthorizationVerified: false }
+    else if (options.workChannel && envelope.method === 'bridgePlugin/startWork') {
+      const work: DshWorkSnapshot = { schema: 1, issuerEpoch: String(input.issuerEpoch), id: String(input.id), childId: String(input.childId),
+        parentSessionId: String(input.parentSessionId), generation: Number(input.generation), state: 'running', result: null, error: null }
+      works.set(work.id, work); value = work
+    } else if (options.workChannel && envelope.method === 'bridgePlugin/inspectWork') value = works.get(String(input.id))
+    else if (options.workChannel && envelope.method === 'bridgePlugin/readWorkAsset') value = {
+      schema: 1, ...input, asset: workAsset, offset: 0, data: Buffer.from('file report').toString('base64'), nextOffset: null }
+    else if (options.workChannel && envelope.method === 'bridgePlugin/followupWork') {
+      const prior = works.get(String(input.id))!; works.set(prior.id, { ...prior, state: 'running', result: null }); value = { messageId: 'followup-accepted' }
+    } else if (options.workChannel && envelope.method === 'bridgePlugin/interruptWork') {
+      const prior = works.get(String(input.id))!; works.set(prior.id, { ...prior, state: 'completed', result: { stopReason: 'interrupted', output: [{ type: 'text', text: '工作已停止。' }] } }); value = { accepted: true }
+    } else if (options.executionCheckpoint && envelope.method === 'bridgePlugin/inspectExecution') value = {
+      ...input, schema: 1, protocol: 'qq-agent-framework.execution-evidence/1',
+      issuerEpoch: (plugin.invoke('bridgePlugin/describe', {}) as Record<string, unknown>).issuerEpoch,
+      state: checkpointSettled ? 'settled' : 'not-observed',
+      matchedUserMessageId: checkpointSettled ? input.userMessageId ?? `user-${input.requestId}` : null,
+      matchedTurn: checkpointSettled ? input.turn ?? 1 : null, outcome: checkpointSettled ? 'completed' : null,
+      userSequence: checkpointSettled ? 2 : null, terminalSequence: checkpointSettled ? 7 : null,
+      checkpointSequence: checkpointSettled ? 7 : null, checkpointHash: checkpointSettled ? 'c'.repeat(64) : null,
+      quiescent: true, missingReasons: checkpointSettled ? [] : ['execution_request_not_observed'] }
+    else if (options.migrationChannel && envelope.method === 'settings/describe') value = { namespaces: [{ ns: 'fixture-llm', value: { providers: {
+      'external-provider': { models: [{ id: 'model', contextWindow: 120000, maxTokens: 8192 }, { id: 'next-model', contextWindow: 131072, maxTokens: 16000 }] } } } }] }
+    else if (options.migrationChannel && envelope.method === 'agentPresets/list') value = { presets: [{ id: 'test-native-chat' }, { id: 'test-native-next' }] }
+    else if (options.migrationChannel && envelope.method === 'agentPresets/read') value = { agentPreset: input.agentPreset,
+      content: `- name: "@deepseek-ai/dsh-compaction-basic"\n  config: { auto: true, headroomTokens: 0, maxTokens: 16000, summarizationProvider: external-provider, summarizationModel: next-model }\n` }
+    else if (options.migrationChannel && envelope.method === 'credentials/describe') value = { credentials: [] }
+    else if (options.migrationChannel && envelope.method === 'bridgePlugin/forkPreview') value = { ...input, migrationProtocol: 'qaf-session-migration/1',
+      issuerEpoch: (plugin.invoke('bridgePlugin/describe', {}) as Record<string, unknown>).issuerEpoch, state: 'available',
+      sourceCursor: 7, sourceDigest: 'c'.repeat(64), targetRevision: 'd'.repeat(64), missingReasons: [] }
+    else if (options.migrationChannel && envelope.method === 'bridgePlugin/forkWithPreset') {
+      value = { ...input, migrationProtocol: 'qaf-session-migration/1', state: 'completed', childSessionId: `migration-child-${migrations.size+1}`, idempotency: 'created', missingReasons: [] }
+      migrations.set(String(input.migrationId), value as Record<string, unknown>)
+      if (options.unknownFork) { response.destroy(); return }
+    } else if (options.migrationChannel && envelope.method === 'bridgePlugin/inspectMigration') value = { ...migrations.get(String(input.migrationId)), idempotency: 'replayed' }
+    else if (envelope.method.startsWith('bridgePlugin/')) value = plugin.invoke(envelope.method, input)
+    else if (envelope.method === 'session/create') {
       creates++
       if (options.holdCreate) { heldCreate = { response, rpcId: envelope.rpcId }; return }
-      value = { sessionId: `session-${creates}`, agentPreset: 'test-native-chat' }
+      value = { sessionId: `session-${creates}`, agentPreset: options.migrationChannel ? input.agentPreset : 'test-native-chat' }
     } else if (envelope.method === 'session/selectModel') {
-      value = { selected: { provider: 'external-provider', model: 'model', reasoningEffort: 'off' } }
+      value = { selected: options.migrationChannel ? { provider: input.provider, model: input.model, ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }) } : { provider: 'external-provider', model: 'model', reasoningEffort: 'off' } }
     } else if (envelope.method === 'session/prompt') {
+      if (!options.suppressClaims) plugin.accepted(String(input.sessionId), String(input.requestId))
+      if (options.holdPrompt) { heldPrompt = { response, rpcId: envelope.rpcId }; return }
+      value = { accepted: true }
+    } else if (envelope.method === 'session/cancel') {
+      if (options.unknownCancel) { response.destroy(); return }
       value = { accepted: true }
     }
     response.end(JSON.stringify({ type: 'server-response', rpcId: envelope.rpcId, result: { ok: true, value } }))
@@ -103,7 +237,7 @@ async function fixture(context: TestContext, options: {
         connection.on('message', data => {
           const action = JSON.parse(data.toString()) as { action: string; echo: string }
           assert.equal(action.action, 'get_login_info')
-          connection.send(JSON.stringify({ status: 'ok', retcode: 0, echo: action.echo, data: { user_id: 999 } }))
+          connection.send(JSON.stringify({ status: 'ok', retcode: 0, echo: action.echo, data: { user_id: options.protocolSelfId ?? 999 } }))
         })
         return
       }
@@ -111,7 +245,14 @@ async function fixture(context: TestContext, options: {
       assert.equal(request.headers.cookie, 'dsh_test=local.test')
       connection.on('message', data => {
         const input = JSON.parse(data.toString()) as { type: string; streamId: string; payload: { args: { request: { address: { sessionId: string } } } } }
-        if (input.type === 'cancel') return
+        if (handleDshControlFrame(connection, input)) {
+          if (input.type === 'open' && 'endpoint' in input && input.endpoint === '$events') interactions.push({ socket: connection, id: input.streamId })
+          return
+        }
+        if (options.failFollow) {
+          connection.send(JSON.stringify({ type: 'error', streamId: input.streamId }))
+          return
+        }
         const stream = { socket: connection, id: input.streamId, sequence: 0 }
         follows.push(stream)
         connection.send(JSON.stringify({ type: 'item', streamId: input.streamId,
@@ -124,12 +265,19 @@ async function fixture(context: TestContext, options: {
   const address = server.address()
   assert(address && typeof address !== 'string')
   const base = `http://127.0.0.1:${address.port}`
-  const createRuntime = () => createNativeChatRuntime({ directory,
-    loadConfiguration: () => readNativeChatConfiguration(directory),
+  const createRuntime = (historyOnly = false) => createNativeChatRuntime({ directory, accountScope: options.accountScope, expectedSelfId: options.expectedSelfId, bootstrap: options.bootstrap,
+    ...(options.workChannel ? { resolveWorkTarget: async () => ({ configuration: { schema: 1 as const, enabled: true,
+      provider: 'provider', model: 'model', agentPreset: 'test-work', fullAccess: false, timeoutMs: 300000 },
+      externalProvider: 'external-work', agentPreset: 'test-work', assistantRevision: 'a'.repeat(64), configurationRevision: 'b'.repeat(64), missingReasons: [] }) } : {}),
+    loadConfiguration: () => {
+      assert.equal(historyOnly, false, 'Offline history must not load current plans or preferences')
+      return readNativeChatConfiguration(directory)
+    },
     resolveDeployment: async configuration => {
+      assert.equal(historyOnly, false, 'Offline history must not resolve deployment')
       const selectedPlan = configuration.catalog.plans.find(value => value.id === configuration.catalog.activePlanId)!
       const selectedPersona = configuration.personas.find(value => value.id === selectedPlan?.personaId)!
-      return { missingReasons: [], presetBindings: selectedPlan && selectedPersona ? [{ agentPreset: 'test-native-chat',
+      return { missingReasons: [], presetBindings: selectedPlan && selectedPersona ? [{ agentPreset: options.migrationChannel && selectedPlan.model === 'next-model' ? 'test-native-next' : 'test-native-chat',
         externalProvider: 'external-provider', definition: buildChatSessionDefinition(selectedPlan, selectedPersona) }] : [] }
     } })
   let runtime = createRuntime()
@@ -159,7 +307,7 @@ async function fixture(context: TestContext, options: {
   }
   const message = (id: number, extra: Record<string, unknown> = {}) => {
     assert(onebots.size > 0)
-    for (const socket of onebots) socket.send(JSON.stringify({ post_type: 'message', self_id: 999,
+    for (const socket of onebots) socket.send(JSON.stringify({ post_type: 'message', self_id: options.protocolSelfId ?? 999,
       message_type: 'private', user_id: 123, message_id: id, time: 1_000 + id,
       message: [{ type: 'text', data: { text: `User message ${id}` } }], ...extra }))
   }
@@ -184,10 +332,350 @@ async function fixture(context: TestContext, options: {
     await rm(directory, { recursive: true, force: true })
   })
   return { directory, configure, save, start, message, agentEvent, answer, routes, rpc, sends, follows,
+    toolCalls, toolResults, toolLeases, works, workAsset,
+    interaction(value: Record<string, unknown>) { const target = interactions.at(-1)!;
+      target.socket.send(JSON.stringify({ type: 'item', streamId: target.id, value })) },
     runtime: () => runtime, creates: () => creates, httpReads: () => httpReads, exchanges: () => exchanges,
     heldCreate: () => heldCreate,
-    async restart() { await runtime.close(); runtime = createRuntime(); await start() } }
+    heldPrompt: () => heldPrompt,
+    restartPlugin: plugin.restart,
+    confirmCheckpoint() { checkpointSettled = true },
+    claimPrompt() {
+      const input = rpc.find(value => value.method === 'session/prompt')!.request
+      plugin.accepted(String(input.sessionId), String(input.requestId))
+    },
+    async restart() { await runtime.close(); runtime = createRuntime(); await start() },
+    async offline() { await runtime.close(); runtime = createRuntime(true) } }
 }
+
+function historyDatabaseSnapshot(filename: string) {
+  const database = new DatabaseSync(filename, { readOnly: true })
+  try {
+    return { records: database.prepare('SELECT * FROM durable_records ORDER BY namespace, key').all(),
+      meta: database.prepare('SELECT * FROM durable_meta ORDER BY name').all(),
+      schema: database.prepare('SELECT type, name, sql FROM sqlite_schema ORDER BY name').all() }
+  } finally { database.close() }
+}
+
+test('features projection preserves bootstrap custom capabilities without turning declarations into grants', async context => {
+  let effects = 0
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'projection-worker', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'f'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    create() {
+      return { effectAdapters: { 'review.work': { execute() { effects++; return 'review completed' } } },
+        eventValidators: { 'review.requested': () => true },
+        features: [{ id: 'review-worker', version: '1.0.0', apiVersion: 1, capabilities: ['review.work', 'messaging.send'],
+          subscriptions: ['review.requested'], setup(services) {
+            services.on('review.requested', async execution => {
+              const result = await execution.invoke('review.work', { action: 'synthetic local work' })
+              await execution.send([{ type: 'text', text: String(result) }])
+            })
+          } }] }
+    } }
+  const fake = await fixture(context, { bootstrap })
+  await fake.configure()
+  await fake.start()
+  const host = fake.runtime().host()!
+  const beforeGrants = host.policy.describe().grants
+  const projected = await invoke(fake.routes(), 'GET', '/api/chat/features')
+  const features = projected.features as Array<Record<string, unknown>>
+  const worker = features.find(row => row.id === 'review-worker')!
+  assert.deepEqual(worker.capabilities, ['review.work', 'messaging.send'])
+  assert.equal(worker.declared, true)
+  assert.equal(worker.installed, true)
+  assert.equal(projected.authorizationEvaluated, false)
+  const work = (projected.capabilities as Array<Record<string, unknown>>).find(row => row.id === 'review.work')!
+  assert.equal(work.declared, true)
+  assert.equal(work.installed, true)
+  assert.equal(capabilityLabel('review.work'), '扩展能力')
+  assert.equal(featureLabel('review-worker'), '扩展功能')
+  assert.deepEqual(host.policy.describe().grants, beforeGrants)
+  const denied = await host.engine.emit({ id: 'manifest-only', type: 'review.requested', conversationId: 'private:123', data: {} })
+  assert.equal(denied.outcomes.find(outcome => outcome.featureId === 'review-worker')?.errorCode, 'POLICY_DENIED')
+  assert.equal(effects, 0)
+  assert.equal(fake.sends.length, 0)
+  host.policy.grant({ id: 'explicit-worker-grant', featureId: 'review-worker', conversationId: 'private:123',
+    capabilities: ['review.work', 'messaging.send'], maxUses: { 'review.work': 1, 'messaging.send': 1 } })
+  const allowed = await host.engine.emit({ id: 'explicit-grant', type: 'review.requested', conversationId: 'private:123', data: {} })
+  assert.equal(allowed.outcomes.find(outcome => outcome.featureId === 'review-worker')?.status, 'completed')
+  assert.equal(effects, 1)
+  assert.equal(fake.sends.length, 1)
+  const exhausted = await host.engine.emit({ id: 'exhausted-grant', type: 'review.requested', conversationId: 'private:123', data: {} })
+  assert.equal(exhausted.outcomes.find(outcome => outcome.featureId === 'review-worker')?.errorCode, 'BUDGET_EXHAUSTED')
+  assert.equal(effects, 1)
+  const usedGrants = host.policy.describe().grants
+  await invoke(fake.routes(), 'GET', '/api/chat/features')
+  assert.deepEqual(host.policy.describe().grants, usedGrants)
+  await host.engine.uninstall('review-worker')
+  const stopped = await invoke(fake.routes(), 'GET', '/api/chat/features')
+  const stoppedWorker = (stopped.features as Array<Record<string, unknown>>).find(row => row.id === 'review-worker')!
+  assert.equal(stoppedWorker.declared, true)
+  assert.equal(stoppedWorker.installed, false)
+  assert.deepEqual(stoppedWorker.capabilities, ['review.work', 'messaging.send'])
+  for (let index = 0; index < 260; index++) host.engine.install({ id: `projection-${index}`, version: '1.0.0', apiVersion: 1,
+    capabilities: [], subscriptions: [], setup() {} })
+  const bounded = await invoke(fake.routes(), 'GET', '/api/chat/features')
+  assert.equal((bounded.features as unknown[]).length, 256)
+  assert.equal(bounded.featuresLimited, true)
+  assert((bounded.capabilities as unknown[]).length <= 512)
+  assert.equal(fake.rpc.filter(row => row.method === 'session/prompt' || row.method === 'session/create').length, 0)
+  context.diagnostic(JSON.stringify({ worker, work, denied: denied.outcomes, allowed: allowed.outcomes,
+    exhausted: exhausted.outcomes, stoppedWorker, effects, sends: fake.sends.length,
+    declaredDidNotGrant: true, featureLimit: 256, capabilitiesLimit: 512 }))
+})
+
+test('offline history GET routes retain real sessions, usage and unknown journal without starting chat', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  fake.agentEvent('assistant/message', { turn: 1, step: 0, message: { id: 'history-prefix', role: 'assistant',
+    source: { kind: 'model', provider: 'external-provider', model: 'model' },
+    content: [{ type: 'text', text: 'Work prefix' }, { type: 'tool-call', name: 'not-run' }] },
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 0, totalTokens: 17 } })
+  fake.agentEvent('step/start', { turn: 1, step: 1 })
+  fake.agentEvent('assistant/message', { turn: 1, step: 1, message: { id: 'history-final', role: 'assistant',
+    source: { kind: 'model', provider: 'external-provider', model: 'model' },
+    content: [{ type: 'text', text: 'History final' }] },
+    usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 3, cacheWriteTokens: 0, totalTokens: 29 } })
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await until(() => fake.sends.length === 1 && fake.runtime().usage()!.summary().records === 2)
+  fake.message(2, { message_type: 'group', group_id: 456,
+    message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: 'Accepted without final' } }] })
+  await until(() => fake.runtime().host()!.replies.get('group:456')?.status === 'waiting')
+  bindSyntheticPaginationSessions(fake.runtime().host()!, 103)
+  const pricing = await invoke(fake.routes(), 'GET', '/api/chat/usage/pricing')
+  await fake.runtime().stop()
+  const sessions = await invoke(fake.routes(), 'GET', '/api/chat/sessions')
+  const usage = await invoke(fake.routes(), 'GET', '/api/chat/usage')
+  const journal = await invoke(fake.routes(), 'GET', '/api/chat/executions')
+  assert.equal((journal.items as Record<string, unknown>[]).filter(row => row.status === 'unknown' && row.isolated).length, 1)
+  await fake.save('plans', { activePlanId: 'daily', plans: [{ ...plan, instructions: 'Changed current plan, not old context' }] })
+  await fake.save('personas', { personas: [{ ...persona, style: 'Changed current preferences and style' }] })
+  await fake.offline()
+  assert.equal(fake.runtime().host(), undefined)
+  assert.equal(fake.runtime().usage(), undefined)
+  assert.equal(fake.runtime().executions(), undefined)
+  const counts = () => ({ rpc: fake.rpc.length, sends: fake.sends.length, http: fake.httpReads(),
+    exchanges: fake.exchanges(), follows: fake.follows.length, creates: fake.creates() })
+  const beforeCounts = counts()
+  const filename = join(fake.directory, 'native-chat.sqlite')
+  const beforeDatabase = historyDatabaseSnapshot(filename)
+  const beforeBytes = await readFile(filename)
+  const server = createAdminServer({ token: 'synthetic-offline-history-token-only', snapshot: () => ({ offline: true }), routes: fake.routes() })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  assert(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  context.after(async () => {
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  })
+  const getRequests: Array<{ path: string; status: number }> = []
+  const get = async (path: string) => {
+    const response = await fetch(origin + path, { headers: { authorization: 'Bearer synthetic-offline-history-token-only' } })
+    getRequests.push({ path, status: response.status })
+    assert.equal(response.status, 200, `${path}: ${response.status}`)
+    return await response.json() as Record<string, unknown>
+  }
+  assert.equal((await fetch(origin + '/api/chat/sessions')).status, 401)
+  const offlineSessions = await get('/api/chat/sessions')
+  assert.deepEqual(offlineSessions.items, sessions.items)
+  const actualBindings = offlineSessions.sessions as Array<Record<string, unknown>>
+  assert.deepEqual(actualBindings, sessions.sessions)
+  for (const binding of actualBindings) {
+    const metadata = (offlineSessions.items as Array<Record<string, unknown>>).find(item => item.conversationId === binding.key)!
+    assert.equal(binding.generation, metadata.generation)
+    assert.match(String(binding.bindingRevision), /^[a-f0-9]{64}$/)
+  }
+  assert(parseSessionSnapshot(offlineSessions))
+  const nextSessions = await get('/api/chat/sessions?limit=100&after=' + encodeURIComponent(String(offlineSessions.next)))
+  assert.equal((nextSessions.items as unknown[]).length, 5)
+  const offlineUsage = await get('/api/chat/usage')
+  assert.equal(offlineUsage.records, usage.records)
+  assert.deepEqual(offlineUsage.knownTokens, usage.knownTokens)
+  assert.equal((offlineUsage.knownTokens as Record<string, unknown>).total, 46)
+  assert.deepEqual(offlineUsage.tokens, usage.tokens)
+  assert.deepEqual(offlineUsage.totals, usage.totals)
+  assert.equal(offlineUsage.policy, null)
+  assert.equal(offlineUsage.metrics, null)
+  assert.equal(offlineUsage.outbox, null)
+  assert(parseUsageSnapshot(offlineUsage))
+  const offlineJournal = await get('/api/chat/executions')
+  assert.deepEqual(offlineJournal.items, journal.items)
+  assert.equal(offlineJournal.manualCancelAvailable, false)
+  assert(parseExecutionJournalPage(offlineJournal))
+  const firstJournal = await get('/api/chat/executions?limit=1')
+  const secondJournal = await get('/api/chat/executions?limit=1&after=' + String(firstJournal.next))
+  assert.equal((secondJournal.items as unknown[]).length, 1)
+  const firstUsage = await get('/api/chat/usage/turns?limit=1')
+  const secondUsage = await get('/api/chat/usage/turns?limit=1&after=' + String(firstUsage.next))
+  assert.equal((secondUsage.items as unknown[]).length, 1)
+  assert(parseUsageConversation(await get('/api/chat/usage/turns?key=private%3A123')))
+  assert(parseUsageRecent(await get('/api/chat/usage/recent')))
+  assert(parseUsageSeries(await get('/api/chat/usage/series?hours=24&buckets=48')))
+  assert.equal((await get('/api/chat/usage/series?bucketMs=60000')).partial, false)
+  assert.deepEqual(await get('/api/chat/usage/maintenance?action=list&limit=20'), { schema: 1, operations: [], next: null, partial: false })
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/sessions/reset', {}), { statusCode: 400, code: 'invalid_session_reset' })
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/usage/reset', {}), { statusCode: 405 })
+  assert.deepEqual(await get('/api/chat/usage/pricing'), pricing)
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/usage/pricing', { revision: null, prices: [] }), { statusCode: 503 })
+  assert.deepEqual(historyDatabaseSnapshot(filename), beforeDatabase)
+  assert.deepEqual(await readFile(filename), beforeBytes)
+  assert.deepEqual(counts(), beforeCounts)
+  context.diagnostic(JSON.stringify({ beforeCounts, afterCounts: counts(), getRequests, records: offlineUsage.records,
+    knownTokens: offlineUsage.knownTokens,
+    totals: offlineUsage.totals, journal: offlineJournal.items, bindings: (offlineSessions.items as unknown[]).length + 5,
+    mainDatabaseUnchanged: true, allRecordsSchemaAndGrantsUnchanged: true }))
+  await fake.runtime().close()
+  for (const path of ['/api/chat/sessions', '/api/chat/usage', '/api/chat/executions']) {
+    await assert.rejects(invoke(fake.routes(), 'GET', path), { statusCode: 503, code: 'native_history_unavailable' })
+  }
+})
+
+test('offline history never-started GET is unavailable and creates no files or protocol activity', async context => {
+  const fake = await fixture(context)
+  const before = await readdir(fake.directory)
+  assert.deepEqual(await invoke(fake.routes(), 'GET', '/api/chat/usage/maintenance', null, new URLSearchParams({ action: 'list' })),
+    { schema: 1, operations: [], next: null, partial: false })
+  for (const path of ['/api/chat/sessions', '/api/chat/usage', '/api/chat/executions', '/api/chat/usage/recent',
+    '/api/chat/usage/series', '/api/chat/usage/turns']) {
+    await assert.rejects(invoke(fake.routes(), 'GET', path), { statusCode: 503, code: 'runtime_not_connected' })
+  }
+  assert.deepEqual(await readdir(fake.directory), before)
+  assert.equal(fake.rpc.length, 0)
+  assert.equal(fake.httpReads(), 0)
+  assert.equal(fake.exchanges(), 0)
+  assert.equal(fake.follows.length, 0)
+  assert.equal(fake.creates(), 0)
+})
+
+test('offline history corrupt existing database is explicitly unavailable, not empty success', async context => {
+  const fake = await fixture(context)
+  const filename = join(fake.directory, 'native-chat.sqlite')
+  await writeFile(filename, 'corrupt synthetic database', { mode: 0o600 })
+  for (const path of ['/api/chat/sessions', '/api/chat/usage', '/api/chat/executions']) {
+    await assert.rejects(invoke(fake.routes(), 'GET', path), { statusCode: 503, code: 'native_history_unavailable' })
+  }
+  assert.equal((await readFile(filename)).toString(), 'corrupt synthetic database')
+  assert.equal(fake.rpc.length, 0)
+  assert.equal(fake.httpReads(), 0)
+  assert.equal(fake.exchanges(), 0)
+})
+
+for (const recovery of [
+  { timeoutMs: 1_000, defaultActions: false, crossDeadline: true },
+  { timeoutMs: 1_200, defaultActions: true, crossDeadline: true },
+  { timeoutMs: 3_000, defaultActions: true, crossDeadline: false }
+]) test(`native first restart records recovered reply expiry without replay (${JSON.stringify(recovery)})`, async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: recovery.timeoutMs,
+    ...(recovery.defaultActions ? {} : { noticeEnabled: false, noticeText: null, cancelOnTimeout: false }) } })
+  await fake.save('authorization', { version: 'recovery', grants: ['private:123', 'group:456'].map(conversationId => ({
+    conversationId, submitUses: 10, sendUses: 10, cancelUses: 1, expiresAt: null
+  })) })
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  const original = fake.runtime().executions()!.list()[0]!
+  const host = fake.runtime().host()!
+  const reply = host.replies.get('private:123')!
+  const bindings = host.sessions.list()
+  const history = host.history.snapshot('private:123', { afterSequence: 0 })
+  const grants = host.policy.describe().grants
+  await fake.runtime().stop()
+  assert.equal(host.replies.get('private:123')?.status, 'waiting')
+  if (recovery.crossDeadline) await delay(Math.max(0, reply.deadlineAt - Date.now()) + 25)
+  else assert(Date.now() < reply.deadlineAt)
+  await fake.restart()
+  const resumed = fake.runtime()
+  const status = await resumed.status()
+  assert.equal(status.state, 'running')
+  assert.equal(status.chatReady, true)
+  assert.equal(status.host?.faults, 0)
+  assert.equal(status.lastError, null)
+  assert.equal(resumed.executions()!.get(original.id)?.status, 'unknown')
+  assert.equal(resumed.executions()!.get(original.id)?.isolated, true)
+  assert.equal(resumed.executions()!.get(original.id)?.deadlineAt, original.deadlineAt)
+  assert.deepEqual(resumed.host()!.sessions.list(), bindings)
+  assert.deepEqual(resumed.host()!.history.snapshot('private:123', { afterSequence: 0 }), history)
+  assert.deepEqual(resumed.host()!.policy.describe().grants, grants)
+  const restoredFollow = fake.follows.length - 1
+  await awaitCondition(() => resumed.host()!.replies.get('private:123')?.status === 'timed-out', { timeoutMs: recovery.timeoutMs + 1_500, intervalMs: 5, message: 'Restored reply deadline did not expire' })
+  assert.equal(resumed.host()!.replies.get('private:123')?.deadlineAt, reply.deadlineAt)
+  assert.equal(resumed.host()!.metrics().replies.expired, 1)
+  assert.equal(resumed.host()!.metrics().faults, 0)
+  fake.agentEvent('assistant/message', { turn: 999, message: { id: 'unattributed', role: 'assistant',
+    content: [{ type: 'text', text: 'Must not deliver or release unknown work.' }] } }, restoredFollow)
+  fake.agentEvent('turn/end', { turn: 999, reason: { kind: 'completed' } }, restoredFollow)
+  fake.message(2)
+  fake.message(3, { message_type: 'group', group_id: 456,
+    message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: 'Unaffected conversation' } }] })
+  await until(() => fake.rpc.filter(value => value.method === 'session/prompt').length === 2)
+  assert.equal(resumed.executions()!.get(original.id)?.isolated, true)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt' && value.request.sessionId === original.binding.sessionId).length, 1)
+  await until(() => resumed.host()!.replies.get('group:456')?.status === 'waiting')
+  fake.answer(1)
+  await until(() => fake.sends.length === 1)
+  assert.equal(fake.creates(), 2)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/cancel').length, 0)
+  fake.agentEvent('assistant/message', { turn: 1, message: { id: 'late', role: 'assistant',
+    content: [{ type: 'text', text: 'Late answer must be record-only.' }] } }, restoredFollow)
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }, restoredFollow)
+  await until(() => resumed.executions()!.get(original.id)?.lateOutcome?.outcome === 'completed')
+  assert.equal(fake.sends.length, 1)
+  assert.deepEqual(resumed.host()!.history.snapshot('private:123', { afterSequence: 0 }), history)
+  assert.deepEqual(resumed.host()!.sessions.get('private:123'), original.binding)
+})
+
+test('native recovered reply expiry still blocks startup on a real SQLite write failure', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 1_000 } })
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  const reply = fake.runtime().host()!.replies.get('private:123')!
+  await fake.runtime().close()
+  const database = new DatabaseSync(join(fake.directory, 'native-chat.sqlite'))
+  try {
+    database.exec(`CREATE TRIGGER reject_reply_recovery BEFORE UPDATE ON durable_records
+      WHEN OLD.namespace = 'host.replies' BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END`)
+  } finally { database.close() }
+  await delay(Math.max(0, reply.deadlineAt - Date.now()) + 25)
+  await assert.rejects(fake.restart(), { code: 'NATIVE_CHAT_HOST_NOT_READY' })
+  const status = await fake.runtime().status()
+  assert.equal(status.state, 'error')
+  assert.equal(status.chatReady, false)
+  assert.equal(status.host?.lastFaultCode, 'STORE_IO_ERROR')
+  assert.equal(fake.runtime().host()!.replies.get('private:123')?.status, 'waiting')
+  assert.equal(fake.creates(), 1)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 1)
+})
+
+test('native startup does not ignore a real restored follow failure after local reply expiry', async context => {
+  const options = { failFollow: false }
+  const fake = await fixture(context, options)
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 1_000 } })
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  const reply = fake.runtime().host()!.replies.get('private:123')!
+  await fake.runtime().stop()
+  await delay(Math.max(0, reply.deadlineAt - Date.now()) + 25)
+  options.failFollow = true
+  await assert.rejects(fake.restart(), { code: 'NATIVE_CHAT_HOST_NOT_READY' })
+  const status = await fake.runtime().status()
+  assert.equal(status.state, 'error')
+  assert.equal(status.chatReady, false)
+  assert.equal(status.host?.lastFaultCode, 'AGENT_FOLLOW_UNKNOWN')
+  assert.equal(fake.runtime().host()!.replies.get('private:123')?.status, 'timed-out')
+  assert.equal(fake.creates(), 1)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 1)
+})
 
 test('native composition stays offline until manual start and reports layered missing reasons', async context => {
   const fake = await fixture(context)
@@ -207,6 +695,269 @@ test('native composition stays offline until manual start and reports layered mi
     chatRuntime: { status: () => ({ chatReady: true }) } as unknown as ReturnType<typeof createNativeChatRuntime> }), TypeError)
 })
 
+test('execution API owns an eighth CAS revision and old authorization documents retain their exact four-field grant shape', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  const initial = await invoke(fake.routes(), 'GET', '/api/chat/execution')
+  assert.equal((initial.policy as Record<string, unknown>).turnTimeoutMs, 120_000)
+  const authorization = await invoke(fake.routes(), 'GET', '/api/chat/authorization')
+  assert.equal(authorization.cancelAvailable, true)
+  assert.equal(Object.hasOwn((authorization.grants as Record<string, unknown>[])[0]!, 'cancelUses'), false)
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  assert.equal(Object.keys(configuration.revisions).length, 8)
+  assert.equal(configuration.revisions.execution, initial.revision)
+  const { execution: _execution, ...oldRevisions } = configuration.revisions
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/runtime/start', { revisions: oldRevisions }),
+    { statusCode: 400, code: 'invalid_runtime_revisions' })
+  const policy = { ...DEFAULT_NATIVE_EXECUTION_POLICY, noticeEnabled: false, cancelOnTimeout: false }
+  await fake.save('execution', { policy })
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/execution', { revision: initial.revision, policy }),
+    { statusCode: 409, code: 'chat_revision_conflict' })
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/execution', { revision: initial.revision, policy: { ...policy, turnTimeoutMs: 0 } }),
+    { statusCode: 400, code: 'invalid_execution_policy' })
+  assert.equal(fake.rpc.length, 0)
+})
+
+test('missing trusted optional plugin blocks manual startup with false readiness and zero sessions', async context => {
+  const fake = await fixture(context, { pluginMissing: true })
+  await fake.configure()
+  await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_CORRELATION_PLUGIN_UNAVAILABLE' })
+  assert.equal((await fake.runtime().status()).chatReady, false)
+  assert.equal(fake.creates(), 0)
+  assert.equal((await invoke(fake.routes(), 'GET', '/api/chat/sessions')).items instanceof Array, true)
+  assert.equal(fake.runtime().host()?.sessions.list().length, 0)
+})
+
+test('actual native persona scope preserves a proven 015 version without aliasing or rewriting old outbox data', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  const definition = buildChatSessionDefinition(configuration.catalog.plans[0], configuration.personas[0])
+  const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const legacyVersion = hash(definition)
+  const nativeIdentity = createNativePersonaIdentity(configuration.personas[0])
+  const filename = join(fake.directory, 'native-chat.sqlite')
+  const fixtureStore = createSqliteStore({ filename })
+  const bindings = [{ agentPreset: 'test-native-chat', externalProvider: 'external-provider', definition }]
+  fixtureStore.write('native-chat.meta', 'session-definition', { identity: hash({ definition,
+    endpoint: configuration.adapters.dshAgent.endpoint, bindings }) })
+  const sessions = createSessionRegistry({ store: fixtureStore, agent: {
+    async createSession() { throw new Error('Synthetic legacy fixture must not create a session') },
+    async submit() { return { status: 'rejected' } }, async follow() { return () => {} }
+  } })
+  sessions.bind('private:123', 'session-legacy')
+  const outbox = createDurableTransport({ store: fixtureStore, transport: {
+    async send() { return { status: 'confirmed', messageId: 'legacy-send' } }
+  } })
+  await outbox.send({ conversationId: 'private:123', content: [{ type: 'text', text: 'Synthetic legacy fixture.' }],
+    idempotencyKey: 'legacy-outbound', signal: new AbortController().signal,
+    scope: { persona: { id: nativeIdentity.contextId, version: legacyVersion }, sessionId: 'session-legacy', generation: 1 } })
+  const oldOutbox = fixtureStore.list('outbox')[0]!
+  fixtureStore.close()
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  fake.answer(1)
+  await until(() => fake.sends.length === 1)
+  await until(() => fake.runtime().host()!.outbox.list().filter(value => value.status === 'confirmed').length === 2)
+  await fake.runtime().stop()
+  const observed = createSqliteStore({ filename })
+  try {
+    assert.deepEqual(observed.read('outbox', oldOutbox.key), oldOutbox)
+    const metadata = observed.read('native-chat.meta', 'persona-identity')!.value as Record<string, unknown>
+    assert.equal(metadata.contentVersion, nativeIdentity.version)
+    assert.equal(metadata.scopeVersion, legacyVersion)
+    assert.equal(metadata.source, 'preserved-v15-definition-version')
+    const freshOutbox = observed.list('outbox').find(value => value.key !== oldOutbox.key)!
+    const scope = (freshOutbox.value as Record<string, unknown>).scope as Record<string, unknown>
+    assert.deepEqual(scope.persona, { id: nativeIdentity.contextId, version: legacyVersion })
+    assert.equal(fake.creates(), 0)
+  } finally { observed.close() }
+})
+
+test('adding explicit cancelUses zero to an already used authorization version cannot create a fresh grant or refill budgets', async context => {
+  const fake = await fixture(context, { uses: 2 })
+  await fake.configure()
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  fake.answer(1)
+  await until(() => fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
+  const before = fake.runtime().host()!.policy.describe().grants
+  await fake.runtime().stop()
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  await fake.save('authorization', { version: configuration.authorization.version,
+    grants: configuration.authorization.grants.map(grant => ({ ...grant, cancelUses: 0 })) })
+  await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_AUTHORIZATION_VERSION_CONFLICT' })
+  assert.deepEqual(fake.runtime().host()!.policy.describe().grants, before)
+  assert.equal(fake.creates(), 1)
+})
+
+test('delegation availability does not upgrade legacy grants and used authorization versions reject explicit zero or positive delegation', async context => {
+  for (const toolDelegationUses of [0, 1]) {
+    const fake = await fixture(context)
+    await fake.configure()
+    const authorization = await invoke(fake.routes(), 'GET', '/api/chat/authorization')
+    assert.equal(authorization.toolDelegationAvailable, true)
+    assert((authorization.grants as Record<string, unknown>[]).every(grant => !Object.hasOwn(grant, 'toolDelegationUses')))
+    await fake.start()
+    const before = fake.runtime().host()!.policy.describe().grants
+    assert(before.every(grant => !grant.capabilities.includes('agent.tools.delegate')))
+    await fake.runtime().stop()
+    const configuration = await readNativeChatConfiguration(fake.directory)
+    await fake.save('authorization', { version: configuration.authorization.version,
+      grants: configuration.authorization.grants.map(grant => ({ ...grant, toolDelegationUses })) })
+    await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_AUTHORIZATION_VERSION_CONFLICT' })
+    assert.deepEqual(fake.runtime().host()!.policy.describe().grants, before)
+    assert.equal(fake.creates(), 0)
+  }
+})
+
+test('explicit delegation uses the actual persistent policy without implying submit, grant refill or external authorization', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  const saved = await fake.save('authorization', { version: 'delegate-explicit',
+    grants: configuration.authorization.grants.map(grant => ({ ...grant,
+      ...(grant.conversationId === 'private:123' ? { submitUses: 0, toolDelegationUses: 1 } : {}) })) })
+  assert.equal(saved.toolDelegationAvailable, true)
+  await fake.start()
+  const policy = fake.runtime().host()!.policy
+  const privateGrant = () => fake.runtime().host()!.policy.describe().grants.find(grant => grant.conversationId === 'private:123')!
+  assert.equal(privateGrant().maxUses['agent.tools.delegate'], 1)
+  assert.equal(privateGrant().maxUses['agent.submit'], 0)
+  fake.message(1)
+  await until(async () => (await fake.runtime().status()).ingress.received === 1)
+  assert.equal(fake.rpc.filter(request => request.method === 'session/prompt').length, 0)
+  assert.equal(privateGrant().used['agent.tools.delegate'], 0)
+  const reservation = policy.reserve({ featureId: 'agent-relay', conversationId: 'private:123', capability: 'agent.tools.delegate' })
+  policy.begin(reservation)
+  assert.equal(privateGrant().used['agent.tools.delegate'], 1)
+  await fake.restart()
+  assert.equal(privateGrant().used['agent.tools.delegate'], 1)
+  assert.throws(() => fake.runtime().host()!.policy.reserve({ featureId: 'agent-relay',
+    conversationId: 'private:123', capability: 'agent.tools.delegate' }), { code: 'BUDGET_EXHAUSTED' })
+  assert.equal((await fake.runtime().status()).toolDelegation.externalToolAuthorizationVerified, false)
+  assert.equal(fake.rpc.filter(request => request.method === 'session/prompt').length, 0)
+})
+
+test('selected work identity changes cannot reuse or reset an existing native session', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
+  const before = fake.runtime().host()!.sessions.list()
+  await fake.runtime().stop()
+  await fake.save('plans', { activePlanId: 'daily', plans: [{ ...plan,
+    capabilitySelection: { schema: 1, presetId: 'operator-work', revision: 'a'.repeat(64) } }] })
+  await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_SESSION_CONFIGURATION_CONFLICT' })
+  assert.equal(fake.creates(), 1)
+  assert.equal(fake.rpc.filter(request => request.method === 'session/prompt').length, 1)
+  assert.deepEqual(fake.runtime().host()!.sessions.list(), before)
+})
+
+test('real endless progress expires total deadline, consumes finite notice/cancel grants and isolates later same-session prompts', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 500, noticeEnabled: true } })
+  await fake.save('authorization', { version: '2', grants: ['private:123', 'group:456'].map(conversationId => ({
+    conversationId, submitUses: 10, sendUses: 10, cancelUses: 1, expiresAt: null
+  })) })
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  const execution = fake.runtime().executions()!.list()[0]!
+  const progress = setInterval(() => fake.agentEvent('step/start', { turn: 1, step: 1 }), 20)
+  context.after(() => clearInterval(progress))
+  await until(() => fake.runtime().executions()!.get(execution.id)?.deadlineReached === true)
+  clearInterval(progress)
+  await until(() => fake.sends.length === 1 && fake.rpc.some(value => value.method === 'session/cancel')
+    && fake.runtime().executions()!.get(execution.id)?.noticeStatus === 'confirmed'
+    && fake.runtime().executions()!.get(execution.id)?.cancelStatus === 'accepted')
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.deadlineAt, execution.deadlineAt)
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.isolated, true)
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.cancelStatus, 'accepted')
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.noticeStatus, 'confirmed')
+  fake.message(2)
+  await delay(60)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 1)
+  assert.equal(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages.filter(value => value.actor === '123').length, 1)
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+  await until(() => fake.runtime().executions()!.get(execution.id)?.isolated === false)
+  fake.message(3)
+  await until(() => fake.rpc.filter(value => value.method === 'session/prompt').length === 2)
+  fake.answer(2)
+  await until(() => fake.sends.length === 2)
+  assert.equal(fake.creates(), 1)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/cancel').length, 1)
+  assert.equal(fake.runtime().host()!.policy.describe().grants.find(value => value.conversationId === 'private:123')?.used['agent.cancel'], 1)
+})
+
+test('real half-open prompt times out once, sends one notice and never replays after concurrent stop or restart', async context => {
+  const fake = await fixture(context, { holdPrompt: true })
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 500, noticeEnabled: true, cancelOnTimeout: false } })
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.heldPrompt() !== undefined)
+  await until(() => fake.runtime().executions()!.list()[0]?.deadlineReached === true)
+  await until(() => fake.sends.length === 1)
+  const original = fake.runtime().executions()!.list()[0]!
+  await Promise.all([fake.runtime().stop(), fake.runtime().stop()])
+  await fake.restart()
+  fake.message(2)
+  await delay(100)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 1)
+  assert.equal(fake.runtime().executions()!.get(original.id)?.status, 'unknown')
+  assert.equal(fake.runtime().executions()!.get(original.id)?.deadlineAt, original.deadlineAt)
+  fake.answer(1)
+  await until(() => fake.runtime().executions()!.get(original.id)?.externalStatus === 'completed')
+  assert.equal(fake.sends.length, 1)
+  assert.equal(fake.runtime().executions()!.get(original.id)?.lateOutcome?.outcome, 'completed')
+})
+
+test('real claim gap never guesses the only pending prompt and a later exact final is record-only', async context => {
+  const fake = await fixture(context, { suppressClaims: true })
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 500, noticeEnabled: true, cancelOnTimeout: false } })
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  fake.answer(1)
+  await delay(60)
+  assert.equal(fake.sends.length, 0)
+  const execution = fake.runtime().executions()!.list()[0]!
+  assert.equal(execution.turn, null)
+  await until(() => fake.sends.length === 1)
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.isolated, true)
+  fake.claimPrompt()
+  fake.answer(1)
+  await until(() => fake.runtime().executions()!.get(execution.id)?.lateOutcome?.outcome === 'completed')
+  assert.equal(fake.sends.length, 1)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 1)
+})
+
+test('real plugin epoch change invalidates readiness without adopting a new baseline or resubmitting work', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  fake.message(1)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  const execution = fake.runtime().executions()!.list()[0]!
+  fake.restartPlugin()
+  await until(() => fake.runtime().executions()!.get(execution.id)?.status === 'unknown')
+  const status = await fake.runtime().status()
+  assert.equal(status.chatReady, false)
+  assert.equal(status.execution.correlationVerified, false)
+  assert(status.missingReasons.includes('execution_correlation_unavailable'))
+  fake.answer(1)
+  fake.message(2)
+  await delay(80)
+  assert.equal(fake.sends.length, 0)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 1)
+})
+
 test('real local WS text passes through native host/DSH/policy/durable outbox to confirmed QQ HTTP send', async context => {
   const fake = await fixture(context)
   await fake.configure()
@@ -220,7 +971,7 @@ test('real local WS text passes through native host/DSH/policy/durable outbox to
     adapterRuntime: { status: () => ({ running: false }), connectionStatus: () => ({ state: 'connected',
       selfId: '999', lastError: null, received: 0, dropped: 0, chatReady: true }) } })
   await assert.rejects(invoke(unrelated, 'GET', '/api/chat/adapters'), { statusCode: 503, code: 'adapter_runtime_status_unavailable' })
-  assert.deepEqual(fake.rpc.map(request => request.method), ['settings/describe'])
+  assert.deepEqual(fake.rpc.map(request => request.method), ['settings/describe', 'bridgePlugin/describe'])
   await assert.rejects(fake.runtime().adapterRuntime.disconnect!(), { code: 'NATIVE_CHAT_BUSY' })
   fake.message(1)
   await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
@@ -235,13 +986,18 @@ test('real local WS text passes through native host/DSH/policy/durable outbox to
   await until(() => fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
   assert.deepEqual(fake.sends[0], { user_id: 123, message: [{ type: 'text', data: { text: 'Final answer 1' } }] })
   const host = fake.runtime().host()!
-  assert.equal(host.history.snapshot('private:123').messages.length, 2)
+  assert.equal(host.history.snapshot('private:123', { afterSequence: 0 }).messages.length, 2)
   assert.equal(host.policy.describe().grants.find(grant => grant.conversationId === 'private:123')?.used['agent.submit'], 1)
   const sessions = await invoke(fake.routes(), 'GET', '/api/chat/sessions')
   assert.equal((sessions.items as unknown[]).length, 1)
   const usage = await invoke(fake.routes(), 'GET', '/api/chat/usage')
   assert.equal(usage.tokenUsageAvailable, false)
   assert.equal(usage.source, 'chat-ledger')
+  const journal = await invoke(fake.routes(), 'GET', '/api/chat/executions')
+  assert(parseExecutionJournalPage(journal))
+  assert.equal(journal.manualCancelAvailable, false)
+  assert.equal((journal.items as Record<string, unknown>[])[0]?.status, 'completed')
+  assert.equal(Object.hasOwn((journal.items as Record<string, unknown>[])[0]!, 'policy'), false)
   const metrics = await invoke(fake.routes(), 'GET', '/api/host/metrics')
   assert.equal(metrics.started, true)
   fake.message(1)
@@ -261,8 +1017,12 @@ test('access deny and forged WS identities never create agent sessions; self men
   fake.message(3, { message_type: 'group', group_id: 456,
     message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: 'Directed group message' } }] })
   await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
-  assert.deepEqual(fake.rpc.find(request => request.method === 'session/prompt')?.request.content,
-    [{ type: 'text', text: 'Directed group message' }])
+  const content = fake.rpc.find(request => request.method === 'session/prompt')?.request.content
+  assert(Array.isArray(content))
+  const prompt = content.map((part: { text: string }) => part.text).join('\n')
+  assert.match(prompt, /当前消息：\nDirected group message/)
+  assert.match(prompt, /\"senderId\":\"123\"/)
+  assert.match(prompt, /\"conversationId\":\"group:456\"/)
 })
 
 test('allow and owner do not grant effects; configuration changes fail closed without clearing sessions', async context => {
@@ -294,7 +1054,7 @@ test('failed DSH authentication and HTTP identity mismatch never report chat rea
     await assert.rejects(fake.start())
     const status = await fake.runtime().status()
     assert.equal(status.chatReady, false)
-    assert.equal(status.protocolConnected, false)
+    assert.equal(status.protocolConnected, status.connection.state === 'connected' && status.connection.selfId !== null)
     assert.equal(status.state, 'error')
     assert.equal(fake.creates(), 0)
     assert(!JSON.stringify(status).includes('dsh-test-secret'))
@@ -314,7 +1074,7 @@ test('restart preserves sessions, history, exhausted budgets and unknown outbox 
   await fake.restart()
   assert.deepEqual(fake.runtime().host()!.sessions.list()[0], before)
   assert.equal(fake.runtime().host()!.outbox.list()[0]?.status, 'unknown')
-  assert.equal(fake.runtime().host()!.history.snapshot('private:123').messages.length, 1)
+  assert.equal(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages.length, 1)
   fake.message(1)
   fake.message(2)
   await delay(80)
@@ -378,7 +1138,7 @@ test('imported catalog identifiers remain unchanged while private core persona m
   assert.equal(fake.creates(), 1)
 })
 
-test('real native session metadata reaches page 101+ with stable exclusive cursors and reset disabled', async context => {
+test('real native session metadata reaches page 101+ with stable exclusive cursors and reset blocked while running', async context => {
   const fake = await fixture(context)
   await fake.configure()
   await fake.start()
@@ -401,9 +1161,1113 @@ test('real native session metadata reaches page 101+ with stable exclusive curso
   assert.equal(new Set(keys).size, fixtureData.count)
   const large = await invoke(fake.routes(), 'GET', '/api/chat/sessions', null, new URLSearchParams({ limit: '1000' }))
   assert.equal((large.items as unknown[]).length, 205)
-  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/sessions/reset', {}),
-    error => error !== null && typeof error === 'object' && 'code' in error && error.code === 'session_reset_not_enabled')
+  const target = (large.sessions as Array<Record<string, unknown>>)[0]!
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/sessions/reset', { key: target.key, sessionId: target.sessionId,
+    generation: target.generation, bindingRevision: target.bindingRevision, confirm: true }),
+    { statusCode: 409, code: 'session_reset_requires_stopped' })
   assert.equal(fake.runtime().host()!.sessions.list({ limit: 1_000 }).length, 205)
   assert.equal(fake.creates(), 0)
   assert.equal(fake.sends.length, 0)
+})
+
+test('native group nickname, bot quote and continuation deliver bounded speaker context without stealing addressed conversation', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  const group = { message_type: 'group', group_id: 456 }
+  fake.message(301, { ...group, user_id: 777, message: [{ type: 'text', data: { text: '大家聊点别的' } }] })
+  fake.message(302, { ...group, message: [{ type: 'text', data: { text: 'Native，看看之前大家说的' } }] })
+  await until(() => prompts().length === 1)
+  const first = JSON.stringify(prompts()[0]!.request.content)
+  assert.match(first, /nickname/)
+  assert.match(first, /大家聊点别的/)
+  assert.match(first, /777/)
+  fake.answer()
+  await until(() => fake.sends.length === 1 && fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
+  fake.message(303, { ...group, message: [{ type: 'at', data: { qq: '777' } }, { type: 'text', data: { text: '问的是你' } }] })
+  fake.message(304, { ...group, user_id: 777,
+    message: [{ type: 'reply', data: { id: '1001' } }, { type: 'text', data: { text: '解释一下这个回答' } }] })
+  await until(() => prompts().length === 2)
+  const second = JSON.stringify(prompts()[1]!.request.content)
+  assert.match(second, /Final answer 1/)
+  assert.match(second, /available\\?":true/)
+  assert.match(second, /reply/)
+  fake.answer(2)
+  await until(() => fake.sends.length === 2)
+  fake.message(305, { ...group, user_id: 777, message: [{ type: 'text', data: { text: '再补充一下' } }] })
+  await until(() => prompts().length === 3)
+  assert.match(JSON.stringify(prompts()[2]!.request.content), /continuation/)
+})
+
+test('native busy corrections queue and merge after confirmed reply with one subsequent submission', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  fake.message(401, { message_type: 'group', group_id: 456, message: [
+    { type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '开始这个问题' } }] })
+  await until(() => prompts().length === 1)
+  fake.message(402, { message_type: 'group', group_id: 456, message: [{ type: 'text', data: { text: '第一处更正' } }] })
+  fake.message(403, { message_type: 'group', group_id: 456, message: [{ type: 'text', data: { text: '第二处补充' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 3)
+  assert.equal(prompts().length, 1)
+  fake.answer()
+  await until(() => prompts().length === 2)
+  const queued = JSON.stringify(prompts()[1]!.request.content)
+  assert.match(queued, /第一处更正/)
+  assert.match(queued, /第二处补充/)
+  assert.match(queued, /Final answer 1/)
+  fake.message(402, { message_type: 'group', group_id: 456, message: [{ type: 'text', data: { text: '第一处更正' } }] })
+  fake.answer(2)
+  await until(() => fake.sends.length === 2)
+  await delay(300)
+  assert.equal(prompts().length, 2)
+})
+
+test('native mixed and media-only input retain scoped handles and explicitly unread facts', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  fake.message(501, { message: [{ type: 'text', data: { text: '这张图里是什么？' } },
+    { type: 'image', data: { file: 'opaque-image-token', url: 'https://media.example.test/image?token=private-test-token' } }] })
+  await until(() => prompts().length === 1)
+  const mixed = JSON.stringify(prompts()[0]!.request.content)
+  assert.match(mixed, /这张图里是什么/)
+  assert.match(mixed, /image资源 media-/)
+  assert.match(mixed, /未读取内容/)
+  assert.equal(mixed.includes('private-test-token'), false)
+  const history = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 })
+  assert.equal(history.messages[0]?.content[1]?.type, 'image')
+  fake.answer()
+  await until(() => fake.sends.length === 1)
+  fake.message(502, { message: [{ type: 'record', data: { file: 'opaque-audio-token' } }] })
+  await until(() => prompts().length === 2)
+  assert.match(JSON.stringify(prompts()[1]!.request.content), /audio资源 media-/)
+  const counts = fake.rpc.length
+  const media = await invoke(fake.routes(), 'GET', '/api/chat/media', null, new URLSearchParams({ conversationId: 'private:123', limit: '100' }))
+  assert(Array.isArray(media.items) && media.items.length === 2)
+  assert(media.items.some(item => isRecord(item) && item.kind === 'audio' && item.readingAvailable === false
+    && Array.isArray(item.missingReasons) && item.missingReasons.includes('native_media_transcriber_not_connected')))
+  assert(!JSON.stringify(media).includes('private-test-token'))
+  assert.equal(fake.rpc.length, counts)
+  await fake.runtime().stop()
+  const stopped = await invoke(fake.routes(), 'GET', '/api/chat/media', null, new URLSearchParams({ conversationId: 'private:123' }))
+  assert.equal(stopped.running, false); assert(Array.isArray(stopped.items) && stopped.items.length === 2)
+})
+
+test('native installed feature reads a registered forward through policy and retains nested unread media', async context => {
+  const results: JsonValue[] = []
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'forward-reader', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'e'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    create() { return { agentInputPreparation: { capabilities: [], prepare(_execution, event) {
+      return [...normalizeContent(event.data.content), { type: 'text', text: 'input-extension-active' }]
+    } }, features: [{ id: 'forward-reader', version: '1.0.0', apiVersion: 1,
+      capabilities: ['native.media.read'], subscriptions: ['message.received'], setup(services) {
+        services.on('message.received', async (execution, event) => {
+          const forward = normalizeContent(event.data.content).find(part => part.type === 'forward-reference')
+          if (!forward) return
+          results.push(await execution.invoke('native.media.read', { assetId: forward.assetId }))
+        })
+      } }] } } }
+  const fake = await fixture(context, { bootstrap, forwardMessages: [{ sender: { user_id: 789, nickname: '转发里的名字' },
+    time: 100, content: [{ type: 'text', data: { text: '转发正文' } },
+      { type: 'image', data: { file: 'nested-file', url: 'https://media.example.test/nested?token=secret-pointer' } }] }] })
+  await fake.configure()
+  await fake.start()
+  fake.runtime().host()!.policy.grant({ id: 'forward-reader-explicit', featureId: 'forward-reader',
+    conversationId: 'private:123', capabilities: ['native.media.read'], maxUses: { 'native.media.read': 1 } })
+  fake.message(601, { message: [{ type: 'forward', data: { id: 'forward-token' } }] })
+  await until(() => results.length === 1)
+  const result = results[0] as { state: string; sourceMeaning: string; contentRead: boolean; nestedMediaRead: boolean;
+    nodes: { senderId: string; content: { type: string; assetId?: string }[] }[] }
+  assert.equal(result.state, 'expanded')
+  assert.equal(result.contentRead, true)
+  assert.equal(result.nestedMediaRead, false)
+  assert.equal(result.sourceMeaning, 'forwarded-content-not-authenticated-current-sender')
+  assert.equal(result.nodes[0]?.senderId, '789')
+  assert.equal(result.nodes[0]?.content[1]?.type, 'image')
+  assert.match(result.nodes[0]?.content[1]?.assetId ?? '', /^media-/)
+  assert.equal(JSON.stringify(result).includes('secret-pointer'), false)
+  assert.equal(fake.runtime().host()!.policy.describe().grants.find(grant => grant.id === 'forward-reader-explicit')?.used['native.media.read'], 1)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  assert.match(JSON.stringify(fake.rpc.find(value => value.method === 'session/prompt')!.request.content), /input-extension-active/)
+})
+
+test('editing unused catalog entries keeps active chat and session identity while selected dependencies still block', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  fake.message(701)
+  await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
+  const binding = fake.runtime().host()!.sessions.get('private:123')
+  await fake.save('personas', { personas: [persona, { ...persona, id: 'unused-persona', name: 'Unused', identity: 'Unused identity.' }] })
+  await fake.save('plans', { activePlanId: 'daily', plans: [plan,
+    { ...plan, id: 'unused-plan', personaId: 'unused-persona', instructions: 'Unused instructions.' }] })
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  await fake.save('providers', { providers: [...configuration.providers,
+    { ...configuration.providers[0]!, id: 'unused-provider', name: 'Unused provider' }] })
+  const status = await fake.runtime().status()
+  assert.equal(status.chatReady, true)
+  assert.equal(status.configurationImpact?.canContinue, true)
+  assert.deepEqual([...status.configurationImpact!.ignoredCatalogRevisions].sort(), ['personas', 'plans', 'providers'])
+  fake.answer()
+  await until(() => fake.sends.length === 1)
+  fake.message(702)
+  await until(() => fake.rpc.filter(value => value.method === 'session/prompt').length === 2)
+  assert.deepEqual(fake.runtime().host()!.sessions.get('private:123'), binding)
+  assert.equal(fake.creates(), 1)
+  await fake.save('personas', { personas: [{ ...persona, identity: 'Selected identity changed.' },
+    { ...persona, id: 'unused-persona', name: 'Unused', identity: 'Unused identity.' }] })
+  assert.equal((await fake.runtime().status()).chatReady, false)
+  fake.answer(2)
+  await delay(80)
+  assert.equal(fake.sends.length, 1)
+  assert.deepEqual(fake.runtime().host()!.sessions.get('private:123'), binding)
+})
+
+test('native protocol notice reaches installed feature with scope checks and no automatic model submission', async context => {
+  const notices: JsonValue[] = []
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'protocol-reader', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'd'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    create() { return { features: [{ id: 'protocol-reader', version: '1.0.0', apiVersion: 1,
+      capabilities: [], subscriptions: ['protocol.message.recalled'], setup(services) {
+        services.on('protocol.message.recalled', (_execution, event) => { notices.push(event.data) })
+      } }] } } }
+  const fake = await fixture(context, { bootstrap })
+  await fake.configure()
+  await fake.start()
+  const notice = { post_type: 'notice', notice_type: 'group_recall', group_id: 456, operator_id: 123, message_id: 800, time: 1000 }
+  fake.message(801, notice)
+  await until(() => notices.length === 1)
+  assert.equal((notices[0] as { messageId: string }).messageId, '800')
+  fake.message(801, notice)
+  fake.message(802, { ...notice, group_id: 789 })
+  fake.message(803, { ...notice, self_id: 100 })
+  await delay(100)
+  assert.equal(notices.length, 1)
+  assert.equal(fake.rpc.filter(value => value.method === 'session/prompt').length, 0)
+  assert.equal(fake.creates(), 0)
+  assert.equal(fake.sends.length, 0)
+})
+
+test('native input configuration changes trigger behavior live without resetting sessions and cancels withdrawn queued continuation', async context => {
+  const { createDefaultPackageConfigurationRegistry } = await import('../src/host/chat-input-configuration.ts')
+  const { DEFAULT_CHAT_INPUT_CONFIGURATION } = await import('../src/contracts/chat-input-configuration.ts')
+  const fake = await fixture(context)
+  await fake.configure(); await fake.start()
+  const registry = createDefaultPackageConfigurationRegistry(fake.directory)
+  async function configureInput(configuration: typeof DEFAULT_CHAT_INPUT_CONFIGURATION) {
+    const current = await registry.read('chat-input')
+    await registry.compareAndSet('chat-input', current.revision, configuration, new AbortController().signal)
+  }
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  const group = { message_type: 'group', group_id: 456 }
+  await configureInput({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, wakeOnMention: false, wakeOnReply: false,
+    continuationMs: 0, nicknames: ['小框架'] })
+  fake.message(801, { ...group, message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '只提及不启动' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 1)
+  assert.equal(prompts().length, 0)
+  fake.message(802, { ...group, message: [{ type: 'text', data: { text: '小框架，开始吧' } }] })
+  await until(() => prompts().length === 1)
+  await configureInput({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, nicknames: ['小框架'] })
+  fake.message(803, { ...group, message: [{ type: 'text', data: { text: '待处理更正' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 3)
+  assert.equal((await fake.runtime().inboxSummary()).pending, 1)
+  await configureInput({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, continuationMs: 0 })
+  fake.answer()
+  await until(() => fake.sends.length === 1)
+  await until(() => fake.runtime().inboxSummary().pending === 0)
+  assert.equal(prompts().length, 1)
+  assert.equal(fake.creates(), 1)
+  assert.equal((await fake.runtime().status()).chatReady, true)
+})
+
+test('native persistent application survives request cancellation and repeated route construction without repeating a start', async context => {
+  const { randomUUID } = await import('node:crypto')
+  const { parseNativeApplicationSnapshot } = await import('../src/contracts/native-application.ts')
+  const fake = await fixture(context)
+  await fake.configure()
+  const revisions = (await readNativeChatConfiguration(fake.directory)).revisions
+  const operationId = randomUUID()
+  const request = new AbortController()
+  const route = fake.routes().find(route => route.pathname === '/api/chat/application' && route.method === 'POST')!
+  const response = await route.handle({ query: new URLSearchParams(), body: { operationId, revisions, deploy: false }, signal: request.signal })
+  assert(response && typeof response === 'object' && 'operation' in response)
+  assert.equal(parseNativeApplicationSnapshot(response.operation)?.state, 'running')
+  request.abort()
+  await until(async () => {
+    const read = await invoke(fake.routes(), 'GET', '/api/chat/application')
+    return parseNativeApplicationSnapshot(read.operation)?.state === 'completed'
+  })
+  const first = await invoke(fake.routes(), 'GET', '/api/chat/application', null, new URLSearchParams({ id: operationId }))
+  const before = fake.rpc.length
+  const repeated = await invoke(fake.routes(), 'POST', '/api/chat/application', { operationId, revisions, deploy: false })
+  assert.deepEqual(repeated, first)
+  assert.equal(fake.rpc.length, before)
+  assert.equal((await fake.runtime().status()).chatReady, true)
+  assert.equal((await readNativeChatConfiguration(fake.directory)).revisions.execution, revisions.execution)
+})
+
+test('native remote quote resolves same-conversation speaker and text without exposing cross-conversation content', async context => {
+  const fake = await fixture(context, { quotedMessages: {
+    '9001': { message_id: 9001, message_type: 'group', group_id: 456, sender: { user_id: 999 },
+      message: [{ type: 'text', data: { text: '协议返回的本群旧回答' } }] },
+    '9002': { message_id: 9002, message_type: 'group', group_id: 777, sender: { user_id: 999 },
+      message: [{ type: 'text', data: { text: '其他群的保密上下文' } }] },
+  } })
+  await fake.configure(); await fake.start()
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  const group = { message_type: 'group', group_id: 456 }
+  fake.message(901, { ...group, message: [{ type: 'reply', data: { id: '9002' } }, { type: 'text', data: { text: '这个呢' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 1)
+  assert.equal(prompts().length, 0)
+  const rejectedQuote = await invoke(fake.routes(), 'GET', '/api/chat/media', null, new URLSearchParams({ conversationId: 'group:456' }))
+  assert(isRecord(rejectedQuote.quote)); assert.equal(rejectedQuote.quote.status, 'unknown')
+  assert.equal(rejectedQuote.quote.code, 'ONEBOT_ACTION_INVALID_RESPONSE')
+  assert(!JSON.stringify(rejectedQuote).includes('其他群的保密上下文'))
+  fake.message(902, { ...group, message: [{ type: 'reply', data: { id: '9001' } }, { type: 'text', data: { text: '接着解释' } }] })
+  await until(() => prompts().length === 1)
+  const input = JSON.stringify(prompts()[0]!.request.content)
+  assert.match(input, /协议返回的本群旧回答/)
+  assert.match(input, /reply/)
+  assert(!input.includes('其他群的保密上下文'))
+  const readQuote = await invoke(fake.routes(), 'GET', '/api/chat/media', null, new URLSearchParams({ conversationId: 'group:456' }))
+  assert(isRecord(readQuote.quote)); assert.equal(readQuote.quote.status, 'confirmed'); assert.equal(readQuote.quote.messageId, '9001')
+  assert.equal(fake.sends.length, 0)
+})
+
+test('native default framework tools project only explicit grants and execute media read through current claim and feature policy', async context => {
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'fixture-tool-grants', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'd'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    create() { return { start(host) { host.policy.grant({ id: 'explicit-framework-media', featureId: 'framework-tools',
+      conversationId: 'private:123', capabilities: ['native.media.inspect', 'native.media.read'],
+      maxUses: { 'native.media.inspect': 2, 'native.media.read': 1 } }) } } } }
+  const fake = await fixture(context, { bootstrap, frameworkToolChannel: true,
+    forwardMessages: [{ sender: { user_id: 789 }, content: [{ type: 'text', data: { text: '由真实宿主工具展开的正文' } }] }] })
+  await fake.configure(); await fake.start()
+  fake.message(950, { message: [{ type: 'forward', data: { id: 'forward-token' } }, { type: 'text', data: { text: '读这个转发' } }] })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
+  const lease = fake.toolLeases.get(sessionId)!
+  assert.deepEqual(lease.names, ['qaf_media_inspect', 'qaf_media_read'])
+  const call = { id: 'tool-call-1', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
+    name: 'qaf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
+  fake.toolCalls.push({ ticket: 'ticket-forged', leaseId: lease.leaseId, call: { ...call, id: 'forged', userMessageId: 'unmatched-source' } })
+  await until(() => fake.toolResults.has('ticket-forged'))
+  assert.equal(fake.toolResults.get('ticket-forged')?.status, 'rejected')
+  fake.toolCalls.push({ ticket: 'ticket-real', leaseId: lease.leaseId, call })
+  await until(() => fake.toolResults.has('ticket-real'))
+  const result = fake.toolResults.get('ticket-real')!
+  assert.equal(result.status, 'confirmed')
+  const toolEvents = await invoke(fake.routes(), 'GET', '/api/chat/events', null, new URLSearchParams({ source: 'host', kind: 'tool', toolCallId: call.id }))
+  assert(isNativeEventPage(toolEvents))
+  assert.deepEqual(toolEvents.events.map(event => event.status), ['started', 'progress', 'completed'])
+  assert(toolEvents.events.every(event => event.correlation.requestId === requestId && event.correlation.generation === 1))
+  assert(!JSON.stringify(toolEvents).includes(assetId))
+  assert.match(JSON.stringify(result), /由真实宿主工具展开的正文/)
+  assert.equal(fake.runtime().host()!.policy.describe().grants.find(grant => grant.id === 'explicit-framework-media')?.used['native.media.read'], 1)
+  assert.equal(fake.sends.length, 0)
+  assert.equal(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages.length, 1)
+  await fake.runtime().stop()
+  assert.equal(fake.toolLeases.size, 0)
+  assert((await fake.runtime().status()).packages.every(item => item.state === 'stopped'))
+})
+
+test('native consumes a structured non-participation decision without sending control text or blocking queued conversation', async context => {
+  const fake = await fixture(context)
+  await fake.configure(); await fake.start()
+  fake.message(960)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  fake.agentEvent('assistant/message', { turn: 1, message: { id: 'silent-final', role: 'assistant', content: [{ type: 'text',
+    text: JSON.stringify({ schema: 'qaf.reply/1', action: 'silent', reason: 'user-requested' }) }] } })
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'suppressed')
+  assert.equal(fake.sends.length, 0)
+  assert.equal(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages.length, 1)
+  fake.message(961)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  fake.answer(2)
+  await until(() => fake.sends.length === 1)
+  assert(!JSON.stringify(fake.sends).includes('qaf.reply/1'))
+  assert.equal(fake.creates(), 1)
+})
+
+test('native reminder routes remain editable while stopped and dispatch with a separate one-use rule grant', async context => {
+  const fake = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '999' } })
+  await fake.configure()
+  const before = await readdir(fake.directory)
+  assert.deepEqual((await invoke(fake.routes(), 'GET', '/api/chat/reminders')).rules, [])
+  assert.deepEqual((await readdir(fake.directory)).sort(), before.sort())
+  await assert.rejects(() => invoke(fake.routes(), 'POST', '/api/chat/reminders', { action: 'create', configuration: {
+    conversationId: 'private:888', text: 'Denied', timeZone: 'UTC', schedule: { kind: 'delay', delayMs: 1000 }, enabled: true } }),
+  { code: 'reminder_access_denied' })
+  const rule = await invoke(fake.routes(), 'POST', '/api/chat/reminders', { action: 'create', configuration: {
+    conversationId: 'private:123', text: '独立提醒发送', timeZone: 'Asia/Shanghai', schedule: { kind: 'delay', delayMs: 1000 }, enabled: true } })
+  assert.equal(fake.sends.length, 0)
+  await fake.start()
+  for (const grant of fake.runtime().host()!.policy.describe().grants)
+    if (grant.featureId === 'agent-relay') fake.runtime().host()!.policy.revoke(grant.id)
+  await delay(1050)
+  await fake.runtime().reminderService().tick()
+  await until(() => fake.sends.length === 1)
+  assert.match(JSON.stringify(fake.sends), /独立提醒发送/)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0)
+  const grants = fake.runtime().host()!.policy.describe().grants
+  const reminderGrant = grants.find(grant => grant.featureId === 'reminder')!
+  assert.equal(reminderGrant.used['messaging.send'], 1)
+  assert.equal(reminderGrant.active, false)
+  assert(grants.filter(grant => grant.featureId === 'agent-relay').every(grant => grant.used['messaging.send'] === 0))
+  assert.equal(fake.runtime().reminderService().read(String(rule.id)).state, 'completed')
+  await fake.runtime().stop()
+  const stopped = fake.runtime().readReminders().rules.find(item => item.id === rule.id)!
+  const cancelled = await invoke(fake.routes(), 'POST', '/api/chat/reminders', { action: 'cancel', id: rule.id, revision: stopped.revision })
+  assert.equal(cancelled.state, 'cancelled')
+  await fake.start()
+  await fake.runtime().reminderService().tick()
+  assert.equal(fake.sends.length, 1)
+})
+
+test('native reminder unknown send is retained across restart without an automatic second delivery', async context => {
+  const fake = await fixture(context, { unknownSend: true })
+  await fake.configure()
+  const rule = await fake.runtime().reminderService().create({ conversationId: 'private:123', text: '未知发送',
+    timeZone: 'UTC', schedule: { kind: 'delay', delayMs: 1000 }, enabled: true }, new AbortController().signal)
+  await fake.start(); await delay(1050); await fake.runtime().reminderService().tick()
+  await until(() => fake.runtime().reminderService().read(rule.id).state === 'unknown')
+  assert.equal(fake.sends.length, 1)
+  await fake.runtime().stop(); await fake.start(); await fake.runtime().reminderService().tick()
+  assert.equal(fake.sends.length, 1)
+  assert.equal(fake.runtime().readReminders().rules[0].state, 'unknown')
+  assert.equal(fake.runtime().readReminderHistory().history[0].status, 'unknown')
+})
+
+test('native explicit tool permission management projects tools, preserves consumed budgets and withdraws revoked capabilities', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true,
+    forwardMessages: [{ sender: { user_id: 789 }, content: [{ type: 'text', data: { text: '显式授权读取' } }] }] })
+  await fake.configure()
+  const path = '/api/chat/tool-permissions'
+  const initial = await invoke(fake.routes(), 'GET', path)
+  const id = randomUUID()
+  let permissions = await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
+    id, conversationId: 'private:123', capabilities: ['native.media.read'], maxUses: { 'native.media.read': 1 }, expiresAt: null } })
+  assert.equal((permissions.runtime as Record<string, unknown>).state, 'not-running')
+  await fake.start()
+  assert.equal(((await invoke(fake.routes(), 'GET', path)).runtime as Record<string, unknown>).state, 'applied')
+  fake.message(970, { message: [{ type: 'forward', data: { id: 'forward-token' } }, { type: 'text', data: { text: '读取' } }] })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
+  const lease = fake.toolLeases.get(sessionId)!
+  assert.deepEqual(lease.names, ['qaf_media_read'])
+  const call = { id: 'configured-read', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
+    name: 'qaf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
+  fake.toolCalls.push({ ticket: 'configured-read', leaseId: lease.leaseId, call })
+  await until(() => fake.toolResults.has('configured-read'))
+  assert.equal(fake.toolResults.get('configured-read')?.status, 'confirmed')
+  permissions = await invoke(fake.routes(), 'POST', path, { revision: permissions.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.media.inspect'], maxUses: { 'native.media.inspect': 2 }, expiresAt: null } })
+  assert.deepEqual(fake.toolLeases.get(sessionId)?.names, ['qaf_media_inspect'])
+  const used = () => fake.runtime().host()!.policy.describe().grants.find(grant => grant.id === `native-framework-tool:${id}`)!
+  assert.equal(used().used['native.media.read'], 1)
+  permissions = await invoke(fake.routes(), 'POST', path, { revision: permissions.revision, action: 'revoke', id })
+  assert.equal(used().active, false)
+  fake.toolCalls.push({ ticket: 'revoked-read', leaseId: lease.leaseId, call: { ...call, id: 'revoked-read' } })
+  await until(() => fake.toolResults.has('revoked-read'))
+  assert.equal(fake.toolResults.get('revoked-read')?.status, 'rejected')
+  await fake.runtime().stop(); await fake.start()
+  assert.equal(used().used['native.media.read'], 1)
+  assert.equal(used().active, false)
+  assert.equal(fake.sends.length, 0)
+})
+
+test('native memory management and QQ owner commands inject only confirmed current-scope data and persist revocation', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  const path = '/api/chat/memory'
+  const before = await readdir(fake.directory)
+  assert.deepEqual((await invoke(fake.routes(), 'GET', path)).entries, [])
+  assert.deepEqual((await readdir(fake.directory)).sort(), before.sort())
+  const saved = await invoke(fake.routes(), 'POST', path, { action: 'create', entry: {
+    scope: { kind: 'user', userId: '123', conversationId: 'private:123' }, kind: 'preference',
+    content: '本次测试偏好简明回答', tags: [], expiresAt: null } })
+  await invoke(fake.routes(), 'POST', path, { action: 'create', entry: {
+    scope: { kind: 'group', conversationId: 'group:999' }, kind: 'memory', content: '其他群私有记忆', tags: [], expiresAt: null } })
+  await fake.start()
+  fake.message(980)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request.content)
+  assert.match(prompt, /本次测试偏好简明回答/)
+  assert(!prompt.includes('其他群私有记忆'))
+  assert.match(prompt, /confirmed-memory/)
+  fake.answer(); await until(() => fake.sends.length === 1)
+  fake.message(981, { message: [{ type: 'text', data: { text: '/记住 主人刚刚提供的新记忆' } }] })
+  await until(() => fake.runtime().readMemory().entries.some(entry => entry.content === '主人刚刚提供的新记忆'))
+  await until(() => fake.sends.length === 2)
+  fake.message(981, { message: [{ type: 'text', data: { text: '/记住 主人刚刚提供的新记忆' } }] })
+  await delay(50)
+  assert.equal(fake.runtime().readMemory().entries.filter(entry => entry.content === '主人刚刚提供的新记忆').length, 1)
+  assert.equal(fake.sends.length, 2)
+  fake.message(982, { user_id: 789, message_type: 'group', group_id: 456,
+    message: [{ type: 'at', data: { qq: 999 } }, { type: 'text', data: { text: '/记住 非主人伪造记忆' } }] })
+  await until(() => fake.sends.length === 3)
+  assert(!fake.runtime().readMemory().entries.some(entry => entry.content === '非主人伪造记忆'))
+  await invoke(fake.routes(), 'POST', path, { action: 'revoke', id: saved.id, revision: saved.revision })
+  fake.message(983)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  const next = JSON.stringify(fake.rpc.filter(call => call.method === 'session/prompt')[1].request.content)
+  assert(!next.includes('本次测试偏好简明回答'))
+  assert.match(next, /主人刚刚提供的新记忆/)
+  assert.equal(fake.creates(), 1)
+})
+
+test('native model memory proposals require actual QQ owner confirmation and reminder tools preserve current source scope', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true, accountScope: { protocolId: 'onebot', accountId: '999' } })
+  await fake.configure()
+  const path = '/api/chat/tool-permissions'
+  const initial = await invoke(fake.routes(), 'GET', path)
+  await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities: ['memory.propose', 'memory.query', 'reminders.create'],
+    maxUses: { 'memory.propose': 1, 'memory.query': 2, 'reminders.create': 1 }, expiresAt: null } })
+  await fake.start(); fake.message(990)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const lease = fake.toolLeases.get(sessionId)!
+  async function call(id: string, name: string, input: JsonValue) {
+    fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name, input, sessionId, requestId,
+      generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10_000 } })
+    await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
+  }
+  const proposed = await call('propose-memory', 'qaf_memory_propose', { kind: 'preference', content: '模型推测的有界偏好', tags: [], expiresAt: null })
+  assert.equal(proposed.status, 'confirmed')
+  const entry = fake.runtime().readMemory().entries[0]
+  assert.equal(entry.status, 'proposed')
+  assert.equal(entry.source.kind, 'model-inference')
+  assert.equal(entry.confirmedBy, null)
+  assert.equal(entry.scope.kind, 'user')
+  const before = await call('query-before', 'qaf_memory_query', { query: '' })
+  assert.equal(before.status, 'confirmed'); assert(!JSON.stringify(before).includes('模型推测的有界偏好'))
+  const reminder = await call('owner-reminder', 'qaf_reminder_create', { text: '模型工具创建的提醒', timeZone: 'UTC',
+    schedule: { kind: 'delay', delayMs: 60_000 }, enabled: false })
+  assert.equal(reminder.status, 'confirmed')
+  assert.equal(fake.runtime().readReminders().rules[0].configuration.conversationId, 'private:123')
+  await assert.rejects(() => invoke(fake.routes(), 'POST', '/api/chat/memory', { action: 'confirm', id: entry.id, revision: entry.revision }),
+    { code: 'invalid_memory_request' })
+  fake.message(991, { message: [{ type: 'text', data: { text: `/确认记忆 ${entry.id}` } }] })
+  await until(() => fake.runtime().readMemoryEntry(entry.id).status === 'confirmed')
+  assert.equal(fake.runtime().readMemoryEntry(entry.id).confirmedBy?.kind, 'owner-message')
+  const after = await call('query-after', 'qaf_memory_query', { query: '' })
+  assert.equal(after.status, 'confirmed'); assert.match(JSON.stringify(after), /模型推测的有界偏好/)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+})
+
+
+test('native work tools run independently, persist results, send with delegation grants and continue the original child', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true, workChannel: true, accountScope: { protocolId: 'onebot', accountId: '999' } })
+  await fake.configure()
+  const path = '/api/chat/tool-permissions'
+  const initial = await invoke(fake.routes(), 'GET', path)
+  const capabilities = ['native.work.start', 'native.work.status', 'native.work.followup', 'native.work.interrupt', 'native.work.reconcile']
+  await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities,
+    maxUses: Object.fromEntries(capabilities.map(capability => [capability, 4])), expiresAt: null } })
+  await fake.start(); fake.message(1200)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  assert.equal(fake.runtime().workStatus().available, true)
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const lease = fake.toolLeases.get(sessionId)!
+  async function call(id: string, name: string, input: JsonValue) {
+    fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name, input, sessionId, requestId,
+      generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+    await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
+  }
+  const started = await call('start-independent', 'qaf_work_start', { task: '执行明确委派的测试任务', context: '' })
+  assert.equal(started.status, 'confirmed', JSON.stringify(started))
+  assert.equal(fake.works.size, 1)
+  const [id, work] = [...fake.works][0]
+  assert.equal(fake.runtime().readWork(id)?.status, 'running')
+  const start = fake.rpc.find(call => call.method === 'bridgePlugin/startWork')!.request
+  assert.equal(start.modelProvider, 'external-work'); assert.equal(start.agentPreset, 'test-work')
+  assert.equal(start.parentSessionId, sessionId)
+  const status = await call('status-independent', 'qaf_work_status', { id })
+  assert.equal(status.status, 'confirmed')
+  // Work delivery has its own bounded authorization even when the ordinary relay send grant is exhausted/revoked.
+  for (const grant of fake.runtime().host()!.policy.describe().grants) if (grant.featureId === 'agent-relay') fake.runtime().host()!.policy.revoke(grant.id)
+  fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [{ type: 'text', text: '独立工作真实回传' }] } })
+  await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
+  assert.equal(fake.sends.length, 1)
+  assert.match(JSON.stringify(fake.sends[0]), /独立工作真实回传/)
+  const receipt = fake.runtime().readWork(id)!
+  assert.equal(receipt.deliveryMessageId, '1001'); assert(receipt.resultId)
+  assert.equal(fake.runtime().host()!.sessions.get('private:123')?.sessionId, sessionId)
+  const followup = await call('follow-independent', 'qaf_work_followup', { id, text: '补充明确要求', delivery: 'queue' })
+  assert.equal(followup.status, 'confirmed', JSON.stringify(followup))
+  assert.equal(fake.works.get(id)?.childId, work.childId)
+  await until(() => fake.runtime().readWork(id)?.status === 'running')
+  const stopped = await call('stop-independent', 'qaf_work_interrupt', { id })
+  assert.equal(stopped.status, 'confirmed', JSON.stringify(stopped))
+  await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed' && fake.sends.length === 2)
+  assert.equal(fake.rpc.filter(call => call.method === 'bridgePlugin/startWork').length, 1)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  await fake.restart()
+  assert.equal(fake.runtime().listWork().records.length, 1)
+  assert.equal(fake.runtime().readWork(id)?.delivery, 'confirmed')
+  assert.equal(fake.sends.length, 2)
+})
+
+
+test('native child questions use QQ owner replies while the main conversation continues independently', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true, workChannel: true })
+  await fake.configure()
+  const current = await invoke(fake.routes(), 'GET', '/api/chat/tool-permissions')
+  await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: current.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.work.start'], maxUses: { 'native.work.start': 1 }, expiresAt: null } })
+  await fake.start(); fake.message(1300)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const lease = fake.toolLeases.get(sessionId)!
+  fake.toolCalls.push({ ticket: 'child-start', leaseId: lease.leaseId, call: { id: 'child-start', name: 'qaf_work_start',
+    input: { task: '执行需要确认的独立工作', context: '' }, sessionId, requestId, generation: 1,
+    userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+  await until(() => fake.toolResults.has('child-start'))
+  assert.equal(fake.toolResults.get('child-start')?.status, 'confirmed')
+  const [id, work] = [...fake.works][0]
+  fake.answer()
+  await until(() => fake.sends.length === 1)
+  fake.message(1301)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  assert.equal(fake.runtime().readWork(id)?.status, 'running')
+  fake.interaction({ type: 'waterfall', event: 'approval/request', agentId: work.childId, eventId: 'work-approval',
+    request: { toolName: 'workspace.write', reason: '需要写入测试报告 secret=dsh-test-secret' } })
+  await until(() => fake.sends.length === 2)
+  assert.match(JSON.stringify(fake.sends[1]), /需要写入测试报告/)
+  assert(!JSON.stringify(fake.sends[1]).includes('dsh-test-secret'))
+  assert.match(JSON.stringify(fake.sends[1]), /秒内回复/)
+  fake.message(1302, { user_id: 456, message: [{ type: 'text', data: { text: '同意' } }] })
+  await delay(30)
+  assert.equal(fake.rpc.filter(call => call.method === '$events/result').length, 0)
+  fake.message(1303, { message: [{ type: 'text', data: { text: '同意' } }] })
+  await until(() => fake.rpc.some(call => call.method === '$events/result'))
+  const answered = fake.rpc.find(call => call.method === '$events/result')!.request
+  assert.equal(answered.eventId, 'work-approval')
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 2)
+  fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [{ type: 'text', text: '工作完成' }] } })
+  await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
+})
+
+
+test('native work file result is registered from SDK bytes and records a real upload receipt without a fake message id', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true, workChannel: true })
+  await fake.configure()
+  const current = await invoke(fake.routes(), 'GET', '/api/chat/tool-permissions')
+  await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: current.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.work.start'], maxUses: { 'native.work.start': 1 }, expiresAt: null } })
+  await fake.start(); fake.message(1400)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  fake.toolCalls.push({ ticket: 'file-start', leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id: 'file-start', name: 'qaf_work_start',
+    input: { task: '生成报告文件', context: '' }, sessionId, requestId, generation: 1,
+    userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+  await until(() => fake.toolResults.has('file-start'))
+  assert.equal(fake.toolResults.get('file-start')?.status, 'confirmed')
+  const [id, work] = [...fake.works][0]
+  fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [
+    { type: 'text', text: '报告见文件' }, fake.workAsset ] } })
+  await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
+  const result = fake.runtime().readWork(id)!
+  assert.equal(result.deliveryMessageId, null)
+  assert.equal(result.deliveryFileId, 'uploaded-report')
+  assert.equal(fake.sends.length, 2)
+  assert.equal(fake.sends[1].file, 'base64://' + Buffer.from('file report').toString('base64'))
+  assert.equal(fake.sends[1].name, 'report.txt')
+  assert.equal(fake.sends[1].user_id, 123)
+  await fake.restart()
+  assert.equal(fake.runtime().readWork(id)?.deliveryFileId, 'uploaded-report')
+  assert.equal(fake.sends.length, 2)
+})
+
+test('native bootstrap packages share versioned services, contribute input and execute effects only through feature policy', async context => {
+  let effects = 0
+  const disposed: string[] = []
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'package-fixture', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'a'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    create() { return { packages: [
+      { manifest: { schema: 1, id: 'fixture-source', version: '1.0.0', dependencies: [], requires: [],
+        provides: [{ id: 'fixture-shared', version: 1 }], contributions: [
+          { kind: 'effect', id: 'fixture.package-effect' }, { kind: 'feature', id: 'fixture-package-feature' },
+          { kind: 'event-validator', id: 'fixture.package-event' }] },
+        install(scope) {
+          scope.publish('fixture-shared', 1, Object.freeze({ text: '来自第二个扩展包的可信输入' }))
+          scope.contribute('effect', 'fixture.package-effect', { async execute() { effects++; return { executed: true } } })
+          scope.contribute('event-validator', 'fixture.package-event', (data: Record<string, unknown>) => Object.keys(data).length === 0)
+          scope.contribute('feature', 'fixture-package-feature', { id: 'fixture-package-feature', version: '1.0.0', apiVersion: 1,
+            capabilities: ['fixture.package-effect'], subscriptions: ['fixture.package-event'],
+            setup(services: import('../src/core/types.ts').FeatureSetup) { services.on('fixture.package-event', async execution => {
+              await execution.invoke('fixture.package-effect', {})
+            }) } })
+          scope.own('subscription', 'owned-subscription', () => { disposed.push('source') })
+        } },
+      { manifest: { schema: 1, id: 'fixture-input', version: '1.0.0', dependencies: ['fixture-source'],
+        requires: [{ id: 'fixture-shared', version: 1 }], provides: [],
+        contributions: [{ kind: 'input-provider', id: 'fixture-package-input', capabilities: [], order: 10 }] },
+        install(scope) {
+          const shared = scope.service('fixture-shared', 1) as { readonly text: string }
+          scope.contribute('input-provider', 'fixture-package-input', { capabilities: [],
+            async prepare(_execution: unknown, event: import('../src/core/types.ts').FrameworkEvent) {
+              return [...normalizeContent(event.data.content), { type: 'text' as const, text: shared.text }]
+            } })
+          scope.own('timer', 'owned-timer', () => { disposed.push('input') })
+        } }
+    ] } } }
+  const fake = await fixture(context, { bootstrap })
+  await fake.configure(); await fake.start()
+  const host = fake.runtime().host()!
+  assert((await fake.runtime().status()).packages.some(item => item.id === 'fixture-source' && item.state === 'running'))
+  const denied = await host.dispatchEvent({ id: 'package-denied', type: 'fixture.package-event', conversationId: 'private:123', data: {} })
+  assert.equal(denied.errorCode, 'POLICY_DENIED')
+  assert.equal(effects, 0)
+  host.policy.grant({ id: 'explicit-package-effect', featureId: 'fixture-package-feature', conversationId: 'private:123',
+    capabilities: ['fixture.package-effect'], maxUses: { 'fixture.package-effect': 1 } })
+  await host.dispatchEvent({ id: 'package-allowed', type: 'fixture.package-event', conversationId: 'private:123', data: {} })
+  assert.equal(effects, 1)
+  fake.message(1600)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  assert.match(JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request.content), /来自第二个扩展包的可信输入/)
+  await fake.runtime().stop()
+  assert.deepEqual(disposed, ['input', 'source'])
+  assert((await fake.runtime().status()).packages.every(item => item.state === 'stopped'))
+})
+
+
+test('native media tools read protocol image and text-file bytes without sending source URLs or pretending to transcribe audio', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true, mediaBytes: true })
+  await fake.configure()
+  const current = await invoke(fake.routes(), 'GET', '/api/chat/tool-permissions')
+  await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: current.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.media.read'], maxUses: { 'native.media.read': 3 }, expiresAt: null } })
+  await fake.start()
+  fake.message(1700, { message: [{ type: 'text', data: { text: '看图和读文件' } },
+    { type: 'image', data: { file: 'image-token', url: 'https://untrusted.example.test/not-used' } },
+    { type: 'file', data: { file_id: 'file-token', name: 'report.txt', file_hash: 'private-hash' } },
+    { type: 'record', data: { file: 'audio-token' } }] })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const source = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages[0]
+  const contents = source.content.filter(part => ['image', 'file', 'audio'].includes(part.type))
+  assert.equal(contents.length, 3)
+  async function call(index: number) {
+    const part = contents[index]; assert('assetId' in part)
+    const id = `media-read-${index}`
+    fake.toolCalls.push({ ticket: id, leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id, name: 'qaf_media_read',
+      input: { assetId: part.assetId }, sessionId, requestId, generation: 1,
+      userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+    await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
+  }
+  const image = await call(0)
+  assert.equal(image.status, 'confirmed', JSON.stringify(image)); assert(image.status === 'confirmed')
+  assert.equal(image.content?.[0].type, 'image')
+  assert(!JSON.stringify(image.value).includes('base64'))
+  assert(!JSON.stringify(image).includes('untrusted.example.test'))
+  const file = await call(1)
+  assert.equal(file.status, 'confirmed', JSON.stringify(file)); assert(file.status === 'confirmed')
+  assert.deepEqual(file.content, [{ type: 'text', text: '默认读取器取得的文本文件正文' }])
+  const audio = await call(2)
+  assert.equal(audio.status, 'confirmed'); assert(audio.status === 'confirmed')
+  assert.match(JSON.stringify(audio.value), /native_media_transcriber_not_connected/)
+  assert.equal(audio.content, undefined)
+  assert.equal(fake.sends.length, 0)
+})
+
+test('default native host publishes shared versioned services and invalidates retained package facades after stop', async context => {
+  const consumers: import('../src/host/native-services.ts').NativeHostServiceMap[] = []
+  const ids = ['native-agent', 'native-interactions', 'native-executions', 'native-tools', 'native-work'] as const
+  const { requireNativeHostService } = await import('../src/host/native-services.ts')
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'service-consumers', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'b'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    create() { return { packages: ['one', 'two'].map(id => ({
+      manifest: { schema: 1 as const, id: `consumer-${id}`, version: '1.0.0', dependencies: ['native-services'],
+        requires: ids.map(id => ({ id, version: 1 })), provides: [], contributions: [] },
+      install(scope: import('../src/host/native-packages.ts').NativePackageContext) {
+        consumers.push({ 'native-agent': requireNativeHostService(scope, 'native-agent'),
+          'native-interactions': requireNativeHostService(scope, 'native-interactions'),
+          'native-executions': requireNativeHostService(scope, 'native-executions'),
+          'native-tools': requireNativeHostService(scope, 'native-tools'), 'native-work': requireNativeHostService(scope, 'native-work') })
+      } })) } } }
+  const fake = await fixture(context, { bootstrap })
+  await fake.configure(); await fake.start()
+  assert.equal(consumers.length, 2)
+  for (const id of ids) assert.equal(consumers[0][id], consumers[1][id])
+  assert.equal(consumers[0]['native-agent'].status().available, true)
+  assert.equal(consumers[0]['native-agent'].binding('private:123'), null)
+  assert.equal(consumers[0]['native-work'].status().available, false)
+  assert.deepEqual(consumers[0]['native-work'].list().records, [])
+  fake.message(1800)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const binding = consumers[0]['native-agent'].binding('private:123')
+  assert.equal(binding?.generation, 1)
+  assert.equal(consumers[0]['native-executions'].list().length, 1)
+  assert(!Object.hasOwn(consumers[0]['native-agent'], 'rawRpc'))
+  assert(!Object.hasOwn(consumers[0]['native-work'], 'grant'))
+  await fake.runtime().stop()
+  assert.throws(() => consumers[0]['native-agent'].status())
+  await assert.rejects(consumers[0]['native-tools'].catalog(new AbortController().signal))
+})
+
+test('default appearance binding supplies opaque context and policy-controlled real image content without changing persona identity', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true })
+  await fake.configure()
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  const personaId = configuration.catalog.plans[0].personaId
+  const { createNativeAppearanceService } = await import('../src/host/native-appearance.ts')
+  const appearance = createNativeAppearanceService({ directory: fake.directory })
+  const signal = new AbortController().signal
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHd8AAAAASUVORK5CYII='
+  const uploaded = await appearance.execute({ action: 'upload', revision: (await appearance.snapshot()).revision,
+    name: '参考图', description: '仅作视觉资料', mediaType: 'image/png', data: png }, signal)
+  const assetId = uploaded.assets[0].id
+  const bound = await appearance.execute({ action: 'bind', revision: uploaded.revision, personaId, assetId, version: 1 }, signal)
+  const permissions = await invoke(fake.routes(), 'GET', '/api/chat/tool-permissions')
+  await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: permissions.revision, action: 'grant', grant: {
+    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.role.read'], maxUses: { 'native.role.read': 3 }, expiresAt: null } })
+  await fake.start(); fake.message(1801)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  assert.match(JSON.stringify(prompt.content), new RegExp(assetId))
+  assert(!JSON.stringify(prompt.content).includes(png))
+  assert(!JSON.stringify(prompt.content).includes(fake.directory))
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  const lease = fake.toolLeases.get(sessionId)!
+  assert.deepEqual(lease.names, ['qaf_role_reference'])
+  async function read(id: string, version: number) {
+    fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name: 'qaf_role_reference', input: { assetId, version },
+      sessionId, requestId, generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+    await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
+  }
+  const image = await read('appearance-valid', 1)
+  assert.equal(image.status, 'confirmed', JSON.stringify(image)); assert(image.status === 'confirmed')
+  assert.deepEqual(image.content, [{ type: 'image', mediaType: 'image/png', data: png }])
+  await appearance.execute({ action: 'unbind', revision: bound.revision, personaId }, signal)
+  assert.equal((await read('appearance-unbound', 1)).status, 'rejected')
+  assert.deepEqual((await readNativeChatConfiguration(fake.directory)).personas, configuration.personas)
+  assert.equal(fake.sends.length, 0)
+})
+
+test('native output package sends registered image audio file and configured long forward with real delivery receipts', async context => {
+  const fake = await fixture(context, { mediaBytes: true })
+  await fake.configure()
+  await fake.save('authorization', { version: 'forward-explicit', grants: [{ conversationId: 'private:123', submitUses: 10, sendUses: 10, forwardUses: 2, expiresAt: null }] })
+  await fake.start()
+  fake.message(1900, { message: [{ type: 'text', data: { text: '把这些资源整理发给我' } },
+    { type: 'image', data: { file: 'image-token' } }, { type: 'record', data: { file: 'audio-token' } },
+    { type: 'file', data: { file_id: 'file-token', name: 'report.txt' } }] })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const source = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages[0]
+  const assets = source.content.filter(part => part.type === 'image' || part.type === 'audio' || part.type === 'file')
+  assert.equal(assets.length, 3)
+  fake.agentEvent('assistant/message', { turn: 1, message: { id: 'output-media', role: 'assistant',
+    content: [{ type: 'text', text: JSON.stringify({ schema: 'qaf.output/1', content: [{ type: 'text', text: '这些是原资源。' }, ...assets] }) }] } })
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await until(() => fake.sends.length === 2)
+  assert.match(JSON.stringify(fake.sends[0]), /"type":"image"/)
+  assert.match(JSON.stringify(fake.sends[0]), /"type":"record"/)
+  assert.match(JSON.stringify(fake.sends[0]), /base64:\/\//)
+  assert.equal(fake.sends[1].file, `base64://${Buffer.from('默认读取器取得的文本文件正文').toString('base64')}`)
+  await until(() => fake.runtime().host()!.outbox.list().every(row => row.status === 'confirmed'))
+  const database = new DatabaseSync(join(fake.directory, 'native-chat.sqlite'), { readOnly: true })
+  try { assert(database.prepare("SELECT value FROM durable_records WHERE namespace = 'outbox'").all().some(row => String(row.value).includes('uploaded-report'))) }
+  finally { database.close() }
+  const { createNativePackageConfigurationRegistry } = await import('../src/host/native-package-configuration.ts')
+  const registry = createNativePackageConfigurationRegistry({ directory: fake.directory })
+  const current = await registry.read('chat-output')
+  await registry.compareAndSet('chat-output', current.revision, { schema: 1, bubbles: false, longTextAsForward: true,
+    longTextThreshold: 500, media: true }, new AbortController().signal)
+  fake.message(1901)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  fake.agentEvent('assistant/message', { turn: 2, message: { id: 'output-forward', role: 'assistant', content: [{ type: 'text', text: '长文内容。'.repeat(150) }] } })
+  fake.agentEvent('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await until(() => fake.sends.length === 3)
+  assert(Array.isArray(fake.sends[2].messages))
+  const nodes = fake.sends[2].messages as { data: { user_id: string; nickname: string } }[]
+  assert.equal(String(nodes[0].data.user_id), '999')
+  assert.equal(nodes[0].data.nickname, 'Native')
+  assert.equal(fake.rpc.filter(call => call.method === 'session/create').length, 1)
+})
+
+test('long-forward behavior never grants forwarding and unknown output is not replayed after restart', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  const { createNativePackageConfigurationRegistry } = await import('../src/host/native-package-configuration.ts')
+  const registry = createNativePackageConfigurationRegistry({ directory: fake.directory })
+  const current = await registry.read('chat-output')
+  await registry.compareAndSet('chat-output', current.revision, { schema: 1, bubbles: true, longTextAsForward: true,
+    longTextThreshold: 500, media: true }, new AbortController().signal)
+  await fake.start(); fake.message(1910)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  fake.agentEvent('assistant/message', { turn: 1, message: { id: 'no-forward-authority', role: 'assistant', content: [{ type: 'text', text: '没有转发权限。'.repeat(100) }] } })
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await awaitCondition(() => fake.runtime().host()!.engine.describe().outbox.some(row => row.status === 'denied'),
+    { message: 'Forward without permission must be denied before transport', timeoutMs: 1500, diagnostics: () => fake.runtime().host()!.engine.describe().outbox })
+  assert(fake.runtime().host()!.engine.describe().outbox.some(row => row.errorCode === 'POLICY_DENIED'))
+  assert.equal(fake.sends.length, 0)
+  assert(fake.runtime().host()!.policy.describe().grants.every(grant => !grant.capabilities.includes('messaging.forward')))
+  const unknown = await fixture(context, { unknownSend: true })
+  await unknown.configure(); await unknown.start(); unknown.message(1911)
+  await until(() => unknown.rpc.some(call => call.method === 'session/prompt'))
+  unknown.answer()
+  await until(() => unknown.runtime().host()!.outbox.list().some(row => row.status === 'unknown'))
+  assert.equal(unknown.sends.length, 1)
+  await unknown.restart()
+  assert.equal(unknown.sends.length, 1)
+  assert(unknown.runtime().host()!.outbox.list().some(row => row.status === 'unknown'))
+})
+
+test('whitelist forwarding is scoped to explicit conversations and never inherited by another allowed conversation', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.save('authorization', { version: 'whitelist-forward', mode: 'whitelist', grants: [], forwardAllow: ['private:123'] })
+  await fake.start()
+  const grants = fake.runtime().host()!.policy.describe().grants.filter(grant => grant.featureId === 'agent-relay' && grant.active)
+  assert(grants.find(grant => grant.conversationId === 'private:123')!.capabilities.includes('messaging.forward'))
+  assert(!grants.find(grant => grant.conversationId === 'group:456')!.capabilities.includes('messaging.forward'))
+  assert((await invoke(fake.routes(), 'GET', '/api/chat/authorization')).forwardAllow)
+  await fake.runtime().stop(); await fake.start()
+  const actual = fake.runtime().host()!.policy.describe().grants.filter(grant => grant.featureId === 'agent-relay' && grant.active)
+  assert.deepEqual(actual.map(grant => [grant.id, grant.used]), grants.map(grant => [grant.id, grant.used]))
+})
+
+
+test('explicit management execution reconciliation verifies fresh SDK checkpoint without replay and suppresses the old reply', async context => {
+  const fake = await fixture(context, { executionCheckpoint: true })
+  await fake.configure()
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, noticeEnabled: false, cancelOnTimeout: false } })
+  await fake.start(); fake.message(2000)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  const execution = fake.runtime().executions()!.list()[0]!
+  fake.restartPlugin()
+  await until(() => fake.runtime().executions()!.get(execution.id)?.status === 'unknown')
+  const before = fake.rpc.filter(call => ['session/create','session/prompt','session/cancel'].includes(call.method)).length
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/executions/reconcile', { executionId: execution.id, confirm: false }), /invalid_execution_reconciliation/)
+  const absent = await invoke(fake.routes(), 'POST', '/api/chat/executions/reconcile', { executionId: execution.id, confirm: true })
+  assert.equal(absent.state, 'blocked')
+  assert.deepEqual(absent.missingReasons, ['execution_request_not_observed'])
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.isolated, true)
+  fake.confirmCheckpoint()
+  const released = await invoke(fake.routes(), 'POST', '/api/chat/executions/reconcile', { executionId: execution.id, confirm: true })
+  assert.equal(released.state, 'released', JSON.stringify(released))
+  assert.equal(released.automaticReplayAvailable, false)
+  assert.equal(released.restartRequired, true)
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.isolated, false)
+  assert.equal(fake.runtime().host()!.replies.get('private:123')?.status, 'suppressed')
+  assert.equal(fake.rpc.filter(call => ['session/create','session/prompt','session/cancel'].includes(call.method)).length, before)
+  assert.equal(fake.sends.length, 0)
+  assert.equal((await fake.runtime().status()).chatReady, false)
+  await fake.restart()
+  fake.message(2001)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  fake.answer(2)
+  await until(() => fake.sends.length === 1)
+  assert.match(JSON.stringify(fake.sends[0]), /Final answer 2/)
+  assert(!JSON.stringify(fake.sends[0]).includes('Final answer 1'))
+  assert.equal(fake.creates(), 1)
+})
+
+
+test('default runtime migrates model reasoning and capacity through verified SDK selection then resumes the child without recreating history', async context => {
+  const fake = await fixture(context, { migrationChannel: true })
+  await fake.configure()
+  await fake.save('authorization', { version: 'migration-whitelist', mode: 'whitelist', grants: [] })
+  await fake.start(); fake.message(2010)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  fake.answer(1)
+  await until(() => fake.sends.length === 1
+    && fake.runtime().executions()!.list()[0]?.externalStatus === 'completed'
+    && fake.runtime().executions()!.list()[0]?.isolated === false
+    && fake.runtime().host()!.replies.get('private:123')?.status === 'responded'
+    && fake.runtime().host()!.outbox.list().every(row => row.status === 'confirmed'))
+  const original = fake.runtime().host()!.sessions.get('private:123')!
+  const originalHistory = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages
+  await fake.runtime().stop()
+  await fake.save('providers', { providers: [{ id: 'provider', name: 'Provider', type: 'openai', enabled: true,
+    baseUrl: 'https://model.example.test', apiKey: 'never-called-model-key', models: [{ id: 'model', name: 'Model' }, { id: 'next-model', name: 'Next' }] }] })
+  await fake.save('plans', { activePlanId: 'daily', plans: [{ ...plan, model: 'next-model', reasoningEffort: 'high', contextLimits: { group: 65536, private: 131072 } }] })
+  const prepared = await invoke(fake.routes(), 'GET', '/api/chat/sessions/migration')
+  assert.equal(prepared.state, 'available', JSON.stringify(prepared))
+  const bindings = prepared.bindings as Array<Record<string, unknown>>
+  const selection = { provider: 'external-provider', model: 'next-model', reasoningEffort: 'high',
+    contextLimits: { contextWindow: 131072, maxTokens: 16000, headroomTokens: 0 } }
+  assert.deepEqual(bindings[0].targetSelection, selection)
+  const configuration = await readNativeChatConfiguration(fake.directory)
+  const migrated = await invoke(fake.routes(), 'POST', '/api/chat/sessions/migrate', { revisions: configuration.revisions, confirm: true,
+    migrationId: prepared.migrationId, revision: prepared.revision })
+  assert.equal(migrated.state, 'completed', JSON.stringify(migrated))
+  assert.deepEqual(fake.rpc.find(call => call.method === 'bridgePlugin/forkWithPreset')!.request.targetSelection, selection)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  await fake.start()
+  const child = fake.runtime().host()!.sessions.get('private:123')!
+  assert.notEqual(child.sessionId, original.sessionId)
+  assert.equal(child.generation, original.generation + 1)
+  assert.deepEqual(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages, originalHistory)
+  assert.equal(fake.runtime().host()!.sessions.findBySessionId(original.sessionId), null)
+  fake.message(2011)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').at(-1)!.request.sessionId, child.sessionId)
+  fake.agentEvent('assistant/message', { turn: 1, message: { id: 'migrated-answer', role: 'assistant', content: [{ type: 'text', text: '迁移后的新回答' }] } })
+  fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await until(() => fake.sends.length === 2)
+  assert.match(JSON.stringify(fake.sends[1]), /迁移后的新回答/)
+  assert.equal(fake.creates(), 1)
+})
+
+
+test('default management fork recovery preserves cancellation uncertainty and resumes only a new session after explicit restart', async context => {
+  const fake = await fixture(context, { executionCheckpoint: true, migrationChannel: true, unknownCancel: true, unknownFork: true })
+  await fake.configure()
+  await fake.save('authorization', { version: 'recovery-cancel-explicit', grants: ['private:123', 'group:456'].map(conversationId => ({ conversationId, submitUses: 10, sendUses: 10, cancelUses: 1, expiresAt: null })) })
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 1000, cancelTimeoutMs: 100, noticeEnabled: false } })
+  await fake.start(); fake.message(2020)
+  await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting')
+  const execution = fake.runtime().executions()!.list()[0]!
+  const original = execution.binding
+  await awaitCondition(() => fake.runtime().executions()!.get(execution.id)?.cancelStatus === 'unknown',
+    { timeoutMs: 3000, message: 'The actual cancellation response must remain unknown' })
+  fake.confirmCheckpoint()
+  const stillBlocked = await invoke(fake.routes(), 'POST', '/api/chat/executions/reconcile', { executionId: execution.id, confirm: true })
+  assert.deepEqual(stillBlocked.missingReasons, ['execution_cancel_evidence_unknown'])
+  const before = fake.rpc.filter(call => ['session/create','session/prompt','session/cancel'].includes(call.method)).length
+  const plan = await invoke(fake.routes(), 'POST', '/api/chat/executions/recovery/preview', { executionId: execution.id })
+  assert.equal(plan.state, 'available', JSON.stringify(plan))
+  assert.equal(plan.restartRequired, true)
+  const unknown = await invoke(fake.routes(), 'POST', '/api/chat/executions/recovery/commit', { executionId: execution.id, revision: plan.revision, confirm: true })
+  assert.equal(unknown.state, 'unknown', JSON.stringify(unknown))
+  assert.equal(fake.runtime().host()!.sessions.get('private:123')!.sessionId, original.sessionId)
+  const inspectBefore = fake.rpc.filter(call => call.method === 'bridgePlugin/inspectMigration').length
+  const observed = await invoke(fake.routes(), 'GET', '/api/chat/executions/recovery', null, new URLSearchParams({ id: execution.id }))
+  assert.equal((observed.item as Record<string, unknown>).state, 'unknown')
+  assert.equal(fake.rpc.filter(call => call.method === 'bridgePlugin/inspectMigration').length, inspectBefore)
+  const completed = await invoke(fake.routes(), 'POST', '/api/chat/executions/recovery/commit', { executionId: execution.id, revision: plan.revision, confirm: true })
+  assert.equal(completed.state, 'completed', JSON.stringify(completed))
+  const child = fake.runtime().host()!.sessions.get('private:123')!
+  assert.notEqual(child.sessionId, original.sessionId); assert.equal(child.generation, original.generation + 1)
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.cancelStatus, 'unknown')
+  assert.equal(fake.runtime().executions()!.get(execution.id)?.isolated, true)
+  assert.equal(fake.runtime().host()!.replies.get('private:123')?.status, 'suppressed')
+  assert.equal(fake.rpc.filter(call => call.method === 'bridgePlugin/forkWithPreset').length, 1)
+  assert.equal(fake.rpc.filter(call => call.method === 'bridgePlugin/inspectMigration').length, inspectBefore + 1)
+  assert.equal(fake.rpc.filter(call => ['session/create','session/prompt','session/cancel'].includes(call.method)).length, before)
+  assert.equal(fake.sends.length, 0)
+  assert.equal((await fake.runtime().status()).chatReady, false)
+  await fake.runtime().stop()
+  const offlineBefore = fake.rpc.length
+  const offline = await invoke(fake.routes(), 'GET', '/api/chat/executions/recovery', null, new URLSearchParams({ id: execution.id }))
+  assert.equal((offline.item as Record<string, unknown>).state, 'completed')
+  assert.equal(fake.rpc.length, offlineBefore)
+  await fake.start()
+  fake.message(2021)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').at(-1)!.request.sessionId, child.sessionId)
+  fake.answer(1)
+  await until(() => fake.sends.length === 1)
+  assert.equal(fake.creates(), 1)
+})
+
+function promptHostFacts(request: Record<string, unknown>): Record<string, unknown> {
+  assert(Array.isArray(request.content))
+  const text = request.content.map((part: unknown) => isRecord(part) && part.type === 'text' ? String(part.text) : '').join('')
+  const line = text.split('\n').find(line => line.startsWith('{"schema":1,"conversationId"'))
+  assert(line, 'host facts must reach the actual DSH request')
+  const facts: unknown = JSON.parse(line.split('当前消息：')[0]!)
+  assert(isRecord(facts))
+  return facts
+}
+
+test('actual prompt tool facts change after permission revocation and never promise an absent work backend', async context => {
+  const fake = await fixture(context, { frameworkToolChannel: true })
+  await fake.configure()
+  const path = '/api/chat/tool-permissions'
+  const initial = await invoke(fake.routes(), 'GET', path)
+  const id = randomUUID()
+  const granted = await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
+    id, conversationId: 'private:123', capabilities: ['native.media.inspect'], maxUses: { 'native.media.inspect': 1 }, expiresAt: null } })
+  await fake.start(); fake.message(2300)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const first = promptHostFacts(fake.rpc.find(call => call.method === 'session/prompt')!.request)
+  assert(isRecord(first.tools) && Array.isArray(first.tools.tools))
+  assert.deepEqual(first.tools.tools.map(tool => isRecord(tool) ? tool.name : null), ['qaf_media_inspect'])
+  assert(isRecord(first.output)); assert.equal(first.output.forwardAuthorized, false)
+  fake.answer(1); await until(() => fake.sends.length === 1)
+  await invoke(fake.routes(), 'POST', path, { revision: granted.revision, action: 'revoke', id })
+  fake.message(2301)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  const second = promptHostFacts(fake.rpc.filter(call => call.method === 'session/prompt')[1]!.request)
+  assert(isRecord(second.tools)); assert.deepEqual(second.tools.tools, [])
+  assert.equal(fake.runtime().workStatus().available, false)
+  assert.equal(fake.creates(), 1)
+})
+
+test('native conversation doctor and versioned event routes expose blockers without submitting or revealing message content', async context => {
+  const fake = await fixture(context)
+  await fake.configure(); await fake.start()
+  const before = fake.rpc.length
+  const denied = await invoke(fake.routes(), 'GET', '/api/chat/diagnostics', null, new URLSearchParams({ conversationId: 'group:9999' }))
+  assert.equal(denied.state, 'blocked')
+  assert(Array.isArray(denied.checks) && denied.checks.some(check => isRecord(check) && check.code === 'conversation_not_allowed'))
+  assert.equal(fake.rpc.length, before)
+  fake.message(2400)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const busy = await invoke(fake.routes(), 'GET', '/api/chat/diagnostics', null, new URLSearchParams({ conversationId: 'private:123' }))
+  assert.equal(busy.state, 'waiting')
+  assert(isRecord(busy.context) && busy.context.source === 'active-session' && Number(busy.context.limit) > 0)
+  const rows = fake.runtime().executions()!.list()
+  assert.equal(rows.length, 1)
+  const detail = await invoke(fake.routes(), 'GET', '/api/chat/executions', null, new URLSearchParams({ id: rows[0].id }))
+  assert(isRecord(detail.item)); assert.equal(detail.item.id, rows[0].id); assert(!Object.hasOwn(detail.item, 'policy'))
+  const events = await invoke(fake.routes(), 'GET', '/api/chat/events', null, new URLSearchParams({ conversationId: 'private:123' }))
+  assert.equal(events.protocol, 'qaf.events/1'); assert(Array.isArray(events.events) && events.events.length > 0)
+  assert(!JSON.stringify(events).includes('User message 2400'))
+  const counts = fake.rpc.length
+  const abort = new AbortController()
+  const subscription = fake.runtime().subscribeEvents({ signal: abort.signal, after: fake.runtime().readEvents().nextCursor })
+  abort.abort()
+  await assert.rejects(subscription.next(), { code: 'EVENT_SUBSCRIPTION_ABORTED' })
+  assert.equal(fake.rpc.length, counts)
+})
+
+
+test('two default native accounts isolate matching logical sessions grants and replies and reject a wrong verified identity', async context => {
+  const first = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '999' }, protocolSelfId: 999 })
+  const second = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '1000' }, protocolSelfId: 1000 })
+  await first.configure(); await second.configure()
+  await invoke(first.routes(), 'POST', '/api/chat/memory', { action: 'create', entry: {
+    scope: { kind: 'user', conversationId: 'private:123', userId: '123' }, kind: 'memory', content: '账号甲的私有测试资料', tags: [], expiresAt: null } })
+  assert.deepEqual(second.runtime().readMemory().entries, [])
+  await first.start(); await second.start()
+  first.message(2500); second.message(2500)
+  await until(() => first.rpc.some(call => call.method === 'session/prompt') && second.rpc.some(call => call.method === 'session/prompt'))
+  assert.match(JSON.stringify(first.rpc.find(call => call.method === 'session/prompt')!.request), /账号甲的私有测试资料/)
+  assert.doesNotMatch(JSON.stringify(second.rpc.find(call => call.method === 'session/prompt')!.request), /账号甲的私有测试资料/)
+  first.answer(1); second.answer(1)
+  await until(() => first.sends.length === 1 && second.sends.length === 1)
+  const a = first.runtime().host()!; const b = second.runtime().host()!
+  assert.deepEqual(a.accountScope, { protocolId: 'onebot', accountId: '999' })
+  assert.deepEqual(b.accountScope, { protocolId: 'onebot', accountId: '1000' })
+  assert.deepEqual(a.sessions.get('private:123')?.accountScope, a.accountScope)
+  assert.deepEqual(b.sessions.get('private:123')?.accountScope, b.accountScope)
+  assert.throws(() => a.policy.reserve({ featureId: 'agent-relay', conversationId: 'private:123', capability: 'messaging.send', accountScope: b.accountScope }), /account/i)
+  const before = second.rpc.filter(call => call.method === 'session/prompt').length
+  await first.runtime().stop(); second.message(2501)
+  await until(() => second.rpc.filter(call => call.method === 'session/prompt').length === before + 1)
+  assert.equal(second.creates(), 1)
+  const wrong = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '1001' }, protocolSelfId: 999 })
+  await wrong.configure()
+  await assert.rejects(wrong.start(), { code: 'NATIVE_ACCOUNT_IDENTITY_MISMATCH' })
+  assert.equal(wrong.creates(), 0); assert.equal(wrong.sends.length, 0)
 })

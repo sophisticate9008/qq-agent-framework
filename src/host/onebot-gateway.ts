@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { createOneBotCompatGateway } from '../adapters/onebot-compat.ts';
 import { assert, errorCode, isRecord, reference, snapshot } from '../core/values.ts';
 import { createSqliteStore } from '../storage/sqlite.ts';
+import { isConfigurationPath, resolveConfigurationPath } from './configuration-path.ts';
 
 export interface OneBotGatewayConfiguration {
   port: number;
@@ -26,6 +27,7 @@ export interface OneBotGatewayConfiguration {
 }
 
 function privateText(filename: string, maxBytes: number): string {
+  filename = resolveConfigurationPath(filename);
   const metadata = lstatSync(filename);
   assert(metadata.isFile() && !metadata.isSymbolicLink() && (metadata.mode & 0o077) === 0
     && metadata.size <= maxBytes, 'GATEWAY_PRIVATE_FILE', 'A bounded private regular file is required.');
@@ -38,8 +40,8 @@ export function loadOneBotGatewayConfiguration(filename: string): Readonly<OneBo
     'storeFilename', 'allowedConversations', 'persona', 'timeoutMs', 'maxPending', 'maxBodyBytes', 'maxRecords',
     'budgetEnabled', 'maxSendUses', 'grantTtlMs', 'authorizationVersion'].includes(key)), 'GATEWAY_INVALID_CONFIG', 'Gateway configuration contains unknown fields.');
   assert(Number.isSafeInteger(input.port) && Number(input.port) >= 0 && Number(input.port) <= 65535
-    && typeof input.upstreamEndpoint === 'string' && reference(input.tokenFile) && reference(input.storeFilename)
-    && (input.upstreamTokenFile === undefined || reference(input.upstreamTokenFile))
+    && typeof input.upstreamEndpoint === 'string' && isConfigurationPath(input.tokenFile) && isConfigurationPath(input.storeFilename)
+    && (input.upstreamTokenFile === undefined || isConfigurationPath(input.upstreamTokenFile))
     && Array.isArray(input.allowedConversations)
     && input.allowedConversations.length <= 1000 && input.allowedConversations.every(value => typeof value === 'string'
       && /^(?:group|private):[1-9]\d{0,15}$/.test(value))
@@ -62,8 +64,8 @@ export function loadOneBotGatewayConfiguration(filename: string): Readonly<OneBo
       'GATEWAY_INVALID_CONFIG', 'Gateway limits must be finite and within supported bounds.');
   }
   const base = dirname(resolve(filename));
-  return snapshot({ ...input, tokenFile: resolve(base, input.tokenFile), storeFilename: resolve(base, input.storeFilename),
-    ...(input.upstreamTokenFile === undefined ? {} : { upstreamTokenFile: resolve(base, input.upstreamTokenFile) }) }) as unknown as Readonly<OneBotGatewayConfiguration>;
+  return snapshot({ ...input, tokenFile: resolveConfigurationPath(input.tokenFile, base), storeFilename: resolveConfigurationPath(input.storeFilename, base),
+    ...(input.upstreamTokenFile === undefined ? {} : { upstreamTokenFile: resolveConfigurationPath(input.upstreamTokenFile, base) }) }) as unknown as Readonly<OneBotGatewayConfiguration>;
 }
 
 function credential(filename: string): string {

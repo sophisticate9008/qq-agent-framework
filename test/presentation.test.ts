@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { createPresentationService, type PresentationContext, type PresentationRequest } from '../src/host/presentation.ts';
+import { createPresentationService, type PresentationContext, type PresentationRequest, type PresentationServiceOptions } from '../src/host/presentation.ts';
 
 function context(): PresentationContext {
   return { conversationId: 'group:123', scope: { persona: { id: 'fixture', version: '1.0.0' } },
@@ -13,6 +13,32 @@ test('normal conversation stays plain and does not gain an automatic quote', asy
   const result = await service.prepare({ body: '今天怎么样？' }, context());
   assert.deepEqual(result, { format: 'text', quote: false, content: [{ type: 'text', text: '今天怎么样？' }] });
   assert.equal((await service.prepare({ body: '收到', replyTo: { messageId: '12', distance: 1, ageMs: 3000 } }, context())).quote, false);
+});
+
+test('trusted selectors receive frozen execution metadata separately from the live abort signal', async () => {
+  const trusted = { ...context(), scope: { persona: { id: 'fixture', version: '2' }, sessionId: 'actual-session', generation: 3 } };
+  let calls = 0;
+  const service = createPresentationService({ capabilities: { contentTypes: ['text', 'forward'] }, select(input, signal, metadata) {
+    calls++;
+    assert(signal instanceof AbortSignal);
+    assert.equal(signal.aborted, false);
+    assert.deepEqual(metadata, { conversationId: trusted.conversationId, scope: trusted.scope, idempotencyKey: trusted.idempotencyKey });
+    assert.deepEqual(Object.keys(metadata).sort(), ['conversationId', 'idempotencyKey', 'scope']);
+    assert(Object.isFrozen(metadata) && Object.isFrozen(metadata.scope) && Object.isFrozen(metadata.scope.persona));
+    assert.equal(Reflect.set(metadata.scope.persona, 'version', 'spoofed'), false);
+    return { format: metadata.conversationId === 'group:123' ? 'forward' : input.suggested.format, quote: false };
+  } });
+  assert.equal((await service.prepare({ body: '# standard text' }, trusted)).format, 'forward');
+  for (const field of ['conversationId', 'scope', 'idempotencyKey', 'signal']) {
+    await assert.rejects(service.prepare({ body: 'x', [field]: 'spoofed' } as PresentationRequest, trusted), { code: 'INVALID_PRESENTATION' });
+  }
+  assert.equal(calls, 1);
+  const oldSelect: PresentationServiceOptions['select'] = (input, signal) => {
+    assert(signal instanceof AbortSignal);
+    return input.suggested;
+  };
+  assert.equal((await createPresentationService({ capabilities: { contentTypes: ['text'] }, select: oldSelect })
+    .prepare({ body: 'unchanged' }, trusted)).format, 'text');
 });
 
 test('distant messages can quote; uncertain timing goes to a selector and otherwise omits quoting', async () => {
@@ -88,6 +114,34 @@ test('malformed selector choices and caller-injected scope are rejected', async 
   }
   const wrong = createPresentationService({ capabilities: { contentTypes: ['text'] }, select: () => ({ format: 'forward', quote: false }) });
   await assert.rejects(wrong.prepare({ body: 'x' }, context()), { code: 'INVALID_PRESENTATION_CHOICE' });
+});
+
+test('automatic suggestions stay within partial transport capabilities and reach the selector', async () => {
+  const selected: string[] = [];
+  const forward = createPresentationService({ capabilities: { contentTypes: ['forward'] }, select(input) {
+    assert.deepEqual(input.available, ['forward']);
+    assert.deepEqual(input.suggested, { format: 'forward', quote: false });
+    selected.push(input.suggested.format);
+    return input.suggested;
+  } });
+  const result = await forward.prepare({ body: '简短记录', format: 'auto' }, context());
+  assert.equal(result.format, 'forward');
+  assert.deepEqual(result.content, [{ type: 'forward', nodes: [{ content: [{ type: 'text', text: '简短记录' }] }] }]);
+  assert.deepEqual(selected, ['forward']);
+  const withoutSelector = createPresentationService({ capabilities: { contentTypes: ['forward'] } });
+  assert.equal((await withoutSelector.prepare({ body: '简短记录' }, context())).format, 'forward');
+  const images = createPresentationService({ capabilities: { contentTypes: ['image'] },
+    renderer: { async render() { return [{ png: new Uint8Array([1]), width: 1, height: 1 }]; } },
+    publishImage: async () => 'controlled-image',
+  });
+  assert.deepEqual((await images.prepare({ body: '简短记录' }, context())).content,
+    [{ type: 'image', assetId: 'controlled-image' }]);
+  await assert.rejects(forward.prepare({ body: '简短记录', format: 'text' }, context()), { code: 'PRESENTATION_UNAVAILABLE' });
+  assert.deepEqual(selected, ['forward']);
+  const empty = createPresentationService({ capabilities: { contentTypes: ['image'] }, select() {
+    assert.fail('Incomplete image support must not invoke a selector.');
+  } });
+  await assert.rejects(empty.prepare({ body: '简短记录' }, context()), { code: 'PRESENTATION_UNAVAILABLE' });
 });
 
 test('uncooperative selectors remain counted after abort until their real promise settles', async () => {

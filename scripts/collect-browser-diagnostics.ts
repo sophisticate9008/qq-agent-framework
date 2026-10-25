@@ -21,6 +21,7 @@ const suites = [
   { name: 'activity', directory: 'runtime/activity-smoke', png: picture, json: report },
   { name: 'usage', directory: 'runtime/usage-smoke', png: picture, json: report },
   { name: 'native-chat-ui', directory: 'runtime/native-chat-ui-smoke', png: picture, json: report },
+  { name: 'execution-journal', directory: 'runtime/execution-journal-smoke', png: picture, json: report },
   { name: 'markdown', directory: 'runtime/engineering/validation/006',
     png: /^markdown-page-[0-9]{1,6}\.png$/, json: /^(?:markdown|presentation)-smoke\.json$/ },
   { name: 'presentation', directory: 'runtime/engineering/validation/006/presentation-assets', png: picture, json: /$^/ }
@@ -28,7 +29,8 @@ const suites = [
 const pngHeader = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const errorNames = new Set(['Error', 'AssertionError', 'TimeoutError', 'TypeError', 'FrameworkError', 'RangeError', 'AbortError']);
 const publicScripts = new Set(['browser-smoke', 'management-smoke', 'page-navigation-smoke', 'activity-smoke',
-  'usage-smoke', 'native-chat-ui-smoke', 'markdown-smoke', 'presentation-smoke', 'virtual-list-perf-smoke']);
+  'usage-smoke', 'native-chat-ui-smoke', 'markdown-smoke', 'presentation-smoke', 'virtual-list-perf-smoke',
+  'execution-journal-smoke', 'execution-runtime-browser-smoke']);
 const booleanFields = ['fixtureOnly', 'insecureContext', 'randomUUIDFallback', 'allVisibleH2Indexed',
   'navigationDoesNotModifyNativeResources', 'privateRuntimePermissions', 'tokenStoredByBrowserScript',
   'xssExecuted', 'runningApplyBlocked', 'deploymentCapabilityChecked'] as const;
@@ -58,7 +60,7 @@ export function projectBrowserDiagnostic(value: unknown): Summary {
     for (const page of pageNames) if (isCount(value.pageEntryCounts[page])) counts[page] = value.pageEntryCounts[page];
     summary.pageEntryCounts = counts;
   }
-  for (const key of ['themes'] as const) {
+  for (const key of ['executionJournal', 'executionRuntime', 'themes'] as const) {
     if (!isRecord(value[key])) continue;
     const flags = Object.values(value[key]).filter(entry => typeof entry === 'boolean');
     summary[key] = { trueFlagCount: flags.filter(entry => entry === true).length,

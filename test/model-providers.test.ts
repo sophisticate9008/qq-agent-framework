@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { modelProviderApi } from '../src/host/model-provider-protocols.ts'
 
 import {
   publicModelProviders,
@@ -11,6 +12,39 @@ const provider = {
   id: 'primary', name: 'Primary', type: 'openai', baseUrl: 'https://models.example.test/v1',
   enabled: true, apiKey: 'test-private-key', models: [{ id: 'vendor/chat-v1', name: 'Chat V1' }]
 } as const
+
+test('DSH api identifiers are preserved without a framework provider-family whitelist', () => {
+  const { type: ignoredType, ...fields } = provider
+  void ignoredType
+  for (const api of ['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai', 'operator-custom-api']) {
+    const catalog = validateModelProviders([{ ...fields, api }])
+    assert.equal(catalog[0].api, api)
+    assert.equal(modelProviderApi(catalog[0]), api)
+    assert.equal(Object.hasOwn(catalog[0], 'type'), false)
+    assert.equal(publicModelProviders(catalog)[0].api, api)
+    assert.equal(updateModelProviders(catalog, [{ ...fields, api, apiKey: '' }])[0].apiKey, fields.apiKey)
+  }
+  assert.equal(modelProviderApi(provider), 'openai-completions')
+  assert.equal(modelProviderApi({ type: 'anthropic' }), 'anthropic-messages')
+  for (const api of ['', 'api key', '../api', 'api\nvalue', 'x'.repeat(129), undefined, 123]) {
+    assert.throws(() => validateModelProviders([{ ...fields, api }]), /Invalid model providers/)
+  }
+  assert.throws(() => validateModelProviders([fields]), /Invalid model providers/)
+})
+
+test('remote HTTP is only retained with explicit provider-local consent, without rewriting the endpoint', () => {
+  const baseUrl = 'http://gateway.example.test:8080/v1'
+  for (const allowInsecureHttp of [false, undefined, 'yes']) {
+    assert.throws(() => validateModelProviders([{ ...provider, baseUrl, allowInsecureHttp }]), /Invalid model providers/)
+  }
+  const catalog = validateModelProviders([{ ...provider, baseUrl, allowInsecureHttp: true }])
+  assert.equal(catalog[0].baseUrl, baseUrl)
+  assert.equal(publicModelProviders(catalog)[0].allowInsecureHttp, true)
+  assert.equal(updateModelProviders(catalog, [catalog[0]])[0].allowInsecureHttp, true)
+  for (const invalidUrl of ['http://secret@remote.test', 'http://remote.test?secret=value', 'http://remote.test#fragment', 'http://remote.test\\path']) {
+    assert.throws(() => validateModelProviders([{ ...provider, baseUrl: invalidUrl, allowInsecureHttp: true }]), /Invalid model providers/)
+  }
+})
 
 test('provider validation freezes independent named catalogs and public output never includes keys', () => {
   const models = [{ id: 'claude', name: 'Claude' }]

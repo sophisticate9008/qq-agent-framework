@@ -68,6 +68,22 @@ function fixture(fetchImplementation: typeof fetch, overrides: Partial<OneBotCom
   return { store, gateway, server }
 }
 
+test('gateway metrics preserve explicit stored unmetered limits as null instead of zero or a numeric sentinel', async context => {
+  const setup = fixture(async () => response({ status: 'ok', retcode: 0, data: { message_id: 77 } }))
+  context.after(async () => { await setup.gateway.close(); setup.store.close() })
+  const namespace = `onebot.compat.${digest(persona)}.policy.grants`
+  const record = setup.store.list(namespace).find(entry => isRecord(entry.value) && entry.value.conversationId === 'group:100')
+  assert(record && isRecord(record.value))
+  setup.store.write(namespace, record.key, { ...record.value,
+    maxUses: { 'messaging.send': null, 'messaging.forward': null } }, { expectedRevision: record.revision })
+  const metric = setup.gateway.metrics().policy.find(entry => entry.conversationId === 'group:100')
+  assert(metric)
+  assert.equal(metric.sendRemaining, null)
+  assert.equal(metric.forwardRemaining, null)
+  assert.equal(metric.active, true)
+  assert.equal(setup.gateway.metrics().policy.find(entry => entry.conversationId === 'private:200')?.sendRemaining, 10)
+})
+
 test('service defaults have no daily send quota or expiry', async context => {
   const setup = fixture(async () => response({ status: 'ok', retcode: 0, data: { message_id: 77 } }),
     { maxSendUses: undefined, grantTtlMs: undefined })

@@ -1,19 +1,16 @@
+import { BUILTIN_WHALE_PERSONA } from './chat-personas.ts'
+import { DAILY_CHAT_OPERATING_INSTRUCTIONS } from './chat-operating-instructions.ts'
+export { BUILTIN_WHALE_PERSONA } from './chat-personas.ts'
 import type { ChatPersona, ChatPlan, NormalizedChatPlan } from './chat-plans.ts'
 
 export type ChatPlanTemplate = Omit<NormalizedChatPlan, 'personaId' | 'provider' | 'model'>
 
-export const BUILTIN_WHALE_PERSONA: ChatPersona = Object.freeze({
-  id: 'whale',
-  name: '小鲸鱼',
-  identity: '你叫小鲸鱼，也可以称作鲸鲸，是一个虚构的海洋主题聊天伙伴。形象是一条圆润的小鲸鱼，性格温和、好奇，有一点俏皮。不编造现实经历或与对话者之间未说明的关系。',
-  style: '使用自然流畅的中文，语气亲切、轻松，不刻意卖萌。措辞简洁，需要认真说明时清楚表达；玩笑点到为止，不堆叠口头禅、表情或夸张比喻。'
-})
 
 export const BUILTIN_DAILY_CHAT_PLAN: ChatPlanTemplate = Object.freeze({
   id: 'daily-chat',
   name: '日常聊天方案',
-  description: '适合群聊与私聊的日常交流；身份和表达风格由关联人设独立定义。',
-  instructions: '围绕当前消息与相关上下文自然接话，不机械复述前文或套用固定开场。先回应对方真正关心的内容，简单问题简短回答，复杂问题按需展开；只有缺少关键信息时才追问。不确定时坦诚说明，不把普通闲聊写成工作汇报。',
+  description: '默认混合模式：自然闲聊与明确任务共用连续上下文，不是每轮工作；身份和表达风格由关联人设定义，实际执行仍取决于挂载能力与独立授权。',
+  instructions: DAILY_CHAT_OPERATING_INSTRUCTIONS,
   reasoningEffort: 'low',
   contextLimits: Object.freeze({ group: 128_000, private: 128_000 })
 })

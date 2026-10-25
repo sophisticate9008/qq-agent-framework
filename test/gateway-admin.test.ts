@@ -1,3 +1,4 @@
+import { parseNativeRuntimeProjection } from '../src/contracts/native-runtime-projection.ts';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import {
@@ -271,16 +272,29 @@ test('binds 0.0.0.0 and serves an authenticated real read-only gateway snapshot'
 
   const nativeFeatures = await fetch(`${origin}/api/chat/features`, { headers });
   assert.equal(nativeFeatures.status, 200);
-  assert.deepEqual(parseObject(await nativeFeatures.json()), {
+  const featureDocument = parseObject(await nativeFeatures.json());
+  const nativeProjection = parseNativeRuntimeProjection(featureDocument.projection);
+  assert(nativeProjection);
+  assert.equal(nativeProjection.source, 'native-chat');
+  assert.equal(nativeProjection.coverage, 'current-native-host');
+  assert.equal(nativeProjection.state, 'stopped');
+  assert.equal(nativeProjection.chatReady, false);
+  assert.deepEqual(nativeProjection.features, []);
+  assert.deepEqual(parseNativeRuntimeProjection(second.runtimeProjection), nativeProjection);
+  const { projection: _projection, ...compatibleFeatures } = featureDocument;
+  assert.deepEqual(compatibleFeatures, {
     runtimeConnected: false,
     editableResources: true,
     capabilities: [
-      { id: 'chat-plans', installed: false },
-      { id: 'personas', installed: false },
-      { id: 'model-settings', installed: false },
-      { id: 'access-policy', installed: false }
+      { id: 'chat-plans', declared: true, installed: false },
+      { id: 'personas', declared: true, installed: false },
+      { id: 'model-settings', declared: true, installed: false },
+      { id: 'access-policy', declared: true, installed: false }
     ],
-    features: []
+    features: [],
+    featuresLimited: false,
+    capabilitiesLimited: false,
+    authorizationEvaluated: false
   });
   assert.equal(existsSync(join(files.directory, 'runtime')), true);
 
@@ -452,26 +466,24 @@ test('gateway mounts explicit WS protocol controls, verifies login, drops incomi
   assert.equal((await fetch(`${origin}/api/chat/adapters/connect`, {
     method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ revision: initial.revision })
   })).status, 401);
-  const savedResponse = await post('', { revision: initial.revision, adapters: {
+  const saving = post('', { revision: initial.revision, adapters: {
     onebotHttp: { enabled: true, endpoint: 'https://existing-http.example.test', secret: 'existing-http-private-key' },
     onebotWs: { enabled: true, endpoint: `ws://127.0.0.1:${address.port}`, secret: 'fixture-ws-secret' }
   } });
-  assert.equal(savedResponse.status, 200);
-  const saved = parseObject(await savedResponse.json());
-  assert.equal(connections, 0);
-  assert.equal(parseObject(saved.status).running, false);
-  const filename = join(files.directory, 'runtime', 'chat-adapters.json');
-  const original = readFileSync(filename);
-  const metadata = statSync(filename);
-  const connecting = post('/connect', { revision: saved.revision });
   await requested;
+  assert.equal(connections, 1);
   const pending = await getAdapters();
   assert.equal(parseObject(pending.status).running, false);
   assert.equal(parseObject(pending.connection).state, 'connecting');
   respondLogin?.();
-  const connectedResponse = await connecting;
-  assert.equal(connectedResponse.status, 200);
-  const connected = parseObject(await connectedResponse.json());
+  const savedResponse = await saving;
+  assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+  const saved = parseObject(await savedResponse.json());
+  assert.equal(parseObject(saved.status).running, true);
+  const filename = join(files.directory, 'runtime', 'chat-adapters.json');
+  const original = readFileSync(filename);
+  const metadata = statSync(filename);
+  const connected = saved;
   assert.deepEqual(connected.status, { assembled: true, running: true, applyAvailable: true });
   assert.equal(parseObject(connected.connection).selfId, '123');
   assert.equal(parseObject(connected.connection).chatReady, false);

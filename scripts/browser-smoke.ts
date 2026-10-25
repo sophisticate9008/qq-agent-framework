@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { chromium, type Browser } from 'playwright';
 import { startDemo } from '../src/demo.ts';
+import { navigateConsolePage } from './browser-navigation-smoke.ts';
 
 const directory = new URL('../runtime/ui-smoke/', import.meta.url);
 await mkdir(directory, { recursive: true });
@@ -24,13 +25,13 @@ try {
     return route.continue();
   });
   await page.goto(origin);
-  await page.getByRole('heading', { name: '工作台概览' }).waitFor();
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'light');
   await page.locator('#token').waitFor();
   await page.locator('#token').fill(token);
   await page.locator('#connect').click();
   await page.getByRole('button', { name: '断开连接' }).waitFor();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await page.getByRole('heading', { name: '工作台概览' }).waitFor();
   const sessionCookies = (await context.cookies(sessionUrl)).filter(cookie => cookie.httpOnly && cookie.path === '/api');
   assert.equal(sessionCookies.length, 1);
   const sessionCookie = sessionCookies[0]!;
@@ -86,7 +87,7 @@ try {
     contentType: 'application/json',
     body: JSON.stringify({ revision: 'a'.repeat(64), personas: [{ id: 'browser-persona', name: '浏览器测试', identity: '测试角色的身份定义', style: '自然简洁' }] })
   }));
-  await page.getByRole('button', { name: '人设与形象', exact: true }).click();
+  await navigateConsolePage(page, 'persona');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   await page.getByRole('heading', { name: '人设与形象', exact: true }).waitFor();
   await theme.selectOption('dark');
@@ -96,13 +97,13 @@ try {
   const persona = page.getByRole('textbox', { name: '身份定义' });
   await persona.fill('尚未保存的人设正文');
   await page.getByRole('button', { name: '断开连接', exact: true }).click();
-  await page.getByRole('heading', { name: '还有未保存的更改' }).waitFor();
+  await page.getByRole('heading', { name: '退出工作台？' }).waitFor();
   assert.equal((await context.cookies(sessionUrl)).some(cookie => cookie.name === sessionCookie.name), true);
   await page.getByRole('button', { name: '继续编辑' }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.equal((await context.cookies(sessionUrl)).some(cookie => cookie.name === sessionCookie.name), true);
   await page.getByRole('button', { name: '断开连接', exact: true }).click();
-  await page.getByRole('button', { name: '舍弃并离开' }).click();
+  await page.getByRole('button', { name: '退出并清除草稿' }).click();
   await page.getByRole('button', { name: '连接工作台', exact: true }).first().waitFor();
   assert.equal((await context.cookies(sessionUrl)).some(cookie => cookie.name === sessionCookie.name), false);
 

@@ -1,11 +1,10 @@
-import { constants } from 'node:fs';
-import { lstat, open, rename, unlink } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { dirname, isAbsolute, normalize, resolve, sep, win32 } from 'node:path';
 
 import { AdminRequestError, type AdminRoute } from './server.ts';
 import { withConfigurationWriteLock } from './configuration-lock.ts';
+import { readPrivateJson, replacePrivateJson } from './private-json-storage.ts';
 import { createAdminOriginPolicy, isLoopbackAddress, validatePublicOrigin } from './public-origin.ts';
 import { loadOneBotGatewayConfiguration } from '../host/onebot-gateway.ts';
 import {
@@ -74,44 +73,13 @@ function hasForbiddenKey(value: unknown): boolean {
   return false;
 }
 
-function sha256(content: Uint8Array): string {
-  return createHash('sha256').update(content).digest('hex');
-}
-
-function sameFile(
-  left: { readonly dev: number; readonly ino: number },
-  right: { readonly dev: number; readonly ino: number }
-): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-
 async function readConfiguration(descriptor: SourceDescriptor): Promise<ConfigurationDocument> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(descriptor.filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const before = await handle.stat();
-    if (!before.isFile() || (before.mode & 0o077) !== 0 || before.size > descriptor.maxBytes) {
-      requestError(500, 'configuration_file_invalid');
-    }
-    const content = await handle.readFile();
-    const after = await handle.stat();
-    const pathname = await lstat(descriptor.filename);
-    if (content.byteLength > descriptor.maxBytes || !sameFile(before, after) || !sameFile(after, pathname)
-      || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
-      requestError(409, 'configuration_conflict');
-    }
-    let text = new TextDecoder('utf-8', { fatal: true }).decode(content);
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-    const parsed: unknown = JSON.parse(text);
-    if (!isRecord(parsed) || hasForbiddenKey(parsed)) requestError(500, 'configuration_file_invalid');
-    return { revision: sha256(content), values: parsed };
-  } catch (error: unknown) {
-    if (error instanceof AdminRequestError) throw error;
-    requestError(500, 'configuration_file_invalid');
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-  throw new AdminRequestError(500, 'configuration_file_invalid');
+  const document = await readPrivateJson(descriptor.filename, { maxBytes: descriptor.maxBytes,
+    invalidCode: 'configuration_file_invalid', conflictCode: 'configuration_conflict', validate(value) {
+      if (!isRecord(value) || hasForbiddenKey(value)) requestError(500, 'configuration_file_invalid');
+      return value;
+    } });
+  return { revision: document.revision, values: document.value };
 }
 
 function ownValue(root: Record<string, unknown>, path: readonly string[]): unknown {
@@ -384,40 +352,12 @@ async function atomicReplace(
       requestError(500, 'configuration_write_failed');
     }
     if (content.byteLength > descriptor.maxBytes) requestError(413, 'configuration_file_too_large');
-    const temporary = `${descriptor.filename}.configuration-${process.pid}-${randomUUID()}.tmp`;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-    let renamed = false;
-    try {
-      handle = await open(temporary,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      await handle.chmod(0o600);
-      await handle.writeFile(content);
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      validateSourceCandidate(descriptor, temporary);
-      const latest = await readConfiguration(descriptor);
-      if (latest.revision !== expectedRevision) requestError(409, 'configuration_conflict');
-      await rename(temporary, descriptor.filename);
-      renamed = true;
-      let directoryHandle: Awaited<ReturnType<typeof open>> | undefined;
-      try {
-        directoryHandle = await open(dirname(descriptor.filename), constants.O_RDONLY);
-        await directoryHandle.sync();
-      } finally {
-        await directoryHandle?.close().catch(() => undefined);
-      }
-      const written = await readConfiguration(descriptor);
-      if (written.revision !== sha256(content)) requestError(500, 'configuration_write_unknown');
-      return { revision: sha256(content), authorizationChanged: result.authorizationChanged };
-    } catch (error: unknown) {
-      if (renamed) requestError(500, 'configuration_write_unknown');
-      if (error instanceof AdminRequestError) throw error;
-      requestError(500, 'configuration_write_failed');
-    } finally {
-      await handle?.close().catch(() => undefined);
-      await unlink(temporary).catch(() => undefined);
-    }
+    const written = await replacePrivateJson({ filename: descriptor.filename, directory: dirname(descriptor.filename),
+      expectedRevision, content, temporary: `${descriptor.filename}.configuration-${process.pid}-${randomUUID()}.tmp`,
+      read: () => readConfiguration(descriptor), beforeRevisionCheck: temporary => validateSourceCandidate(descriptor, temporary),
+      ignoreDirectoryCloseErrors: true, conflictCode: 'configuration_conflict',
+      writeFailedCode: 'configuration_write_failed', writeUnknownCode: 'configuration_write_unknown' });
+    return { revision: written.revision, authorizationChanged: result.authorizationChanged };
   });
 }
 

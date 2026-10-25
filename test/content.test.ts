@@ -21,3 +21,10 @@ test('media references cannot smuggle raw files, hidden fields or oversized data
     assert.throws(() => normalizeContent(input), { code: 'INVALID_CONTENT' });
   }
 });
+
+test('inbound forward references keep an opaque asset separately from outgoing forward nodes', () => {
+  assert.deepEqual(normalizeContent([{ type: 'forward-reference', assetId: 'scoped-forward' }]),
+    [{ type: 'forward-reference', assetId: 'scoped-forward' }]);
+  assert.throws(() => normalizeContent([{ type: 'forward-reference', assetId: 'scoped-forward', id: 'raw-resid' }]),
+    { code: 'INVALID_CONTENT' });
+});

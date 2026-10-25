@@ -317,6 +317,36 @@ test('OneBot WS pre-aborted connect has no network and close is terminal/idempot
   assert.equal(client.status().selfId, null)
 })
 
+test('OneBot WS retains trusted receive times while callbacks wait in its FIFO', async context => {
+  const fake = await fixture(context)
+  const calls: Array<{ sequence: number; receivedAt: number; enteredAt: number; frozen: boolean }> = []
+  let unblock!: () => void
+  const blocked = new Promise<void>(resolve => { unblock = resolve })
+  context.after(() => unblock())
+  const client = fake.client({ onEvent: (event, details) => {
+    calls.push({ sequence: Number(event.sequence), receivedAt: details.receivedAt,
+      enteredAt: Date.now(), frozen: Object.isFrozen(details) })
+    if (event.sequence === 1) return blocked
+  } })
+  await client.connect()
+  const before = Date.now()
+  for (const sequence of [1, 2]) fake.send({ post_type: 'message', self_id: 12345, sequence,
+    receivedAt: 1, time: -1, message: [{ type: 'text', data: { text: 'test' } }] })
+  await until(() => client.status().received === 2 && calls.length === 1)
+  const bothQueuedAt = Date.now()
+  await delay(25)
+  const releasedAt = Date.now()
+  unblock()
+  await until(() => calls.length === 2)
+  assert.deepEqual(calls.map(call => call.sequence), [1, 2])
+  for (const call of calls) {
+    assert(Number.isSafeInteger(call.receivedAt) && call.receivedAt >= before && call.receivedAt <= bothQueuedAt)
+    assert.equal(call.frozen, true)
+  }
+  assert(calls[1].receivedAt < releasedAt)
+  assert(calls[1].enteredAt >= releasedAt)
+})
+
 test('OneBot WS callback FIFO admission, deadlines and raw pending cap survive ignored cancellation', async context => {
   const fake = await fixture(context)
   const calls: number[] = []
@@ -566,4 +596,37 @@ test('OneBot WS close/abort during a pending pong disposes deadlines without rec
     assert.equal(fake.requests.length, 1)
     assert.equal(fake.pings.length, 1)
   }
+})
+
+test('OneBot WS decodes protocol notices through the same bounded FIFO while separating them from messages', async context => {
+  const fake = await fixture(context)
+  const delivered: string[] = []
+  let release: (() => void) | undefined
+  const client = fake.client({ maxPendingEvents: 3,
+    onEvent() { delivered.push('message') },
+    async onProtocolEvent(event, details) {
+      assert.equal(event.data.selfId, details.selfId)
+      assert(Object.isFrozen(event.data))
+      delivered.push(event.type)
+      if (event.type === 'protocol.message.recalled') await new Promise<void>(resolve => { release = resolve })
+    },
+  })
+  await client.connect()
+  fake.send({ post_type: 'notice', notice_type: 'group_recall', self_id: 12345, time: 1,
+    group_id: 456, user_id: 123, operator_id: 123, message_id: -1 })
+  await until(() => release !== undefined)
+  fake.message(1)
+  fake.send({ post_type: 'notice', notice_type: 'group_decrease', sub_type: 'kick_me', self_id: 12345,
+    time: 1, group_id: 456, user_id: 12345, operator_id: 123 })
+  await delay(30)
+  assert.deepEqual(delivered, ['protocol.message.recalled'])
+  release!()
+  await until(() => delivered.length === 3)
+  assert.deepEqual(delivered, ['protocol.message.recalled', 'message', 'protocol.group.member.changed'])
+  fake.send({ post_type: 'notice', notice_type: 'group_recall', self_id: 999, time: 1, group_id: 456,
+    user_id: 123, operator_id: 123, message_id: -1 })
+  fake.send({ post_type: 'notice', notice_type: 'group_recall', self_id: 12345, time: 1,
+    group_id: 456, user_id: 123, operator_id: 123 })
+  await until(() => client.status().dropped === 2)
+  assert.equal(delivered.length, 3)
 })

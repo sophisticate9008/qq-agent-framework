@@ -1,11 +1,13 @@
+import type { AccountScope } from '../contracts/account-scope.ts';
+export type { AccountScope } from '../contracts/account-scope.ts';
 import type { ResolvedContext, FeatureStateScope } from './context.ts';
 
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
-export interface JsonObject { [key: string]: JsonValue }
+export * from '../contracts/data.ts';
+import type { JsonObject, JsonValue } from '../contracts/data.ts';
 export type Clock = () => number;
 
 export interface FrameworkEvent {
+  accountScope?: Readonly<AccountScope>;
   id: string;
   type: string;
   conversationId: string;
@@ -15,24 +17,18 @@ export interface FrameworkEvent {
   data: JsonObject;
 }
 
-export interface TextContent { type: 'text'; text: string }
-export interface ImageContent { type: 'image'; assetId: string }
-export interface AudioContent { type: 'audio'; assetId: string }
-export interface FileContent { type: 'file'; assetId: string; name: string }
-export interface MentionContent { type: 'mention'; userId: string }
-export interface ReplyContent { type: 'reply'; messageId: string }
-export type BasicMessageContent = TextContent | ImageContent | AudioContent | FileContent | MentionContent | ReplyContent;
-export interface ForwardNode { content: readonly BasicMessageContent[] }
-export interface ForwardContent { type: 'forward'; nodes: readonly ForwardNode[] }
-export type MessageContent = BasicMessageContent | ForwardContent;
+export * from '../contracts/messages.ts';
+import type { MessageContent } from '../contracts/messages.ts';
 export interface PersonaScope { id: string; version: string }
 export interface OutboundScope {
+  accountScope?: Readonly<AccountScope>;
   persona: Readonly<PersonaScope>;
   sessionId?: string;
   generation?: number;
 }
-export type DeliveryReceipt = { status: 'confirmed'; messageId: string }
-  | { status: 'unknown' | 'rejected' };
+export interface MessageDeliveryReceipt { status: 'confirmed'; messageId: string; kind?: never }
+export interface FileUploadReceipt { status: 'confirmed'; kind: 'file-upload'; fileId: string; name: string; messageId?: never }
+export type DeliveryReceipt = MessageDeliveryReceipt | FileUploadReceipt | { status: 'unknown' | 'rejected' };
 export interface SendRequest {
   conversationId: string;
   content: readonly MessageContent[];
@@ -48,6 +44,7 @@ export interface TransportAdapter {
 export interface ModelRequest { prompt: JsonValue; signal: AbortSignal }
 export interface ModelAdapter { generate(request: ModelRequest): Promise<{ text: string }> | { text: string } }
 export interface EffectScope {
+  accountScope?: Readonly<AccountScope>;
   eventId: string;
   conversationId: string;
   featureId: string;

@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import { createDshJsonRpcPort } from '../src/adapters/dsh-jsonrpc.ts'
-import { createChatCapabilityService } from '../src/host/chat-capabilities.ts'
+import { composeChatCapabilityPreset, createChatCapabilityService, validateChatCapabilityApprovalRequest, validateChatCapabilityCompositionApproval } from '../src/host/chat-capabilities.ts'
 import type { ChatCapabilityCompositionRequest } from '../src/host/chat-capabilities.ts'
 import type { JsonObject } from '../src/core/types.ts'
 
@@ -136,4 +136,39 @@ test('composition rejects persona, authority mutation, named realms, aliases and
   data.documents.set('user-tools', '- &tool {id: tool, name: "@example/tool"}\n- *tool\n')
   const catalog = await data.service.catalog(signal())
   assert.equal(catalog.presets.find(preset => preset.presetId === 'user-tools')?.composable, false)
+})
+
+test('capability source export pins the raw revision and shared composition preserves the base entry identity', async context => {
+  const data = await composition(context)
+  const declaration = await data.service.readDeclaration(data.request.selection, signal())
+  const composed = composeChatCapabilityPreset(basePreset, declaration)
+  assert.equal(composed.entryId, basePreset.entryId)
+  assert.equal(composed.config.id, basePreset.config.id)
+  assert.deepEqual((composed.config.plugins as JsonObject[])[0], basePreset.config.plugins[0])
+  assert.equal((composed.config.plugins as JsonObject[])[1]?.name, '@example/user-tool')
+  assert.equal((basePreset.config.plugins as JsonObject[]).length, 1)
+  assert(Object.isFrozen(composed.config.plugins))
+  assert.throws(() => composeChatCapabilityPreset(basePreset, { ...declaration, content: '[]' }))
+  data.documents.set('user-tools', '[]')
+  await assert.rejects(data.service.readDeclaration(data.request.selection, signal()))
+})
+
+test('capability approval DTO binds a versioned source, exact target and final composition, never a grant or arbitrary body', () => {
+  const request = { schema: 1, source: { schema: 1, presetId: 'operator/work', revision: 'a'.repeat(64) },
+    compositionRevision: 'b'.repeat(64), target: { profilePath: '/private/cordis.patch.yml', credentialsPath: '/private/.credentials.yaml',
+      layerPaths: ['/private/base.patch.yml'], schemaVersion: '0.2.1-rc.2' } }
+  const receipt = { ...request, approvalId: 'trusted-owner-receipt', authority: 'owner', externalTools: 'separate-runtime-authorization-required' }
+  assert.deepEqual(validateChatCapabilityApprovalRequest(request), request)
+  assert.deepEqual(validateChatCapabilityCompositionApproval(receipt), receipt)
+  for (const invalid of [
+    { ...request, schema: 2 }, { ...request, compositionRevision: 'latest' }, { ...request, granted: true },
+    { ...request, source: { ...request.source, revision: 'latest' } },
+    { ...request, target: { ...request.target, extra: true } },
+    { ...request, target: { ...request.target, layerPaths: [request.target.profilePath] } },
+    { ...request, target: { ...request.target, layerPaths: ['relative.patch.yml'] } },
+  ]) assert.throws(() => validateChatCapabilityApprovalRequest(invalid))
+  for (const invalid of [null, {}, { ...receipt, authority: 'model' }, { ...receipt, externalTools: 'authorized' },
+    { ...receipt, grant: ['work'] }, { ...receipt, body: 'private-data' }]) {
+    assert.throws(() => validateChatCapabilityCompositionApproval(invalid))
+  }
 })

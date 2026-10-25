@@ -1,16 +1,24 @@
 import { asRecord, isRecord } from './api.ts';
 import { resolveConfigurationVisibility, type VisibilityGroup } from './configuration-visibility.ts';
 import type { PageId } from './types.ts';
+import { pageDefinition, pageRegistry, registeredPageId } from './page-registry.ts';
+import { canonicalPageId } from './page-navigation.ts';
+import { nativeFormSearchTargets } from './native-form-metadata.ts';
 import { usageSectionLabels } from './usage-details.ts';
 
 export interface WorkspaceSearchTarget {
   readonly page: PageId;
   readonly title: string;
   readonly sectionTitle?: string;
+  readonly sectionId?: string;
+  readonly fallbackSectionId?: string;
+  readonly availability?: 'available' | 'requires-setup' | 'unknown';
+  readonly unavailableMessage?: string;
   readonly kind: 'page' | 'section' | 'field';
 }
 
 export interface WorkspaceSearchVisibleEntry {
+  readonly sectionId?: string;
   readonly title: string;
   readonly sectionTitle: string;
   readonly kind: 'section' | 'field';
@@ -34,34 +42,16 @@ interface SearchConfigurationGroup extends VisibilityGroup {
   readonly category: Exclude<PageId, 'overview'>;
 }
 
-const pageDefinitions: readonly { readonly id: PageId; readonly title: string }[] = [
-  { id: 'overview', title: '概览' },
-  { id: 'sessions', title: '会话管理' },
-  { id: 'usage', title: '用量统计' },
-  { id: 'persona', title: '人设与形象' },
-  { id: 'features', title: '功能与触发' },
-  { id: 'access', title: '访问范围' },
-  { id: 'model', title: '聊天方案' },
-  { id: 'providers', title: '模型提供方' },
-  { id: 'adapters', title: '适配器' },
-  { id: 'settings', title: '运行设置' },
-];
-
-const pageIds = new Set<PageId>(pageDefinitions.map(page => page.id));
-const configurationCategories = new Set<Exclude<PageId, 'overview'>>([
-  'persona',
-  'features',
-  'access',
-  'model',
-  'settings',
-]);
+const pageDefinitions = pageRegistry.map(page => ({ id: page.id, title: page.label }));
+const configurationCategories = new Set<string>(pageRegistry.filter(page => page.configurationCategory)
+  .flatMap(page => [page.id, ...(page.aliases ?? []).map(alias => alias.id)]));
 
 export const workspacePageTargets: readonly WorkspaceSearchTarget[] = Object.freeze(
   pageDefinitions.map(page => Object.freeze({ page: page.id, title: page.title, kind: 'page' as const }))
 );
 
 export function workspacePageTitle(page: PageId): string {
-  return pageDefinitions.find(definition => definition.id === page)?.title ?? page;
+  return pageDefinition(page).label;
 }
 
 function parseConfiguration(configuration: unknown): {
@@ -97,39 +87,8 @@ function parseConfiguration(configuration: unknown): {
   return { groups, booleanValues };
 }
 
-function settingsTargets(response: unknown): readonly WorkspaceSearchTarget[] {
-  const root = asRecord(response);
-  const gateway = asRecord(root.gateway);
-  const admin = asRecord(root.admin);
-  const gatewayValues = asRecord(gateway.values);
-  const adminValues = asRecord(admin.values);
-  if (typeof gatewayValues.budgetEnabled !== 'boolean'
-    || Object.keys(adminValues).length === 0) {
-    return [];
-  }
-
-  const targets: WorkspaceSearchTarget[] = [
-    { page: 'settings', title: '运营预算', sectionTitle: '运营预算', kind: 'section' },
-    { page: 'settings', title: '启用发送预算', sectionTitle: '运营预算', kind: 'field' },
-    { page: 'settings', title: '技术约束', sectionTitle: '技术约束', kind: 'section' },
-    { page: 'settings', title: '请求超时', sectionTitle: '技术约束', kind: 'field' },
-    { page: 'settings', title: '并发请求上限', sectionTitle: '技术约束', kind: 'field' },
-    { page: 'settings', title: '单次请求体上限', sectionTitle: '技术约束', kind: 'field' },
-    { page: 'settings', title: '持久记录上限', sectionTitle: '技术约束', kind: 'field' },
-    { page: 'settings', title: '管理端监听', sectionTitle: '管理端监听', kind: 'section' },
-    { page: 'settings', title: '监听地址', sectionTitle: '管理端监听', kind: 'field' },
-    { page: 'settings', title: '监听端口', sectionTitle: '管理端监听', kind: 'field' },
-  ];
-  if (gatewayValues.budgetEnabled) {
-    targets.splice(2, 0,
-      { page: 'settings', title: '每次授权最多发送', sectionTitle: '运营预算', kind: 'field' },
-      { page: 'settings', title: '授权有效时间', sectionTitle: '运营预算', kind: 'field' });
-  }
-  return targets;
-}
-
 function targetKey(target: WorkspaceSearchTarget): string {
-  return `${target.page}\u0000${target.kind}\u0000${target.sectionTitle ?? ''}\u0000${target.title}`;
+  return `${target.page}\u0000${target.kind}\u0000${target.sectionId ?? target.sectionTitle ?? ''}\u0000${target.title}`;
 }
 
 function uniqueTargets(targets: readonly WorkspaceSearchTarget[]): readonly WorkspaceSearchTarget[] {
@@ -147,13 +106,24 @@ export function applyCurrentPageVisibility(
   currentPage: PageId,
   visibleEntries: readonly WorkspaceSearchVisibleEntry[]
 ): readonly WorkspaceSearchTarget[] {
-  const retained = targets.filter(target => target.page !== currentPage || target.kind === 'page');
+  currentPage = canonicalPageId(currentPage);
+  const native = nativeFormSearchTargets();
+  const retained = targets.filter(target => target.page !== currentPage || target.kind === 'page' || target.sectionId)
+    .map(target => target.page === currentPage && target.sectionId ? {
+      ...target,
+      availability: visibleEntries.some(entry => entry.kind === target.kind && (entry.kind === 'section' || entry.title === target.title)
+        && entry.sectionId === target.sectionId) ? 'available' as const : 'requires-setup' as const,
+    } : target);
   const visible = visibleEntries
     .filter(entry => entry.title.trim() !== '' && entry.sectionTitle.trim() !== '')
+    .filter(entry => !native.some(target => target.page === currentPage && target.sectionId === entry.sectionId
+      && (entry.kind === 'section' || target.kind === entry.kind && target.title === entry.title)))
     .map(entry => ({
       page: currentPage,
       title: entry.title.trim(),
-      sectionTitle: entry.sectionTitle.trim(),
+      sectionTitle: native.find(target => target.page === currentPage && target.sectionId === entry.sectionId)?.sectionTitle
+        ?? entry.sectionTitle.trim(),
+      sectionId: entry.sectionId,
       kind: entry.kind,
     } satisfies WorkspaceSearchTarget));
   return uniqueTargets([...retained, ...visible]);
@@ -166,10 +136,11 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
   const configurationTargets: WorkspaceSearchTarget[] = [];
 
   for (const group of groups) {
+    if (group.id === 'gateway-targets') continue;
     const groupVisibility = visibility.get(group.id);
     if (!groupVisibility?.visible) continue;
     configurationTargets.push({
-      page: group.category,
+      page: canonicalPageId(group.category),
       title: group.title,
       sectionTitle: group.title,
       kind: 'section',
@@ -177,7 +148,7 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     for (const field of group.fields) {
       if (!groupVisibility.fieldIds.has(field.id)) continue;
       configurationTargets.push({
-        page: group.category,
+        page: canonicalPageId(group.category),
         title: field.label,
         sectionTitle: group.title,
         kind: 'field',
@@ -188,17 +159,20 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
   let targets = uniqueTargets([
     ...workspacePageTargets,
     ...configurationTargets,
-    ...settingsTargets(sources.settings),
-    { page: 'model', title: '聊天方案', sectionTitle: '聊天方案', kind: 'section' },
+    ...nativeFormSearchTargets(),
+    { page: 'security', title: '访问范围', sectionTitle: '访问范围', sectionId: 'security-access', kind: 'section' },
+    { page: 'security', title: '运行设置', sectionTitle: '运行设置', sectionId: 'security-settings', kind: 'section' },
+    { page: 'overview', title: '最近活动（100 条）', sectionTitle: '最近活动（100 条）', sectionId: 'recent-activity', kind: 'section' },
+    { page: 'sessions', title: '待处理提问与工具审批', sectionTitle: '待处理提问与工具审批', sectionId: 'chat-interactions', kind: 'section' },
+    { page: 'features', title: '聊天工具', sectionTitle: '聊天工具', sectionId: 'chat-tools', kind: 'section' },
     { page: 'persona', title: '人设库', sectionTitle: '人设库', kind: 'section' },
-    { page: 'access', title: '消息处理授权', sectionTitle: '消息处理授权', kind: 'section' },
     { page: 'adapters', title: '聊天运行', sectionTitle: '聊天运行', kind: 'section' },
     ...(runtimeConnected ? Object.values(usageSectionLabels).map(title => ({
       page: 'usage' as const, title, sectionTitle: title, kind: 'section' as const,
     })) : []),
   ]);
   if (sources.currentPage && sources.visibleEntries) {
-    targets = applyCurrentPageVisibility(targets, sources.currentPage, sources.visibleEntries);
+    targets = applyCurrentPageVisibility(targets, canonicalPageId(sources.currentPage), sources.visibleEntries);
   }
   return targets;
 }
@@ -208,12 +182,8 @@ export function normalizeWorkspaceSearchQuery(query: string): readonly string[] 
 }
 
 function searchableText(target: WorkspaceSearchTarget): string {
-  const aliases = target.kind === 'page' && target.page === 'usage' ? 'token tokens 费用 花费 用量'
-    : target.kind === 'page' && target.page === 'sessions' ? 'session sessions 群聊 私聊 会话'
-      : target.kind === 'page' && target.page === 'adapters' ? 'adapter adapters OneBot WebSocket WS WSS HTTP webhook DSH 协议 接入 服务地址 连接凭据 收消息 发消息 启动聊天 应用聊天设置 模型容量 配置文件'
-        : target.kind === 'page' && target.page === 'providers' ? 'provider providers OpenAI Anthropic API key 服务商 密钥 模型昵称'
-          : target.kind === 'page' && target.page === 'model' ? '模型 回复 prompt 方案 指令 群聊上下文 私聊上下文' : '';
-  return [workspacePageTitle(target.page), target.sectionTitle, target.title, aliases]
+  const aliases = target.kind === 'page' ? pageDefinition(target.page).searchAliases ?? '' : '';
+  return (target.kind === 'field' ? [target.title] : [workspacePageTitle(target.page), target.sectionTitle, target.title, aliases])
     .filter((part): part is string => typeof part === 'string')
     .join(' ')
     .normalize('NFKC')
@@ -237,7 +207,8 @@ export function groupWorkspaceSearchTargets(
   targets: readonly WorkspaceSearchTarget[]
 ): readonly WorkspaceSearchGroup[] {
   return pageDefinitions.flatMap(page => {
-    const pageTargets = targets.filter(target => target.page === page.id);
+    const pageTargets = targets.filter(target => canonicalPageId(target.page) === page.id)
+      .map(target => ({ ...target, page: page.id }));
     return pageTargets.length > 0 ? [{ page: page.id, title: page.title, targets: pageTargets }] : [];
   });
 }
@@ -249,5 +220,13 @@ export function workspaceSearchPath(target: WorkspaceSearchTarget): string {
 }
 
 export function isPageId(value: unknown): value is PageId {
-  return typeof value === 'string' && pageIds.has(value as PageId);
+  return registeredPageId(value);
+}
+
+export function isWorkspaceSearchShortcut(event: KeyboardEvent): boolean {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat
+    || event.key.toLocaleLowerCase() !== 'k' || (!event.ctrlKey && !event.metaKey) || event.altKey) return false;
+  return !(event.target instanceof Element && event.target.closest(
+    'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"]'
+  ));
 }

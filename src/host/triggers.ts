@@ -295,7 +295,7 @@ function isoDay(year: number, month: number, day: number) {
   return (value === 0 ? 7 : value) as WeeklyCalendarSchedule['dayOfWeek'];
 }
 
-function scheduledBetween(value: StoredRule, from: number, through: number) {
+function scheduledBetween(value: Pick<StoredRule, 'schedule' | 'timeZone' | 'dst'>, from: number, through: number) {
   const first = localParts(Math.max(0, from - dayMs), value.timeZone);
   const last = localParts(through + dayMs, value.timeZone);
   const start = Date.UTC(first.year, first.month - 1, first.day);
@@ -312,6 +312,15 @@ function scheduledBetween(value: StoredRule, from: number, through: number) {
     if (resolved !== null && resolved >= from && resolved <= through) result.push(resolved);
   }
   return [...new Set(result)].sort((left, right) => left - right);
+}
+
+/** Read-only next occurrence calculation shared by management projections and the scheduler. */
+export function nextCalendarTriggerAt(input: Pick<CalendarTriggerInput, 'schedule' | 'timeZone' | 'dst'>, after: number): number | null {
+  finiteTimestamp(after, 'INVALID_CALENDAR_TIME')
+  const value = { schedule: validateSchedule(input.schedule), timeZone: canonicalTimeZone(input.timeZone), dst: validateDst(input.dst) }
+  const through = after + 16 * dayMs
+  finiteTimestamp(through, 'INVALID_CALENDAR_TIME')
+  return scheduledBetween(value, after + 1, through)[0] ?? null
 }
 
 function occurrenceId(ruleId: string, generation: number, scheduledAt: number) {

@@ -60,7 +60,7 @@ test('adapters default to unassembled resources and saving never calls an extern
   assert.deepEqual(saved.status, initial.status)
   assert.deepEqual(Object.keys(object(saved.adapters)), Object.keys(adapters))
   assert.deepEqual(object(saved.adapters).dshAgent, {
-    enabled: true, endpoint: 'https://agent.example.test', authConfigured: true
+    enabled: true, endpoint: 'https://agent.example.test', authConfigured: true, localAuthConfigured: false
   })
   assert.equal(fetchCalls, 0)
   assert.equal(statSync(setup.directory).mode & 0o777, 0o700)
@@ -113,7 +113,11 @@ test('adapter CAS is shared across route instances and rejects stale concurrent 
   const failed = results.find(result => result.status === 'rejected')
   assert(failed?.status === 'rejected')
   assert(failed.reason instanceof AdminRequestError)
-  assert.equal(failed.reason.code, 'chat_revision_conflict')
+  assert.equal(failed.reason.code, 'native_chat_busy')
+  await rejects(invoke(other, 'POST', {
+    revision: initial.revision,
+    adapters: { dshAgent: { enabled: false, endpoint: 'https://stale.example.test' } }
+  }), 409, 'chat_revision_conflict')
 })
 
 test('adapter saves honor a private lockfile created by another process', async context => {
@@ -276,7 +280,9 @@ test('an explicit host status port reports runtime state independently from save
       NonNullable<NativeRuntimeRouteOptions['adapterRuntime']>['status']
   } })
   await rejects(invoke(malformed, 'GET'), 503, 'adapter_runtime_status_unavailable')
-  assert.equal((await invoke(setup.routes, 'GET')).revision, saved.revision)
+  const observed = await invoke(setup.routes, 'GET')
+  assert.notEqual(observed.revision, saved.revision)
+  assert.equal(object(object(observed.adapters).dshAgent).endpoint, 'https://new.example.test')
   assert.throws(() => createNativeRuntimeRoutes({
     directory: setup.directory, adapterRuntime: { status: 'unsafe' }
   } as unknown as NativeRuntimeRouteOptions))
@@ -395,7 +401,7 @@ test('in-flight controls reject concurrent controls and configuration writes wit
     await rejects(control(other, 'disconnect', {}), 409, 'adapter_runtime_busy')
     await rejects(invoke(other, 'POST', { revision: initial.revision, adapters: {
       onebotHttp: { enabled: true, endpoint: 'https://http.example.test' }
-    } }), 409, 'chat_storage_busy')
+    } }), 409, 'native_chat_busy')
   } finally {
     release?.()
     await first

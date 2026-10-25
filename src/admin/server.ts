@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, open, readFile } from 'node:fs/promises'
 import {
   createServer,
   type IncomingMessage,
@@ -10,6 +11,9 @@ import {
 
 import { createAccessSessionStore, type AccessSessionStore } from './access-sessions.ts'
 import { createAdminOriginPolicy } from './public-origin.ts'
+import { AdminRequestError } from './errors.ts'
+
+export { AdminRequestError } from './errors.ts'
 
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_HEADER_BYTES = 16 * 1024
@@ -38,6 +42,7 @@ const APP_URL = new URL('app.js', WEB_ROOT)
 interface StaticAsset {
   readonly url: URL
   readonly type: string
+  readonly generated?: true
 }
 
 export interface AdminServerOptions {
@@ -76,7 +81,7 @@ const STATIC_ROUTES = new Map<string, StaticAsset>([
 
 const SECURITY_HEADERS: Readonly<OutgoingHttpHeaders> = {
   'Cache-Control': 'no-store',
-  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
@@ -228,17 +233,6 @@ async function readJsonBody(request: IncomingMessage, maxBytes = MAX_BODY_BYTES)
   return value
 }
 
-export class AdminRequestError extends Error {
-  readonly statusCode: number
-  readonly code: string
-
-  constructor(statusCode: number, code: string) {
-    super(code)
-    this.statusCode = statusCode
-    this.code = code
-  }
-}
-
 const RequestError = AdminRequestError
 
 class ClientDisconnectedError extends Error {}
@@ -330,12 +324,33 @@ function waitForHandler<Value>({
   })
 }
 
+async function staticAsset(pathname: string): Promise<StaticAsset | undefined> {
+  const fixed = STATIC_ROUTES.get(pathname)
+  if (fixed) return fixed
+  // Vite emits flat, content-hashed modules. Other files and encoded/nested paths remain private.
+  if (!/^\/[A-Za-z0-9_-]{1,128}-[A-Za-z0-9_-]{8}\.js$/.test(pathname)) return undefined
+  const url = new URL(pathname.slice(1), WEB_ROOT)
+  try {
+    const metadata = await lstat(url)
+    return metadata.isFile() && !metadata.isSymbolicLink() ? { url, type: 'text/javascript; charset=utf-8', generated: true } : undefined
+  } catch { return undefined }
+}
+
+async function readStaticAsset(asset: StaticAsset): Promise<Buffer> {
+  if (!asset.generated) return readFile(asset.url)
+  const handle = await open(asset.url, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    if (!(await handle.stat()).isFile()) throw new TypeError('A static asset must be a regular file')
+    return await handle.readFile()
+  } finally { await handle.close() }
+}
+
 async function serveStatic(
   pathname: string,
   response: ServerResponse,
-  cache: Map<string, Promise<Buffer>>
+  cache: Map<string, Promise<Buffer>>,
+  asset: StaticAsset | undefined
 ): Promise<void> {
-  const asset = STATIC_ROUTES.get(pathname)
   if (asset === undefined) {
     sendError(response, 404, 'not_found')
     return
@@ -343,7 +358,7 @@ async function serveStatic(
   try {
     let pending = cache.get(pathname)
     if (pending === undefined) {
-      pending = readFile(asset.url).then(content => {
+      pending = readStaticAsset(asset).then(content => {
         if (content.byteLength > MAX_CACHED_ASSET_BYTES) cache.delete(pathname)
         return content
       }, (error: unknown) => {
@@ -395,7 +410,7 @@ export function createAdminServer({
     throw new TypeError('accessSessionTtlMs must be an integer between 10 and 2592000000')
   }
 
-  if (!Array.isArray(routes) || routes.length > 64) throw new TypeError('routes must be a bounded array')
+  if (!Array.isArray(routes) || routes.length > 128) throw new TypeError('routes must be an array of at most 128 entries')
   const extensions = new Map<string, AdminRoute>()
   const methods = new Map<string, string[]>()
   for (const route of routes) {
@@ -604,8 +619,9 @@ export function createAdminServer({
         return
       }
 
-      if (request.method === 'GET' && STATIC_ROUTES.has(pathname)) {
-        await serveStatic(pathname, response, staticCache)
+      const asset = await staticAsset(pathname)
+      if (request.method === 'GET' && asset !== undefined) {
+        await serveStatic(pathname, response, staticCache, asset)
         return
       }
 
@@ -613,7 +629,7 @@ export function createAdminServer({
         pathname === '/health'
         || pathname === '/api/snapshot'
         || dispatchDemo && pathname === '/api/demo/events'
-        || STATIC_ROUTES.has(pathname)
+        || asset !== undefined
       ) {
         sendError(response, 405, 'method_not_allowed', { Allow: pathname === '/api/demo/events' ? 'POST' : 'GET' })
         return

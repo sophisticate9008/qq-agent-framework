@@ -2,6 +2,7 @@ import type { Clock, JsonObject } from '../core/types.ts'
 import { FrameworkError, assert, isRecord, reference, snapshot } from '../core/values.ts'
 import type { DurableStore, StoredRecord } from './types.ts'
 import { digest, json, object } from './data.ts'
+import { createDefaultUsagePriceTable, defaultUsagePriceAt } from './default-usage-prices.ts'
 
 export interface NativeUsageTokens {
   readonly input: number | null
@@ -22,18 +23,33 @@ export interface NativeUsagePrice {
   readonly cacheWritePerMillion: number
 }
 
+export interface NativeUsagePriceSnapshot extends NativeUsagePrice {
+  readonly schema: 1
+  readonly source: 'operator' | 'migrated-reference'
+  readonly version: string
+  readonly tier: 'flat' | 'peak' | 'off'
+  readonly unit: 1_000_000
+  readonly at: number
+  readonly cacheWritePricing: 'operator' | 'same-as-cache-miss-assumption'
+  readonly requestedModel?: string
+  readonly referenceModel?: string
+  readonly fallbackUsed?: boolean
+}
+
 export interface NativeUsageTurn {
+  readonly recordKind?: 'turn' | 'opening-balance' | 'detail-only'
   readonly conversationId: string
   readonly sessionId: string
   readonly generation: number
   readonly turnId: string
   readonly stepId?: string | null
   readonly stepNumber?: number | null
+  readonly retryNumber?: number | null
   readonly coverage?: 'complete' | 'partial' | 'unknown'
   readonly provider: string
   readonly model: string
   readonly externalProvider?: string
-  readonly status: 'completed' | 'failed'
+  readonly status: 'completed' | 'failed' | 'unknown'
   readonly tokens: NativeUsageTokens
   readonly reportedCost: { readonly amount: number; readonly currency: string } | null
 }
@@ -48,7 +64,10 @@ export interface NativeUsageQuery {
   readonly until?: number
 }
 
-const namespace = 'native-usage.turns'
+export const NATIVE_USAGE_TURNS_NAMESPACE = 'native-usage.turns'
+export const NATIVE_USAGE_ARCHIVE_NAMESPACE = 'native-usage.archive'
+export const NATIVE_USAGE_RETIRED_NAMESPACE = 'native-usage.retired'
+const namespace = NATIVE_USAGE_TURNS_NAMESPACE
 const priceNamespace = 'native-usage.pricing'
 const tokenKeys = ['input', 'output', 'cacheRead', 'cacheWrite', 'total', 'reasoning'] as const
 const priceKeys = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion'] as const
@@ -84,11 +103,13 @@ export function validateNativeUsagePrices(input: unknown): readonly NativeUsageP
 
 function validateTurn(input: NativeUsageTurn): NativeUsageTurn {
   assert(isRecord(input) && reference(input.conversationId) && reference(input.sessionId) && reference(input.turnId)
+    && (input.recordKind === undefined || ['turn', 'opening-balance', 'detail-only'].includes(input.recordKind))
     && reference(input.provider) && reference(input.model) && Number.isSafeInteger(input.generation) && input.generation > 0
     && (input.externalProvider === undefined || reference(input.externalProvider))
-    && ['completed', 'failed'].includes(input.status) && isRecord(input.tokens)
+    && ['completed', 'failed', 'unknown'].includes(input.status) && isRecord(input.tokens)
     && (input.stepId === undefined || input.stepId === null || reference(input.stepId))
     && (input.stepNumber === undefined || input.stepNumber === null || token(input.stepNumber))
+    && (input.retryNumber === undefined || input.retryNumber === null || token(input.retryNumber))
     && (input.coverage === undefined || ['complete', 'partial', 'unknown'].includes(input.coverage))
     && ['input', 'output', 'cacheRead', 'cacheWrite', 'total'].every(key => Object.hasOwn(input.tokens, key))
     && Object.keys(input.tokens).every(key => (tokenKeys as readonly string[]).includes(key))
@@ -119,19 +140,44 @@ function validateQuery(query: NativeUsageQuery): Required<Pick<NativeUsageQuery,
   return { ...query, limit }
 }
 
-function storedTurn(record: StoredRecord) {
+export function readNativeUsageStoredTurn(record: StoredRecord) {
   const value = object(record.value)
   assert(value.schema === 1 && reference(value.fingerprint) && token(value.recordedAt) && isRecord(value.turn)
     && (value.cost === null || isRecord(value.cost) && money(value.cost.amount) && currency(value.cost.currency)
       && ['reported', 'operator-price-estimate'].includes(String(value.cost.source))),
   'USAGE_DATA_CORRUPT', 'Stored usage metadata is invalid.')
   const turn = validateTurn(value.turn as unknown as NativeUsageTurn)
-  return { cursor: record.key, ...turn, recordedAt: value.recordedAt,
-    cost: value.cost as { amount: number; currency: string; source: string } | null,
-    pricingRevision: value.pricingRevision as number | null }
+  if (value.priceSnapshot !== undefined) {
+    const price = object(value.priceSnapshot)
+    assert(price.schema === 1 && ['operator', 'migrated-reference'].includes(String(price.source))
+      && reference(price.version) && ['flat', 'peak', 'off'].includes(String(price.tier))
+      && price.unit === 1_000_000 && token(price.at) && reference(price.provider) && reference(price.model)
+      && (price.requestedModel === undefined && price.referenceModel === undefined && price.fallbackUsed === undefined
+        || price.requestedModel === turn.model && reference(price.referenceModel) && typeof price.fallbackUsed === 'boolean'
+          && price.fallbackUsed === (price.referenceModel !== price.requestedModel))
+      && currency(price.currency) && priceKeys.every(key => money(price[key]) && Number(price[key]) <= 1_000_000)
+      && ['operator', 'same-as-cache-miss-assumption'].includes(String(price.cacheWritePricing)),
+    'USAGE_DATA_CORRUPT', 'Stored usage price snapshot is invalid.')
+  }
+  const publicTurn: NativeUsageTurn = { conversationId: turn.conversationId, sessionId: turn.sessionId, generation: turn.generation,
+    turnId: turn.turnId, provider: turn.provider, model: turn.model, status: turn.status, tokens: turn.tokens, reportedCost: turn.reportedCost,
+    ...(turn.recordKind === undefined ? {} : { recordKind: turn.recordKind }), ...(turn.externalProvider === undefined ? {} : { externalProvider: turn.externalProvider }),
+    ...(turn.stepId === undefined ? {} : { stepId: turn.stepId }), ...(turn.stepNumber === undefined ? {} : { stepNumber: turn.stepNumber }),
+    ...(turn.retryNumber === undefined ? {} : { retryNumber: turn.retryNumber }), ...(turn.coverage === undefined ? {} : { coverage: turn.coverage }) }
+  const rawPrice = value.priceSnapshot as unknown as NativeUsagePriceSnapshot | undefined
+  const priceSnapshot: NativeUsagePriceSnapshot | undefined = rawPrice === undefined ? undefined : {
+    schema: 1, source: rawPrice.source, version: rawPrice.version, tier: rawPrice.tier, unit: 1_000_000, at: rawPrice.at,
+    provider: rawPrice.provider, model: rawPrice.model, currency: rawPrice.currency, inputPerMillion: rawPrice.inputPerMillion,
+    outputPerMillion: rawPrice.outputPerMillion, cacheReadPerMillion: rawPrice.cacheReadPerMillion, cacheWritePerMillion: rawPrice.cacheWritePerMillion,
+    cacheWritePricing: rawPrice.cacheWritePricing, ...(rawPrice.requestedModel === undefined ? {} : { requestedModel: rawPrice.requestedModel }),
+    ...(rawPrice.referenceModel === undefined ? {} : { referenceModel: rawPrice.referenceModel }), ...(rawPrice.fallbackUsed === undefined ? {} : { fallbackUsed: rawPrice.fallbackUsed }) }
+  const rawCost = value.cost as { amount: number; currency: string; source: string } | null
+  return { cursor: record.key, ...publicTurn, recordedAt: value.recordedAt,
+    cost: rawCost === null ? null : { amount: rawCost.amount, currency: rawCost.currency, source: rawCost.source },
+    ...(priceSnapshot === undefined ? {} : { priceSnapshot }), pricingRevision: value.pricingRevision as number | null }
 }
 
-function matches(turn: ReturnType<typeof storedTurn>, query: NativeUsageQuery): boolean {
+function matches(turn: ReturnType<typeof readNativeUsageStoredTurn>, query: NativeUsageQuery): boolean {
   return (query.conversationId === undefined || turn.conversationId === query.conversationId)
     && (query.provider === undefined || turn.provider === query.provider)
     && (query.model === undefined || turn.model === query.model)
@@ -139,20 +185,22 @@ function matches(turn: ReturnType<typeof storedTurn>, query: NativeUsageQuery): 
     && (query.until === undefined || turn.recordedAt < query.until)
 }
 
-export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
-  { readonly store: DurableStore; readonly clock?: Clock; readonly maxScan?: number }) {
+export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, builtinHolidays, builtinHolidayYears }:
+  { readonly store: DurableStore; readonly clock?: Clock; readonly maxScan?: number;
+    readonly builtinHolidays?: readonly string[]; readonly builtinHolidayYears?: readonly number[] }) {
   assert(Number.isSafeInteger(maxScan) && maxScan >= 1 && maxScan <= 100_000,
     'USAGE_INVALID_OPTIONS', 'Usage scans must have a finite bound.')
+  const builtin = createDefaultUsagePriceTable({ holidays: builtinHolidays, holidayYears: builtinHolidayYears })
 
   function pricing() {
     const record = store.read(priceNamespace, 'catalog')
     return { revision: record?.revision ?? null,
-      prices: record ? validateNativeUsagePrices(object(record.value).prices) : [] }
+      prices: record ? validateNativeUsagePrices(object(record.value).prices) : [], builtin }
   }
 
   function scan(query: NativeUsageQuery = {}) {
     const validated = validateQuery(query)
-    const items: ReturnType<typeof storedTurn>[] = []
+    const items: ReturnType<typeof readNativeUsageStoredTurn>[] = []
     let after = validated.after
     let scanned = 0
     while (scanned < maxScan) {
@@ -161,7 +209,7 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
       for (const record of batch) {
         scanned++
         after = record.key
-        const turn = storedTurn(record)
+        const turn = readNativeUsageStoredTurn(record)
         if (matches(turn, validated)) items.push(turn)
       }
       if (batch.length < limit) return { items, truncated: false, next: null }
@@ -170,12 +218,14 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
     return { items, truncated: more, next: more ? after ?? null : null }
   }
 
-  function summarize(items: readonly ReturnType<typeof storedTurn>[], partial: boolean) {
+  function summarize(items: readonly ReturnType<typeof readNativeUsageStoredTurn>[], partial: boolean) {
     const knownTokens = Object.fromEntries(tokenKeys.map(key => [key, 0])) as Record<typeof tokenKeys[number], number>
     const missingTokens = Object.fromEntries(tokenKeys.map(key => [key, 0])) as Record<typeof tokenKeys[number], number>
     const costs: Record<string, number> = {}
     let missingCostTurns = 0
-    for (const turn of items) {
+    let missingCostRecords = 0
+    const totalRecords = items.filter(turn => turn.recordKind !== 'detail-only')
+    for (const turn of totalRecords) {
       for (const key of tokenKeys) {
         const value = turn.tokens[key] ?? null
         if (value === null) missingTokens[key]++
@@ -184,21 +234,28 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
           assert(Number.isSafeInteger(knownTokens[key]), 'USAGE_TOTAL_OVERFLOW', 'Usage total exceeds safe integer bounds.')
         }
       }
-      if (!turn.cost) missingCostTurns++
+      if (!turn.cost) {
+        missingCostRecords++
+        if (turn.recordKind !== 'opening-balance') missingCostTurns++
+      }
       else {
         costs[turn.cost.currency] = (costs[turn.cost.currency] ?? 0) + turn.cost.amount
         assert(Number.isFinite(costs[turn.cost.currency]), 'USAGE_TOTAL_OVERFLOW', 'Usage cost total exceeds numeric bounds.')
       }
     }
-    const incompleteTurns = new Set(items.filter(turn => turn.coverage !== 'complete')
+    const modelRecords = items.filter(turn => turn.recordKind !== 'opening-balance')
+    const incompleteTurns = new Set(modelRecords.filter(turn => turn.coverage !== 'complete')
       .map(turn => digest([turn.sessionId, turn.generation, turn.turnId])))
+    const incompleteTotals = modelRecords.some(turn => turn.recordKind !== 'detail-only' && turn.coverage !== 'complete')
+    const historical = items.some(turn => turn.recordKind === 'opening-balance' || turn.recordKind === 'detail-only' || turn.status === 'unknown')
     const tokens = Object.fromEntries(tokenKeys.map(key => [key,
-      partial || missingTokens[key] > 0 || incompleteTurns.size > 0 ? null : knownTokens[key]]))
-    return { turns: new Set(items.map(turn => digest([turn.sessionId, turn.generation, turn.turnId]))).size,
+      partial || missingTokens[key] > 0 || incompleteTotals ? null : knownTokens[key]]))
+    return { turns: new Set(modelRecords.map(turn => digest([turn.sessionId, turn.generation, turn.turnId]))).size,
       records: items.length, incompleteTurns: incompleteTurns.size, partial, tokens, knownTokens, missingTokens,
-      knownCosts: costs, missingCostTurns, costComplete: !partial && missingCostTurns === 0 && incompleteTurns.size === 0,
-      tokenUsageAvailable: items.some(turn => tokenKeys.some(key => turn.tokens[key] !== null)),
-      source: 'durable-dsh-turn-events', observationScope: 'observed-terminal-turns-only',
+      knownCosts: costs, missingCostTurns, costComplete: !partial && missingCostRecords === 0 && !incompleteTotals,
+      tokenUsageAvailable: totalRecords.some(turn => tokenKeys.some(key => turn.tokens[key] !== null)),
+      source: historical ? 'durable-dsh-turn-events-and-imported-history' : 'durable-dsh-turn-events',
+      observationScope: historical ? 'observed-events-and-preserved-history' : 'observed-terminal-turns-only',
       retention: 'explicit-store-capacity-no-automatic-reset' }
   }
 
@@ -219,10 +276,37 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
       const prior = store.read(namespace, key)
       if (prior) {
         assert(object(prior.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A recorded turn has different usage.')
-        return storedTurn(prior)
+        return readNativeUsageStoredTurn(prior)
       }
-      const prices = pricing()
-      const price = prices.prices.find(value => value.provider === turn.provider && value.model === turn.model)
+      const archived = store.read(NATIVE_USAGE_ARCHIVE_NAMESPACE, key)
+      if (archived) {
+        assert(object(archived.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'An archived turn has different usage.')
+        return readNativeUsageStoredTurn(archived)
+      }
+      const retired = store.read(NATIVE_USAGE_RETIRED_NAMESPACE, key)
+      if (retired) {
+        const receipt = object(retired.value)
+        assert(receipt.schema === 1 && receipt.fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
+        return Object.freeze({ retired: true as const, cursor: key, fingerprint })
+      }
+      const prices = turn.recordKind === 'opening-balance' || turn.recordKind === 'detail-only'
+        ? { revision: null, prices: [] } : pricing()
+      const recordedAt = clock()
+      assert(token(recordedAt), 'USAGE_INVALID_CLOCK', 'Usage needs a nonnegative integer timestamp.')
+      const manual = prices.prices.find(value => value.provider === turn.provider && value.model === turn.model)
+      const rate = !manual && turn.recordKind !== 'opening-balance' && turn.recordKind !== 'detail-only'
+        ? defaultUsagePriceAt(turn.model, recordedAt, builtin) : null
+      const price = manual ? { ...manual, schema: 1 as const, source: 'operator' as const,
+        version: `native:${prices.revision}`, tier: 'flat' as const, unit: 1_000_000 as const,
+        at: recordedAt, cacheWritePricing: 'operator' as const,
+        requestedModel: turn.model, referenceModel: turn.model, fallbackUsed: false }
+        : rate ? { schema: 1 as const, provider: turn.provider, model: turn.model, currency: rate.currency,
+          inputPerMillion: rate.cacheMiss, outputPerMillion: rate.output,
+          cacheReadPerMillion: rate.cacheHit, cacheWritePerMillion: rate.cacheWrite,
+          source: rate.source, version: rate.version, tier: rate.tier, unit: rate.unit, at: recordedAt,
+          cacheWritePricing: rate.cacheWritePricing, requestedModel: rate.requestedModel,
+          referenceModel: rate.referenceModel, fallbackUsed: rate.fallbackUsed } : null
+      let priceSnapshot: NativeUsagePriceSnapshot | undefined
       let cost: JsonObject | null = turn.reportedCost === null ? null : { ...turn.reportedCost, source: 'reported' }
       if (cost === null && price && [turn.tokens.input, turn.tokens.output, turn.tokens.cacheRead, turn.tokens.cacheWrite]
         .every(value => value !== null)) {
@@ -230,17 +314,28 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
           + turn.tokens.cacheRead! * price.cacheReadPerMillion + turn.tokens.cacheWrite! * price.cacheWritePerMillion) / 1_000_000
         assert(money(amount), 'USAGE_COST_OVERFLOW', 'Estimated cost exceeds supported bounds.')
         cost = { amount, currency: price.currency, source: 'operator-price-estimate' }
+        priceSnapshot = price
       }
-      const recordedAt = clock()
-      assert(token(recordedAt), 'USAGE_INVALID_CLOCK', 'Usage needs a nonnegative integer timestamp.')
       try {
-        return storedTurn(store.write(namespace, key,
-          json({ schema: 1, turn, fingerprint, cost, pricingRevision: prices.revision, recordedAt }), { expectedRevision: null }))
+        const value = json({ schema: 1, turn, fingerprint, cost, pricingRevision: prices.revision, recordedAt,
+          ...(priceSnapshot ? { priceSnapshot } : {}) })
+        const saved = store.compareAndSetBatch ? store.compareAndSetBatch([
+          { kind: 'check', namespace: NATIVE_USAGE_ARCHIVE_NAMESPACE, key, expectedRevision: null },
+          { kind: 'check', namespace: NATIVE_USAGE_RETIRED_NAMESPACE, key, expectedRevision: null },
+          { kind: 'write', namespace, key, expectedRevision: null, value }
+        ])[2] : store.write(namespace, key, value, { expectedRevision: null })
+        assert(saved, 'USAGE_TURN_CONFLICT', 'Usage was retired while being recorded.')
+        return readNativeUsageStoredTurn(saved)
       } catch (error) {
         if (!(error instanceof FrameworkError) || error.code !== 'STORE_CONFLICT') throw error
-        const winner = store.read(namespace, key)
+        const winner = store.read(namespace, key) ?? store.read(NATIVE_USAGE_ARCHIVE_NAMESPACE, key)
+        const retired = store.read(NATIVE_USAGE_RETIRED_NAMESPACE, key)
+        if (!winner && retired) {
+          assert(object(retired.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
+          return Object.freeze({ retired: true as const, cursor: key, fingerprint })
+        }
         assert(winner && object(winner.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A recorded turn has different usage.')
-        return storedTurn(winner)
+        return readNativeUsageStoredTurn(winner)
       }
     },
     list(query: NativeUsageQuery = {}) {
@@ -257,15 +352,17 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000 }:
     recent(query: NativeUsageQuery = {}) {
       const validated = validateQuery(query)
       const page = scan(validated)
-      return snapshot({ items: page.items.sort((left, right) => right.recordedAt - left.recordedAt
+      return snapshot({ items: page.items.filter(turn => turn.recordKind !== 'opening-balance')
+        .sort((left, right) => right.recordedAt - left.recordedAt
         || left.cursor.localeCompare(right.cursor)).slice(0, validated.limit), partial: page.truncated })
     },
     series(query: NativeUsageQuery = {}, bucketMs = 3_600_000) {
       assert(Number.isSafeInteger(bucketMs) && bucketMs >= 60_000 && bucketMs <= 86_400_000,
         'USAGE_INVALID_QUERY', 'Usage buckets must be between one minute and one day.')
       const page = scan(query)
-      const buckets = new Map<number, ReturnType<typeof storedTurn>[]>()
+      const buckets = new Map<number, ReturnType<typeof readNativeUsageStoredTurn>[]>()
       for (const turn of page.items) {
+        if (turn.recordKind === 'opening-balance') continue
         const start = Math.floor(turn.recordedAt / bucketMs) * bucketMs
         const bucket = buckets.get(start) ?? []
         bucket.push(turn)

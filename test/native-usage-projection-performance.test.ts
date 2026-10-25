@@ -15,6 +15,7 @@ test('native conversation grouping visits high-cardinality records linearly even
   const visits: number[] = []
   for (const count of [1_000, 2_000]) {
     let reads = 0
+    assert(!('retired' in seed))
     const rows = Array.from({ length: count }, (_unused, index) => ({ ...seed,
       cursor: `cursor-${index}`, conversationId: `private:${1_000 + index}`,
       sessionId: `session-${index}`, recordedAt: 100_000 + index % 13 }))

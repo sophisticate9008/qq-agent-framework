@@ -6,6 +6,8 @@ import type { JsonObject, JsonValue } from '../core/types.ts'
 import { snapshot } from '../core/values.ts'
 import type { DshJsonRpcPort } from '../adapters/dsh-jsonrpc.ts'
 import type { DshDeploymentPreset } from '../adapters/dsh-deployment.ts'
+import { isChatPlanCapabilitySelection } from './chat-plans.ts'
+import type { ChatPlanCapabilitySelection } from './chat-plans.ts'
 
 export const CHAT_CAPABILITY_BOUNDARY = Object.freeze({
   mounted: false as const,
@@ -23,24 +25,12 @@ export const CHAT_CAPABILITY_SOURCE_REFS = Object.freeze([
   '@deepseek-ai/dsh-agent-preset-registry/lib/typert.remote-client.d.ts (only list/read/select)',
 ])
 
-export interface ChatCapabilitySelection {
-  readonly presetId: string
-  readonly revision: string
-}
+export type { ChatCapabilitySelection, ChatCapabilityPreset, ChatCapabilityApproval, ChatCapabilityDeclaration,
+  ChatCapabilityComposition, ChatCapabilityApprovalRequest, ChatCapabilityCompositionApproval } from '../contracts/chat-capabilities.ts'
+import type { ChatCapabilitySelection, ChatCapabilityPreset, ChatCapabilityApproval, ChatCapabilityDeclaration,
+  ChatCapabilityComposition, ChatCapabilityApprovalRequest, ChatCapabilityCompositionApproval } from '../contracts/chat-capabilities.ts'
 
-export interface ChatCapabilityPreset extends ChatCapabilitySelection {
-  readonly name: string
-  readonly description: string
-  readonly composable: boolean
-  readonly packages: readonly string[]
-  readonly missingReasons: readonly string[]
-}
-
-export interface ChatCapabilityApproval {
-  readonly approvalId: string
-  readonly authority: 'owner'
-  readonly externalTools: 'separate-runtime-authorization-required'
-}
+export type ResolveChatCapabilityApproval = (request: ChatCapabilityApprovalRequest, signal: AbortSignal) => Promise<ChatCapabilityCompositionApproval | null>
 
 export interface ChatCapabilityCompositionRequest {
   readonly selection: ChatCapabilitySelection
@@ -69,6 +59,7 @@ export interface ChatCapabilityOptions {
 interface Declaration {
   readonly metadata: ChatCapabilityPreset
   readonly plugins: readonly JsonObject[] | undefined
+  readonly content?: string
 }
 
 class CapabilityError extends Error {
@@ -146,6 +137,48 @@ function rowIds(plugins: readonly JsonObject[]): string[] {
   return plugins.flatMap(row => [String(row.id), ...(row.group === true && Array.isArray(row.config) ? rowIds(row.config as JsonObject[]) : [])])
 }
 
+export function composeChatCapabilityPreset(base: DshDeploymentPreset, declaration: ChatCapabilityDeclaration): DshDeploymentPreset {
+  const { selection, content } = declaration
+  if (!object(selection) || !identifier(selection.presetId) || typeof content !== 'string'
+    || selection.revision !== hash({ id: selection.presetId, content })) fail('capability_source_revision_conflict')
+  const plugins = safePlugins(content)
+  const problems = compositionProblems(plugins)
+  if (problems.length) fail(problems[0]!)
+  const original = safePlugins(JSON.stringify(base.config.plugins))
+  const ids = rowIds(original)
+  if (rowIds(plugins).some(id => ids.includes(id))) fail('capability_entry_id_conflict')
+  const combined = safePlugins(JSON.stringify([...original, ...plugins]))
+  return snapshot({ entryId: base.entryId, config: { ...base.config, plugins: [...combined] } })
+}
+
+export function validateChatCapabilityApprovalRequest(value: unknown): ChatCapabilityApprovalRequest {
+  const exact = (entry: Record<string, unknown>, keys: readonly string[]): boolean =>
+    Object.keys(entry).length === keys.length && Object.keys(entry).every(key => keys.includes(key))
+  const path = (entry: unknown): entry is string => typeof entry === 'string' && entry.length <= 4096
+    && isAbsolute(entry) && !entry.includes('\0')
+  if (!object(value) || !exact(value, ['schema', 'source', 'compositionRevision', 'target'])
+    || value.schema !== 1 || !isChatPlanCapabilitySelection(value.source)
+    || typeof value.compositionRevision !== 'string' || !/^[a-f0-9]{64}$/.test(value.compositionRevision)
+    || !object(value.target) || !exact(value.target, ['profilePath', 'credentialsPath', 'layerPaths', 'schemaVersion'])
+    || !path(value.target.profilePath) || basename(value.target.profilePath) !== 'cordis.patch.yml'
+    || !path(value.target.credentialsPath) || value.target.schemaVersion !== '0.2.1-rc.2'
+    || !Array.isArray(value.target.layerPaths) || value.target.layerPaths.length > 32 || !value.target.layerPaths.every(path)
+    || new Set([...value.target.layerPaths, value.target.profilePath, value.target.credentialsPath]).size !== value.target.layerPaths.length + 2) {
+    fail('capability_approval_request_invalid')
+  }
+  return snapshot(value) as unknown as ChatCapabilityApprovalRequest
+}
+
+export function validateChatCapabilityCompositionApproval(value: unknown): ChatCapabilityCompositionApproval {
+  if (!object(value) || Object.keys(value).length !== 7
+    || !Object.keys(value).every(key => ['schema', 'source', 'compositionRevision', 'target', 'approvalId', 'authority', 'externalTools'].includes(key))
+    || !identifier(value.approvalId) || value.authority !== 'owner'
+    || value.externalTools !== 'separate-runtime-authorization-required') fail('capability_owner_approval_required')
+  const request = validateChatCapabilityApprovalRequest({ schema: value.schema, source: value.source,
+    compositionRevision: value.compositionRevision, target: value.target })
+  return snapshot({ ...request, approvalId: value.approvalId, authority: value.authority, externalTools: value.externalTools })
+}
+
 function missing(error: unknown): string[] {
   return [error instanceof CapabilityError ? error.code : 'capability_read_or_apply_failed']
 }
@@ -176,7 +209,7 @@ export function createChatCapabilityService(options: ChatCapabilityOptions) {
     const name = typeof row.name === 'string' ? row.name.slice(0, 128) : id
     const description = typeof row.description === 'string' ? row.description.slice(0, 512) : ''
     return { metadata: snapshot({ presetId: id, revision: hash({ id, content: result.content }), name, description,
-      composable: missingReasons.length === 0, packages: plugins ? packages(plugins) : [], missingReasons }), plugins }
+      composable: missingReasons.length === 0, packages: plugins ? packages(plugins) : [], missingReasons }), plugins, content: result.content }
   }
   const selected = async (selection: ChatCapabilitySelection, signal: AbortSignal): Promise<Declaration> => {
     if (!identifier(selection.presetId) || !/^[a-f0-9]{64}$/.test(selection.revision)) fail('capability_selection_invalid')
@@ -188,6 +221,13 @@ export function createChatCapabilityService(options: ChatCapabilityOptions) {
     return declaration
   }
   return Object.freeze({
+    async readDeclaration(selection: ChatCapabilitySelection, signal: AbortSignal): Promise<ChatCapabilityDeclaration> {
+      const declaration = await selected(selection, signal)
+      if (!declaration.plugins || declaration.metadata.missingReasons.length || declaration.content === undefined) {
+        fail(declaration.metadata.missingReasons[0] ?? 'capability_composition_unsupported')
+      }
+      return snapshot({ selection: { presetId: selection.presetId, revision: selection.revision }, content: declaration.content })
+    },
     async catalog(signal: AbortSignal) {
       const presets: ChatCapabilityPreset[] = []
       let bytes = 0
@@ -210,13 +250,10 @@ export function createChatCapabilityService(options: ChatCapabilityOptions) {
           || !/^[a-f0-9]{64}$/.test(captured.target.expectedRevision) || !identifier(captured.target.presetId)) fail('capability_target_invalid')
         declaration = await selected(captured.selection, signal)
         missingReasons = [...declaration.metadata.missingReasons]
-        const base = safePlugins(JSON.stringify(captured.basePreset.config.plugins))
         if (!declaration.plugins || missingReasons.length) fail(missingReasons[0] ?? 'capability_composition_unsupported')
-        const ids = rowIds(base)
-        if (rowIds(declaration.plugins).some(id => ids.includes(id))) fail('capability_entry_id_conflict')
-        candidate = snapshot({ entryId: `cap-${hash(captured).slice(0, 24)}`, config: {
-          ...captured.basePreset.config, id: captured.target.presetId, plugins: [...base, ...declaration.plugins],
-        } })
+        candidate = composeChatCapabilityPreset({ entryId: captured.basePreset.entryId,
+          config: { ...captured.basePreset.config, id: captured.target.presetId } },
+        { selection: captured.selection, content: declaration.content! })
       } catch (error) { missingReasons = missing(error) }
       const summary = snapshot({ ready: candidate !== undefined && missingReasons.length === 0, missingReasons,
         selection: captured.selection, packages: declaration?.metadata.packages ?? [], ownerApprovalRequired: true,

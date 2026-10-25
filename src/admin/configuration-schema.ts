@@ -108,7 +108,7 @@ const gatewayGroups: readonly ConfigurationGroupDefinition[] = [
     id: 'gateway-targets', title: '消息发送范围', category: 'access', source: 'gateway',
     description: '只允许向明确列出的会话发送消息；空列表拒绝所有发送。修改后更新授权版本，保存不等于已应用。',
     applyLabel: '应用消息网关设置',
-    fields: [field('allowedConversations', '允许发送的会话', '每行填写 group:群号 或 private:QQ号。此处只控制出站发送。', 'list',
+    fields: [field('allowedConversations', '允许发送的会话', '群聊和私聊分开填写，多个号码用逗号分隔。此处只控制出站发送。', 'list',
       { maxItems: 1_000, itemMaxLength: 24, allowUnset: false, rotatesAuthorization: true })]
   },
   {
@@ -122,13 +122,13 @@ const gatewayGroups: readonly ConfigurationGroupDefinition[] = [
     ]
   },
   {
-    id: 'gateway-persona', title: '网关人格标识', category: 'persona', source: 'gateway',
-    description: '设置发送消息时使用的人格名称和版本，不包含人格正文。修改后会自动建立新的发送权限范围，不会补充旧额度。',
+    id: 'gateway-persona', title: '程序发送身份（高级）', category: 'settings', source: 'gateway',
+    description: '供独立程序出站网关标记发送记录，日常聊天无需修改；不影响聊天人设。更改后使用新的发送权限范围，旧额度不会重置。',
     applyLabel: '应用并更新发送权限',
     fields: [
-      textField('persona.id', '人格 ID', '稳定的人格标识。', 128,
+      textField('persona.id', '发送身份标识', '程序发送记录使用的内部标识，不是聊天角色名称。', 128,
         { validation: 'reference', allowUnset: false, rotatesAuthorization: true }),
-      textField('persona.version', '人格版本', '不可变人格定义的版本标识。', 128,
+      textField('persona.version', '发送身份版本', '程序发送身份的版本，日常使用保持原值。', 128,
         { validation: 'reference', allowUnset: false, rotatesAuthorization: true })
     ]
   },

@@ -5,7 +5,7 @@ import type { JsonObject, JsonValue, DeliveryReceipt, SendRequest, TransportAdap
 import { FrameworkError, isRecord, reference, snapshot } from '../core/values.ts'
 import { createDurableTransport } from '../host/outbox.ts'
 import { digest, json } from '../host/data.ts'
-import type { DurableStore, StoredRecord } from '../host/types.ts'
+import type { DurableStore, StoredRecord } from '../contracts/ports.ts'
 import { createPersistentPolicy } from '../storage/policy.ts'
 import { classifyOneBotResponse } from './onebot-response.ts'
 
@@ -43,8 +43,8 @@ export interface OneBotCompatGatewayOptions {
 
 export interface OneBotCompatPolicyMetric {
   conversationId: string
-  sendRemaining: number
-  forwardRemaining: number
+  sendRemaining: number | null
+  forwardRemaining: number | null
   expiresAt: number | null
   active: boolean
 }
@@ -872,8 +872,8 @@ export function createOneBotCompatGateway(options: OneBotCompatGatewayOptions): 
         const grant = grants.find(candidate => candidate.id === grantId(conversationId))!
         return {
           conversationId,
-          sendRemaining: Math.max(0, grant.maxUses['messaging.send']! - grant.used['messaging.send']!),
-          forwardRemaining: Math.max(0, grant.maxUses['messaging.forward']! - grant.used['messaging.forward']!),
+          sendRemaining: grant.maxUses['messaging.send'] === null ? null : Math.max(0, grant.maxUses['messaging.send']! - grant.used['messaging.send']!),
+          forwardRemaining: grant.maxUses['messaging.forward'] === null ? null : Math.max(0, grant.maxUses['messaging.forward']! - grant.used['messaging.forward']!),
           expiresAt: grant.expiresAt,
           active: grant.active,
         }

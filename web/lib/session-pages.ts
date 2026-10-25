@@ -1,4 +1,4 @@
-import type { SessionSnapshot } from './activity.ts';
+import { hasSessionResetTarget, type SessionSnapshot } from './session-management.ts';
 
 export const sessionPageLimit = 100;
 export const sessionCollectionLimit = 100_000;
@@ -14,9 +14,14 @@ export function mergeSessionPages(previous: SessionSnapshot | null, page: Sessio
   let changed = 0;
   for (const session of page.sessions) {
     const prior = sessions.get(session.key);
-    if (prior && (prior.sessionId !== session.sessionId || prior.owner !== session.owner)) changed++;
-    sessions.set(session.key, { ...session, bindingRevision: page.revision });
+    if (prior && (prior.sessionId !== session.sessionId || prior.owner !== session.owner
+      || prior.generation !== session.generation || prior.bindingRevision !== session.bindingRevision)) changed++;
+    sessions.set(session.key, { ...session });
   }
   return { snapshot: { revision: previous?.revision ?? page.revision, sessions: [...sessions.values()], next: page.next ?? null,
-    resetAvailable: page.resetAvailable === true && (previous === null || previous.resetAvailable === true) }, changed };
+    ...(page.source === undefined ? {} : { source: page.source }),
+    ...(page.historyReadOnly === undefined ? {} : { historyReadOnly: page.historyReadOnly }),
+    ...(page.resetUnavailableReason === undefined ? {} : { resetUnavailableReason: page.resetUnavailableReason }),
+    resetAvailable: page.resetAvailable === true && page.sessions.every(hasSessionResetTarget)
+      && (previous === null || previous.resetAvailable === true) }, changed };
 }

@@ -1,3 +1,4 @@
+import { createOneBotFileUploadPort, validOneBotUploadSource } from './onebot-files.ts'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http'
 
@@ -10,14 +11,15 @@ import type {
 } from '../core/types.ts'
 import { normalizeContent } from '../core/content.ts'
 import { normalizeOutboundScope, personaKey } from '../core/scope.ts'
-import type { InboundMessage } from '../host/types.ts'
+import type { InboundMessage } from '../contracts/ports.ts'
 import { classifyOneBotResponse } from './onebot-response.ts'
 
 type MaybePromise<Value> = Value | Promise<Value>
 
 export interface OneBotAssetResolutionRequest {
   assetId: string
-  type: 'image' | 'audio'
+  type: 'image' | 'audio' | 'file'
+  name?: string
   conversationId: string
   persona?: string
   sessionId?: string
@@ -44,10 +46,12 @@ export interface OneBotIncomingAssetSource {
   file?: string
   url?: string
   id?: string
+  busId?: number
+  fileHash?: string
 }
 
 export interface OneBotIncomingAsset {
-  kind: 'image' | 'audio' | 'file'
+  kind: 'image' | 'audio' | 'file' | 'forward'
   messageId: string
   conversationId: string
   name?: string
@@ -60,7 +64,7 @@ export type OneBotIncomingAssetRegistrar = (
 ) => MaybePromise<string>
 
 export interface OneBotInboundMediaPreview {
-  type: 'image' | 'audio' | 'file'
+  type: 'image' | 'audio' | 'file' | 'forward'
 }
 
 export interface OneBotAuthorizationContext {
@@ -257,6 +261,7 @@ async function readBoundedJson(response: Response, signal: AbortSignal): Promise
 }
 
 export function createOneBotTransport(options: OneBotTransportOptions): TransportAdapter {
+  const files = createOneBotFileUploadPort(options)
   const sendPrivateUrl = actionUrl(options.endpoint, 'send_private_msg')
   const sendGroupUrl = actionUrl(options.endpoint, 'send_group_msg')
   const sendPrivateForwardUrl = actionUrl(options.endpoint, 'send_private_forward_msg')
@@ -278,7 +283,7 @@ export function createOneBotTransport(options: OneBotTransportOptions): Transpor
   return Object.freeze({
     capabilities() {
       const contentTypes: MessageContent['type'][] = ['text', 'mention', 'reply']
-      if (options.resolveAsset) contentTypes.push('image', 'audio')
+      if (options.resolveAsset) contentTypes.push('image', 'audio', 'file')
       if (forward?.group || forward?.private) contentTypes.push('forward')
       return Object.freeze({ contentTypes: Object.freeze(contentTypes), ...(contentTypes.includes('forward') ? { maxForwardNodes: 32 } : {}) })
     },
@@ -301,6 +306,17 @@ export function createOneBotTransport(options: OneBotTransportOptions): Transpor
       let url = target.action === 'send_private_msg' ? sendPrivateUrl : sendGroupUrl
       let payload: Record<string, unknown>
       const first = content[0]
+      if (first.type === 'file') {
+        if (content.length !== 1 || !options.resolveAsset) return { status: 'rejected' }
+        try {
+          const resolved = await waitWithSignal(options.resolveAsset({ ...selection, type: 'file', name: first.name, assetId: first.assetId, signal }), signal)
+          const file = resolvedFile(resolved)
+          if (!validOneBotUploadSource(file)) return { status: 'rejected' }
+          return target.action === 'send_private_msg'
+            ? files.uploadPrivate({ userId: String(target.value), file, name: first.name, signal })
+            : files.uploadGroup({ groupId: String(target.value), file, name: first.name, signal })
+        } catch { return { status: signal.aborted ? 'unknown' : 'rejected' } }
+      }
       if (first.type === 'forward') {
         if (!forward || !(target.action === 'send_private_msg' ? forward.private : forward.group)) return { status: 'rejected' }
         const nodes: unknown[] = []
@@ -357,6 +373,10 @@ function sourceFromData(data: Record<string, unknown>): OneBotIncomingAssetSourc
   if (file !== undefined) source.file = file
   if (url !== undefined) source.url = url
   if (id !== undefined) source.id = id
+  const busId = typeof data.busid === 'number' ? data.busid : typeof data.busid === 'string' && /^\d+$/.test(data.busid) ? Number(data.busid) : undefined
+  if (busId !== undefined && Number.isSafeInteger(busId) && busId >= 0) source.busId = busId
+  const fileHash = safeString(data.file_hash, 512)
+  if (fileHash !== undefined) source.fileHash = fileHash
   return source
 }
 
@@ -422,9 +442,8 @@ async function normalizeSegments(
       ? 'image'
       : rawSegment.type === 'record'
         ? 'audio'
-        : rawSegment.type === 'file'
-          ? 'file'
-          : null
+        : rawSegment.type === 'file' ? 'file'
+          : rawSegment.type === 'forward' && safeString(data.id, 512) !== undefined ? 'forward' : null
     if (kind === null) continue
     media.push(Object.freeze({ type: kind }))
     if (!context.register) continue
@@ -434,7 +453,7 @@ async function normalizeSegments(
         messageId: context.messageId,
         conversationId: context.conversationId,
         ...(name === undefined ? {} : { name }),
-        source: sourceFromData(data),
+        source: kind === 'forward' ? { id: String(data.id) } : sourceFromData(data),
       }, context.signal),
       context.signal,
     )
@@ -443,6 +462,7 @@ async function normalizeSegments(
     }
     if (kind === 'image') content.push({ type: 'image', assetId })
     else if (kind === 'audio') content.push({ type: 'audio', assetId })
+    else if (kind === 'forward') content.push({ type: 'forward-reference', assetId })
     else content.push({ type: 'file', assetId, name: name ?? 'file' })
   }
   return { content, mentioned, media }
@@ -451,6 +471,20 @@ async function normalizeSegments(
 interface NormalizedOneBotEvent {
   message: InboundMessage
   media: readonly OneBotInboundMediaPreview[]
+}
+
+/** Normalize an authorized protocol read without inventing a new authenticated message sender. */
+export async function normalizeOneBotContent(segments: unknown, options: {
+  readonly messageId: string
+  readonly conversationId: string
+  readonly registerIncomingAsset?: OneBotIncomingAssetRegistrar
+  readonly signal?: AbortSignal
+}): Promise<readonly MessageContent[] | null> {
+  if (messageIdentifier(options.messageId) === null || !/^(?:group|private):[1-9]\d{0,31}$/.test(options.conversationId)) return null
+  const normalized = await normalizeSegments(segments, undefined, { messageId: options.messageId,
+    conversationId: options.conversationId, register: options.registerIncomingAsset, signal: options.signal ?? new AbortController().signal })
+  if (!normalized || normalized.content.length === 0) return null
+  try { return normalizeContent(normalized.content) } catch { return null }
 }
 
 async function normalizeOneBotEvent(
@@ -511,6 +545,16 @@ async function normalizeOneBotEvent(
     }),
     media: Object.freeze(normalized.media),
   })
+}
+
+export function isOneBotControlContent(event: unknown): boolean {
+  if (!record(event)) return false
+  if (typeof event.message === 'string') return !event.message.includes('[CQ:')
+  return Array.isArray(event.message) && event.message.length > 0 && event.message.length <= MAX_CONTENT_SEGMENTS
+    && event.message.every(segment => record(segment) && record(segment.data)
+      && (segment.type === 'text' && typeof segment.data.text === 'string'
+        || segment.type === 'at' && positiveIdentifier(segment.data.qq) !== null
+        || segment.type === 'reply' && messageIdentifier(segment.data.id) !== null))
 }
 
 export async function normalizeOneBotMessage(

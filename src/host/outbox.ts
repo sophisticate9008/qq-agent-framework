@@ -1,3 +1,7 @@
+import type { AccountScope } from '../contracts/account-scope.ts';
+import { assertAccountScope, normalizeAccountScope } from '../core/account-scope.ts';
+import { bindAccountStore } from '../storage/account-scope.ts';
+import { isConfirmedDeliveryReceipt, normalizeDeliveryReceipt } from '../core/delivery.ts';
 import { normalizeContent } from '../core/content.ts';
 import { normalizeOutboundScope } from '../core/scope.ts';
 import { FrameworkError, assert, errorCode, reference, snapshot } from '../core/values.ts';
@@ -13,18 +17,19 @@ function entry(record: StoredRecord) {
   assert(reference(value.id) && reference(value.conversationId) && typeof value.fingerprint === 'string'
     && ['prepared', 'sending', 'confirmed', 'rejected', 'unknown'].includes(String(value.status)),
   'INVALID_STORED_DATA', 'Stored outbox data is invalid.');
-  if (value.status === 'confirmed') assert(reference(value.messageId), 'INVALID_STORED_DATA', 'Stored receipt is invalid.');
+  if (value.status === 'confirmed') assert(isConfirmedDeliveryReceipt(value), 'INVALID_STORED_DATA', 'Stored receipt is invalid.');
   return value;
 }
 
 function receipt(record: StoredRecord): DeliveryReceipt {
   const value = entry(record);
-  return value.status === 'confirmed' ? snapshot({ status: 'confirmed', messageId: String(value.messageId) })
-    : value.status === 'rejected' ? snapshot({ status: 'rejected' }) : snapshot({ status: 'unknown' });
+  return normalizeDeliveryReceipt(value);
 }
 
-export function createDurableTransport({ store, transport, clock = Date.now }:
-  { store: DurableStore; transport: TransportAdapter; clock?: Clock }) {
+export function createDurableTransport({ store, transport, clock = Date.now, accountScope: accountInput }:
+  { store: DurableStore; transport: TransportAdapter; clock?: Clock; accountScope?: AccountScope }) {
+  const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
+  bindAccountStore(store, accountScope);
   const inflight = new Map<string, { fingerprint: string; promise: Promise<DeliveryReceipt> }>();
 
   function recoverEntries(entries: Iterable<StoredRecord>) {
@@ -61,8 +66,7 @@ export function createDurableTransport({ store, transport, clock = Date.now }:
       if (request.signal.aborted) result = { status: 'rejected' };
       else {
         const response = await transport.send(request);
-        result = response?.status === 'confirmed' && reference(response.messageId) ? { status: 'confirmed', messageId: response.messageId }
-          : response?.status === 'rejected' ? { status: 'rejected' } : { status: 'unknown' };
+        result = normalizeDeliveryReceipt(response);
       }
     } catch { result = { status: 'unknown' }; }
     try {
@@ -80,6 +84,7 @@ export function createDurableTransport({ store, transport, clock = Date.now }:
     send(input: SendRequest): Promise<DeliveryReceipt> {
       assert(reference(input.conversationId) && reference(input.idempotencyKey) && input.signal instanceof AbortSignal,
         'INVALID_REQUEST', 'A scoped message and idempotency key are required.');
+      assertAccountScope(accountScope, input.scope?.accountScope);
       const request = { ...input, content: normalizeContent(input.content),
         ...(input.scope === undefined ? {} : { scope: normalizeOutboundScope(input.scope) }) };
       const fingerprint = digest({ conversationId: request.conversationId, content: request.content,
@@ -109,7 +114,7 @@ export function createDurableTransport({ store, transport, clock = Date.now }:
     },
     reconcile(id: string, result: Exclude<DeliveryReceipt, { status: 'unknown' }>) {
       assert(reference(id) && !inflight.has(id), 'OUTBOX_BUSY', 'An active delivery cannot be reconciled.');
-      assert(result.status === 'rejected' || result.status === 'confirmed' && reference(result.messageId),
+      assert(result.status === 'rejected' || isConfirmedDeliveryReceipt(result),
         'INVALID_RECEIPT', 'An explicit terminal receipt is required.');
       const current = store.read(namespace, digest(id));
       assert(current && ['unknown', 'prepared'].includes(String(entry(current).status)),

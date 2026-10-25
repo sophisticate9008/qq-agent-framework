@@ -59,6 +59,8 @@ export interface SessionSnapshot {
   readonly revision: string;
   readonly next?: string | null;
   readonly resetAvailable?: boolean;
+  readonly source?: string;
+  readonly historyReadOnly?: boolean;
 }
 
 export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
@@ -67,6 +69,9 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
   if (!revision) return null;
   if (value.next !== undefined && value.next !== null && (typeof value.next !== 'string' || value.next.length === 0 || value.next.length > 160 || /[\x00-\x1f\x7f]/.test(value.next))) return null;
   if (value.resetAvailable !== undefined && typeof value.resetAvailable !== 'boolean') return null;
+  if (value.source !== undefined && !boundedText(value.source, 128)) return null;
+  if (value.historyReadOnly !== undefined && typeof value.historyReadOnly !== 'boolean') return null;
+  if ((value.source === 'imported' || value.historyReadOnly === true) && value.resetAvailable === true) return null;
   const sessions: ManagedSession[] = [];
   const keys = new Set<string>();
   for (const item of value.sessions) {
@@ -78,7 +83,9 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
     sessions.push({ key, sessionId, owner: item.owner });
   }
   return { sessions, revision, ...(value.next === undefined ? {} : { next: value.next as string | null }),
-    ...(value.resetAvailable === undefined ? {} : { resetAvailable: value.resetAvailable }) };
+    ...(value.resetAvailable === undefined ? {} : { resetAvailable: value.resetAvailable }),
+    ...(value.source === undefined ? {} : { source: value.source as string }),
+    ...(value.historyReadOnly === undefined ? {} : { historyReadOnly: value.historyReadOnly }) };
 }
 
 export interface SessionResetResult {
@@ -162,7 +169,7 @@ export interface UsagePriceModel {
 }
 
 export interface UsagePriceTable {
-  readonly pricingMode?: 'flat';
+  readonly pricingMode?: 'flat' | 'time-of-use';
   readonly version: string;
   readonly currency: string;
   readonly symbol: string;

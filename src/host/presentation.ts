@@ -28,6 +28,7 @@ export interface PresentationContext {
   idempotencyKey: string;
   signal: AbortSignal;
 }
+export type PresentationSelectionContext = Readonly<Omit<PresentationContext, 'signal'>>;
 export interface RenderedImageRequest extends MarkdownPngPage, PresentationContext {}
 export interface PreparedPresentation extends PresentationChoice {
   content: readonly MessageContent[];
@@ -43,7 +44,8 @@ export interface PresentationServiceOptions {
   capabilities: Readonly<TransportCapabilities>;
   renderer?: MarkdownRenderer;
   publishImage?(request: RenderedImageRequest): Promise<string>;
-  select?(input: Readonly<PresentationSelection>, signal: AbortSignal): PresentationChoice | Promise<PresentationChoice>;
+  select?(input: Readonly<PresentationSelection>, signal: AbortSignal,
+    context: PresentationSelectionContext): PresentationChoice | Promise<PresentationChoice>;
   nearDistance?: number;
   nearAgeMs?: number;
   timeoutMs?: number;
@@ -107,7 +109,7 @@ export function createPresentationService({ capabilities, renderer, publishImage
     if (format === 'auto') {
       format = request.purpose === 'document' && formats.includes('markdown-image') ? 'markdown-image'
         : request.body.length > 8000 && formats.includes('forward') ? 'forward'
-        : request.body.length > 8000 && formats.includes('markdown-image') ? 'markdown-image' : 'text';
+        : request.body.length > 8000 && formats.includes('markdown-image') ? 'markdown-image' : formats[0] ?? 'text';
     }
     if (!formats.includes(format) && request.fallback === 'text' && formats.includes('text')) format = 'text';
     assert(formats.includes(format), 'PRESENTATION_UNAVAILABLE', 'The requested presentation is not supported by this host.');
@@ -139,7 +141,8 @@ export function createPresentationService({ capabilities, renderer, publishImage
   async function run(request: Readonly<PresentationRequest>, context: PresentationContext): Promise<Readonly<PreparedPresentation>> {
     const replyTiming = timing(request);
     const initial = suggested(request, replyTiming);
-    const choice = validateChoice(select ? await select(snapshot({ request, available: formats, suggested: initial, replyTiming }), context.signal)
+    const choice = validateChoice(select ? await select(snapshot({ request, available: formats, suggested: initial, replyTiming }), context.signal,
+      snapshot({ conversationId: context.conversationId, scope: context.scope, idempotencyKey: context.idempotencyKey }))
       : initial, request, replyTiming);
     context.signal.throwIfAborted();
     const fallbackFrom = request.format && request.format !== 'auto' && request.format !== choice.format ? request.format : undefined;

@@ -1,5 +1,6 @@
 import type { ConversationUsage, UsageBuckets, UsageCoverage, UsageNowTier, UsagePriceTable, UsageSnapshot, UsageTotals } from './activity.ts';
-import type { UsageConversationDetails, UsageRecent, UsageRecentEntry, UsageSeries, UsageSeriesBucket, UsageTurn } from './usage-details.ts';
+import type { AggregateUsageTier, UsageConversationDetails, UsageRecent, UsageRecentEntry, UsageSeries, UsageSeriesBucket, UsageTier, UsageTurn } from './usage-details.ts';
+import { parseBuiltinPricing } from './usage-pricing.ts';
 
 function invalid(): never { throw new Error('invalid_native_usage'); }
 function record(value: unknown): Record<string, unknown> {
@@ -15,6 +16,10 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : invalid();
 }
 function counter(value: unknown): number | null { return value === null ? null : count(value); }
+function usageTier(value: unknown): UsageTier {
+  return value === 'flat' || value === 'peak' || value === 'off' ? value : invalid();
+}
+function aggregateTier(value: unknown): AggregateUsageTier { return value === 'mixed' ? value : usageTier(value); }
 function bool(value: unknown): boolean { return typeof value === 'boolean' ? value : invalid(); }
 function time(value: unknown): number {
   const parsed = count(value);
@@ -62,7 +67,9 @@ function totals(value: unknown, observed = true): UsageTotals {
 function pricing(value: unknown): UsagePriceTable | null {
   if (value === null) return null;
   const source = record(value);
-  if (source.pricingMode !== 'flat') invalid();
+  if (source.pricingMode === 'time-of-use') return parseBuiltinPricing(source) ?? invalid();
+  if (source.pricingMode !== 'flat' || source.unit !== 1_000_000 || source.peakMultiplier !== 1
+    || array(source.peakWindows, 0).length !== 0 || array(source.peakWeekdays, 0).length !== 0 || source.holidayCount !== 0) invalid();
   const entries = Object.entries(record(source.models));
   if (entries.length > 256) invalid();
   return { pricingMode: 'flat', version: text(source.version), currency: text(source.currency, 16), symbol: text(source.symbol, 16), unit: count(source.unit),
@@ -77,9 +84,13 @@ function pricing(value: unknown): UsagePriceTable | null {
 function nowTier(value: unknown): UsageNowTier | null {
   if (value === null) return null;
   const source = record(value);
-  if (source.tier !== 'flat') invalid();
+  const tier = usageTier(source.tier);
+  if (source.unit !== 1_000_000) invalid();
+  if (tier !== 'flat' && (source.referenceOnly !== true || source.source !== 'migrated-reference'
+    || source.cacheWritePricing !== 'same-as-cache-miss-assumption' || source.estimated !== true)) invalid();
+  if (tier !== 'flat') { text(source.version); bool(source.calendarKnown); }
   const price = (key: string) => { const parsed = quantity(source[key]); return parsed === null ? invalid() : parsed; };
-  return { tier: 'flat', model: text(source.model, 160), label: text(source.label, 160), tierLabel: text(source.tierLabel), currency: text(source.currency, 16), symbol: text(source.symbol, 16), unit: count(source.unit), estimated: bool(source.estimated), cacheHit: price('cacheHit'), cacheMiss: price('cacheMiss'), cacheWrite: price('cacheWrite'), output: price('output') };
+  return { tier, model: text(source.model, 160), label: text(source.label, 160), tierLabel: text(source.tierLabel), currency: text(source.currency, 16), symbol: text(source.symbol, 16), unit: count(source.unit), estimated: bool(source.estimated), cacheHit: price('cacheHit'), cacheMiss: price('cacheMiss'), cacheWrite: price('cacheWrite'), output: price('output') };
 }
 function parse<Result>(value: unknown, read: (source: Record<string, unknown>) => Result): Result | null {
   try { const source = record(value); return source.native === true ? read(source) : null; } catch { return null; }
@@ -101,10 +112,25 @@ export function parseNativeUsageSnapshot(value: unknown): UsageSnapshot | null {
     if (new Set(conversations.map(item => item.key)).size !== conversations.length) invalid();
     const table = pricing(source.priceTable);
     const tier = nowTier(source.nowTier);
-    if ((table === null) !== (tier === null)) invalid();
+    if (tier !== null && (table === null || (table.pricingMode === 'flat') !== (tier.tier === 'flat'))) invalid();
+    if (source.pricingMode !== undefined && source.pricingMode !== table?.pricingMode) invalid();
+    const unavailable = source.unavailable === undefined ? (table ? ['ledger'] as const : ['pricing', 'ledger'] as const)
+      : strings(source.unavailable, 2).map(item => item === 'pricing' || item === 'ledger' ? item : invalid());
+    const estimate = source.pricingEstimateAvailable === undefined ? tier !== null : bool(source.pricingEstimateAvailable);
+    if (estimate !== (tier !== null)) invalid();
+    const missingReasons = source.pricingEstimateMissingReasons === undefined ? (estimate ? [] : ['model_pricing_unavailable'])
+      : strings(source.pricingEstimateMissingReasons, 1).map(item => item === 'model_pricing_unavailable' ? item : invalid());
+    if (estimate && missingReasons.length > 0 || !estimate && missingReasons.length !== 1) invalid();
+    let priceSelection: { model: string; provider: string | null; source: 'query' | 'observed-history' | 'operator-example' | 'builtin-reference' } | undefined;
+    if (source.priceSelection !== undefined) {
+      const selection = record(source.priceSelection);
+      if (selection.source !== 'query' && selection.source !== 'observed-history' && selection.source !== 'operator-example' && selection.source !== 'builtin-reference') invalid();
+      priceSelection = { model: text(selection.model, 160), provider: selection.provider === null ? null : text(selection.provider, 160), source: selection.source };
+    }
     return { native: true, coverage: metadata, resetAvailable: false, source: 'chat-ledger', revision: text(source.revision), generatedAt: new Date(time(source.generatedAt)).toISOString(),
       currency: text(source.currency, 16), symbol: text(source.symbol, 16), totals: totals(source.totals, metadata.records > 0), conversations, limit, limited: bool(source.limited),
-      unavailable: table ? ['ledger'] : ['pricing', 'ledger'], priceVersion: source.priceVersion === null ? null : text(source.priceVersion), priceTable: table, nowTier: tier, ledger: null };
+      unavailable, priceVersion: source.priceVersion === null ? null : text(source.priceVersion), priceTable: table, nowTier: tier, ledger: null,
+      pricingEstimateAvailable: estimate, pricingEstimateMissingReasons: missingReasons, ...(priceSelection === undefined ? {} : { priceSelection }) };
   });
 }
 
@@ -117,12 +143,13 @@ export function parseNativeUsageSeries(value: unknown): UsageSeries | null {
     if (rows.length === 0 || to - from !== rows.length * bucketMs || to - from < hours * 3_600_000 || to - from >= hours * 3_600_000 + bucketMs) invalid();
     const parsedBuckets: UsageSeriesBucket[] = rows.map((item, index) => {
       const row = record(item);
-      if (row.tier !== 'flat' || time(row.t) !== from + index * bucketMs) invalid();
+      const tier = aggregateTier(row.tier);
+      if (time(row.t) !== from + index * bucketMs) invalid();
       const steps = count(row.steps);
       const nullable = (key: string) => { const parsed = counter(row[key]); return steps > 0 ? parsed : null; };
       const cost = quantity(row.cost);
       return { t: time(row.t), cost: steps > 0 ? cost : null, tokens: nullable('tokens'), cacheMiss: nullable('cacheMiss'), cacheHit: nullable('cacheHit'), cacheWrite: nullable('cacheWrite'), output: nullable('output'),
-        turns: count(row.turns), steps, tier: 'flat', keys: strings(row.keys, 500, 160), coverage: coverageState(row.coverage) };
+        turns: count(row.turns), steps, tier, keys: strings(row.keys, 500, 160), coverage: coverageState(row.coverage) };
     });
     const aggregate = record(source.totals);
     const steps = count(aggregate.steps);
@@ -149,11 +176,11 @@ export function parseNativeUsageConversation(value: unknown, expectedKey?: strin
     if (turnLimit < 1 || turnLimit > 1000) invalid();
     const turns: UsageTurn[] = array(source.turns, turnLimit).map(item => {
       const row = record(item);
-      if (row.tier !== 'flat') invalid();
+      const tier = aggregateTier(row.tier);
       const startedAt = time(row.startedAt), endedAt = time(row.endedAt);
       if (startedAt > endedAt) invalid();
       return { sessionId: text(row.sessionId), key: text(row.key, 160), generation: count(row.generation), turn: counter(row.turn), turnId: text(row.turnId, 160), steps: count(row.steps), attempts: count(row.attempts),
-        startedAt, endedAt, model: row.model === null ? null : text(row.model, 160), provider: row.provider === null ? null : text(row.provider, 160), buckets: buckets(row.buckets), cost: quantity(row.cost), tier: 'flat', coverage: coverageState(row.coverage), knownCosts: numericMap(row.knownCosts) };
+        startedAt, endedAt, model: row.model === null ? null : text(row.model, 160), provider: row.provider === null ? null : text(row.provider, 160), buckets: buckets(row.buckets), cost: quantity(row.cost), tier, coverage: coverageState(row.coverage), knownCosts: numericMap(row.knownCosts) };
     });
     const observed = turns.length > 0;
     return { native: true, partial: bool(source.partial), knownCosts: numericMap(source.knownCosts), key, generatedAt: time(source.generatedAt), currency: text(source.currency, 16), symbol: text(source.symbol, 16), sessionIds, sessionCount: sessionIds.length,
@@ -167,7 +194,7 @@ export function parseNativeUsageRecent(value: unknown): UsageRecent | null {
     const rawItems = array(source.items, 500);
     const entries: UsageRecentEntry[] = array(source.entries, 500).map((item, index) => {
       const row = record(item);
-      if (row.tier !== 'flat') invalid();
+      const tier = usageTier(row.tier);
       let knownCost: UsageRecentEntry['knownCost'] = null;
       if (row.knownCost !== null) {
         const cost = record(row.knownCost);
@@ -177,7 +204,7 @@ export function parseNativeUsageRecent(value: unknown): UsageRecent | null {
       }
       return { id: text(record(rawItems[index]).cursor, 160), time: time(row.time), key: text(row.key, 160), sid: text(row.sid), turn: counter(row.turn), turnId: text(row.turnId, 160), step: counter(row.step), retry: counter(row.retry), model: text(row.model, 160),
         tokens: counter(row.tokens), cacheMiss: counter(row.cacheMiss), cacheHit: counter(row.cacheHit), cacheWrite: counter(row.cacheWrite), output: counter(row.output), reasoning: counter(row.reasoning), cost: quantity(row.cost), knownCost,
-        tier: 'flat', estimated: bool(row.estimated), coverage: coverageState(row.coverage), pricingRevision: counter(row.pricingRevision) };
+        tier, estimated: bool(row.estimated), coverage: coverageState(row.coverage), pricingRevision: counter(row.pricingRevision) };
     });
     return { native: true, partial: bool(source.partial), symbol: text(source.symbol, 16), entries };
   });

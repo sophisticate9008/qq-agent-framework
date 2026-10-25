@@ -91,20 +91,28 @@ async function registerProviders(routes: readonly AdminRoute[]): Promise<void> {
 test('native runtime exposes empty editable resources without fabricating a connected host', async context => {
   const files = fixture(context)
   const routes = createNativeRuntimeRoutes({ directory: files.directory })
-  assert.deepEqual(routes.map(item => `${item.method} ${item.pathname}`), [
+  const paths = routes.map(item => `${item.method} ${item.pathname}`)
+  assert.equal(new Set(paths).size, paths.length)
+  assert.deepEqual(paths.sort(), [
+    'GET /api/chat/assistant', 'POST /api/chat/assistant', 'GET /api/chat/model-capabilities',
+    'GET /api/chat/activity',
     'GET /api/chat/plans', 'POST /api/chat/plans',
     'GET /api/chat/personas', 'POST /api/chat/personas',
     'GET /api/chat/model', 'POST /api/chat/model',
     'GET /api/chat/providers', 'POST /api/chat/providers',
     'GET /api/chat/access', 'POST /api/chat/access',
     'GET /api/chat/status', 'GET /api/chat/features',
-    'GET /api/chat/sessions', 'GET /api/chat/usage',
+    'GET /api/chat/inbox', 'GET /api/chat/sessions', 'GET /api/chat/usage',
     'POST /api/chat/sessions/reset',
     'GET /api/chat/usage/series', 'GET /api/chat/usage/turns', 'GET /api/chat/usage/recent',
     'POST /api/chat/usage/reset',
     'GET /api/chat/adapters', 'POST /api/chat/adapters',
-    'POST /api/chat/adapters/connect', 'POST /api/chat/adapters/disconnect'
-  ])
+    'POST /api/chat/adapters/discover-dsh',
+    'POST /api/chat/adapters/connect', 'POST /api/chat/adapters/disconnect',
+    'GET /api/chat/packages/configuration', 'POST /api/chat/packages/configuration',
+    'POST /api/chat/packages/configuration/migrate', 'GET /api/chat/interactions', 'GET /api/chat/tools',
+    'GET /api/chat/appearance', 'POST /api/chat/appearance'
+  ].sort())
   const plans = await invoke(routes, 'GET', '/api/chat/plans')
   const personas = await invoke(routes, 'GET', '/api/chat/personas')
   const access = await invoke(routes, 'GET', '/api/chat/access')
@@ -317,7 +325,7 @@ test('native access is deny-by-default and rejects ambiguous or unlisted input',
     revision: saved.revision,
     allow: ['group:123', 'private:456'],
     deny: ['group:999'],
-    owner: '456'
+    owner: '456', application: 'saved'
   })
   await rejects(invoke(routes, 'POST', '/api/chat/access', {
     revision: saved.revision,

@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
+import { readResource, writeResource } from '../lib/resource-reader.ts';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react';
 import { AlertCircle, CheckCircle2, ChevronDown, CircleOff, LoaderCircle } from 'lucide-react';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
@@ -9,6 +11,9 @@ import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill, ToggleF
 import { StructuredFields, type StructuredFieldFormat, type StructuredFieldState } from './structured-fields.tsx';
 import { ApiError, asRecord, errorMessage, isRecord } from '../lib/api.ts';
 import { resolveConfigurationVisibility } from '../lib/configuration-visibility.ts';
+import { readConfigurationDraft } from '../lib/configuration-drafts.ts';
+import { configurationApplyOutcome } from '../lib/configuration-operations.ts';
+import { configurationOperationStore } from '../lib/configuration-operation-recovery.ts';
 import type { PageProps } from '../lib/types.ts';
 
 type ConfigurationCategory = 'persona' | 'features' | 'access' | 'model' | 'settings';
@@ -58,6 +63,23 @@ interface EditorState {
   readonly groups: readonly ConfigurationGroup[];
   readonly drafts: Readonly<Record<string, DraftValue>>;
   readonly dirtyKeys: ReadonlySet<string>;
+}
+
+const editorDraftKeys = {
+  persona: createDraftKey<EditorState>('configuration:persona'), features: createDraftKey<EditorState>('configuration:features'),
+  access: createDraftKey<EditorState>('configuration:access'), model: createDraftKey<EditorState>('configuration:model'), settings: createDraftKey<EditorState>('configuration:settings'),
+};
+
+/** Credentials remain only in the mounted field; public drafts keep their original CAS baseline. */
+function publicEditorState(editor: EditorState): EditorState {
+  const groups = editor.groups.map(group => ({ ...group, fields: group.fields.map(field => field.type === 'secret' ? { ...field, value: undefined } : field) }));
+  const result = stateFromGroups(groups);
+  const drafts = { ...result.drafts }; const dirtyKeys = new Set<string>();
+  for (const group of groups) for (const field of group.fields) {
+    const key = fieldKey(group.id, field.id);
+    if (field.type !== 'secret' && editor.dirtyKeys.has(key)) { drafts[key] = editor.drafts[key] ?? null; dirtyKeys.add(key); }
+  }
+  return { groups, drafts, dirtyKeys };
 }
 
 interface OperationStatus {
@@ -192,7 +214,7 @@ function reconcileState(current: EditorState, groups: readonly ConfigurationGrou
     for (const field of group.fields) {
       const key = fieldKey(group.id, field.id);
       const preserve = current.dirtyKeys.has(key) && !completedKeys.has(key);
-      const draft = preserve ? current.drafts[key] ?? initialDraft(field) : initialDraft(field);
+      const draft = preserve ? readConfigurationDraft(current.drafts, key, initialDraft(field)) : initialDraft(field);
       drafts[key] = draft;
       if (preserve && isDirty(field, draft)) dirtyKeys.add(key);
     }
@@ -292,6 +314,8 @@ function FieldEditor({ field, draft, disabled, resetToken, onChange, onStructure
 
 export function ConfigurationEditor({ connected, api, setDirty, category, connect }: PageProps & { category: ConfigurationCategory }) {
   const dirtyScope = `configuration:${category}`;
+  const operationStore = useMemo(() => configurationOperationStore(api), [api]);
+  const sourceBlocks = useSyncExternalStore(operationStore.subscribe, operationStore.getSnapshot, operationStore.getSnapshot);
   const [editor, setEditor] = useState<EditorState>(() => stateFromGroups([]));
   const [capabilities, setCapabilities] = useState({ apply: false });
   const [loading, setLoading] = useState(false);
@@ -300,50 +324,86 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [applyingSource, setApplyingSource] = useState<ConfigurationSource | null>(null);
+  const [checkingSource, setCheckingSource] = useState<ConfigurationSource | null>(null);
   const [pendingSources, setPendingSources] = useState<ReadonlySet<ConfigurationSource>>(new Set());
   const [groupStatuses, setGroupStatuses] = useState<Readonly<Record<string, OperationStatus>>>({});
   const [sourceStatuses, setSourceStatuses] = useState<Readonly<Partial<Record<ConfigurationSource, OperationStatus>>>>({});
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string>>>({});
   const [structuredEpoch, setStructuredEpoch] = useState(0);
   const [structuredVersions, setStructuredVersions] = useState<Readonly<Record<string, number>>>({});
+  const epoch = useRef(0);
+  const writeController = useRef<AbortController | null>(null);
+  const readController = useRef<AbortController | null>(null);
+  const activeWrite = useRef<{ store: typeof operationStore; source: ConfigurationSource; token: object } | null>(null);
+  const editorOwner = useRef<{ api: PageProps['api']; category: ConfigurationCategory; epoch: number } | null>(null);
+  const connection = useRef({ api, connected, category });
+  connection.current = { api, connected, category };
+  const dirtyCallback = useRef(setDirty);
+  dirtyCallback.current = setDirty;
+
+  function hasCurrentEditor(): boolean {
+    return connection.current.connected && connection.current.api === api && connection.current.category === category
+      && editorOwner.current?.api === api && editorOwner.current.category === category && editorOwner.current.epoch === epoch.current;
+  }
+
+  function detachWrite(): void {
+    const active = activeWrite.current;
+    if (active && active.store.getSnapshot()[active.source]?.phase === 'pending') active.store.block(active.source, active.token, 'unknown');
+    activeWrite.current = null;
+  }
 
   useEffect(() => {
-    setDirty(editor.dirtyKeys.size > 0, dirtyScope);
-  }, [dirtyScope, editor.dirtyKeys, setDirty]);
-
-  useEffect(() => () => setDirty(false, dirtyScope), [dirtyScope, setDirty]);
-
-  useEffect(() => {
-    if (!connected) {
-      setEditor(stateFromGroups([]));
-      setFieldErrors({});
-      setStructuredVersions({});
-      setStructuredEpoch(current => current + 1);
-      setLoadError('');
-      setLoading(false);
-      return;
+    if (hasCurrentEditor()) {
+      const publicState = publicEditorState(editor);
+      retainDraft(api, editorDraftKeys[category], publicState.dirtyKeys.size > 0 ? publicState : null);
     }
+    setDirty(editor.dirtyKeys.size > 0, dirtyScope);
+  }, [api, category, dirtyScope, editor, setDirty]);
+
+  useEffect(() => () => { epoch.current++; writeController.current?.abort(); dirtyCallback.current(false, dirtyScope); }, [dirtyScope]);
+
+  useEffect(() => {
+    const generation = ++epoch.current;
     const controller = new AbortController();
-    setLoading(true);
-    setLoadError('');
-    void api.get('/api/configuration', controller.signal).then(result => {
+    detachWrite();
+    if (editorOwner.current) operationStore.invalidateReviews(editorOwner.current);
+    readController.current?.abort(); readController.current = null;
+    writeController.current?.abort(); writeController.current = null;
+    editorOwner.current = null;
+    const current = () => !controller.signal.aborted && generation === epoch.current
+      && connection.current.api === api && connection.current.category === category && connection.current.connected;
+    const retained = connected ? retainedDraft(api, editorDraftKeys[category]) : undefined;
+    setEditor(retained ?? stateFromGroups([]));
+    setFieldErrors({});
+    setStructuredVersions({});
+    setStructuredEpoch(value => value + 1);
+    setCapabilities({ apply: false });
+    setSavingGroup(null); setApplyingSource(null); setCheckingSource(null); setPendingSources(new Set());
+    setGroupStatuses({}); setSourceStatuses({}); setLoadError(''); setLoading(connected);
+    if (!connected) {
+      return () => { controller.abort(); epoch.current++; };
+    }
+    void readResource(api, '/api/configuration', controller.signal).then(result => {
+      if (!current()) return;
       const configuration = parseConfiguration(result);
       const groups = configuration.groups.filter(group => group.category === category);
-      setEditor(stateFromGroups(groups));
+      editorOwner.current = { api, category, epoch: generation };
+      setEditor(retained ?? stateFromGroups(groups));
       setFieldErrors({});
       setStructuredVersions({});
       setStructuredEpoch(current => current + 1);
       setCapabilities(configuration.capabilities);
       setExpanded(new Set(groups[0] ? [groups[0].id] : []));
     }).catch(error => {
-      if (!controller.signal.aborted) setLoadError(unavailableMessage(error) ?? errorMessage(error));
+      if (current()) setLoadError(unavailableMessage(error) ?? errorMessage(error));
     }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (current()) setLoading(false);
     });
-    return () => controller.abort();
-  }, [api, category, connected]);
+    return () => { controller.abort(); epoch.current++; writeController.current?.abort(); readController.current?.abort(); detachWrite(); if (editorOwner.current) operationStore.invalidateReviews(editorOwner.current); };
+  }, [api, category, connected, operationStore]);
 
   function updateField(group: ConfigurationGroup, field: ConfigurationField, value: DraftValue): void {
+    if (!hasCurrentEditor()) return;
     const key = fieldKey(group.id, field.id);
     setEditor(current => {
       const drafts = { ...current.drafts, [key]: value };
@@ -365,6 +425,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   }
 
   function updateStructuredField(group: ConfigurationGroup, field: ConfigurationField, state: StructuredFieldState): void {
+    if (!hasCurrentEditor()) return;
     const key = fieldKey(group.id, field.id);
     setEditor(current => {
       const drafts = state.value === undefined ? current.drafts : { ...current.drafts, [key]: state.value };
@@ -400,6 +461,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   }
 
   function resetGroup(group: ConfigurationGroup): void {
+    if (!hasCurrentEditor() || writeController.current) return;
     const keys = group.fields.map(field => fieldKey(group.id, field.id));
     setEditor(current => {
       const drafts = { ...current.drafts };
@@ -434,6 +496,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   }
 
   async function saveGroup(group: ConfigurationGroup): Promise<void> {
+    if (!hasCurrentEditor() || writeController.current || readController.current || operationStore.getSnapshot()[group.source] || loading) return;
     const changes: Record<string, JsonValue> = {};
     const completedKeys = new Set<string>();
     for (const field of group.fields) {
@@ -443,7 +506,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
         setGroupStatuses(current => ({ ...current, [group.id]: { text: `请检查“${field.label}”：${fieldErrors[key]}`, tone: 'warning' } }));
         return;
       }
-      const value = serializedDraft(field, editor.drafts[key] ?? initialDraft(field));
+      const value = serializedDraft(field, readConfigurationDraft(editor.drafts, key, initialDraft(field)));
       if (value === undefined) {
         setGroupStatuses(current => ({ ...current, [group.id]: { text: `请检查“${field.label}”的填写内容。`, tone: 'warning' } }));
         return;
@@ -457,6 +520,15 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     }
     if (Object.keys(changes).length === 0) return;
 
+    const token = operationStore.begin(group.source, group.revision, 'save');
+    if (!token) return;
+    activeWrite.current = { store: operationStore, source: group.source, token };
+    const controller = new AbortController();
+    const generation = epoch.current;
+    writeController.current = controller;
+    const current = () => !controller.signal.aborted && writeController.current === controller
+      && generation === epoch.current && hasCurrentEditor();
+
     setSavingGroup(group.id);
     setGroupStatuses(current => ({ ...current, [group.id]: { text: '正在保存更改', tone: 'neutral' } }));
     setSourceStatuses(current => {
@@ -465,17 +537,22 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
       return next;
     });
     try {
-      const result = asRecord(await api.post('/api/configuration', { source: group.source, revision: group.revision, changes }));
+      const result = asRecord(await writeResource(api, '/api/configuration', { source: group.source, revision: group.revision, changes }, controller.signal));
+      if (!current() || operationStore.getSnapshot()[group.source]?.token !== token
+        || operationStore.getSnapshot()[group.source]?.phase !== 'pending') return;
       if (result.ok !== true || typeof result.revision !== 'string') throw new Error('save_result_unknown');
+      operationStore.complete(group.source, token);
       const applyRequired = result.applyRequired === true || result.restartRequired === true;
       if (applyRequired) setPendingSources(current => new Set(current).add(group.source));
       try {
-        const refreshed = parseConfiguration(await api.get('/api/configuration'));
+        const refreshed = parseConfiguration(await readResource(api, '/api/configuration', controller.signal));
+        if (!current()) return;
         const groups = refreshed.groups.filter(item => item.category === category);
         setEditor(current => reconcileState(current, groups, completedKeys));
         setCapabilities(refreshed.capabilities);
         setGroupStatuses(current => ({ ...current, [group.id]: { text: applyRequired ? '已保存，等待应用' : '设置已保存', tone: applyRequired ? 'warning' : 'success' } }));
       } catch {
+        if (!current()) return;
         const groups = optimisticGroups(group, changes, result.revision);
         setEditor(current => reconcileState(current, groups, completedKeys));
         setGroupStatuses(current => ({ ...current, [group.id]: { text: applyRequired ? '已保存，等待应用；最新状态暂时无法确认。' : '已保存，但最新状态暂时无法确认。', tone: 'warning' } }));
@@ -487,16 +564,31 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
       });
       resetStructuredFields(completedKeys);
     } catch (error) {
+      if (!current()) return;
       const unknown = error instanceof Error && error.message === 'save_result_unknown';
+      if (unknown || !(error instanceof ApiError) || error.status === 409 || error.status >= 500 || /unknown/.test(error.code)) {
+        operationStore.block(group.source, token, error instanceof ApiError && error.status === 409 ? 'conflict' : 'unknown');
+      } else operationStore.complete(group.source, token);
       setGroupStatuses(current => ({ ...current, [group.id]: { text: unknown ? '保存结果待确认，请刷新后查看。' : errorMessage(error), tone: 'warning' } }));
     } finally {
-      setSavingGroup(null);
+      if (operationStore.getSnapshot()[group.source]?.phase === 'pending') operationStore.block(group.source, token, 'unknown');
+      if (activeWrite.current?.token === token) activeWrite.current = null;
+      if (current()) setSavingGroup(null);
+      if (writeController.current === controller) writeController.current = null;
     }
   }
 
   async function applyGroup(group: ConfigurationGroup): Promise<void> {
-    if (savingGroup !== null || applyingSource !== null || editor.groups.some(item => item.source === group.source
+    if (!hasCurrentEditor() || writeController.current || readController.current || loading || savingGroup !== null || applyingSource !== null || editor.groups.some(item => item.source === group.source
       && item.fields.some(field => editor.dirtyKeys.has(fieldKey(item.id, field.id))))) return;
+    const token = operationStore.begin(group.source, group.revision);
+    if (!token) return;
+    activeWrite.current = { store: operationStore, source: group.source, token };
+    const controller = new AbortController();
+    const generation = epoch.current;
+    writeController.current = controller;
+    const current = () => !controller.signal.aborted && writeController.current === controller
+      && generation === epoch.current && hasCurrentEditor();
     setApplyingSource(group.source);
     setGroupStatuses(current => {
       const next = { ...current };
@@ -505,14 +597,11 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     });
     setSourceStatuses(current => ({ ...current, [group.source]: { text: '正在应用更改', tone: 'neutral' } }));
     try {
-      const result = asRecord(await api.post('/api/configuration/apply', { source: group.source, revision: group.revision }));
-      const resultState = typeof result.status === 'string' ? result.status : result.result;
-      const application = asRecord(result.application);
-      if (resultState === 'unknown' || result.ok !== true) {
-        setSourceStatuses(current => ({ ...current, [group.source]: { text: '应用结果待确认，请刷新状态后查看。', tone: 'warning' } }));
-        return;
-      }
-      if (application.applied === true) {
+      const result = await writeResource(api, '/api/configuration/apply', { source: group.source, revision: group.revision }, controller.signal);
+      if (!current()) return;
+      const outcome = configurationApplyOutcome(result, group.source, group.revision);
+      if (outcome === 'applied') {
+        operationStore.complete(group.source, token);
         setPendingSources(current => {
           const next = new Set(current);
           next.delete(group.source);
@@ -521,20 +610,65 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
         setSourceStatuses(current => ({ ...current, [group.source]: { text: '配置应用流程已完成', tone: 'success' } }));
         return;
       }
-      if (application.accepted === true && typeof application.reconnectUrl === 'string') {
-        setPendingSources(current => {
-          const next = new Set(current);
-          next.delete(group.source);
-          return next;
-        });
-        setSourceStatuses(current => ({ ...current, [group.source]: { text: '重启请求已提交，等待服务重新连接', tone: 'neutral' } }));
+      if (outcome === 'accepted') {
+        operationStore.block(group.source, token, 'accepted');
+        setSourceStatuses(current => ({ ...current, [group.source]: { text: '重启请求已提交，仍需核对实际服务。', tone: 'warning' } }));
         return;
       }
-      setSourceStatuses(current => ({ ...current, [group.source]: { text: '应用结果待确认，请刷新状态后查看。', tone: 'warning' } }));
+      operationStore.block(group.source, token, 'unknown');
+      setSourceStatuses(current => ({ ...current, [group.source]: { text: '应用结果待确认，保存和应用已冻结。', tone: 'warning' } }));
     } catch (error) {
+      if (!current()) return;
+      operationStore.block(group.source, token, error instanceof ApiError && error.status === 409 ? 'conflict' : 'unknown');
       setSourceStatuses(current => ({ ...current, [group.source]: { text: errorMessage(error), tone: 'warning' } }));
     } finally {
-      setApplyingSource(null);
+      if (operationStore.getSnapshot()[group.source]?.phase === 'pending') operationStore.block(group.source, token, 'unknown');
+      if (activeWrite.current?.token === token) activeWrite.current = null;
+      if (current()) setApplyingSource(null);
+      if (writeController.current === controller) writeController.current = null;
+    }
+  }
+
+  async function rereadSource(source: ConfigurationSource, token: object): Promise<void> {
+    const block = operationStore.getSnapshot()[source];
+    const owner = editorOwner.current;
+    if (!hasCurrentEditor() || !owner || !block || block.token !== token || block.phase !== 'blocked' || writeController.current || readController.current) return;
+    operationStore.review(source, block.token, null);
+    const controller = new AbortController();
+    readController.current = controller;
+    const generation = epoch.current;
+    const ownsRead = () => !controller.signal.aborted && readController.current === controller
+      && generation === epoch.current && editorOwner.current === owner && hasCurrentEditor();
+    const current = () => ownsRead() && operationStore.getSnapshot()[source]?.token === token
+      && operationStore.getSnapshot()[source]?.phase === 'blocked';
+    setCheckingSource(source);
+    try {
+      const refreshed = parseConfiguration(await readResource(api, '/api/configuration', controller.signal));
+      if (!current()) return;
+      const groups = refreshed.groups.filter(group => group.source === source && group.category === category);
+      const expected = editor.groups.filter(group => group.source === source);
+      if (new Set(groups.map(group => group.id)).size !== groups.length
+        || groups.some(group => new Set(group.fields.map(field => field.id)).size !== group.fields.length)
+        || !expected.every(group => groups.some(candidate => candidate.id === group.id && /^[a-f0-9]{64}$/.test(candidate.revision)
+        && group.fields.every(field => candidate.fields.some(item => item.id === field.id))))) throw new Error('configuration_read_unverified');
+      setEditor(current => reconcileState(current, current.groups.map(group => group.source === source
+        ? groups.find(candidate => candidate.id === group.id) ?? group : group), new Set()));
+      setCapabilities(refreshed.capabilities);
+      operationStore.review(source, block.token, owner);
+      setSourceStatuses(current => ({ ...current, [source]: { text: '已重新读取配置并保留草稿；这不能证明服务应用或重启已完成。', tone: 'warning' } }));
+    } catch {
+      if (current()) setSourceStatuses(current => ({ ...current, [source]: { text: '重新读取失败，仍保持冻结并保留草稿。', tone: 'warning' } }));
+    } finally {
+      if (ownsRead()) setCheckingSource(null);
+      if (readController.current === controller) readController.current = null;
+    }
+  }
+
+  function acknowledgeSource(source: ConfigurationSource, token: object, owner: object | null): void {
+    const block = operationStore.getSnapshot()[source];
+    if (!hasCurrentEditor() || !owner || editorOwner.current !== owner || !block || block.token !== token || writeController.current || readController.current) return;
+    if (operationStore.release(source, block.token, owner)) {
+      setSourceStatuses(current => ({ ...current, [source]: { text: '已记录人工核对；如需保存或应用，请明确发起新的操作。', tone: 'neutral' } }));
     }
   }
 
@@ -580,7 +714,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   }, [editor.groups, visibility, visibilityValues]);
 
   if (!connected) return <ConnectPrompt connect={connect} />;
-  if (loading) return <div className="panel flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取设置</div>;
+  if (loading || !loadError && !hasCurrentEditor()) return <div className="panel flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取设置</div>;
   if (loadError) return <Section title="配置暂不可用"><EmptyState title="无法读取当前设置" description={loadError} action={<Button variant="outline" onClick={() => location.reload()}>重新加载页面</Button>} /></Section>;
   if (editor.groups.length === 0) return null;
 
@@ -601,14 +735,26 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
         && item.fields.some(field => editor.dirtyKeys.has(fieldKey(item.id, field.id))));
       const groupInvalid = group.fields.some(field => Boolean(fieldErrors[fieldKey(group.id, field.id)]));
       const pending = pendingSources.has(group.source);
+      const block = sourceBlocks[group.source];
+      const recoveryOwner = editorOwner.current;
       const status = groupStatuses[group.id] ?? sourceStatuses[group.source];
       const busy = savingGroup !== null || applyingSource !== null;
       const visibleFieldCount = visibleFieldIds === null
         ? groupVisibility?.fieldIds.size ?? 0
         : visibleFieldIds?.size ?? 0;
       const open = inactiveDirtyCount > 0 || expanded.has(group.id);
-      const message = status?.text ?? (groupDirty ? `${dirtyCount} 项更改尚未保存` : pending ? (capabilities.apply ? '已保存，等待应用' : '已保存，需要稍后重启服务') : '已读取保存的配置');
-      return <Section scrollable={open} key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} description={group.description} actions={status && <StatusPill tone={status.tone}>{status.text}</StatusPill>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
+      const message = block?.phase === 'blocked' ? '此配置来源的保存和应用已冻结，请先核对实际服务。'
+        : status?.text ?? (groupDirty ? `${dirtyCount} 项更改尚未保存` : pending ? (capabilities.apply ? '已保存，等待应用' : '已保存，需要稍后重启服务') : '已读取保存的配置');
+      return <Section scrollable={open} key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} description={group.description} actions={status && <StatusPill tone={status.tone}>{status.text}</StatusPill>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid || Boolean(block) || checkingSource !== null} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty || Boolean(block) || checkingSource !== null} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
+        {block?.phase === 'blocked' && editor.groups.find(item => item.source === group.source && matchingGroups.has(item.id))?.id === group.id && <div className="mb-3 grid max-h-48 gap-2 overflow-y-auto rounded-md border border-amber-500/30 p-3 text-xs" role="status">
+          <p>{block.reason === 'conflict' ? '配置存在冲突。' : block.reason === 'accepted' ? '重启请求已被接受，完成情况仍待核对。' : '旧操作结果无法确认。'}请先核对实际服务和旧操作是否已结束；配置读取相同不代表应用或重启已完成。</p>
+          {sourceStatuses[group.source] && <p>{sourceStatuses[group.source]?.text}</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" disabled={busy || checkingSource !== null} onClick={() => void rereadSource(group.source, block.token)}>{checkingSource === group.source ? '正在重新读取' : '重新读取并核对'}</Button>
+            <Button variant="outline" size="sm" disabled={busy || checkingSource !== null || block.reviewedBy !== recoveryOwner} onClick={() => acknowledgeSource(group.source, block.token, recoveryOwner)}>确认旧操作已结束，允许新操作</Button>
+          </div>
+          <p>重新读取保留草稿；确认仅允许新的操作，不会自动保存、应用或重试。</p>
+        </div>}
         <details open={open} onToggle={event => {
           const isOpen = event.currentTarget.open;
           setExpanded(current => {
@@ -623,7 +769,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
           <div className="grid gap-5 pt-5 md:grid-cols-2">{group.fields.map(field => {
             const key = fieldKey(group.id, field.id);
             const fieldVisible = groupVisibility?.fieldIds.has(field.id) === true && (visibleFieldIds === null || visibleFieldIds?.has(field.id) === true);
-            return <div key={field.id} className={fieldVisible ? 'contents' : 'hidden'}><FieldEditor field={field} draft={editor.drafts[key] ?? initialDraft(field)} disabled={busy || field.editable === false} resetToken={`${structuredEpoch}:${structuredVersions[key] ?? 0}`} onChange={value => updateField(group, field, value)} onStructuredChange={state => updateStructuredField(group, field, state)} /></div>;
+            return <div key={field.id} className={fieldVisible ? 'contents' : 'hidden'}><FieldEditor field={field} draft={readConfigurationDraft(editor.drafts, key, initialDraft(field))} disabled={busy || field.editable === false} resetToken={`${structuredEpoch}:${structuredVersions[key] ?? 0}`} onChange={value => updateField(group, field, value)} onStructuredChange={state => updateStructuredField(group, field, state)} /></div>;
           })}</div>
           {group.fields.length === 0 && <div className="flex items-center gap-2 py-5 text-xs text-muted-foreground"><CircleOff className="size-4" />此分组没有可显示的设置</div>}
         </details>
@@ -631,4 +777,14 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     })}
     {(Object.values(groupStatuses).some(status => status.tone === 'warning') || Object.values(sourceStatuses).some(status => status?.tone === 'warning')) && <p className="flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4" />结果待确认时不会自动重试或重复写入。</p>}
   </div>;
+}
+
+/** Package contributions expose only these controlled public fields; validators stay in the host. */
+export function PackageConfigurationFieldEditor({ field, value, disabled, onChange }: {
+  readonly field: import('../../src/contracts/package-configuration.ts').PackageConfigurationField;
+  readonly value: boolean | string; readonly disabled: boolean; readonly onChange: (value: boolean | string) => void;
+}) {
+  if (field.kind === 'boolean') return <ToggleField label={field.label} description={field.description} checked={value === true} disabled={disabled} onChange={onChange} />;
+  if (field.kind === 'integer') return <Field label={field.label} description={`${field.description}${field.unit ? `（${field.unit}）` : ''}`}><Input aria-label={field.label} type="number" min={field.minimum} max={field.maximum} step={1} disabled={disabled} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)} /></Field>;
+  return <Field label={field.label} description={`${field.description} 每行一项，最多 ${field.maximumEntries} 项，每项 ${field.maximumLength} 字符。`}><Textarea aria-label={field.label} disabled={disabled} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)} /></Field>;
 }

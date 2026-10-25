@@ -1,143 +1,371 @@
-# 扩展功能
+# 扩展开发
 
-功能包通过 manifest 声明订阅和 capability，并在同步 `setup` 中注册处理器。
+扩展通过功能定义、宿主服务、包贡献和生命周期进入框架。声明入口后，实际副作用仍由调用方的 `FeatureExecution` 和当前 policy 核验。bootstrap 是可信运维代码，在宿主进程内运行；安装扩展需要运维信任，运行扩展还需要独立的会话授权。
 
-具体业务能力由使用者或 AI 编写独立功能包补充。框架不为每种业务预设服务接口或配置卡；使用现有的自定义事件、capability、资源和 UI 范式接入即可。功能包的配置与凭据自行管理，但仍须遵守授权和副作用边界，不能从消息直接加载代码或扩大权限。
+## SDK 与示例运行方式
 
-## 最小功能
+当前 SDK 包为 `@qq-agent-framework/sdk`，要求 Node.js 24.12.0 或更新版本。以下子路径有公开 `exports` 和声明文件：
 
+| 导入路径 | 用途 |
+| --- | --- |
+| `@qq-agent-framework/sdk` | 核心类型、上下文、policy、engine 与 `defineNativeBootstrap`。 |
+| `@qq-agent-framework/sdk/core` | 核心运行接口。 |
+| `@qq-agent-framework/sdk/host` | bridge、bootstrap、包、配置、任务、日历、事件、服务与账号 registry。 |
+| `@qq-agent-framework/sdk/contracts` | 纯 DTO、ports、account scope、事件与包状态契约。 |
+| `@qq-agent-framework/sdk/storage` | SQLite、只读 SQLite、持久 policy/state 和账号 store 绑定。 |
+
+源码中的其他路径不构成 SDK 承诺。SDK 包不包含管理服务器和网页。仓库可以本地生成 tarball；以下示例不依赖 npm 上已有公开发布：
+
+```sh
+# 在框架仓库中
+npm ci
+npm run build:sdk
+npm pack ./packages/framework-sdk --pack-destination /tmp
+
+# 在一个新的外部目录中
+npm init -y
+npm pkg set type=module
+npm install --ignore-scripts /tmp/qq-agent-framework-sdk-0.1.0.tgz
+npm install --save-dev typescript@5.9.3
+```
+
+将下面三个完整代码块分别保存为标注的 `.ts` 文件，然后执行：
+
+```sh
+npx tsc feature-bootstrap.ts owned-state.ts accounts.ts --strict \
+  --module NodeNext --moduleResolution NodeNext --target ES2023 \
+  --outDir out --skipLibCheck false
+node out/feature-bootstrap.js
+node out/owned-state.js
+node out/accounts.js
+```
+
+示例只使用临时私有目录和合成适配器，不连接 QQ 或模型服务。它们验证真实 host、SQLite、policy、包状态和账号 registry，而非手工模拟 SDK 返回值。完整外部 tarball 消费验收见 [verify-sdk-package.ts](../scripts/verify-sdk-package.ts)。
+
+## 示例一：功能、bootstrap 与显式授权
+
+`feature-bootstrap.ts` 展示安装功能后先被 policy 拒绝，再由可信宿主明确授予一次发送，最后确认额度已经消耗。功能只拿到 execution；grant 在宿主侧创建。
+
+<!-- sdk-example: feature-bootstrap.ts -->
 ```ts
-import type { FeatureDefinition } from '../core/types.ts';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createContextStore, defineNativeBootstrap,
+  type FeatureDefinition } from '@qq-agent-framework/sdk';
+import { createBridgeHost, createNativeBootstrapMount,
+  type LoadedNativeBootstrap } from '@qq-agent-framework/sdk/host';
+import { createSqliteStore } from '@qq-agent-framework/sdk/storage';
 
-export const noticeFeature: FeatureDefinition = {
-  id: 'notice',
-  version: '1.0.0',
-  apiVersion: 1,
-  capabilities: ['messaging.send'],
-  subscriptions: ['trigger.fired'],
-  setup(context) {
-    context.on('trigger.fired', async (execution, event) => {
-      if (event.data.kind !== 'notice') return;
-      await execution.send([{ type: 'text', text: '通知已触发' }]);
+const directory = await mkdtemp(join(tmpdir(), 'sdk-feature-'));
+const store = createSqliteStore({ filename: join(directory, 'state.sqlite') });
+const context = createContextStore();
+const persona = context.registerPersona({ id: 'example', version: '1',
+  name: 'Example', identity: {}, style: {} });
+const controller = new AbortController();
+let sends = 0;
+const feature: FeatureDefinition = {
+  id: 'example-notice', version: '1.0.0', apiVersion: 1,
+  capabilities: ['messaging.send'], subscriptions: ['trigger.fired'],
+  setup(services) {
+    services.on('trigger.fired', async execution => {
+      await execution.send([{ type: 'text', text: 'SDK example' }]);
     });
   },
 };
+const definition = defineNativeBootstrap({
+  manifest: { id: 'example-bootstrap', version: '1.0.0', apiVersion: 1 },
+  create() { return { features: [feature] }; },
+});
+const loaded: LoadedNativeBootstrap = {
+  ...definition,
+  metadata: { manifest: definition.manifest,
+    codeFingerprint: createHash('sha256').update(await readFile(new URL(import.meta.url))).digest('hex'),
+    trust: 'trusted-operator-code', sandboxed: false,
+    requiresSeparateAuthorization: true },
+};
+const mount = await createNativeBootstrapMount({ bootstrap: loaded,
+  context: { directory, store, context, persona, signal: controller.signal } });
+const host = createBridgeHost({ store, context, persona,
+  ...mount.bridgeOptions, authorizeIncoming: () => false,
+  transport: { async send() {
+    sends++;
+    return { status: 'confirmed', messageId: `example-${sends}` };
+  } },
+  agent: {
+    async createSession() { return { sessionId: 'unused-session' }; },
+    async submit() { return { status: 'accepted' }; },
+    async follow() { return () => {}; },
+  },
+});
+const fire = (id: string) => host.engine.emit({ id, type: 'trigger.fired',
+  conversationId: 'private:123', data: {} });
+try {
+  await mount.install(host);
+  await host.start();
+  await mount.start(host);
+  const denied = await fire('before-grant');
+  assert.equal(denied.outcomes.find(item => item.featureId === feature.id)?.errorCode,
+    'POLICY_DENIED');
+  assert.equal(sends, 0);
+  host.policy.grant({ id: 'operator-explicit-once', featureId: feature.id,
+    conversationId: 'private:123', capabilities: ['messaging.send'],
+    maxUses: { 'messaging.send': 1 }, expiresAt: Date.now() + 60_000 });
+  await fire('after-grant');
+  assert.equal(sends, 1);
+  await fire('budget-exhausted');
+  assert.equal(sends, 1);
+  console.log('feature/bootstrap: denied -> granted -> one confirmed send');
+} finally {
+  controller.abort();
+  await mount.stop(host);
+  await host.stop();
+  store.close();
+  await rm(directory, { recursive: true, force: true });
+}
 ```
 
-宿主还需要安装功能，并为该功能、目标会话和 `messaging.send` 创建有限授权。代码声明、配置字段和消息内容都不能替代授权。
+这里手工构造 `LoadedNativeBootstrap` 以展示 SDK 装配，指纹来自实际执行文件。正式原生入口由运维指定 bootstrap 文件，loader 在导入与启动阶段核对内容，不由模型选择代码路径。`create()` 可以准备声明，外部活动放入有期限和 signal 的 start/stop；未安装的 prepared mount 可用 `abandonPrepared()` 放弃，已安装或 unknown 不允许这样退出。
 
-## 自定义事件和 capability
+## 包注册、插入点与服务
 
-可信装配根可在 `createEngine` 或标准 `createBridgeHost` 创建时注入扩展。以下片段假设 `hostOptions` 已包含 store、agent、transport、context、persona 和 authorizeIncoming，model 与 observer 也由 operator 提供：
+bootstrap 的 `create()` 可返回 `packages`。每个包声明 `manifest`：`schema`、`id`、`version`、`dependencies`、`provides`、`requires` 和 `contributions`；需要持久状态时声明 `stateSchemaVersion`。重复包、服务或贡献、缺依赖、循环与服务版本不匹配在启动前拒绝。独立包按数组顺序、依赖包按依赖顺序装配。
+
+包执行 `prepare → migrate → install → recover → start`。在 `install` 中调用 `context.publish()` 或 `context.contribute()`，其 kind/id 必须已经声明。通用贡献包括 `feature`、`effect`、`event-validator` 和带 capabilities/order 的 `input-provider`；保留的 core/agent 能力不能被替换。输入准备只变换内容，不得替换账号、会话、来源或授权上下文。
+
+`context.own(kind, id, dispose)` 登记 task、timer、subscription 等清理责任，停止按逆序排空、释放与注销。长期任务不能捕获原消息 execution；触发时取得新的受控执行，并重新核验当前权限。未知 disposer 已调用一次就保留证据，不靠 stop 重放。
+
+默认 `native-services` 包提供五个版本 1 的服务：`native-agent`、`native-interactions`、`native-executions`、`native-tools`、`native-work`。消费者必须在 manifest 中声明 `requires: [{ id: 'native-work', version: 1 }]`。例如，在已装配包中获取服务：
 
 ```ts
-const host = createBridgeHost({
-  ...hostOptions,
-  model,
-  observer,
-  eventValidators: {
-    'asset.ready': data => typeof data.assetId === 'string',
+import { requireNativeHostService } from '@qq-agent-framework/sdk/host';
+// packageContext 来自本包 install；execution 来自本包功能回调。
+const work = requireNativeHostService(packageContext, 'native-work');
+const status = work.status();
+if (status.available) await work.start(execution, { task: '整理当前明确要求的资料' });
+```
+
+这是局部调用片段。work 写操作内部仍调用该 execution 的 `invoke('native.work.*', ...)`，需要调用方 capability、会话 policy 和实际 QQ 来源；服务版本不授予权限。其余接口提供当前 binding、交互快照、执行读查和工具目录，不公开原始 DSH RPC、凭据或可直接产生副作用的 executor。见 [native-services.ts](../src/host/native-services.ts)、[native-services.test.ts](../test/native-services.test.ts)。
+
+生命周期 hook 可在以下 12 个 checkpoint 声明 observe：`runtime.starting`、`runtime.ready`、`runtime.stopping`、`runtime.stopped`、`message.normalized`、`message.admitted`、`message.rejected`、`agent.submitting`、`agent.submitted`、`send.before`、`send.after`、`access.changed`。只有 starting/admitted/submitting/send.before 支持限制性 guard。hook 按 order 再按 id 排序，缺省期限 1 秒、单项最多 30 秒；guard 可以拒绝，不能授权。局部定义如下：
+
+```ts
+const hook = { id: 'example-send-guard', checkpoint: 'send.before' as const,
+  kind: 'guard' as const, timeoutMs: 500,
+  run({ signal }: { signal: AbortSignal }) { signal.throwIfAborted(); } };
+```
+
+把 hook 放到 bootstrap 的 `lifecycleHooks`；执行与关闭验收见 [lifecycle-hooks.test.ts](../test/lifecycle-hooks.test.ts)。模型提问、工具批准与记忆 proposal 确认仍留在所属 QQ 会话，不能用 hook 或管理 route 建网页审批旁路。
+
+## 配置贡献与日历
+
+在 `defineNativeBootstrap({ packageConfigurations: [...] })` 顶层提供配置贡献，使管理端在未执行 create/start 时就能读取 schema、默认值和受控字段。运行包通过 `configurationIds` 引用同一贡献；不要复制另一份 schema。`context.configuration.read/inspect` 限于本 owner，`migrate` 限于本包迁移阶段。管理端支持 boolean、integer、string-list 声明式字段；保存使用文档 revision CAS，应用影响另行声明，配置保存不创建 grant。见 [package-configuration.ts](../src/contracts/package-configuration.ts)、[package-configuration.test.ts](../test/package-configuration.test.ts)。
+
+SDK 日历服务提供 daily/weekly、IANA 时区、DST 与 misfire 策略；由宿主调用 tick，不在注册时暗中启动计时循环。下面是使用已有私有 `store` 和受控 `dispatchOccurrence` 的局部片段：
+
+```ts
+import { createCalendarTriggerService } from '@qq-agent-framework/sdk/host';
+const calendar = createCalendarTriggerService({ store,
+  callback: occurrence => dispatchOccurrence(occurrence) });
+calendar.register({ id: 'daily-report', scope: 'private:123', timeZone: 'UTC',
+  schedule: { kind: 'daily', hour: 10, minute: 0 },
+  dst: { overlap: 'earlier', nonexistent: 'skip' },
+  misfire: 'coalesce', windowMs: 3_600_000, payload: {} });
+await calendar.tick({ limit: 16 });
+calendar.setEnabled('daily-report', false);
+await calendar.stop();
+```
+
+weekly 的 dayOfWeek 为 ISO 1–7。occurrence 在回调前持久化；中断结果为 unknown，不在重启时重放。默认原生提醒在此基础上提供 once/delay/daily/weekly、规则 CAS、启停、next/history，并在发生时走当前 guard 与发送 policy。只处理用户明确创建的提醒，不默认开启主动话题。完整可重复验收见 [triggers.test.ts](../test/triggers.test.ts)、[native-reminders.test.ts](../test/native-reminders.test.ts)、[native-bootstrap-example.ts](../test/fixtures/native-bootstrap-example.ts)。
+
+## 示例二：实际内容指纹、稳定键与 CAS 迁移
+
+`owned-state.ts` 用一个实际内容文件演示身份核验，写入 65 个稳定键，验证过期 CAS 被拒绝，再把 schema 1 转为 schema 2。迁移页上限 60 条，因此会保存两个原子检查点；SQLite 重开后原键和新 schema 均保留。
+
+<!-- sdk-example: owned-state.ts -->
+```ts
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createNativePackageState } from '@qq-agent-framework/sdk/host';
+import type { NativePackageStateIdentity } from '@qq-agent-framework/sdk/contracts';
+import { createSqliteStore } from '@qq-agent-framework/sdk/storage';
+
+const directory = await mkdtemp(join(tmpdir(), 'sdk-state-'));
+const filename = join(directory, 'state.sqlite');
+const contentFile = join(directory, 'package-content.txt');
+const signal = new AbortController().signal;
+const fingerprint = async () => createHash('sha256')
+  .update(await readFile(contentFile)).digest('hex');
+let store = createSqliteStore({ filename });
+const state = (identity: NativePackageStateIdentity) => createNativePackageState({
+  owner: 'example', store, identity,
+  async verifyIdentity(expected) {
+    assert.equal(await fingerprint(), expected.contentFingerprint);
   },
-  effectAdapters: {
-    'asset.inspect': {
-      execute({ input, signal }) {
-        if (signal.aborted) throw new Error('cancelled');
-        return { accepted: true, input };
+});
+try {
+  await writeFile(contentFile, 'schema=1\n', { mode: 0o600 });
+  const old = state({ packageVersion: '1.0.0', stateSchemaVersion: 1,
+    contentFingerprint: await fingerprint() });
+  await old.initialize(signal);
+  for (let index = 0; index < 65; index++) {
+    await old.compareAndSet(String(index).padStart(3, '0'), null,
+      { count: index }, signal);
+  }
+  await assert.rejects(old.compareAndSet('000', null, { count: 99 }, signal),
+    { code: 'STORE_CONFLICT' });
+  await writeFile(contentFile, 'schema=2\n', { mode: 0o600 });
+  const identity = { packageVersion: '2.0.0', stateSchemaVersion: 2,
+    contentFingerprint: await fingerprint() };
+  const newer = state(identity);
+  const previous = old.status();
+  assert(previous.revision !== null);
+  let progress = await newer.prepare(previous.revision, signal);
+  let pages = 0;
+  while (progress.migration) {
+    assert(progress.revision !== null);
+    progress = await newer.applyPage(progress.revision,
+      progress.migration.operationId, entries => entries.map(entry => {
+        assert(entry.value !== null && typeof entry.value === 'object'
+          && !Array.isArray(entry.value) && typeof entry.value.count === 'number');
+        return { key: entry.key, value: { count: entry.value.count + 1 } };
+      }), signal);
+    pages++;
+  }
+  assert.equal(pages, 2);
+  assert.equal(progress.ready, true);
+  assert.deepEqual(newer.read('000')?.value, { count: 1 });
+  store.close();
+  store = createSqliteStore({ filename, requireExisting: true });
+  const reopened = state(identity);
+  assert.equal(reopened.status().ready, true);
+  assert.equal(reopened.read('064')?.stateSchemaVersion, 2);
+  assert.deepEqual(reopened.read('064')?.value, { count: 65 });
+  assert.equal(store.list('package.example.state', { limit: 100 }).length, 65);
+  console.log('owned state: stale CAS rejected; 65 stable keys migrated in two pages');
+} finally {
+  store.close();
+  await rm(directory, { recursive: true, force: true });
+}
+```
+
+生产包应提供覆盖其实际代码的 `content`，或使用原生 bootstrap 的内容 driver。示例的单文件 hash 只演示 `verifyIdentity`，不声称覆盖依赖树。原生 loader 支持入口旁的 `<entry>.manifest.json`：
+
+```json
+{
+  "schema": 1,
+  "entry": "extension.ts",
+  "dependencies": [
+    { "specifier": "@qq-agent-framework/sdk/host", "lockFile": "package-lock.json" }
+  ]
+}
+```
+
+完整覆盖标记为 `package-tree-and-dependency-locks-v1`：相对导入必须落在根目录内的已计入文件，外部运行时导入按准确 specifier 声明 npm lock v2/v3 的 version/integrity。树最多 256 个文件、总 8 MiB、单文件 1 MiB、深度 8；排除 runtime、node_modules、密钥与数据库等运行数据，拒绝链接、目录外导入和不可核验的动态加载。内容变更要求新进程加载。缺少 sidecar 的兼容入口标记为 `entry-only`，内置包为 `builtin-host-files`；这些范围不升级成完整依赖验证。指纹不是代码签名、授权或沙箱。规则与样本见 [bootstrap-content.ts](../scripts/bootstrap-content.ts)、[bootstrap-content.test.ts](../test/bootstrap-content.test.ts)。
+
+状态元数据记录 packageVersion、stateSchemaVersion、contentFingerprint。`prepare()` 固定目标和 operationId；`applyPage()` 在 converter 前写 applying，再原子检查并更新该页。converter 保持键集合，只返回新 JSON 值，不执行网络或其他外部副作用。超时留下 unknown，晚回结果不提交；核对与明确后续动作见 [RECOVERY.md](RECOVERY.md)。旧 raw 状态必须显式 `prepareLegacyAdoption()`，其来源 schema 为 0，不能猜测为当前版本。完整迁移、冲突和旧键 TTL 验收见 [native-package-state.test.ts](../test/native-package-state.test.ts)。
+
+## 示例三：同步协议工厂与真实账号隔离
+
+`accounts.ts` 注册合成协议，以同步 factory 为两个账号构造真实独立的 bridge/SQLite。两个账号可以拥有相同 conversation、外部 session 和 grant ID；A 的发送和额度不影响 B，错误 scope 被拒绝。异步初始化属于 `start(signal)`，factory 不返回 Promise。
+
+<!-- sdk-example: accounts.ts -->
+```ts
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createContextStore, type FeatureDefinition } from '@qq-agent-framework/sdk';
+import { createBridgeHost, createNativeAccounts,
+  type NativeAccountProtocol } from '@qq-agent-framework/sdk/host';
+import type { AccountScope } from '@qq-agent-framework/sdk/contracts';
+import { createSqliteStore, assertAccountStore } from '@qq-agent-framework/sdk/storage';
+
+const directory = await mkdtemp(join(tmpdir(), 'sdk-accounts-'));
+const signal = new AbortController().signal;
+const hosts = new Map<string, ReturnType<typeof createBridgeHost>>();
+const delivered: string[] = [];
+const feature: FeatureDefinition = {
+  id: 'example-send', version: '1.0.0', apiVersion: 1,
+  capabilities: ['messaging.send'], subscriptions: ['trigger.fired'],
+  setup(services) {
+    services.on('trigger.fired', async execution => {
+      await execution.send([{ type: 'text', text: 'account-local' }]);
+    });
+  },
+};
+const protocol: NativeAccountProtocol = {
+  id: 'example',
+  create({ directory: accountDirectory, accountScope }) {
+    const store = createSqliteStore({ filename: join(accountDirectory, 'state.sqlite') });
+    const context = createContextStore();
+    const persona = context.registerPersona({ id: 'example', version: '1',
+      name: 'Example', identity: {}, style: {} });
+    const host = createBridgeHost({ store, context, persona, accountScope,
+      authorizeIncoming: () => false,
+      transport: { async send() {
+        delivered.push(accountScope.accountId);
+        return { status: 'confirmed', messageId: 'same-message-id' };
+      } },
+      agent: {
+        async createSession() { return { sessionId: 'same-external-session' }; },
+        async submit() { return { status: 'accepted' }; },
+        async follow() { return () => {}; },
       },
-    },
+    });
+    host.engine.install(feature);
+    assertAccountStore(store, accountScope);
+    hosts.set(accountScope.accountId, host);
+    return {
+      async start(startSignal) { startSignal.throwIfAborted(); await host.start(); },
+      async stop() { await host.stop(); },
+      async close() { await host.stop(); store.close(); },
+    };
   },
-});
+};
+const accounts = createNativeAccounts({ directory, protocols: [protocol] });
+const scopeA: AccountScope = { protocolId: 'example', accountId: 'a' };
+const scopeB: AccountScope = { protocolId: 'example', accountId: 'b' };
+try {
+  let snapshot = await accounts.read();
+  assert.equal(hosts.size, 0);
+  for (const accountScope of [scopeA, scopeB]) {
+    snapshot = await accounts.create({ revision: snapshot.revision,
+      label: accountScope.accountId, accountScope }, signal);
+  }
+  assert.equal(hosts.size, 0);
+  for (const account of snapshot.accounts) await accounts.start(account.id, signal);
+  for (const [accountId, host] of hosts) {
+    const binding = await host.sessions.resolve('private:123', signal);
+    assert.equal(binding.sessionId, 'same-external-session');
+    assert.equal(binding.accountScope?.accountId, accountId);
+    host.policy.grant({ id: 'same-grant-id', accountScope: host.accountScope,
+      featureId: feature.id, conversationId: 'private:123',
+      capabilities: ['messaging.send'], maxUses: { 'messaging.send': 1 } });
+  }
+  const a = hosts.get('a');
+  const b = hosts.get('b');
+  assert(a && b);
+  assert.throws(() => a.policy.reserve({ accountScope: scopeB,
+    featureId: feature.id, conversationId: 'private:123', capability: 'messaging.send' }),
+    { code: 'ACCOUNT_SCOPE_MISMATCH' });
+  await a.engine.emit({ id: 'same-event-id', type: 'trigger.fired',
+    accountScope: scopeA, conversationId: 'private:123', data: {} });
+  assert.deepEqual(delivered, ['a']);
+  assert.equal(b.policy.describe().grants[0]?.used['messaging.send'], 0);
+  await b.engine.emit({ id: 'same-event-id', type: 'trigger.fired',
+    accountScope: scopeB, conversationId: 'private:123', data: {} });
+  assert.deepEqual(delivered, ['a', 'b']);
+  console.log('accounts: synchronous construction; independent stores, scopes and budgets');
+} finally {
+  await accounts.close();
+  await rm(directory, { recursive: true, force: true });
+}
 ```
 
-功能必须在 manifest 中声明 `asset.ready` 和 `asset.inspect`，并通过 `execution.invoke` 调用。扩展与内置副作用一样经过输入冻结、队列上限、取消、授权和审计。
-
-事件校验器必须同步严格返回 `true`。effect adapter 得到冻结输入、引擎生成的 scope（含人格版本和可选 session/generation）与 `AbortSignal`；凭据、完整配置和存储句柄不会自动暴露给功能。model 调用仍需 `model.respond` 授权；observer 只看脱敏审计，不是 veto 或授权入口。
-
-标准 host 拒绝替换 `message.received`、`trigger.fired`、`messaging.send`、`messaging.forward`、`model.respond` 以及所有 `agent.*` 注册项。不要从消息、人格或模型输出拼接模块名、注册表或新授权。
-
-## 入站路由与响应归属
-
-把同步 `createMessageRouter({ rules, defaultRoute })` 传给 `createBridgeHost` 的 `routeIncoming`。规则用唯一 id、数值 priority、route、relayToAgent 与 selector 描述，由上层提供匹配条件，不自带 NLU 或模型意图识别。例如在 host 创建前定义：
-
-```ts
-const routeIncoming = createMessageRouter({
-  rules: [{ id: 'work-prefix', priority: 100, route: 'work', relayToAgent: false,
-    selector: message => message.content.some(block => block.type === 'text' && block.text.startsWith('/work ')) }],
-  defaultRoute: { route: 'chat', relayToAgent: false },
-});
-```
-
-在上述 host options 中加入 routeIncoming，再分别用 `host.engine.install(withMessageRoute(chatFeature, 'chat'))` 与 `host.engine.install(withMessageRoute(workFeature, 'work'))` 安装响应者。旁观功能正常安装，不加包装。这样仍广播同一 message.received，只在响应处理器入口做归属过滤；包装功能的 trigger 等其他事件不受影响。
-
-selector 收到冻结消息，必须严格返回 boolean。较大 priority 优先，最高匹配优先级同级多命中拒绝；异常、Promise、非 boolean 不能降级成默认成功，真正无命中才用 defaultRoute。若由内置 agent-relay 接管某 route，应明确设 relayToAgent 为 true，并避免同时安装该 route 的另一回复者；路由不代替 agent.submit/messaging.send 授权，也不改变 directed/isSelf 检查。
-
-## 日历触发
-
-`createCalendarTriggerService` 是需显式装配和驱动的 daily/weekly 服务，不是完整 cron。规则必须带 IANA timeZone、明确 DST overlap（earlier/later）与 nonexistent（skip）、windowMs、misfire（skip/coalesce）及 JSON payload，不能借用进程默认时区或无限补历史。
-
-callback 可把 occurrence.id 映射为事件 id、scope 映射为 conversationId，`await host.engine.emit` 投递 `trigger.fired`，并传递取消信号与合适的有效期；功能仍通过 SDK 和既有 grant 发送。窗口外不执行，窗口内每规则只处理最新一次，coalesce 额外报告被合并次数。具体默认值和窗口限制见 [公共契约](CONTRACTS.md#日历触发)。
-
-启动时循环调用 `recoverInterrupted` 直到 next 为 null，再由应用自己的 timer 调用 `tick`；bridge 的 taskTickMs 不会自动驱动 calendar。停止 timer 后调用服务 stop，再停止 host/关闭 store。更改规则或启停会推进 generation，旧 callback 只有协作取消，不代表已开始的外部发送被回滚。遗留 running 变 unknown，不自动重放。
-
-## 管理挂载点
-
-宿主可把受限管理路由显式交给管理服务器：
-
-```ts
-const server = createAdminServer({
-  token,
-  snapshot,
-  routes: createHostAdminRoutes(host),
-});
-```
-
-自定义 `AdminRoute` 仅支持 `GET` / `POST` 的 `/api/...` 路径，不能覆盖内建入口。处理器接收解析后的 query、POST JSON body 和断连取消信号；认证、同源检查、请求/响应大小限制由服务器统一执行。`createHostAdminRoutes` 只读返回宿主计数、sessions/tasks/outbox/replies 分页元数据及 `GET /api/host/storage` 统计；后者通过 host.storageStats 转交可选 store.stats，未实现时返回 null。不提供权限变更、正文、自动清理 unknown 或重试入口。
-
-## Agent 消息筛选
-
-不同 SDK 的 `assistant/message` 可能包含中间工作文本，并不天然等于 turn 完成或可公开回复。宿主可配置同步 `selectAgentMessage(event, binding)`，读取事件原始 `data` 后返回允许发送的消息块，或以 `null` 跳过出站和发送预算；未配置时保留普通 relay。具体筛选策略由 operator 按外部协议定义，不应把旧业务人格或工具隐藏规则硬编码进框架。
-
-需要异步准备时，另外配置 `agentMessagePreparation: { capabilities, prepare(execution, event) }`。它在标准 agent-relay 的引擎处理器中运行，允许 await execution.invoke/generate，返回内容后继续原 send/outbox 流程，null 则不发送；不必卸载 relay 或在同步 selector 中塞 Promise。额外 capabilities 只是 manifest 声明，仍需给 agent-relay 对应的有限 grant。只向 hook 提供 context/signal/invoke/generate，不提供 send/state/store；可信 hook 应通过受控 invoke 接入 presentation，不直接绕过授权调用 renderer。
-
-仅配置该 hook 时原始 AgentEvent.data 进入 event.data.agentData，DSH metadata 的字段映射由适配端/上层约定并校验，不是框架自动 NLU，也不是授权依据。无文档表达标记时原样返回规范 event.data.content 即可保持普通格式；无准备 capability 授权时 invoke 不会触发渲染。hook 返回 null 不是已回复，不能靠它清除首回复等待；异常也不代表可安全重放。
-
-## 资源消息
-
-功能发送图片、音频或文件时只提交已经登记的 `assetId`。功能不应传递任意绝对路径、读取资源内容或猜测 transport 支持情况。资源目录与 transport 负责解析、类型校验、大小限制和生命周期。
-
-新引擎自动携带实际人格 `{ id, version }` 的 OutboundScope，经 durable outbox 传给 OneBot resolver；不要在功能 body 中伪造 persona。资源登记使用完整 `id@version`，按需绑定 sessionId/generation，并在需要时由 resolver 传 expectedVersion。默认不绑 session 的批准历史资料可以复用；旧请求 scope 可选只是兼容，不会把旧资源自动升级为隔离资源。`registry.get` 只看脱敏元数据，读取真实定位仍走 resolve。
-
-forward 是唯一外层块，节点只含普通 content，不能混发、嵌套或指定发送者。除了 messaging.send，manifest 和有限 grant 都必须有 messaging.forward；operator 还须在 OneBot `forward` 配置中固定 senderId/senderName，并分别显式开启 group/private 扩展。模型不能决定伪造的发送者姓名或 QQ 号，网关兼容性仍须单独验收。
-
-## 文档表达
-
-用 `createPresentationService` 准备 text、markdown-image 或 forward，再由功能 `execution.send` 发送；需要 SDK 授权入口时将 `createPresentationEffect(service)` 注册为自定义 capability。prepare 可渲染与发布图片，但无发送副作用。不可将该 effect 的授权当作 messaging.send 或 messaging.forward 授权。
-
-选择器 `select` 是可选挂载点，不是固定人格、模型或聊天推断器。显式 format 不能被偷偷改写，仅 `fallback: 'text'` 允许明示文本降级；reply 的 near/far/uncertain 由调用方提供距离与年龄，近消息 auto 不引，不确定且无 selector 不引。标准 relay 可用上述 agentMessagePreparation 调用准备 effect；`selectAgentMessage` 仍只负责同步过滤。具体最小接线、browser/字体与 Linux publisher 限制见 [文档表达](PRESENTATION.md)，不要另外安装重复发送相同 agent.message 的响应者。
-
-## 生命周期规则
-
-- `setup` 和清理函数保持同步；异步准备工作放在宿主装配阶段完成。
-- 处理器应 `await` 每个副作用并处理 `confirmed`、`rejected`、`unknown`。
-- 收到 `signal.aborted` 后尽快停止本地工作，但不要假定外部动作已撤销。
-- 处理器返回后不要保存并复用 `FeatureExecution`。
-- 不要从自己的处理器等待自身卸载或引擎停止。
-- 状态值必须是 JSON 数据，并在读取后按业务 schema 校验。
-
-## 开发流程
-
-1. 明确输入、输出、状态、资源、授权和失败终态。
-2. 优先写独立功能；只有多个功能共同需要时才扩展宿主或核心。
-3. 用替身测试功能，再用真实引擎验证授权拒绝、背压、取消、重复与卸载。
-4. 外部适配器分别验证认证、序列化、限速、回执和恢复。
-5. 运行：
-
-```sh
-npm run check
-npm test
-npm run test:built
-```
-
-管理演示页不是代码上传、授权审批或生产部署入口。
-
-候选 release 激活/回滚、业务 schema 迁移、可恢复长 job 控制面与完整 retention 治理仍需独立建设；不应把新增功能或表达挂载点称为已经完成自主迭代发布。
+原生 gateway 的 OneBot factory 还核验实际 WS/HTTP selfId 与 accountScope.accountId 一致。同步 factory 返回 thenable 时立即拒绝为非法工厂，不等待永不 settle 的 Promise，也不声称能回收它偷偷创建的资源；close 有界、每个 runtime 只调用一次，超时保留 unknown。账号接管、HTTP dispatch 与重启意图见 [RECOVERY.md](RECOVERY.md)；真实默认 gateway 验收见 [native-account-gateway.test.ts](../test/native-account-gateway.test.ts)。

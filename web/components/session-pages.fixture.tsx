@@ -5,7 +5,7 @@ import { ApiError, asRecord, type ApiClient } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 import '../console.css';
 
-let bindings = Array.from({ length: 320 }, (_, index) => ({ key: `group:${100_000 + index}`, sessionId: `synthetic-session-${index}`, owner: index === 0 }));
+let bindings = Array.from({ length: 320 }, (_, index) => ({ key: `group:${100_000 + index}`, sessionId: `synthetic-session-${index}`, owner: index === 0, generation: 1, bindingRevision: index.toString(16).padStart(64, '0') }));
 let writable: boolean | undefined = false;
 let hold = false;
 let cycle = false;
@@ -40,8 +40,10 @@ const api: ApiClient = {
     if (resetMode === 'conflict') throw new ApiError('session_revision_conflict', 409);
     if (resetMode === 'unknown') throw new ApiError('session_reset_unknown', 504);
     const record = asRecord(body);
+    const target = bindings.find(binding => binding.key === record.key);
+    if (!target || record.sessionId !== target.sessionId || record.generation !== target.generation || record.bindingRevision !== target.bindingRevision || record.confirm !== true) throw new ApiError('session_reset_conflict', 409);
     bindings = bindings.filter(binding => binding.key !== record.key);
-    return { ok: true, key: record.key, previousSessionId: record.sessionId, bridgeBindingRemoved: true, externalWorkStopped: 'unverified' };
+    return { ok: true, key: record.key, previousSessionId: record.sessionId, bridgeBindingRemoved: true, externalWorkStopped: 'unverified', previousGeneration: target.generation, nextGeneration: target.generation + 1, historyPreserved: true, contextReset: true };
   },
 };
 

@@ -25,6 +25,7 @@ test('actual native projections parse empty, complete, partial and mixed-currenc
   assert.equal(parseUsageSeries(projection.series())?.buckets.every(bucket => bucket.tokens === null && bucket.cost === null), true);
   usage.setPricing([price], null);
   const recorded = usage.append(turn);
+  assert(!('retired' in recorded));
   const summary = parseUsageSnapshot(projection.summary());
   assert(summary);
   assert.equal(summary.totals.totalTokens, 170);

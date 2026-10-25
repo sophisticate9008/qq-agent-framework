@@ -14,6 +14,7 @@ import {
 } from '../src/adapters/dsh.ts'
 import type { AgentEvent } from '../src/host/types.ts'
 import type { JsonObject } from '../src/core/types.ts'
+import type { NativeEventInput } from '../src/contracts/native-events.ts'
 
 interface PortFixture {
   port: DshClientPort
@@ -66,6 +67,31 @@ function eventAt(events: readonly AgentEvent[], index: number): AgentEvent {
   if (event === undefined) throw new Error(`Missing event ${index}`)
   return event
 }
+
+test('DSH observations report real step and tool metadata while observer failures leave final delivery intact',async()=>{
+  const fake=fixture()
+  const observations:NativeEventInput[]=[]
+  const business:AgentEvent[]=[]
+  const adapter=createDshAdapter(fake.port,{onObservation(event){
+    observations.push(event)
+    if(event.status==='progress')return Promise.reject(Error('observer asynchronous failure'))
+    if(event.status==='started')throw Error('observer synchronous failure')
+  }})
+  const stop=await adapter.follow({sessionId:'session-1',signal:new AbortController().signal,onEvent(event){business.push(event)}})
+  const receive=async(type:string,data:JsonObject)=>fake.followRequest().onEvent({type:'session/event',sessionId:'session-1',event:{type,seq:observations.length,data}})
+  await receive('turn/start',{turn:1})
+  await receive('step/start',{turn:1,step:1})
+  await receive('tool/call',{turn:1,step:1,callId:'call-1',name:'fixture',arguments:'private-tool-input'})
+  await receive('tool/result',{turn:1,step:1,message:{role:'tool',toolCallId:'call-1',content:[{type:'text',text:'private-tool-output'}]}})
+  await receive('assistant/message',{turn:1,message:{id:'final-1',role:'assistant',content:[{type:'text',text:'Actual final content'}]}})
+  await receive('turn/end',{turn:1,reason:{kind:'completed'}})
+  assert.deepEqual(observations.map(event=>event.status),['accepted','progress','started','completed','completed'])
+  assert(!JSON.stringify(observations).includes('private-tool'))
+  assert(!JSON.stringify(observations).includes('Actual final content'))
+  assert.deepEqual(business.map(event=>event.type),['message','completed'])
+  assert.deepEqual(business[0]!.content,[{type:'text',text:'Actual final content'}])
+  await stop()
+})
 
 test('DSH adapter sends queue prompts with requestId and keeps acceptance separate from completion', async () => {
   const client = fixture()

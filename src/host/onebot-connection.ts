@@ -52,6 +52,8 @@ async function closeClient(client: ReturnType<typeof createOneBotWebSocketClient
 export function createOneBotConnectionManager(options: {
   readonly createClient?: typeof createOneBotWebSocketClient
   readonly onEvent?: OneBotWebSocketOptions['onEvent']
+  readonly onProtocolEvent?: OneBotWebSocketOptions['onProtocolEvent']
+  readonly accountId?: OneBotWebSocketOptions['accountId']
 } = {}): OneBotConnectionManager {
   const createClient = options.createClient ?? createOneBotWebSocketClient
   let client: ReturnType<typeof createOneBotWebSocketClient> | undefined
@@ -121,6 +123,8 @@ export function createOneBotConnectionManager(options: {
           client = createClient({
             endpoint: selected.onebotWs.endpoint,
             ...(options.onEvent === undefined ? {} : { onEvent: options.onEvent }),
+            ...(options.onProtocolEvent === undefined ? {} : { onProtocolEvent: options.onProtocolEvent }),
+            ...(options.accountId === undefined ? {} : { accountId: options.accountId }),
             ...(selected.onebotWs.secret === '' ? {} : { accessToken: selected.onebotWs.secret }),
             connectTimeoutMs: 5_000, maxReconnectAttempts: 8
           })

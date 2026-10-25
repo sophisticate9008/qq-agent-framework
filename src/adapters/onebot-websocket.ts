@@ -2,14 +2,24 @@ import { randomUUID } from 'node:crypto'
 import WebSocket from 'ws'
 import type { RawData } from 'ws'
 import type { JsonObject } from '../core/types.ts'
+import { normalizeOneBotProtocolEvent, type OneBotProtocolEvent } from './onebot-events.ts'
+
+export interface OneBotWebSocketEventContext {
+  readonly selfId: string
+  readonly signal: AbortSignal
+  readonly receivedAt: number
+}
 
 export interface OneBotWebSocketOptions {
   endpoint: string
   accessToken?: string
+  accountId?: string
   onEvent?: (event: Readonly<JsonObject>, context: {
     readonly selfId: string
     readonly signal: AbortSignal
+    readonly receivedAt: number
   }) => void | Promise<void>
+  onProtocolEvent?: (event: Readonly<OneBotProtocolEvent>, context: OneBotWebSocketEventContext) => void | Promise<void>
   connectTimeoutMs?: number
   callbackTimeoutMs?: number
   maxPendingEvents?: number
@@ -122,8 +132,10 @@ interface Attempt {
 
 interface QueuedEvent {
   event: Readonly<JsonObject>
+  protocolEvent?: Readonly<OneBotProtocolEvent>
   selfId: string
   generation: number
+  receivedAt: number
 }
 
 interface Callback {
@@ -136,9 +148,12 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
   const endpoint = endpointUrl(options.endpoint)
   const accessToken = options.accessToken
   const onEvent = options.onEvent
+  const onProtocolEvent = options.onProtocolEvent
   if ((accessToken !== undefined && (typeof accessToken !== 'string' ||
     accessToken.length > 4096 || !/^[\x21-\x7e]+$/.test(accessToken))) ||
-    (onEvent !== undefined && typeof onEvent !== 'function')) {
+    (onEvent !== undefined && typeof onEvent !== 'function') ||
+    (onProtocolEvent !== undefined && typeof onProtocolEvent !== 'function') ||
+    options.accountId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.accountId)) {
     throw new OneBotWebSocketError('onebot_ws_invalid_options')
   }
   const connectTimeoutMs = bounded(options.connectTimeoutMs, 5000, 10, 300000)
@@ -236,7 +251,7 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
   }
 
   function pump(): void {
-    if (closed || snapshot.state !== 'connected' || callback || !onEvent || rawPending >= maxPendingEvents) return
+    if (closed || snapshot.state !== 'connected' || callback || !onEvent && !onProtocolEvent || rawPending >= maxPendingEvents) return
     const entry = queue.shift()
     if (!entry) return
     const controller = new AbortController()
@@ -259,7 +274,8 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
     }
     void Promise.resolve().then(() => {
       if (!controller.signal.aborted && entry.generation === generation && !closed) {
-        return onEvent(entry.event, Object.freeze({ selfId: entry.selfId, signal: controller.signal }))
+        const context = Object.freeze({ selfId: entry.selfId, signal: controller.signal, receivedAt: entry.receivedAt })
+        return entry.protocolEvent ? onProtocolEvent?.(entry.protocolEvent, context) : onEvent?.(entry.event, context)
       }
     }).then(() => { rawPending -= 1; finish(); pump() }, () => {
       rawPending -= 1
@@ -347,16 +363,22 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
       settle()
       return
     }
-    if (value.post_type !== 'message') return
+    const protocol = value.post_type !== 'message'
+    if (protocol && (!onProtocolEvent || !['notice', 'request', 'meta_event'].includes(String(value.post_type)))) return
     snapshot.received += 1
-    if (!current.authenticated || selfIdentifier(value.self_id) !== snapshot.selfId || !onEvent ||
+    if (!current.authenticated || selfIdentifier(value.self_id) !== snapshot.selfId || (protocol ? !onProtocolEvent : !onEvent) ||
       queue.length + (callback ? 1 : 0) >= maxPendingEvents || rawPending >= maxPendingEvents) {
       snapshot.dropped += 1
       return
     }
-    const event = freezeEvent(value)
+    const receivedAt = Date.now()
+    const protocolEvent = protocol ? normalizeOneBotProtocolEvent(value, {
+      selfId: snapshot.selfId!, receivedAt, ...(options.accountId === undefined ? {} : { accountId: options.accountId }),
+    }) : undefined
+    if (protocol && protocolEvent === null) { snapshot.dropped += 1; return }
+    const event = protocol ? Object.freeze({}) : freezeEvent(value)
     if (!event) { snapshot.dropped += 1; return }
-    queue.push({ event, selfId: snapshot.selfId!, generation })
+    queue.push({ event, ...(protocolEvent ? { protocolEvent } : {}), selfId: snapshot.selfId!, generation, receivedAt })
     pump()
   }
 

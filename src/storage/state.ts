@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer';
 import type { FeatureStateScope } from '../core/context.ts';
 import type { JsonObject, JsonValue } from '../core/types.ts';
 import { FrameworkError, assert, identifier, isRecord, reference, snapshot } from '../core/values.ts';
-import type { DurableStore, StoredRecord } from '../host/types.ts';
+import type { DurableStore, StoredRecord } from '../contracts/ports.ts';
 
 const STATE_NAMESPACE = 'feature.state';
 const MAX_ATTEMPTS = 12;

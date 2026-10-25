@@ -20,7 +20,7 @@ test('native adapter defaults are disabled and copied into frozen configuration 
   assert.deepEqual(publicAdapterConfiguration(defaults), {
     onebotHttp: { enabled: false, endpoint: '', secretConfigured: false },
     onebotWs: { enabled: false, endpoint: '', secretConfigured: false },
-    dshAgent: { enabled: false, endpoint: '', authConfigured: false },
+    dshAgent: { enabled: false, endpoint: '', authConfigured: false, localAuthConfigured: false },
     onebotWebhook: { enabled: false, host: '127.0.0.1', port: 0, selfId: '', hmacConfigured: false }
   })
 })

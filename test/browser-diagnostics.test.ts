@@ -38,11 +38,11 @@ test('browser diagnostics project only known booleans/counts, error types and pu
     pageEntryCounts: { usage: 2, account: 123456, token: syntheticSecret },
     error: { name: 'AssertionError', message: syntheticSecret,
       stack: `AssertionError: ${syntheticSecret}\n at run (file:///private/account/scripts/page-navigation-smoke.ts:279:16)\n at leak (file:///private/${syntheticSecret}.ts:1:1)` },
-    themes: { accepted: true, rejected: false, config: { token: syntheticSecret } }
+    executionRuntime: { accepted: true, rejected: false, config: { token: syntheticSecret } }
   });
   assert.deepEqual(projected, { diagnosticSummary: true, fixtureOnly: true, allVisibleH2Indexed: false,
     pageCount: 10, requestsCount: 1, pageEntryCounts: { usage: 2 },
-    themes: { trueFlagCount: 1, falseFlagCount: 1 }, reportedPassed: false,
+    executionRuntime: { trueFlagCount: 1, falseFlagCount: 1 }, reportedPassed: false,
     errorName: 'AssertionError', locations: ['page-navigation-smoke.ts:279:16'] });
   const serialized = JSON.stringify(projected);
   for (const forbidden of [syntheticSecret, 'SYNTHETICALPHANUMERICSECRET1234567890', '123456', '/private/', 'message', 'stack', 'grants']) {
@@ -72,8 +72,9 @@ test('browser diagnostics retain whitelisted synthetic PNG and JSON summaries, n
   await values.put('runtime/engineering/validation/006/markdown-page-1.png', png);
   await values.put('runtime/engineering/validation/006/presentation-assets/page-1.png', png);
   await values.put('runtime/engineering/validation/006/presentation-assets/result.json', syntheticSecret);
+  await values.put('runtime/execution-journal-smoke/terminal.json', JSON.stringify({ status: 'failed', error: syntheticSecret }));
   const result = await collectBrowserDiagnostics(values);
-  assert.deepEqual((await readdir(result.directory)).sort(), ['markdown-markdown-page-1.png',
+  assert.deepEqual((await readdir(result.directory)).sort(), ['execution-journal-terminal.json', 'markdown-markdown-page-1.png',
     'page-navigation-failure-2026-10-25T00-00-00-000Z.json', 'page-navigation-failure.png',
     'page-navigation-result-1.json', 'presentation-page-1.png']);
   for (const name of (await readdir(result.directory)).filter(value => value.endsWith('.json'))) {
@@ -82,7 +83,7 @@ test('browser diagnostics retain whitelisted synthetic PNG and JSON summaries, n
   assert.deepEqual(JSON.parse(await readFile(join(result.directory, 'page-navigation-result-1.json'), 'utf8')),
     { diagnosticSummary: true, invalidJson: true });
   assert.deepEqual(await readFile(join(result.directory, 'page-navigation-failure.png')), png);
-  assert.equal(result.files, 5);
+  assert.equal(result.files, 6);
   assert.equal(result.rejected, 1);
 });
 

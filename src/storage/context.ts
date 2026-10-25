@@ -1,7 +1,7 @@
 import { createContextStore } from '../core/context.ts';
 import type { Clock, JsonObject, JsonValue } from '../core/types.ts';
 import { FrameworkError, assert, isRecord, snapshot } from '../core/values.ts';
-import type { DurableStore, StoredRecord } from '../host/types.ts';
+import type { DurableStore, StoredRecord } from '../contracts/ports.ts';
 
 const PERSONA_NAMESPACE = 'context.personas';
 const CONFIGURATION_NAMESPACE = 'context.configurations';

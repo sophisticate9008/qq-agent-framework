@@ -1,4 +1,5 @@
 import { isIP } from 'node:net'
+import { basename, isAbsolute, normalize } from 'node:path'
 
 export interface NativeAdapterConfiguration {
   readonly onebotHttp: {
@@ -15,6 +16,7 @@ export interface NativeAdapterConfiguration {
     readonly enabled: boolean
     readonly endpoint: string
     readonly auth: string
+    readonly localCredentialsPath?: string
   }
   readonly onebotWebhook: {
     readonly enabled: boolean
@@ -40,6 +42,7 @@ export interface PublicAdapterConfiguration {
     readonly enabled: boolean
     readonly endpoint: string
     readonly authConfigured: boolean
+    readonly localAuthConfigured: boolean
   }
   readonly onebotWebhook: {
     readonly enabled: boolean
@@ -148,6 +151,22 @@ function outbound(value: unknown, secretKey: string, validateEndpoint = validate
   return { enabled: parsed.enabled, endpoint, credential: credential(parsed[secretKey]) }
 }
 
+function localCredentialsPath(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4_096
+    || !isAbsolute(value) || normalize(value) !== value || basename(value) !== '.credentials.yaml'
+    || /[\u0000-\u001f\u007f\\]/.test(value)) return invalid()
+  return value
+}
+
+function dshAgent(value: unknown): NativeAdapterConfiguration['dshAgent'] {
+  const parsed = keys(value, ['enabled', 'endpoint', 'auth'], ['localCredentialsPath'])
+  const channel = outbound({ enabled: parsed.enabled, endpoint: parsed.endpoint, auth: parsed.auth }, 'auth')
+  const path = Object.hasOwn(parsed, 'localCredentialsPath') ? localCredentialsPath(parsed.localCredentialsPath) : undefined
+  if (path !== undefined && channel.credential !== '') return invalid()
+  return Object.freeze({ enabled: channel.enabled, endpoint: channel.endpoint, auth: channel.credential,
+    ...(path === undefined ? {} : { localCredentialsPath: path }) })
+}
+
 function webhook(value: unknown): NativeAdapterConfiguration['onebotWebhook'] {
   const parsed = keys(value, ['enabled', 'host', 'port', 'selfId', 'hmac'])
   if (typeof parsed.enabled !== 'boolean' || typeof parsed.host !== 'string' || !loopbackHost(parsed.host)
@@ -177,7 +196,7 @@ export function validateAdapterConfiguration(value: unknown): NativeAdapterConfi
   const onebotWs = Object.hasOwn(parsed, 'onebotWs')
     ? outbound(parsed.onebotWs, 'secret', validateOneBotWebSocketEndpoint)
     : { enabled: false, endpoint: '', credential: '' }
-  const dshAgent = outbound(parsed.dshAgent, 'auth')
+  const dsh = dshAgent(parsed.dshAgent)
   const onebotWebhook = webhook(parsed.onebotWebhook)
   if (onebotWs.enabled && onebotWebhook.enabled) return invalid()
   return Object.freeze({
@@ -185,7 +204,7 @@ export function validateAdapterConfiguration(value: unknown): NativeAdapterConfi
       enabled: onebotHttp.enabled, endpoint: onebotHttp.endpoint, secret: onebotHttp.credential
     }),
     onebotWs: Object.freeze({ enabled: onebotWs.enabled, endpoint: onebotWs.endpoint, secret: onebotWs.credential }),
-    dshAgent: Object.freeze({ enabled: dshAgent.enabled, endpoint: dshAgent.endpoint, auth: dshAgent.credential }),
+    dshAgent: dsh,
     onebotWebhook
   })
 }
@@ -202,6 +221,20 @@ function outboundPatch(
     endpoint: parsed.endpoint,
     [secretKey]: mergeCredential(currentCredential, parsed, secretKey, clearKey)
   }
+}
+
+function dshPatch(current: NativeAdapterConfiguration['dshAgent'], value: unknown): Record<string, unknown> {
+  const parsed = keys(value, ['enabled', 'endpoint'], ['auth', 'clearAuth', 'localCredentialsPath'])
+  const manual = Object.hasOwn(parsed, 'auth') ? credential(parsed.auth) : ''
+  if (Object.hasOwn(parsed, 'clearAuth') && typeof parsed.clearAuth !== 'boolean') return invalid()
+  const hasPath = Object.hasOwn(parsed, 'localCredentialsPath')
+  const path = hasPath ? parsed.localCredentialsPath === '' ? undefined : localCredentialsPath(parsed.localCredentialsPath)
+    : current.localCredentialsPath
+  if (manual !== '' && (parsed.clearAuth === true || hasPath && path !== undefined)) return invalid()
+  const nextPath = manual !== '' || parsed.clearAuth === true && !hasPath ? undefined : path
+  const auth = hasPath && path !== undefined || parsed.clearAuth === true ? '' : manual !== '' ? manual : current.auth
+  return { enabled: parsed.enabled, endpoint: parsed.endpoint, auth,
+    ...(nextPath === undefined ? {} : { localCredentialsPath: nextPath }) }
 }
 
 export function updateAdapterConfiguration(current: NativeAdapterConfiguration, patch: unknown): NativeAdapterConfiguration {
@@ -224,7 +257,7 @@ export function updateAdapterConfiguration(current: NativeAdapterConfiguration, 
       ? outboundPatch(previous.onebotWs.secret, updates.onebotWs, 'secret', 'clearSecret')
       : previous.onebotWs,
     dshAgent: Object.hasOwn(updates, 'dshAgent')
-      ? outboundPatch(previous.dshAgent.auth, updates.dshAgent, 'auth', 'clearAuth')
+      ? dshPatch(previous.dshAgent, updates.dshAgent)
       : previous.dshAgent,
     onebotWebhook
   })
@@ -246,7 +279,8 @@ export function publicAdapterConfiguration(value: NativeAdapterConfiguration): P
     dshAgent: Object.freeze({
       enabled: configuration.dshAgent.enabled,
       endpoint: configuration.dshAgent.endpoint,
-      authConfigured: configuration.dshAgent.auth !== ''
+      authConfigured: configuration.dshAgent.auth !== '' || configuration.dshAgent.localCredentialsPath !== undefined,
+      localAuthConfigured: configuration.dshAgent.localCredentialsPath !== undefined
     }),
     onebotWebhook: Object.freeze({
       enabled: configuration.onebotWebhook.enabled,

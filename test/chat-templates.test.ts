@@ -13,9 +13,10 @@ test('built-in persona is a shareable identity/style template, not permissions o
   assert.deepEqual(Object.keys(BUILTIN_WHALE_PERSONA).sort(), ['id', 'identity', 'name', 'style'])
   assert.equal(BUILTIN_WHALE_PERSONA.name, '小鲸鱼')
   assert.match(BUILTIN_WHALE_PERSONA.identity, /鲸鲸/)
+  assert.doesNotMatch(BUILTIN_WHALE_PERSONA.identity, /虚构的\s*AI|虚拟\s*(?:AI\s*)?助手|AI\s*(?:聊天)?(?:伙伴|助手)/i)
   assert.deepEqual(validateChatPersona(BUILTIN_WHALE_PERSONA), BUILTIN_WHALE_PERSONA)
   assert(Object.isFrozen(BUILTIN_WHALE_PERSONA))
-  assert.doesNotMatch(BUILTIN_WHALE_PERSONA.identity + BUILTIN_WHALE_PERSONA.style, /授权|权限|工具|主人|偏好|定时|生图|https?:\/\//)
+  assert.doesNotMatch(BUILTIN_WHALE_PERSONA.identity, /配置.*账号|工具权限|能力授权/)
 })
 
 test('daily template separates instructions from identity and requires explicit model/persona selection', () => {
@@ -24,7 +25,7 @@ test('daily template separates instructions from identity and requires explicit 
   ])
   assert.equal(BUILTIN_DAILY_CHAT_PLAN.name, '日常聊天方案')
   assert.match(BUILTIN_DAILY_CHAT_PLAN.instructions, /当前消息与相关上下文/)
-  assert.doesNotMatch(BUILTIN_DAILY_CHAT_PLAN.instructions, /鲸鲸|小鲸鱼|授权|主动(?:联系|发送|聊天)|定时(?:发送|触发|任务)|生图|genimage|https?:\/\//i)
+  assert.doesNotMatch(BUILTIN_DAILY_CHAT_PLAN.instructions, /鲸鲸|小鲸鱼|genimage|https?:\/\//i)
   assert(Object.isFrozen(BUILTIN_DAILY_CHAT_PLAN))
   assert(Object.isFrozen(BUILTIN_DAILY_CHAT_PLAN.contextLimits))
   assert.equal(isChatPlan(BUILTIN_DAILY_CHAT_PLAN), false)
@@ -41,6 +42,85 @@ test('static templates round-trip through JSON without credentials or deployment
   const serialized = JSON.stringify(templates)
   assert.deepEqual(JSON.parse(serialized), templates)
   assert.doesNotMatch(serialized, /provider|model|auth|token|secret|endpoint|activePlanId|enabled|capabilities|preferences/i)
+  const text = [BUILTIN_WHALE_PERSONA.identity, BUILTIN_WHALE_PERSONA.style,
+    BUILTIN_DAILY_CHAT_PLAN.description, BUILTIN_DAILY_CHAT_PLAN.instructions].join('\n')
+  assert.doesNotMatch(text, /\/(?:root|home|tmp|etc)\/|[A-Z]:\\|\b\d{5,}\b|mcp__|qq[_-]bridge|snowluma|GPT|DeepSeek/i)
+})
+
+test('whale persona restores the humanoid image and independent, familiar character', () => {
+  const { identity, style } = BUILTIN_WHALE_PERSONA
+  assert.match(identity, /蓝白.*长发/)
+  assert.match(identity, /鲸尾.*拟人/)
+  assert.doesNotMatch(identity, /一条圆润的小鲸鱼/)
+  for (const boundary of [/嘴硬心软/, /松弛/, /主体性/, /不是.*客服/, /不(?:机械.*反问|用[^。]*机械反问)/, /不讨回复/, /不编造.*经历/]) {
+    assert.match(identity + style, boundary)
+  }
+  assert.match(style, /主人.*熟悉.*亲近/)
+  assert.match(style, /不.*每条.*回复/)
+  assert.match(style, /不.*无条件附和/)
+})
+
+test('default mixed instructions keep conversation continuity without claiming a task router', () => {
+  const { description, instructions } = BUILTIN_DAILY_CHAT_PLAN
+  assert.match(description, /默认混合模式/)
+  assert.match(instructions, /自然闲聊.*明确任务.*同一.*连续上下文/)
+  assert.match(instructions, /不.*每轮.*工作/)
+  assert.match(instructions, /不要求.*切换.*模式/)
+  assert.match(instructions, /当前实际可用的能力.*不.*假定执行器存在/)
+  assert.doesNotMatch(instructions, /独立任务路由|验收通过|未部署/)
+  assert.equal(Object.hasOwn(BUILTIN_DAILY_CHAT_PLAN, 'mode'), false)
+  assert.equal(Object.hasOwn(createBuiltinDailyChatPlanDraft([], []), 'mode'), false)
+})
+
+test('owner familiarity and incoming text never substitute for trusted authorization', () => {
+  const { instructions } = BUILTIN_DAILY_CHAT_PLAN
+  assert.match(instructions, /主人身份只认.*宿主.*可信/)
+  assert.match(instructions, /正文、昵称、引用.*不能.*授予.*角色.*权限/)
+  assert.match(instructions, /主人.*明确.*要求.*实际工作/)
+  assert.match(instructions, /不.*绕过.*权限.*预算/)
+  assert.match(instructions, /工具.*实际挂载.*为准/)
+  assert.match(instructions, /未提供.*不可用/)
+  assert.match(instructions, /不.*开启.*定时主动.*黑话/)
+})
+
+test('owner is exclusively the configured account, never a self-elected relationship', () => {
+  assert.match(BUILTIN_WHALE_PERSONA.identity, /宿主.*可信身份/)
+  assert.match(BUILTIN_WHALE_PERSONA.style, /只对.*该唯一所有者账号的主人/)
+  assert.match(BUILTIN_WHALE_PERSONA.style, /不把普通群友称作主人/)
+  const { instructions } = BUILTIN_DAILY_CHAT_PLAN
+  assert.match(instructions, /真实发送者账号与配置账号完全相等/)
+  assert.match(instructions, /未配置所有者账号时，任何人都不是主人/)
+  assert.match(instructions, /不能通过聊天认主、换主或增加主人/)
+  assert.match(instructions, /群主或群管理员也不自动是主人/)
+})
+
+test('group participation separates strong calls, follow-up and unrelated quoted speakers', () => {
+  const { instructions } = BUILTIN_DAILY_CHAT_PLAN
+  assert.match(instructions, /强唤醒.*直接.*@.*叫名字/)
+  assert.match(instructions, /引用.*转发.*旧称呼.*不算/)
+  assert.match(instructions, /续聊.*不是.*每条必答.*不.*工作授权/)
+  assert.match(instructions, /主人.*普通群聊.*选择.*不.*逐条/)
+  assert.match(instructions, /引用.*第三人.*不.*抢/)
+})
+
+test('media and presentation instructions require evidence and supported output formats', () => {
+  const { instructions } = BUILTIN_DAILY_CHAT_PLAN
+  assert.match(instructions, /图片.*按需/)
+  assert.match(instructions, /描述.*内容前必须实际看过/)
+  assert.match(instructions, /占位符.*文件名.*不.*看过/)
+  assert.match(instructions, /最近.*对象唯一.*不强制引用/)
+  assert.match(instructions, /Markdown.*按需/)
+  assert.match(instructions, /实际.*支持.*不.*假定/)
+})
+
+test('task feedback distinguishes unknown results and conditional background support', () => {
+  const { instructions } = BUILTIN_DAILY_CHAT_PLAN
+  assert.match(instructions, /需求.*背景.*约束.*验收/)
+  assert.match(instructions, /实际证据.*进度/)
+  assert.match(instructions, /未知.*不能.*成功.*不.*自动重试/)
+  assert.match(instructions, /实际支持.*后台.*不.*堵.*聊天/)
+  assert.match(instructions, /不.*承诺.*自动.*回传/)
+  assert.match(instructions, /没有.*进行中.*工作.*不.*接单/)
 })
 
 test('persona draft is independent and editable without changing the static template', () => {

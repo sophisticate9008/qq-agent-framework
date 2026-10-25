@@ -1,4 +1,5 @@
 import { accountsFixture, exerciseAccountWorkspace } from './management-accounts-smoke.ts';
+import { exerciseProtocolConnectionDiagnostics } from './management-protocol-status-smoke.ts';
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts';
 import { readNativeChatConfiguration } from '../src/admin/native-configuration-repository.ts';
 import { usageMaintenanceFixture, exerciseUsageMaintenance, exerciseExecutionRecovery, exerciseCapacityRecommendations, exerciseMediaAndInteractions } from './management-recovery-smoke.ts';
@@ -1228,6 +1229,7 @@ async function run(): Promise<void> {
     await page.getByText('聊天暂未就绪。', { exact: true }).waitFor();
     assert.equal(await page.getByRole('heading', { name: '聊天功能', exact: true }).count(), 0);
     await exerciseAssistantAndReadOnlyWork(page, requests);
+    await exerciseProtocolConnectionDiagnostics(page, requests, adaptersCleared.value);
     let pricingSaves = 0;
     await page.route('**/api/chat/usage/pricing', route => {
       if (route.request().method() === 'POST') { pricingSaves++; return route.fulfill({ status: 504, json: { error: 'usage_pricing_operation_unknown' } }); }
@@ -1297,6 +1299,7 @@ async function run(): Promise<void> {
     await writePrivateJson(new URL(`result-${runId}.json`, outputDirectory).pathname, {
       checkedAt: new Date().toISOString(),
       nativeRuntimeRoutes: true,
+      websocketConnectedDiagnosticsAndExplicitReconnectRemainIndependent: true,
       usageExactPreviewAtomicMaintenanceExportUnknownRecovery: true,
       sdkReconciliationAndOriginalRevisionRecoveryNoReplay: true,
       conversationDiagnosticsPartialCoverage: true,

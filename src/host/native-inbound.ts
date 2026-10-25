@@ -2,7 +2,7 @@ import type { AccountScope } from '../contracts/account-scope.ts'
 import type { OneBotWebSocketOptions } from '../adapters/onebot-websocket.ts'
 import { validateOneBotProtocolEventData } from '../adapters/onebot-events.ts'
 import { mapOneBotProtocolObservation } from './native-event-mapping.ts'
-import { isOneBotControlContent, normalizeOneBotMessage } from '../adapters/onebot.ts'
+import { isOneBotControlContent, normalizeOneBotMessage, type OneBotIncomingAsset } from '../adapters/onebot.ts'
 import type { JsonObject } from '../core/types.ts'
 import { FrameworkError } from '../core/values.ts'
 import type { createBridgeHost } from './bridge.ts'
@@ -90,9 +90,22 @@ export function createNativeInboundController(options: {
     async onEvent(event, context) {
       const admittedAt = context.receivedAt
       if (runtime.closed || context.signal.aborted || options.expectedSelfId !== undefined && context.selfId !== options.expectedSelfId) return
-      const normalizedMessage = await normalizeOneBotMessage(event, { selfId: context.selfId, signal: context.signal,
-        ...(runtime.state === 'running' && runtime.media && String(object(event).user_id) !== context.selfId
-          ? { registerIncomingAsset: runtime.media.register } : {}) })
+      const media = runtime.state === 'running' && String(object(event).user_id) !== context.selfId ? runtime.media : undefined
+      let mediaConversationId: string | null = null
+      let normalizedMessage: Awaited<ReturnType<typeof normalizeOneBotMessage>>
+      try {
+        normalizedMessage = await normalizeOneBotMessage(event, { selfId: context.selfId, signal: context.signal,
+          ...(media ? { registerIncomingAsset: (asset: OneBotIncomingAsset, signal: AbortSignal) => {
+            mediaConversationId = asset.conversationId
+            return media.register(asset, signal)
+          } } : {}) })
+      } catch (error) {
+        if (mediaConversationId === null || !(error instanceof FrameworkError) || error.code !== 'NATIVE_CHAT_ACCESS_DENIED') throw error
+        rejected++
+        lastReceipt = { status: 'rejected', errorCode: error.code }
+        activity.record('rejected', mediaConversationId)
+        return
+      }
       if (!normalizedMessage || normalizedMessage.isSelf || runtime.closed || context.signal.aborted) return
       const message: InboundMessage = { ...normalizedMessage, ...(options.accountScope ? { accountScope: options.accountScope } : {}) }
       await checkpoint('message.normalized', { message: json(message), chatState: runtime.state }, context.signal)

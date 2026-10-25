@@ -6,6 +6,7 @@ import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.t
 import { NativeCatalogRecovery } from './native-catalog-recovery.tsx';
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
+import { presentOneBotConnection, type OneBotConnectionSnapshot } from '../lib/onebot-connection-presentation.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CircleAlert, LoaderCircle, MessagesSquare, Plug, RefreshCw, ShieldCheck, Unplug, Workflow } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
@@ -40,14 +41,7 @@ interface AdapterSnapshot {
   readonly outbound: Readonly<Record<OutboundId, OutboundConfiguration>>;
   readonly websocket: OutboundConfiguration;
   readonly webhook: WebhookConfiguration;
-  readonly connection?: {
-    readonly state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
-    readonly selfId: string | null;
-    readonly lastError: string | null;
-    readonly received: number;
-    readonly dropped: number;
-    readonly chatReady: boolean;
-  };
+  readonly connection?: OneBotConnectionSnapshot;
   readonly status: {
     readonly assembled: boolean;
     readonly running: boolean;
@@ -463,7 +457,7 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
       setDraft(toDraft(next));
     } catch (error) {
       recovery.fail(operationToken, error);
-      if (current()) setConnectionError(`未能确认连接操作结果：${errorMessage(error)}。请先重新读取状态；WebSocket 与 HTTP 可能使用不同的密钥。`);
+      if (current()) setConnectionError(`未能确认连接操作结果：${errorMessage(error)}。请先重新读取协议状态，按具体诊断核对；不会自动重复连接操作。`);
     } finally {
       if (current()) { saveController.current = null; setControlling(false); }
     }
@@ -509,20 +503,22 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
   if (!connected) return <>{heading}<ConnectPrompt connect={connect} /></>;
   if (loading) return <>{heading}<Section scrollable title="连接配置"><div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取连接配置</div></Section></>;
   if (!snapshot || !draft) return <>{heading}<Section scrollable title="连接设置暂时不可用" description={loadError || '暂时无法读取连接配置。'}><EmptyState locked title="无法读取连接配置" description="检查管理服务连接后重新读取。" action={<Button variant="outline" onClick={reload}><RefreshCw className="size-3.5" />重试</Button>} /></Section></>;
+  const protocol = snapshot.connection ? presentOneBotConnection(snapshot.connection) : null;
 
   return <>
     {heading}
     <NativeCatalogRecovery recovery={recovery} reading={loading || saving || controlling} onRead={reload} onReleased={() => { setResult('idle'); setFormError(''); }} />
     <ChatRuntimeControls api={api} connected={connected} dirty={dirty} navigate={navigate} onRunningChange={setChatRunning} connectionPanel={<div id="adapter-runtime" className="mt-4 grid gap-3 border-t pt-4">
       <h3 className="text-xs font-medium">协议连接管理</h3>
+      {protocol && <div className="flex flex-wrap items-center gap-2" data-protocol-connection-state={snapshot.connection?.state}><StatusPill tone={protocol.statusTone}>{protocol.statusLabel}</StatusPill><span className="text-xs text-muted-foreground">接收计数 {snapshot.connection?.received}；丢弃计数 {snapshot.connection?.dropped}</span></div>}
       <p className="text-xs leading-6 text-muted-foreground">管理服务启动时，以及聊天停止状态下保存参数后，会自动尝试连接已启用的 WebSocket；连接协议不会调用模型。手动断开将保留到下一次保存、管理服务重启或启动聊天，不会被轮询强行复连；已有连接掉线仍有有限重试。聊天运行期间保存参数不会热切连接。{snapshot.connection?.selfId && <span className="block">自动识别账号：{snapshot.connection.selfId}</span>}</p>
       <div className="flex flex-wrap items-center gap-2">
-      <span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置；聊天停止时将自动尝试连接已启用的 WebSocket。' : chatRunning ? '运行期间保存参数不会热切连接；手动操作协议连接前请先停止聊天。' : snapshot.status.applyAvailable ? '自动连接失败时可手动重试，连接后自动识别账号。' : '当前管理实例没有接入协议连接控制。'}</span>
+      <span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置；聊天停止时将自动尝试连接已启用的 WebSocket。' : chatRunning ? '运行期间保存参数不会热切连接；手动操作协议连接前请先停止聊天。' : snapshot.connection?.state === 'connected' ? '当前协议已连接；维护时可明确重新连接或断开。' : snapshot.status.applyAvailable ? '连接尚未就绪时，可核对具体诊断后手动重试。' : '当前管理实例没有接入协议连接控制。'}</span>
       <Button disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接 WebSocket' : '重试连接 WebSocket'}</Button>
       <Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开 WebSocket</Button>
       </div>
       {connectionError && <p className="text-xs leading-5 text-destructive" role="alert">{connectionError}</p>}
-      {snapshot.connection?.lastError && <p className="text-xs leading-5 text-destructive">协议连接失败或已中断，请检查 WebSocket 地址与专用密钥。</p>}
+      {protocol?.diagnostic && <div className={`grid gap-1 text-xs leading-5 ${protocol.diagnostic.tone === 'error' ? 'text-destructive' : protocol.diagnostic.tone === 'warning' ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'}`} role="status" data-protocol-diagnostic={protocol.diagnostic.category}><strong>{protocol.diagnostic.title}</strong><p>{protocol.diagnostic.message}</p>{protocol.diagnostic.code && <details><summary className="cursor-pointer">最近诊断码</summary><code>{protocol.diagnostic.code}</code></details>}</div>}
     </div>} />
     <div className="grid items-start gap-5 xl:grid-cols-2">
       {definitions.map(definition => {

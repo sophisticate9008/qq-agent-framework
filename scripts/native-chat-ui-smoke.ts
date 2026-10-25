@@ -47,6 +47,7 @@ interface FixtureState {
   readonly posts: Array<{ readonly pathname: string; readonly body: unknown }>;
   application: NativeApplicationSnapshot | null;
   reconciliationVerified: boolean;
+  deploymentReadGate?: Promise<void>;
 }
 
 interface FixtureFiles {
@@ -200,7 +201,12 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
       return { schema: 1, operation: state.application };
     }),
     get('/api/chat/authorization', () => state.authorization),
-    get('/api/chat/deployment', () => state.deployment),
+    get('/api/chat/deployment', async () => {
+      const gate = state.deploymentReadGate;
+      delete state.deploymentReadGate;
+      if (gate) await gate;
+      return state.deployment;
+    }),
     post('/api/chat/authorization', body => {
       assert.deepEqual(Object.keys(body).sort(), ['grants', 'revision', 'version']);
       if (body.revision !== state.authorization.revision) throw new AdminRequestError(409, 'chat_revision_conflict');
@@ -330,6 +336,25 @@ async function showAdvancedDeployment(page: Page): Promise<void> {
   const summary = page.locator('#dsh-deployment').getByText('手动部署/远程 DSH（高级）', { exact: true });
   await summary.waitFor();
   if (!await summary.evaluate(element => element.closest('details')?.open === true)) await summary.click();
+}
+
+async function rereadDeployment(page: Page, state: FixtureState): Promise<void> {
+  const card = page.locator('#dsh-deployment');
+  let release = () => {};
+  state.deploymentReadGate = new Promise<void>(resolve => { release = resolve; });
+  try {
+    await card.getByRole('button', { name: '重新读取', exact: true }).click();
+    const loading = card.getByText('正在读取应用设置', { exact: true });
+    // Hold this GET until the old form has actually unmounted. Its details state
+    // cannot stand in for the replacement form's state after the read completes.
+    await loading.waitFor();
+    release();
+    await loading.waitFor({ state: 'hidden' });
+    await showAdvancedDeployment(page);
+  } finally {
+    delete state.deploymentReadGate;
+    release();
+  }
 }
 
 async function acknowledgeDeploymentRecovery(page: Page, state: FixtureState): Promise<void> {
@@ -465,8 +490,7 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   const rejectedApply = state.posts.filter(request => request.pathname === '/api/chat/deployment/apply').at(-1)?.body;
   assert(isRecord(rejectedApply));
   assert.equal(rejectedApply.targetRevision, approved);
-  await card.getByRole('button', { name: '重新读取', exact: true }).click();
-  await showAdvancedDeployment(page);
+  await rereadDeployment(page, state);
   await acknowledgeDeploymentRecovery(page, state);
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), true);
   await card.getByRole('button', { name: '预览变更', exact: true }).click();
@@ -488,8 +512,7 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   assert.equal(countPosts(state, '/api/chat/deployment/apply'), 3);
   assert.equal(state.appliedCount, 1);
   state.applyUnknown = false;
-  await card.getByRole('button', { name: '重新读取', exact: true }).click();
-  await showAdvancedDeployment(page);
+  await rereadDeployment(page, state);
   await acknowledgeDeploymentRecovery(page, state);
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), true);
   for (const outcome of ['unknown', 'conflict'] as const) {
@@ -504,8 +527,7 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
     await page.waitForTimeout(250);
     assert.equal(countPosts(state, '/api/chat/deployment'), before + 1);
     state.deploymentOutcome = 'success';
-    await card.getByRole('button', { name: '重新读取', exact: true }).click();
-    await showAdvancedDeployment(page);
+    await rereadDeployment(page, state);
     await acknowledgeDeploymentRecovery(page, state);
     await input(card, '模型最大输出').waitFor();
     await page.waitForFunction(() => !document.querySelector('#dsh-deployment [role="alert"]'));

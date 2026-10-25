@@ -21,7 +21,7 @@ import { createBuiltinDailyChatPlanDraft } from '../../src/host/chat-templates.t
 import { ChatCapabilityManager } from './chat-capability-manager.tsx';
 import { VirtualList } from './virtual-list.tsx';
 import { DshDeploymentManager } from './dsh-deployment-manager.tsx';
-import { modelReasoningEffortLabel, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
+import { modelCapabilitiesUnavailableMessage, modelReasoningEffortLabel, modelReasoningEffortOptions, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
 
 import { CHAT_PLAN_LIMITS, DEFAULT_CHAT_CONTEXT_LIMITS, isChatContextLimit, isChatPlanReasoningEffort } from '../../src/contracts/chat-plans.ts';
 import { parsePlan, parsePlanCatalog, type ChatPlanCatalogSnapshot, type ChatPlanDraft } from '../lib/chat-plans.ts';
@@ -170,11 +170,12 @@ export function ChatPlanManager(props: PageProps) {
   const currentCapabilities = connected && capabilitiesView?.api === api && capabilitiesView.generation === capabilitiesEpoch.current
     && capabilitiesView.provider === draft.provider && capabilitiesView.model === draft.model ? capabilitiesView : null;
   const supportedEfforts = currentCapabilities?.value?.state === 'available' ? currentCapabilities.value.reasoningEfforts : [];
+  const reasoningOptions = modelReasoningEffortOptions(currentCapabilities?.value ?? null, draft.reasoningEffort);
   const effortSupported = supportedEfforts.some(effort => effort === draft.reasoningEffort);
   const reasoningSupport = !draft.provider || !draft.model ? '先选择提供方和模型，再读取实际支持档位。'
     : currentCapabilities?.value?.state === 'available' ? `当前模型支持：${supportedEfforts.map(modelReasoningEffortLabel).join('、')}。`
       : currentCapabilities?.loading || !currentCapabilities ? '正在读取当前模型支持的档位…'
-        : currentCapabilities.error || '暂未获得当前模型的支持声明，不能选择或猜测档位。';
+        : currentCapabilities.error || modelCapabilitiesUnavailableMessage(currentCapabilities.value?.missingReasons ?? []);
   const deletionBlockedReason = editingDisabled ? '正在读取、保存或等待结果核对，暂不能删除。'
     : selectedPlan?.id === catalog?.activePlanId ? catalog?.plans.length === 1 ? '当前只有这一份启用方案，请先新建方案并切换启用，再删除。' : '当前方案正在启用，请先选择其他方案启用并保存。'
       : dirty ? '请先保存或撤销当前更改，再删除。'
@@ -591,9 +592,9 @@ export function ChatPlanManager(props: PageProps) {
           <Field label={nativeFormMetadata.plan.fields.instructions} description="只放本方案的回复约束；人设正文、能力权限和用户偏好在各自页面管理。"><Textarea value={draft.instructions} maxLength={CHAT_PLAN_LIMITS.instructions} disabled={editingDisabled} className="h-44 resize-none leading-6" placeholder="描述这份聊天方案如何组织回复" onChange={event => update('instructions', event.target.value)} /></Field>
           {creating && !draft.personaId && <p className="text-xs leading-5 text-muted-foreground" role="status">尚未关联人设：可先在人设库使用内置小鲸鱼并保存，或选择其他已登记人设。模板不会自动创建人设。</p>}
           <div className="grid gap-5 sm:grid-cols-2"><Field label={nativeFormMetadata.plan.fields.persona} description="身份与表达风格在人设库中独立维护。"><div className="flex gap-2"><select className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm" value={draft.personaId} disabled={editingDisabled || personas.length === 0} onChange={event => update('personaId', event.target.value)}><option value="" disabled>{personas.length === 0 ? '请先创建人设' : '选择人设'}</option>{personas.map(persona => <option key={persona.id} value={persona.id}>{persona.name}</option>)}</select><Button type="button" variant="outline" onClick={() => navigate('persona')}>管理人设</Button></div></Field><Field label={nativeFormMetadata.plan.fields.reasoning} description={reasoningSupport}>
-            <select className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={effortSupported ? draft.reasoningEffort : ''} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}>
+            <select className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={draft.reasoningEffort} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}>
               <option value="" disabled>{supportedEfforts.length === 0 ? '尚无已确认档位' : '选择当前模型支持的档位'}</option>
-              {supportedEfforts.map(effort => <option key={effort} value={effort}>{modelReasoningEffortLabel(effort)}</option>)}
+              {reasoningOptions.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
             </select>
             {draft.reasoningEffort && !effortSupported && <p className="text-xs leading-5 text-muted-foreground">草稿原值“{modelReasoningEffortLabel(draft.reasoningEffort)}”仍保留，当前未确认支持；不会自动降档。支持情况未知时，已有方案可原样保留模型和档位，仅保存其他字段。</p>}
             <Button type="button" size="sm" variant="ghost" className="justify-self-start" disabled={editingDisabled || !draft.provider || !draft.model || currentCapabilities?.loading === true} onClick={invalidateCapabilities}><RefreshCw className={currentCapabilities?.loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取支持情况</Button>

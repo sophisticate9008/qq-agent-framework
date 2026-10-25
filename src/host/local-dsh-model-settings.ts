@@ -82,6 +82,11 @@ function compose(layers: readonly unknown[]): readonly Record<string, unknown>[]
   catch { return missing() }
 }
 
+function selectReasoningCandidates<T extends { readonly api: unknown }>(candidates: readonly T[], api: string): readonly T[] {
+  const matching = candidates.filter(candidate => candidate.api === api)
+  return matching.length > 0 ? matching : candidates
+}
+
 /** Generated conversation caps are deployment limits, not new observations of the model's capacity. */
 function managedConversationRoutes(entries: readonly Record<string, unknown>[]): ReadonlySet<string> {
   const routes = new Set<string>()
@@ -118,11 +123,10 @@ export async function readLocalDshModelCapabilities(provider: NativeModelProvide
     }
     const base = canonicalBase(provider.baseUrl)
     if (base === null) return unavailable('model_metadata_not_observed')
-    const candidates: unknown[] = []
+    const candidates: { api: unknown; reasoningEfforts: unknown; contextWindow: unknown; maxTokens: unknown }[] = []
     for (const [routeId, route] of Object.entries(entries[0]!.config.providers)) {
       if (generatedRoutes.has(routeId)) continue
-      if (!isRecord(route) || route.api !== modelProviderApi(provider)
-        || canonicalBase(route.baseURL) !== base || !Array.isArray(route.models)) continue
+      if (!isRecord(route) || canonicalBase(route.baseURL) !== base || !Array.isArray(route.models)) continue
       for (const model of route.models) {
         if (!isRecord(model) || model.id !== modelId) continue
         let selected = model
@@ -134,12 +138,13 @@ export async function readLocalDshModelCapabilities(provider: NativeModelProvide
             selected = { ...model, ...override }
           }
         }
-        candidates.push({ reasoningEfforts: selected.reasoningEfforts, contextWindow: selected.contextWindow ?? route.defaultContextWindow, maxTokens: selected.maxTokens ?? route.defaultMaxTokens })
+        candidates.push({ api: route.api, reasoningEfforts: selected.reasoningEfforts, contextWindow: selected.contextWindow ?? route.defaultContextWindow, maxTokens: selected.maxTokens ?? route.defaultMaxTokens })
       }
     }
     if (candidates.length === 0) return unavailable('model_metadata_not_observed')
-    if (candidates.some(candidate => !isRecord(candidate) || !isRecord(candidates[0]) || !isDeepStrictEqual(candidate.reasoningEfforts, candidates[0].reasoningEfforts))) return unavailable('model_metadata_conflict')
-    const candidate = candidates[0]
+    const reasoningCandidates = selectReasoningCandidates(candidates, modelProviderApi(provider))
+    if (reasoningCandidates.some(candidate => !isRecord(candidate) || !isRecord(reasoningCandidates[0]) || !isDeepStrictEqual(candidate.reasoningEfforts, reasoningCandidates[0].reasoningEfforts))) return unavailable('model_metadata_conflict')
+    const candidate = reasoningCandidates[0]
     if (!isRecord(candidate)) return unavailable('model_metadata_invalid')
     const declared = candidate.reasoningEfforts
     const capacity = candidates.every(item => isRecord(item) && item.contextWindow === candidate.contextWindow && item.maxTokens === candidate.maxTokens) ? recommendChatCapacity(candidate) : null
@@ -202,8 +207,7 @@ export async function resolveLocalDshModelSettings(configuration: NativeChatConf
     }
     if (candidates.length === 0 || candidates.some(candidate => candidate.settings.contextWindow !== candidates[0]!.settings.contextWindow
       || candidate.settings.maxTokens !== candidates[0]!.settings.maxTokens)) missing()
-    const matchingApi = candidates.filter(candidate => candidate.api === modelProviderApi(provider))
-    const reasoningCandidates = matchingApi.length > 0 ? matchingApi : candidates
+    const reasoningCandidates = selectReasoningCandidates(candidates, modelProviderApi(provider))
     if (reasoningCandidates.some(candidate => !isDeepStrictEqual(candidate.settings.inputModalities ?? ['text'], reasoningCandidates[0]!.settings.inputModalities ?? ['text'])))
       throw new FrameworkError('LOCAL_DSH_MODEL_INPUT_UNAVAILABLE', 'The selected model input metadata is ambiguous.')
     if (reasoningCandidates.some(candidate => !isDeepStrictEqual(candidate.reasoning, reasoningCandidates[0]!.reasoning))) reasoningMissing()

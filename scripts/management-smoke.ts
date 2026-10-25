@@ -1,5 +1,6 @@
 import { accountsFixture, exerciseAccountWorkspace } from './management-accounts-smoke.ts';
 import { exerciseProtocolConnectionDiagnostics } from './management-protocol-status-smoke.ts';
+import { exerciseModelReasoningCapabilities } from './management-model-capabilities-smoke.ts';
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts';
 import { readNativeChatConfiguration } from '../src/admin/native-configuration-repository.ts';
 import { usageMaintenanceFixture, exerciseUsageMaintenance, exerciseExecutionRecovery, exerciseCapacityRecommendations, exerciseMediaAndInteractions } from './management-recovery-smoke.ts';
@@ -340,7 +341,8 @@ async function exerciseBuiltinDraft(page: Page, runtimeDirectory: string, reques
       assert.equal(await field(page, label).locator('select').inputValue(), '');
     }
     const reasoning = field(page, '思考强度');
-    assert.equal(await reasoning.locator('select').inputValue(), '');
+    assert.equal(await reasoning.locator('select').inputValue(), 'low');
+    assert.equal(await reasoning.locator('option[value="low"]').isDisabled(), true);
     assert.equal(await reasoning.locator('select').isDisabled(), true);
     await reasoning.getByText(/草稿原值“low”仍保留/).waitFor();
     for (const label of ['群聊上下文', '私聊上下文']) {
@@ -1230,6 +1232,7 @@ async function run(): Promise<void> {
     assert.equal(await page.getByRole('heading', { name: '聊天功能', exact: true }).count(), 0);
     await exerciseAssistantAndReadOnlyWork(page, requests);
     await exerciseProtocolConnectionDiagnostics(page, requests, adaptersCleared.value);
+    await exerciseModelReasoningCapabilities(page, requests, fixtureProviders);
     let pricingSaves = 0;
     await page.route('**/api/chat/usage/pricing', route => {
       if (route.request().method() === 'POST') { pricingSaves++; return route.fulfill({ status: 504, json: { error: 'usage_pricing_operation_unknown' } }); }
@@ -1300,6 +1303,7 @@ async function run(): Promise<void> {
       checkedAt: new Date().toISOString(),
       nativeRuntimeRoutes: true,
       websocketConnectedDiagnosticsAndExplicitReconnectRemainIndependent: true,
+      reasoningRetainsCurrentValueAndRestoresOnlyRealSupportWithLateReadsIsolated: true,
       usageExactPreviewAtomicMaintenanceExportUnknownRecovery: true,
       sdkReconciliationAndOriginalRevisionRecoveryNoReplay: true,
       conversationDiagnosticsPartialCoverage: true,

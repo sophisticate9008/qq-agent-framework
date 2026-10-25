@@ -99,6 +99,62 @@ test('actual model discovery and deployment use identical layered static data wi
   assert('missingReasons' in blocked && blocked.missingReasons.includes('dsh_explicit_layers_required'))
 })
 
+test('model capabilities and deployment share API preference, fallback and conflict rules without using managed caps', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-model-capabilities-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const profilePath = join(directory, 'cordis.patch.yml')
+  const target = { profilePath, credentialsPath: join(directory, '.credentials.yaml'), schemaVersion: '0.2.1-rc.2' as const }
+  const defaults = await new NativeConfigurationRepository(directory).read()
+  const provider = { id: 'selected', name: 'Selected', enabled: true, api: 'openai-responses',
+    baseUrl: 'https://models.example.test/v1/', apiKey: 'synthetic-key', models: [{ id: 'model', name: 'Model' }] }
+  const configuration: NativeChatConfiguration = { ...defaults, providers: [provider],
+    catalog: { activePlanId: 'plan', plans: [{ id: 'plan', name: 'Plan', description: '', instructions: 'Be concise.',
+      personaId: 'persona', provider: provider.id, model: 'model', reasoningEffort: 'high' }] },
+    deployment: { ...defaults.deployment, target, modelSettings: null } }
+  const model = { id: 'model', contextWindow: 128_000, maxTokens: 4096, reasoningEfforts: { off: 'off', high: 'high' } }
+  const route = { api: 'openai-completions', baseURL: 'https://models.example.test/v1', models: [model] }
+  const generated = 'qqaf-' + 'a'.repeat(24) + '-group'
+  async function profile(routes: Record<string, unknown>, managed = false) {
+    await writeFile(profilePath, '- insert: ' + JSON.stringify([
+      { id: 'provider', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: routes } },
+      ...(managed ? [{ id: 'qqaf-preset-' + 'a'.repeat(24) + '-group', name: '@deepseek-ai/dsh-agent-preset',
+        config: { id: generated, name: 'Native chat (group)', plugins: [] } }] : [])
+    ]) + '\n', { mode: 0o600 })
+    return readLocalDshModelCapabilities(provider, 'model', target)
+  }
+  const fallback = await profile({ observed: route })
+  assert.equal(fallback.state, 'available')
+  assert.deepEqual(fallback.reasoningEfforts, ['off', 'high'])
+  assert.equal(fallback.capacity?.contextWindow, 128_000)
+  assert.deepEqual((await resolveLocalDshModelSettings(configuration, target)).modelSettings.reasoningEfforts, model.reasoningEfforts)
+
+  const generatedRoute = { ...route, api: provider.api,
+    models: [{ ...model, contextWindow: 64_000, reasoningEfforts: { low: 'low' } }] }
+  const withManaged = await profile({ observed: route, [generated]: generatedRoute }, true)
+  assert.deepEqual(withManaged.reasoningEfforts, ['off', 'high'])
+  assert.equal(withManaged.capacity?.contextWindow, 128_000)
+  assert.equal((await resolveLocalDshModelSettings(configuration, target)).modelSettings.contextWindow, 128_000)
+
+  const exact = { ...route, api: provider.api, models: [{ ...model, reasoningEfforts: { high: 'exact-high' } }] }
+  assert.deepEqual((await profile({ observed: route, exact })).reasoningEfforts, ['high'])
+  assert.deepEqual((await resolveLocalDshModelSettings(configuration, target)).modelSettings.reasoningEfforts, { high: 'exact-high' })
+
+  const conflicting = { ...route, models: [{ ...model, reasoningEfforts: { low: 'low' } }] }
+  assert.deepEqual((await profile({ observed: route, conflicting })).missingReasons, ['model_metadata_conflict'])
+  await assert.rejects(resolveLocalDshModelSettings(configuration, target), { code: 'LOCAL_DSH_MODEL_REASONING_UNAVAILABLE' })
+  const conflictingExact = { ...conflicting, api: provider.api }
+  assert.deepEqual((await profile({ observed: route, exact, conflictingExact })).missingReasons, ['model_metadata_conflict'])
+
+  const capacityConflict = await profile({ observed: route,
+    differentCapacity: { ...route, models: [{ ...model, contextWindow: 256_000 }] } })
+  assert.equal(capacityConflict.state, 'available')
+  assert.deepEqual(capacityConflict.reasoningEfforts, ['off', 'high'])
+  assert.equal(capacityConflict.capacity, undefined)
+  assert.deepEqual((await profile({ [generated]: generatedRoute }, true)).missingReasons, ['model_metadata_not_observed'])
+  assert.deepEqual((await profile({ unknown: { ...route, models: [{ id: 'model', contextWindow: 128_000, maxTokens: 4096 }] } })).missingReasons,
+    ['model_reasoning_metadata_unknown'])
+})
+
 test('actual local process discovery validates composed layers before returning a writable target', { skip: process.platform !== 'linux', timeout: 15_000 }, async context => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-static-discovery-'))
   context.after(() => rm(directory, { recursive: true, force: true }))

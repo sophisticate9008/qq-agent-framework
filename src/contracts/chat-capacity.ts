@@ -19,9 +19,10 @@ export function recommendChatCapacity(metadata: unknown): ChatCapacityRecommenda
   const maxTokens = value.maxTokens
   if (typeof contextWindow !== 'number' || typeof maxTokens !== 'number' || !Number.isSafeInteger(contextWindow)
     || !Number.isSafeInteger(maxTokens) || maxTokens <= 0 || contextWindow <= maxTokens || contextWindow > 16_777_216) return null
-  const group = Math.max(maxTokens + 1, Math.floor(contextWindow * 0.75))
-  return Object.freeze({ source: 'model-metadata', contextWindow, maxTokens, recommended: Object.freeze({ group, private: contextWindow }),
-    compaction: Object.freeze({ groupHeadroomTokens: chatCompactionHeadroom(group, maxTokens), privateHeadroomTokens: chatCompactionHeadroom(contextWindow, maxTokens) }) })
+  const group = Math.max(maxTokens + 1, Math.floor(contextWindow * 0.4))
+  const privateContext = Math.max(maxTokens + 1, Math.floor(contextWindow * 0.7))
+  return Object.freeze({ source: 'model-metadata', contextWindow, maxTokens, recommended: Object.freeze({ group, private: privateContext }),
+    compaction: Object.freeze({ groupHeadroomTokens: chatCompactionHeadroom(group, maxTokens), privateHeadroomTokens: chatCompactionHeadroom(privateContext, maxTokens) }) })
 }
 export function parseChatCapacityRecommendation(input: unknown): ChatCapacityRecommendation | null {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) return null

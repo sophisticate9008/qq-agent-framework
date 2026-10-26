@@ -7,7 +7,8 @@ test('known capacity produces group/private recommendations and compaction space
     const result = recommendChatCapacity({ contextWindow, maxTokens })!
     assert(result)
     assert(result.recommended.group > maxTokens && result.recommended.group <= contextWindow)
-    assert.equal(result.recommended.private, contextWindow)
+    assert.equal(result.recommended.group, Math.max(maxTokens + 1, Math.floor(contextWindow * 0.4)))
+    assert.equal(result.recommended.private, Math.max(maxTokens + 1, Math.floor(contextWindow * 0.7)))
     for (const limit of Object.values(result.recommended)) assert(limit - maxTokens - chatCompactionHeadroom(limit, maxTokens) > 0)
     assert.deepEqual(parseChatCapacityRecommendation(result), result)
   }

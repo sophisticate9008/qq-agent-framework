@@ -6,8 +6,16 @@ import { checkSourceRules } from './source-rules.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const excluded = new Set(['.git', 'node_modules', 'runtime', 'state', 'coverage', 'dist']);
-// Offline design previews use browser scripts without a build step; application code remains TypeScript.
-const authoredJavaScriptDirectories = ['docs/design/full-console/'];
+// Directory exceptions are maintained independently of the CI implementation.
+const authoredJavaScriptDirectories = fs.readFileSync(path.join(root, '.ci-js-ignore'), 'utf8')
+  .split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#')).map(directory => {
+    const normalized = directory.replace(/\/$/, '');
+    if (!normalized || normalized.split('/').some(part => !part || part === '.' || part === '..')
+      || /[\\:*?\[\]{}]/.test(normalized)) {
+      throw new Error(`.ci-js-ignore: expected a repository-relative directory: ${directory}`);
+    }
+    return `${normalized}/`;
+  });
 const findings: string[] = [];
 let checked = 0;
 

@@ -204,6 +204,11 @@ export function createNativeApplicationCoordinator(options: {
         status = await check();
       }
       if (status.configurationCompatibility.state === 'blocked') {
+        // Earlier effects are confirmed. Preview cannot submit a session fork;
+        // a failed preflight must not turn a completed deployment into unknown.
+        sideEffectStarted = false;
+        lastPhase = 'migrate';
+        await update(id, { phase: 'migrate', phaseState: 'pending' });
         const preview = await withDeadline({ signal, timeoutMs: 30_000, code: 'APPLICATION_MIGRATION_PREVIEW_UNAVAILABLE',
           run: phaseSignal => options.ports.previewMigration(currentRevisions, phaseSignal) });
         if (preview.state === 'blocked') { await blocked(preview.missingReasons); return; }

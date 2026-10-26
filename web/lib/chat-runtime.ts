@@ -80,6 +80,7 @@ const reasons: Readonly<Record<string, { readonly text: string; readonly page: P
   APPLICATION_PREPARATION_UNVERIFIED: { text: '自动识别的设置或版本未通过核验，请重新读取并检查应用条件。', page: 'adapters' },
   APPLICATION_DEPLOYMENT_UNCONFIRMED: { text: 'DSH 配置写入或加载尚未确认，请核对实际结果；不会再次应用。', page: 'adapters' },
   APPLICATION_MIGRATION_PREVIEW_UNAVAILABLE: { text: '无法获得保留上下文的会话衔接预览，尚未提交衔接。', page: 'adapters' },
+  NATIVE_SESSION_MIGRATION_UNSETTLED: { text: '旧会话仍有处理或发送结果未确认，暂时无法应用新方案；请到会话页查看对应记录。', page: 'sessions' },
   APPLICATION_MIGRATION_UNCONFIRMED: { text: '会话衔接尚未全部确认，已停止后续启动，不会重建或清空会话。', page: 'adapters' },
   APPLICATION_START_UNCONFIRMED: { text: '启动聊天尚未确认，请核对实际运行结果；不会再次启动。', page: 'adapters' },
   active_plan_or_persona_missing: { text: '先选择聊天方案，并为方案关联人设。', page: 'model' },

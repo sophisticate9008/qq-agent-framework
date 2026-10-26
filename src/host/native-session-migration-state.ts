@@ -286,9 +286,19 @@ export function verifyMigrationQuiescence(store: DurableStore, conversations: Re
         scoped ||= conversations.has(String(value.conversationId))
       }
       if (!scoped) continue
+      // AGENT_UNKNOWN is a completed ingress receipt, not a live dispatch. Keep
+      // its uncertain acceptance history; execution/outbox checks below and the
+      // DSH fork preview still require the source session and queues to be idle.
+      const settledAgentReceipt = namespace === 'host.inbox' && value.status === 'unknown'
+        && value.errorCode === 'AGENT_UNKNOWN' && reference(value.eventId)
+        && value.event !== null && typeof value.event === 'object' && !Array.isArray(value.event)
+        && value.event.type === 'message.received' && value.event.id === value.eventId
+        && value.event.conversationId === value.scope
       if (namespace === 'host.executions') {
         if (value.schema !== 1 || value.isolated !== false
-          || typeof value.status !== 'string' || !['completed', 'failed', 'rejected', 'timed-out'].includes(value.status)
+          // Late completion releases execution isolation while retaining the original
+          // unknown delivery outcome. That history is not an active model request.
+          || typeof value.status !== 'string' || !['completed', 'failed', 'rejected', 'timed-out', 'unknown'].includes(value.status)
           || typeof value.externalStatus !== 'string' || !['completed', 'failed', 'rejected', 'cancelled'].includes(value.externalStatus)
           || typeof value.cancelStatus !== 'string' || !['not-requested', 'unavailable', 'rejected', 'confirmed'].includes(value.cancelStatus)
           || typeof value.noticeStatus !== 'string' || !['not-requested', 'unavailable', 'confirmed', 'rejected'].includes(value.noticeStatus)) {
@@ -299,7 +309,7 @@ export function verifyMigrationQuiescence(store: DurableStore, conversations: Re
         || namespace === 'outbox' && !['confirmed', 'rejected'].includes(String(value.status))
         || namespace === 'host.replies' && value.status === 'waiting'
         || namespace === 'tasks' && ['waiting', 'running', 'unknown'].includes(String(value.status))
-        || namespace === 'host.inbox' && !['accepted', 'rejected'].includes(String(value.status))) {
+        || namespace === 'host.inbox' && !settledAgentReceipt && !['accepted', 'rejected'].includes(String(value.status))) {
         migrationFailure('NATIVE_SESSION_MIGRATION_UNSETTLED')
       }
     }

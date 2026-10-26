@@ -135,6 +135,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
   const [auxiliaryWarnings, setAuxiliaryWarnings] = useState<readonly string[]>([]);
   const [writeError, setWriteError] = useState('');
   const [fieldError, setFieldError] = useState('');
+  const [reasoningError, setReasoningError] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [reloadVersion, setReloadVersion] = useState(0);
   const [deleteConfirmed, setDeleteConfirmed] = useState(false);
@@ -179,10 +180,15 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
   const supportedEfforts = currentCapabilities?.value?.state === 'available' ? currentCapabilities.value.reasoningEfforts : [];
   const reasoningOptions = modelReasoningEffortOptions(currentCapabilities?.value ?? null, draft.reasoningEffort);
   const effortSupported = supportedEfforts.some(effort => effort === draft.reasoningEffort);
+  useEffect(() => {
+    if (effortSupported) setReasoningError(false);
+  }, [effortSupported]);
   const reasoningSupport = !draft.provider || !draft.model ? '先选择提供方和模型，再读取实际支持档位。'
     : currentCapabilities?.value?.state === 'available' ? `当前模型支持：${supportedEfforts.map(modelReasoningEffortLabel).join('、')}。`
       : currentCapabilities?.loading || !currentCapabilities ? '正在读取当前模型支持的档位…'
         : currentCapabilities.error || modelCapabilitiesUnavailableMessage(currentCapabilities.value?.missingReasons ?? []);
+  const validationError = fieldError || (reasoningError && !effortSupported
+    ? currentCapabilities?.value?.state === 'available' ? '当前模型不支持这个思考强度，请从列表选择。' : reasoningSupport : '');
   const deletionBlockedReason = editingDisabled ? '正在读取、保存或等待结果核对，暂不能删除。'
     : selectedPlan?.id === catalog?.activePlanId ? catalog?.plans.length === 1 ? '当前只有这一份启用方案，请先新建方案并切换启用，再删除。' : '当前方案正在启用，请先选择其他方案启用并保存。'
       : dirty ? '请先保存或撤销当前更改，再删除。'
@@ -436,6 +442,8 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
 
   async function save(options: { readonly activate?: boolean; readonly signal?: AbortSignal } = {}): Promise<ChatPlanCatalogSnapshot | null> {
     if (!catalog || catalogRef.current !== catalog || saving || blocked || loading || updatingChat && !options.activate || operationBlocked.current || saveController.current || connection.current.api !== api || !connection.current.connected) return null;
+    setFieldError('');
+    setReasoningError(false);
     if (!dirty && (!options.activate || catalog.activePlanId === draft.id)) return catalog;
     const normalized = { ...draft, id: draft.id.trim(), name: draft.name.trim(), personaId: draft.personaId.trim(), provider: draft.provider.trim(), model: draft.model.trim(), reasoningEffort: draft.reasoningEffort, contextLimits: { group: Number(groupContext), private: Number(privateContext) } };
     if (!normalized.id || !normalized.name || !normalized.personaId || !normalized.provider || !normalized.model || !normalized.reasoningEffort) {
@@ -480,7 +488,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
       && selectedPlan.provider === normalized.provider && selectedPlan.model === normalized.model
       && selectedPlan.reasoningEffort === normalized.reasoningEffort && (options.activate ? normalized.id : pendingActivePlanId) === catalog.activePlanId;
     if (!capabilitiesConfirmed && !preservingUnknownModel) {
-      setFieldError('请先确认当前模型的支持情况，并明确选择该模型支持的思考强度；原草稿值会保留。');
+      setReasoningError(true);
       return null;
     }
     const plans = creating ? [...catalog.plans, normalized] : catalog.plans.map(plan => plan.id === selectedId ? normalized : plan);
@@ -636,7 +644,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
         {!registeredSelection && <div className="rounded-lg border border-dashed px-3 py-2.5 text-xs leading-5 text-muted-foreground">{draft.provider ? '这份方案的提供方或模型尚未登记、已停用。原有内容会保留，请在“模型提供方”补齐后再启用。' : '先在“模型提供方”添加连接和模型，再回来选择。'}</div>}
         <PlanField stacked id="chat-plan-instructions" label={nativeFormMetadata.plan.fields.instructions} tip="只放本方案的回复约束；人设正文、能力权限和用户偏好在各自页面管理。"><Textarea id="chat-plan-instructions" value={draft.instructions} maxLength={CHAT_PLAN_LIMITS.instructions} disabled={editingDisabled} rows={9} className="min-h-48 resize-y leading-5" placeholder="描述这份聊天方案如何组织回复" onChange={event => update('instructions', event.target.value)} /></PlanField>
 
-          {fieldError && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />{fieldError}</div>}
+          {validationError && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />{validationError}</div>}
           {writeError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown') && <Button size="sm" variant="outline" onClick={() => setReloadVersion(version => version + 1)}>重新载入</Button>}</div>}
         </div>;
 
@@ -659,7 +667,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
       <PlanField id="overview-chat-model" label="聊天模型"><select id="overview-chat-model" className="h-[27px] w-full min-w-0 rounded border bg-background px-2" value={JSON.stringify([draft.provider, draft.model])} disabled={editingDisabled} onChange={event => { const selected = providers.flatMap(provider => provider.enabled ? provider.models.map(model => ({ provider: provider.id, model: model.id })) : []).find(item => JSON.stringify([item.provider, item.model]) === event.target.value); if (!selected) return; invalidateCapabilities(); setDraft(current => ({ ...current, provider: selected.provider, model: selected.model })); setFieldError(''); setWriteError(''); setSaveState('idle'); }}><option value={JSON.stringify([draft.provider, draft.model])} disabled>{selectedModel ? selectedModel.name : '选择聊天模型'}</option>{providers.filter(provider => provider.enabled).flatMap(provider => provider.models.filter(model => provider.id !== draft.provider || model.id !== draft.model).map(model => <option key={JSON.stringify([provider.id, model.id])} value={JSON.stringify([provider.id, model.id])}>{model.name}</option>))}</select></PlanField>
       <PlanField id="overview-chat-reasoning" label="思考强度" tip={reasoningSupport}><select id="overview-chat-reasoning" className="h-[27px] w-full min-w-0 rounded border bg-background px-2" value={draft.reasoningEffort} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}><option value="" disabled>{supportedEfforts.length === 0 ? '尚无已确认档位' : '选择支持的档位'}</option>{reasoningOptions.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{modelReasoningEffortLabel(option.value)}{option.disabled ? '（未确认）' : ''}</option>)}</select></PlanField>
     </div>
-    {(fieldError || writeError || loadError) && <p className="text-xs text-destructive" role="alert">{fieldError || writeError || loadError}</p>}
+    {(validationError || writeError || loadError) && <p className="text-xs text-destructive" role="alert">{validationError || writeError || loadError}</p>}
     {props.children}
     <div className="row border-t pt-2"><Button size="sm" variant="ghost" disabled={!dirty || editingDisabled} onClick={reset}>撤销</Button><DshDeploymentManager compact minimal api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" configurationActive={catalog.activePlanId === draft.id} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /></div>
   </div>;

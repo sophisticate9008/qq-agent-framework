@@ -62,6 +62,10 @@ GET /api/chat/application?id=<原 operationId>
 
 ## 会话迁移、重置与执行核对
 
+应用中的会话衔接预览单独记为 `migrate/pending`。预览条件不满足时记录 blocked 和实际原因，不将此前已确认的配置应用改记为 unknown。
+
+会话衔接按实际执行占用检查：旧执行虽然保留 unknown，但已收到模型终态、解除隔离且取消与通知均无未决动作时，不再阻止衔接。已结束分发的 `AGENT_UNKNOWN` 入站回执保留原样，不作为持续占用；其他未知入站仍阻止衔接。执行、发送、回复和任务仍分别检查，DSH 预览及提交继续核对源会话与队列空闲、历史游标和内容摘要。此判断不补发旧消息，也不将旧回执改成成功。
+
 历史会话不因配置目录保存自动换 ID。兼容基线记录原定义与身份，用于说明冲突及可恢复值；敏感内容、容量上限或旧基线缺失时，会明确显示无法提供原值，不能凭当前配置捏造历史基线。
 
 **`GET /api/chat/sessions/migration` 是准备操作。** 它读取外部 DSH 的迁移预览证据，并持久保存带 migrationId/revision 的 prepared 计划，不是纯历史查询。计划提交仍需显式 `POST /api/chat/sessions/migrate`，携带预览所得计划与 revision。迁移中断后使用原计划核对，不重做 child fork 或换 operationId 掩盖已有结果。

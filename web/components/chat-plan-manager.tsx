@@ -20,7 +20,7 @@ import { ProviderManager } from './provider-manager.tsx';
 import { createBuiltinDailyChatPlanDraft } from '../../src/host/chat-templates.ts';
 import { ChatCapabilityManager } from './chat-capability-manager.tsx';
 import { VirtualList } from './virtual-list.tsx';
-import { DshDeploymentManager } from './dsh-deployment-manager.tsx';
+import { DshDeploymentManager, type DshDeploymentHandle, type PreparedChatConfiguration } from './dsh-deployment-manager.tsx';
 import { modelCapabilitiesUnavailableMessage, modelReasoningEffortLabel, modelReasoningEffortOptions, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
 
 import { CHAT_PLAN_LIMITS, DEFAULT_CHAT_CONTEXT_LIMITS, isChatContextLimit, isChatPlanReasoningEffort } from '../../src/contracts/chat-plans.ts';
@@ -125,6 +125,11 @@ export function ChatPlanManager(props: PageProps) {
   const [pendingActivePlanId, setPendingActivePlanId] = useState<string | null>(retained?.pendingActivePlanId ?? null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [updatingChat, setUpdatingChat] = useState(false);
+  const [canUpdateChat, setCanUpdateChat] = useState(false);
+  const [chatUpdateNeedsReconciliation, setChatUpdateNeedsReconciliation] = useState(false);
+  const deploymentAction = useRef<DshDeploymentHandle | null>(null);
+  const updateOwner = useRef<symbol | null>(null);
   const [loadError, setLoadError] = useState('');
   const [auxiliaryWarnings, setAuxiliaryWarnings] = useState<readonly string[]>([]);
   const [writeError, setWriteError] = useState('');
@@ -162,7 +167,7 @@ export function ChatPlanManager(props: PageProps) {
   const draftOwner = useRef({ api, catalog, draft, creating, selectedId, groupContext, privateContext, pendingActivePlanId, dirty });
   draftOwner.current = { api: draftApi.current, catalog, draft, creating, selectedId, groupContext, privateContext, pendingActivePlanId, dirty };
   const blocked = recovery.blocked || saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown';
-  const editingDisabled = saving || blocked || loading;
+  const editingDisabled = saving || blocked || loading || updatingChat;
   const selectedProvider = providers.find(provider => provider.id === draft.provider);
   const selectedModel = selectedProvider?.models.find(model => model.id === draft.model);
   const registeredSelection = selectedProvider?.enabled === true && selectedModel !== undefined;
@@ -427,41 +432,42 @@ export function ChatPlanManager(props: PageProps) {
     setSaveState('idle');
   }
 
-  async function save(): Promise<void> {
-    if (!catalog || catalogRef.current !== catalog || !dirty || editingDisabled || operationBlocked.current || saveController.current || connection.current.api !== api || !connection.current.connected) return;
+  async function save(options: { readonly activate?: boolean; readonly signal?: AbortSignal } = {}): Promise<ChatPlanCatalogSnapshot | null> {
+    if (!catalog || catalogRef.current !== catalog || saving || blocked || loading || updatingChat && !options.activate || operationBlocked.current || saveController.current || connection.current.api !== api || !connection.current.connected) return null;
+    if (!dirty && (!options.activate || catalog.activePlanId === draft.id)) return catalog;
     const normalized = { ...draft, id: draft.id.trim(), name: draft.name.trim(), personaId: draft.personaId.trim(), provider: draft.provider.trim(), model: draft.model.trim(), reasoningEffort: draft.reasoningEffort, contextLimits: { group: Number(groupContext), private: Number(privateContext) } };
     if (!normalized.id || !normalized.name || !normalized.personaId || !normalized.provider || !normalized.model || !normalized.reasoningEffort) {
       setFieldError('内部标识、名称、关联人设、模型提供方、模型和思考强度必须填写。');
-      return;
+      return null;
     }
     if (!isCatalogIdentifier(normalized.id)) {
       setFieldError(catalogIdentifierDescription);
-      return;
+      return null;
     }
     if (planIdConflict) {
       setFieldError('内部标识已存在。');
-      return;
+      return null;
     }
     if (!personas.some(persona => persona.id === normalized.personaId)) {
       setFieldError('请选择人设库中存在的人设。');
-      return;
+      return null;
     }
     if (!isChatPlanReasoningEffort(normalized.reasoningEffort)) {
       setFieldError('请选择受支持的思考强度。');
-      return;
+      return null;
     }
     if (!/^\d+$/.test(groupContext) || !/^\d+$/.test(privateContext)
       || !isChatContextLimit(normalized.contextLimits.group) || !isChatContextLimit(normalized.contextLimits.private)) {
       setFieldError('群聊和私聊上下文分别填写 1–16,777,216 之间的整数，单位为 token。');
-      return;
+      return null;
     }
     if (!registeredSelection && (creating || selectedPlan === null || selectedPlan.provider !== normalized.provider || selectedPlan.model !== normalized.model)) {
       setFieldError('请先在“模型提供方”登记并启用服务与模型，再从列表选择。');
-      return;
+      return null;
     }
     if (!parsePlan(normalized)) {
       setFieldError('方案字段超出长度限制或格式无效，请检查后再保存。');
-      return;
+      return null;
     }
     const capabilitiesConfirmed = currentCapabilities !== null && currentCapabilities.generation === capabilitiesEpoch.current
       && currentCapabilities.value?.state === 'available' && currentCapabilities.provider === normalized.provider
@@ -470,24 +476,27 @@ export function ChatPlanManager(props: PageProps) {
       || currentCapabilities.value?.state !== 'available';
     const preservingUnknownModel = capabilitiesUnknown && !creating && selectedPlan !== null
       && selectedPlan.provider === normalized.provider && selectedPlan.model === normalized.model
-      && selectedPlan.reasoningEffort === normalized.reasoningEffort && pendingActivePlanId === catalog.activePlanId;
+      && selectedPlan.reasoningEffort === normalized.reasoningEffort && (options.activate ? normalized.id : pendingActivePlanId) === catalog.activePlanId;
     if (!capabilitiesConfirmed && !preservingUnknownModel) {
       setFieldError('请先确认当前模型的支持情况，并明确选择该模型支持的思考强度；原草稿值会保留。');
-      return;
+      return null;
     }
     const plans = creating ? [...catalog.plans, normalized] : catalog.plans.map(plan => plan.id === selectedId ? normalized : plan);
-    const activePlanId = selectedId !== null && pendingActivePlanId === selectedId && selectedId !== normalized.id ? normalized.id : pendingActivePlanId;
+    const activePlanId = options.activate ? normalized.id : selectedId !== null && pendingActivePlanId === selectedId && selectedId !== normalized.id ? normalized.id : pendingActivePlanId;
     const activePlan = plans.find(plan => plan.id === activePlanId);
     if (activePlanId !== catalog.activePlanId && activePlan
       && !providers.some(provider => provider.enabled && provider.id === activePlan.provider && provider.models.some(model => model.id === activePlan.model))) {
       setFieldError('启用前请先登记并启用该方案使用的提供方与模型。');
-      return;
+      return null;
     }
     const controller = new AbortController();
+    const abort = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) return null;
+    options.signal?.addEventListener('abort', abort, { once: true });
     const generation = epoch.current;
     saveController.current = controller;
     const operationToken = recovery.begin(catalog.revision, controller.signal);
-    if (!operationToken) { saveController.current = null; return; }
+    if (!operationToken) { saveController.current = null; options.signal?.removeEventListener('abort', abort); return null; }
     const current = () => !controller.signal.aborted && epoch.current === generation && saveController.current === controller
       && connection.current.api === api && connection.current.connected;
     setSaving(true);
@@ -495,11 +504,12 @@ export function ChatPlanManager(props: PageProps) {
     setSaveState('idle');
     try {
       const response = await writeResource(api, '/api/chat/plans', { revision: catalog.revision, activePlanId, plans }, controller.signal);
-      if (!current()) return;
+      if (!current()) return null;
       const next = parsePlanCatalog(response);
-      if (!next) throw new Error('invalid_chat_plans_response');
+      if (!next || next.activePlanId !== activePlanId) throw new Error('invalid_chat_plans_response');
       const saved = next.plans.find(plan => plan.id === normalized.id);
       if (!saved) throw new Error('invalid_chat_plans_response');
+      catalogRef.current = next;
       setCatalog(next);
       setPendingActivePlanId(next.activePlanId);
       setSelectedId(saved.id);
@@ -511,6 +521,7 @@ export function ChatPlanManager(props: PageProps) {
       setDeleteConfirmed(false);
       recovery.complete(operationToken);
       setSaveState('saved');
+      return next;
     } catch (error) {
       recovery.fail(operationToken, error);
       if (current()) {
@@ -519,9 +530,40 @@ export function ChatPlanManager(props: PageProps) {
         setSaveState(failureState);
         setWriteError(errorMessage(error));
       }
+      return null;
     } finally {
+      options.signal?.removeEventListener('abort', abort);
       if (current()) { setSaving(false); saveController.current = null; }
     }
+  }
+
+  async function prepareChatUpdate(signal: AbortSignal): Promise<PreparedChatConfiguration | null> {
+    if (updateOwner.current || editingDisabled || !catalog || !draft.id) return null;
+    const token = Symbol('plan-update');
+    const generation = epoch.current;
+    const submitted = draftOwner.current;
+    updateOwner.current = token;
+    setUpdatingChat(true);
+    const complete = () => {
+      if (updateOwner.current !== token) return;
+      updateOwner.current = null;
+      setUpdatingChat(false);
+    };
+    try {
+      const next = await save({ activate: true, signal });
+      const savedPlan = next?.plans.find(plan => plan.id === next.activePlanId);
+      if (!next || !savedPlan || savedPlan.id !== submitted.draft.id.trim() || signal.aborted) { complete(); return null; }
+      const isCurrent = () => {
+        const owner = draftOwner.current;
+        const unchangedSubmission = owner.draft === submitted.draft && owner.groupContext === submitted.groupContext
+          && owner.privateContext === submitted.privateContext && owner.selectedId === submitted.selectedId;
+        const committedSubmission = samePlan(owner.draft, savedPlan) && owner.groupContext === String(savedPlan.contextLimits.group)
+          && owner.privateContext === String(savedPlan.contextLimits.private) && owner.selectedId === savedPlan.id;
+        return !signal.aborted && updateOwner.current === token && epoch.current === generation && catalogRef.current === next
+          && connection.current.api === api && connection.current.connected && (unchangedSubmission || committedSubmission);
+      };
+      return { revision: next.revision, isCurrent, complete };
+    } catch (failure) { complete(); throw failure; }
   }
 
   async function deletePlan(): Promise<void> {
@@ -571,7 +613,8 @@ export function ChatPlanManager(props: PageProps) {
     <div className="flex flex-wrap items-center gap-3 text-xs">
       <StatusPill tone={dirty || creating ? 'warning' : 'neutral'}>{dirty || creating ? '未保存' : '已保存'}</StatusPill>
       <StatusPill tone={runtimeConnected ? 'success' : 'warning'}>{runtimeConnected === null ? '聊天状态待确认' : runtimeConnected ? '聊天可用' : '聊天暂不可用'}</StatusPill>
-      <span className="text-muted-foreground">保存并选择启用方案后，在本页应用到 DSH。</span>
+      <span className="text-muted-foreground">更新聊天会保存当前方案、选择启用并应用，保留已有上下文。</span>
+      <Button id="native-plan-update" disabled={!canUpdateChat || !chatUpdateNeedsReconciliation && (editingDisabled || !draft.id)} onClick={() => void deploymentAction.current?.updateChat()}>{chatUpdateNeedsReconciliation ? '核对并继续更新' : updatingChat ? '正在更新聊天…' : '更新聊天'}</Button>
       <Button variant="outline" onClick={showDshApplication}>查看 DSH 应用</Button>
       <Button variant="ghost" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新状态</Button>
     </div>
@@ -625,7 +668,8 @@ export function ChatPlanManager(props: PageProps) {
         </div>
       </Section>
     </div>
-    <DshDeploymentManager compact navigate={navigate} api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" />
+    <DshDeploymentManager compact navigate={navigate} api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans"
+      updateRef={deploymentAction} onUpdateAvailable={setCanUpdateChat} onReconciliationRequired={setChatUpdateNeedsReconciliation} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} />
     <details className="rounded-xl border bg-muted/10">
       <summary className="cursor-pointer px-4 py-3 text-sm font-medium">高级工具设置</summary>
       <div className="max-h-[32rem] overflow-auto overscroll-contain p-3 pt-0">

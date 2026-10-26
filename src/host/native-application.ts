@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { NativeApplicationPhase, NativeApplicationRequest, NativeApplicationSnapshot } from '../contracts/native-application.ts';
-import { parseNativeApplicationRequest, parseNativeApplicationSnapshot } from '../contracts/native-application.ts';
+import { nativeApplicationRequiresReconciliation, parseNativeApplicationRequest, parseNativeApplicationSnapshot } from '../contracts/native-application.ts';
 import type { NativeConfigurationRevisions } from '../contracts/native-revisions.ts';
 import { isNativeConfigurationRevisions } from '../contracts/native-revisions.ts';
-import type { NativeDeploymentApplyResult, NativeDeploymentPreparationResult } from '../contracts/native-deployment.ts';
+import type { NativeDeploymentApplyResult, NativeDeploymentPreparationResult, NativeDeploymentReconciliationResult } from '../contracts/native-deployment.ts';
 import { assert, errorCode, snapshot } from '../core/values.ts';
 import type { NativeSessionMigrationCommit, NativeSessionMigrationResult } from './native-session-migration.ts';
 import { digest } from './data.ts';
@@ -26,6 +27,7 @@ export interface NativeApplicationPorts {
     readonly prepared: NativeDeploymentPreparationResult;
   }>;
   apply(revisions: NativeConfigurationRevisions, targetRevision: string, signal: AbortSignal): Promise<NativeDeploymentApplyResult>;
+  reconcileDeployment(revisions: NativeConfigurationRevisions, signal: AbortSignal): Promise<NativeDeploymentReconciliationResult>;
   previewMigration(revisions: NativeConfigurationRevisions, signal: AbortSignal): Promise<NativeSessionMigrationResult>;
   migrate(request: NativeSessionMigrationCommit, signal: AbortSignal): Promise<NativeSessionMigrationResult>;
   start(revisions: NativeConfigurationRevisions, signal: AbortSignal): Promise<NativeApplicationRuntimeStatus>;
@@ -75,9 +77,16 @@ export function createNativeApplicationCoordinator(options: {
   readonly ports: NativeApplicationPorts;
   readonly signal: AbortSignal;
   readonly clock?: () => number;
+  readonly deploymentVerificationTimeoutMs?: number;
+  readonly deploymentPollIntervalMs?: number;
 }) {
   const instanceId = randomUUID();
   const now = options.clock ?? Date.now;
+  const verificationTimeoutMs = options.deploymentVerificationTimeoutMs ?? 60_000;
+  const pollIntervalMs = options.deploymentPollIntervalMs ?? 500;
+  assert(Number.isSafeInteger(verificationTimeoutMs) && verificationTimeoutMs >= 1 && verificationTimeoutMs <= 60_000
+    && Number.isSafeInteger(pollIntervalMs) && pollIntervalMs >= 1 && pollIntervalMs <= 10_000,
+  'INVALID_APPLICATION_TIMEOUT', 'Application deployment observation must be bounded.');
   let active: Promise<void> | undefined;
   let starting = false;
   let pendingEffects = 0;
@@ -102,15 +111,22 @@ export function createNativeApplicationCoordinator(options: {
     }
     return next;
   }
-  async function run(request: NativeApplicationRequest) {
+  async function verifyDeployment(revisions: NativeConfigurationRevisions, signal: AbortSignal) {
+    const result = await withDeadline({ signal, timeoutMs: 10_000, code: 'APPLICATION_DEPLOYMENT_READ_UNAVAILABLE',
+      run: phaseSignal => options.ports.reconcileDeployment(revisions, phaseSignal) });
+    return result.missingReasons.length === 0 && result.presetBindings.length > 0
+      && result.verificationScope === 'provider-preset-and-managed-file-provenance'
+      && result.credentialValueIdentityVerified === false;
+  }
+  async function run(request: NativeApplicationRequest, continuation?: { readonly revisions: NativeConfigurationRevisions }) {
     const id = request.operationId;
-    let currentRevisions = request.revisions;
+    let currentRevisions = continuation?.revisions ?? request.revisions;
     let sideEffectStarted = false;
-    let lastPhase: NativeApplicationPhase | null = null;
+    let lastPhase: NativeApplicationPhase | null = continuation ? 'apply' : null;
     const signal = AbortSignal.any([options.signal, AbortSignal.timeout(180_000)]);
-    async function check() {
-      signal.throwIfAborted();
-      const status = await withDeadline({ signal, timeoutMs: 10_000, code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
+    async function check(checkSignal = signal) {
+      checkSignal.throwIfAborted();
+      const status = await withDeadline({ signal: checkSignal, timeoutMs: 10_000, code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
       assert(same(status.revisions, currentRevisions), 'APPLICATION_CONFIGURATION_CHANGED', 'Saved settings changed during application.');
       return status;
     }
@@ -128,15 +144,32 @@ export function createNativeApplicationCoordinator(options: {
       return result;
     }
     async function blocked(values: readonly string[]) { await update(id, { state: 'blocked', reasons: reasons(values) }); }
+    async function waitForDeployment() {
+      const deadline = AbortSignal.timeout(verificationTimeoutMs);
+      const observationSignal = AbortSignal.any([signal, deadline]);
+      try {
+        while (!observationSignal.aborted) {
+          await check(observationSignal);
+          const verified = await verifyDeployment(currentRevisions, observationSignal);
+          await check(observationSignal);
+          if (verified) return true;
+          await delay(pollIntervalMs, undefined, { signal: observationSignal });
+        }
+      } catch (error) {
+        if (!deadline.aborted || signal.aborted) throw error;
+      }
+      signal.throwIfAborted();
+      return false;
+    }
     try {
       let status = await check();
-      if (status.state === 'running' || status.state === 'error') {
+      if (!continuation && (status.state === 'running' || status.state === 'error')) {
         const stopped = await step('stop', phaseSignal => options.ports.stop(phaseSignal));
         assert(stopped.state === 'stopped', 'APPLICATION_STOP_UNCONFIRMED', 'Stopping has not been confirmed.');
         status = await check();
       }
       assert(status.state === 'stopped', 'APPLICATION_RUNTIME_BUSY', 'Runtime is not stopped.');
-      if (request.deploy) {
+      if (request.deploy && !continuation) {
         if (!status.canApplyDeployment) { await blocked(status.missingReasons); return; }
         const prepared = await step('prepare', phaseSignal => options.ports.prepare(currentRevisions.deployment, phaseSignal));
         assert(isNativeConfigurationRevisions(prepared.revisions)
@@ -150,8 +183,23 @@ export function createNativeApplicationCoordinator(options: {
         assert(status.state === 'stopped' && status.canApplyDeployment, 'APPLICATION_RUNTIME_BUSY', 'Runtime changed before deployment.');
         const applied = await step('apply', phaseSignal => options.ports.apply(currentRevisions, prepared.prepared.targetRevision!, phaseSignal));
         if (applied.state === 'blocked' || applied.state === 'conflict') { await blocked(applied.missingReasons); return; }
-        assert(applied.state === 'verified' && applied.missingReasons.length === 0,
-          'APPLICATION_DEPLOYMENT_UNCONFIRMED', 'Deployment has no verified completion.');
+        if (applied.state === 'pending_reload') {
+          await update(id, { reasons: ['pending_reload'] });
+          if (!await waitForDeployment()) {
+            const uncertain = applied.missingReasons.some(reason => reason !== 'pending_reload');
+            await update(id, { state: uncertain ? 'unknown' : 'blocked', reasons: reasons(applied.missingReasons.length > 0
+              ? applied.missingReasons : ['pending_reload']) });
+            return;
+          }
+          await update(id, { reasons: [] });
+        } else if (applied.state === 'unknown') {
+          await update(id, { state: 'unknown', reasons: reasons(applied.missingReasons.length > 0
+            ? applied.missingReasons : ['APPLICATION_DEPLOYMENT_UNCONFIRMED']) });
+          return;
+        } else {
+          assert(applied.state === 'verified' && applied.missingReasons.length === 0,
+            'APPLICATION_DEPLOYMENT_UNCONFIRMED', 'Deployment has no verified completion.');
+        }
         status = await check();
       }
       if (status.configurationCompatibility.state === 'blocked') {
@@ -194,10 +242,23 @@ export function createNativeApplicationCoordinator(options: {
         const record = prior.value.records.find(item => item.snapshot.id === id);
         assert(record, 'APPLICATION_NOT_FOUND', 'The application was not found.');
         const current = project(record);
-        if (current.state !== 'unknown') return current;
+        const awaitingDeployment = current.phase === 'apply' && (current.state === 'unknown'
+          || current.state === 'blocked' && current.reasons.includes('pending_reload'));
+        if (current.state !== 'unknown' && !awaitingDeployment) return current;
         const observed = await withDeadline({ signal: options.signal, timeoutMs: 10_000,
           code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
         if (!same(observed.revisions, current.revisions)) return current;
+        if (awaitingDeployment && observed.state === 'stopped' && await verifyDeployment(current.revisions, options.signal)) {
+          const checked = await withDeadline({ signal: options.signal, timeoutMs: 10_000,
+            code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
+          if (checked.state !== 'stopped' || !same(checked.revisions, current.revisions)) return current;
+          const continuing: NativeApplicationSnapshot = { ...current, state: 'running', phaseState: 'confirmed', reasons: [], updatedAt: now() };
+          await options.storage.write(prior.revision, { schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
+            ? { ...item, instanceId, snapshot: continuing } : item) });
+          inMemoryUnknown = undefined;
+          active = run(record.request, { revisions: current.revisions }).finally(() => { active = undefined; });
+          return snapshot(continuing);
+        }
         let verified: NativeApplicationSnapshot | undefined;
         if (current.phase === 'start' && observed.state === 'running' && observed.chatReady) {
           verified = { ...current, state: 'completed', phaseState: 'confirmed', reasons: [], updatedAt: now() };
@@ -232,7 +293,7 @@ export function createNativeApplicationCoordinator(options: {
           assert(digest(existing.request) === digest(request), 'APPLICATION_ID_CONFLICT', 'An operation ID cannot change intent.');
           return project(existing);
         }
-        assert(!active && !prior.value.records.some(record => ['running', 'unknown'].includes(project(record).state)),
+        assert(!active && !prior.value.records.some(record => nativeApplicationRequiresReconciliation(project(record))),
           'APPLICATION_RECONCILIATION_REQUIRED', 'An existing application requires reconciliation.');
         assert(prior.value.records.length < 1024, 'APPLICATION_HISTORY_FULL', 'Application journal capacity is full.');
         const status = await withDeadline({ signal: options.signal, timeoutMs: 10_000,

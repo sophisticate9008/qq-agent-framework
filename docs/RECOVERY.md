@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 配置保存冲突 | 原文档 revision、当前值与本地草稿 | 重新读取，合并后明确提交新 CAS。 |
 | 保存结果未知 | 原配置域的未决记录和服务端当前 revision | 保留原草稿和请求归属；先核对，不自动重复 POST。 |
-| 应用 running/unknown | 原 operationId、phase、phaseState、reasons | 查询同一操作；明确 reconcile，不能另建请求绕开未决操作。 |
+| 应用 running/unknown、apply 阶段 blocked/pending_reload | 原 operationId、phase、phaseState、reasons | 查询同一操作；明确 reconcile，不能另建请求绕开未决操作。 |
 | DSH 部署 pending_reload/unknown | 托管文件、provider/preset、当前进程可见的核验结果 | 使用对应部署 reconcile；读回证据满足要求后才进入下一步。 |
 | 执行 unknown/超时/丢流 | execution、session/generation、request/turn、取消状态 | 原执行只记录晚到结果；使用显式执行核对和恢复预览/提交。 |
 | inbox blocked | 所属会话、原期限、队列阶段与错误 | 保留未决输入，不自动恢复投递。 |
@@ -32,9 +32,13 @@ GET /api/chat/application?id=<原 operationId>
 
 不传 id 时读取当前操作。重复提交同一 id 和相同意图会指向同一操作；不同意图复用 id 会冲突。浏览器关闭不会让服务端重新创建操作，进程重启也不会续跑 unknown 阶段。
 
-`POST /api/chat/application/reconcile` 的 body 为 `{ "operationId": "<原 UUID>" }`。它核对当前配置与运行证据：确实已按原配置运行时才能确认 completed；确实停止且没有确认继续执行时，记录 blocked 并要求新的明确意图。reconcile 不替用户重新应用或重放尚未确认的阶段。GET 返回 200 只表示读到了快照，不是恢复许可。
+正常应用遇到 `pending_reload` 时，默认额外等待最多 60 秒，只读核对 DSH 实际加载结果，仍受整次操作 180 秒期限和运行 lifetime 限制。核验通过后原链继续；已确认写入但等待结束仍未加载时，记录 blocked/pending_reload。写入本身仍不确定时保留 unknown，不能把它当作普通加载延迟。
 
-应用中的 maintenance stop 保留持久运行意图，以便成功后启动；但 journal 为 running/unknown 时，重启恢复 gate 会阻止自动 start。否则一个未确认应用可能被旧 desiredRunning 意图绕过。见 [native-application.ts](../src/host/native-application.ts)、[native-chat-lifecycle.ts](../src/admin/native-chat-lifecycle.ts)、[native-application.test.ts](../test/native-application.test.ts)。
+`POST /api/chat/application/reconcile` 的 body 为 `{ "operationId": "<原 UUID>" }`，界面入口为“核对并继续更新”。对于原 apply 阶段的 unknown，或 blocked/pending_reload，它核对原配置 revision、DSH 实际预设和完整来源证据；满足条件后，保存同一操作的 running 状态并在后台继续 migrate/start，立即返回供页面查询。不会再次 stop、prepare 或 apply，也不创建另一份操作。
+
+其他未知阶段继续采用对应证据核对：确实已按原配置运行时可确认 completed；确实停止且无法证明允许续行时记录 blocked，并给出原因。普通 GET 不续行、不启动；返回 200 只表示读到了快照。明确拒绝受理和已发生动作但回执未知分别呈现，不能一概归为未知应用。
+
+应用中的 maintenance stop 保留持久运行意图，以便成功后启动；但 journal 为 running、unknown 或 apply 阶段的 blocked/pending_reload 时，重启恢复 gate 会阻止自动 start。否则一个未确认应用可能被旧 desiredRunning 意图绕过。见 [native-application.ts](../src/host/native-application.ts)、[native-chat-lifecycle.ts](../src/admin/native-chat-lifecycle.ts)、[native-application.test.ts](../test/native-application.test.ts)。
 
 ## DSH 部署与助手目标
 

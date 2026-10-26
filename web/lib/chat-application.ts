@@ -1,4 +1,4 @@
-import { NATIVE_APPLICATION_PATH, parseNativeApplicationEnvelope, type NativeApplicationPhase, type NativeApplicationSnapshot } from '../../src/contracts/native-application.ts';
+import { NATIVE_APPLICATION_PATH, nativeApplicationRequiresReconciliation, parseNativeApplicationEnvelope, type NativeApplicationPhase, type NativeApplicationSnapshot } from '../../src/contracts/native-application.ts';
 import { isNativeConfigurationRevisions } from '../../src/contracts/native-revisions.ts';
 import { ApiError, type ApiClient } from './api.ts';
 import { parseChatRuntimeStatus, type ChatRuntimeStatus } from './chat-runtime.ts';
@@ -16,6 +16,10 @@ export interface ChatApplicationState {
   readonly operationId: string | null;
   readonly operation: NativeApplicationSnapshot | null;
   readonly manualSource: 'deployment' | 'runtime' | null;
+}
+export function chatApplicationCanReconcile(state: ChatApplicationState): boolean {
+  return state.kind === 'application' && state.operationId !== null && !state.busy && !state.reconciling
+    && (state.blocked || state.operation !== null && nativeApplicationRequiresReconciliation(state.operation));
 }
 function createStore() {
   let state: ChatApplicationState = { busy: false, blocked: false, reconciling: false, phase: null, kind: null, operationId: null, operation: null, manualSource: null };
@@ -43,22 +47,28 @@ function createStore() {
     identify(token: symbol, operationId: string) {
       if (owner === token) update({ ...state, operationId, operation: null, kind: 'application' });
     },
-    observe(operation: NativeApplicationSnapshot): boolean {
+    discardUnaccepted(token: symbol) {
+      if (owner !== token || state.kind !== 'application' || state.operation !== null) return;
+      update({ ...state, kind: null, operationId: null, phase: null, blocked: false });
+    },
+    observe(operation: NativeApplicationSnapshot, reconciliationToken?: symbol): boolean {
       if (state.kind === 'manual' && (state.busy || state.blocked) || owner && state.operationId === null) return false;
       if (state.operationId && state.operationId !== operation.id && (owner || state.busy || state.blocked)) return false;
       const previous = state.operation;
+      const explicitContinuation = reconciliationToken !== undefined && owner === reconciliationToken && state.reconciling
+        && previous?.id === operation.id && (previous.state === 'unknown' || previous.state === 'blocked');
       if (previous) {
         if (previous.id !== operation.id && operation.createdAt < previous.createdAt) return false;
         if (previous.id === operation.id && (operation.updatedAt < previous.updatedAt
           || previous.createdAt !== operation.createdAt
           || previous.phase !== null && operation.phase !== null
             && phaseOrder[operation.phase] < phaseOrder[previous.phase]
-          || previous.state !== 'running' && operation.state === 'running'
+          || previous.state !== 'running' && operation.state === 'running' && !explicitContinuation
           || operation.updatedAt === previous.updatedAt && previous.phase === operation.phase
             && previous.phaseState === 'confirmed' && operation.phaseState !== 'confirmed')) return false;
       }
       update({ ...state, operation, operationId: operation.id, phase: operation.phase, kind: 'application', manualSource: null,
-        busy: operation.state === 'running', blocked: operation.state === 'unknown' });
+        busy: operation.state === 'running', blocked: operation.state !== 'running' && nativeApplicationRequiresReconciliation(operation) });
       return true;
     },
     release(token: symbol) {
@@ -174,9 +184,9 @@ export async function applyAndStartChat(options: {
       '应用设置版本已变化，请重新读取核对。');
     const existing = await readChatApplication(api, signal);
     guard();
-    if (existing?.state === 'running' || existing?.state === 'unknown') {
+    if (existing && nativeApplicationRequiresReconciliation(existing)) {
       store.release(token); store.observe(existing);
-      throw new Error(existing.state === 'unknown' ? '先前应用结果尚未确认，请按原操作标识核对；不会重新提交。' : '已有应用操作正在进行，请只读核对当前阶段。');
+      throw new Error(existing.state === 'running' ? '已有应用操作正在进行，请只读核对当前阶段。' : '先前应用仍需核对，请按原操作标识核对并继续；不会重新提交。');
     }
     const operationId = newChatApplicationId();
     store.identify(token, operationId);
@@ -192,7 +202,7 @@ export async function applyAndStartChat(options: {
       guard();
       // A missing POST acknowledgement never authorizes another POST, even with the same id.
       if (failure instanceof ApiError && failure.status >= 400 && failure.status < 500 && !/unknown/.test(failure.code)) {
-        wrote = false; throw failure;
+        wrote = false; store.discardUnaccepted(token); throw failure;
       }
       const recovered = await readChatApplication(api, signal, operationId);
       guard(); requireState(recovered, '应用请求结果尚未确认，请按操作标识重新读取；不会重复提交。'); operation = recovered;
@@ -225,8 +235,12 @@ export async function reconcileChatApplication(api: ApiClient, operationId: stri
     const envelope = parseNativeApplicationEnvelope(await writeResource(api, `${NATIVE_APPLICATION_PATH}/reconcile`, { operationId }, signal));
     signal?.throwIfAborted();
     requireState(envelope?.operation?.id === operationId, '无法确认核对结果，请重新读取同一操作；不会再次提交。');
-    store.observe(envelope.operation);
-    return envelope.operation;
+    if (store.observe(envelope.operation, token)) return envelope.operation;
+    const latest = store.getSnapshot().operation;
+    requireState(latest?.id === operationId && latest.createdAt === envelope.operation.createdAt
+      && latest.updatedAt >= envelope.operation.updatedAt && (latest.state === 'completed'
+        || latest.state === 'running' && envelope.operation.state === 'running'), '核对结果与当前操作阶段不一致，请重新读取同一操作。');
+    return latest;
   } catch (error) { store.freeze(); throw error; }
   finally { store.release(token); }
 }

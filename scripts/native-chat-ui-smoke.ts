@@ -608,7 +608,8 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
   await card.getByRole('button', { name: '重新检查', exact: true }).click();
   await enabled(start, false);
   await deployment.getByText('应用操作详情', { exact: true }).click();
-  await deployment.getByRole('button', { name: '核对实际结果', exact: true }).click();
+  await deployment.locator('details').filter({ has: page.getByText('应用操作详情', { exact: true }) })
+    .getByRole('button', { name: '核对并继续更新', exact: true }).click();
   await card.getByRole('button', { name: '重新检查', exact: true }).click();
   await card.getByRole('button', { name: '停止聊天', exact: true }).click();
   await enabled(start, true);

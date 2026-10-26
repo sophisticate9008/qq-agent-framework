@@ -1,6 +1,7 @@
 import { accountsFixture, exerciseAccountWorkspace } from './management-accounts-smoke.ts';
 import { exerciseProtocolConnectionDiagnostics } from './management-protocol-status-smoke.ts';
 import { exerciseModelReasoningCapabilities } from './management-model-capabilities-smoke.ts';
+import { exercisePlanUpdate } from './management-plan-update-smoke.ts';
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts';
 import { readNativeChatConfiguration } from '../src/admin/native-configuration-repository.ts';
 import { usageMaintenanceFixture, exerciseUsageMaintenance, exerciseExecutionRecovery, exerciseCapacityRecommendations, exerciseMediaAndInteractions } from './management-recovery-smoke.ts';
@@ -757,7 +758,7 @@ async function run(): Promise<void> {
 
     await navigate(page, '聊天方案', 'model', '聊天方案');
     await section(page, 'Fixture Plan').waitFor();
-    await page.getByText('保存并选择启用方案后，在本页应用到 DSH。', { exact: true }).waitFor();
+    await page.getByText('更新聊天会保存当前方案、选择启用并应用，保留已有上下文。', { exact: true }).waitFor();
     await page.getByText('聊天暂不可用', { exact: true }).waitFor();
     const planName = field(page, '方案名称').locator('input');
     const providerSelect = field(page, '模型提供方').locator('select');
@@ -1233,6 +1234,7 @@ async function run(): Promise<void> {
     await exerciseAssistantAndReadOnlyWork(page, requests);
     await exerciseProtocolConnectionDiagnostics(page, requests, adaptersCleared.value);
     await exerciseModelReasoningCapabilities(page, requests, fixtureProviders);
+    await exercisePlanUpdate(page, requests);
     let pricingSaves = 0;
     await page.route('**/api/chat/usage/pricing', route => {
       if (route.request().method() === 'POST') { pricingSaves++; return route.fulfill({ status: 504, json: { error: 'usage_pricing_operation_unknown' } }); }
@@ -1304,6 +1306,8 @@ async function run(): Promise<void> {
       nativeRuntimeRoutes: true,
       websocketConnectedDiagnosticsAndExplicitReconnectRemainIndependent: true,
       reasoningRetainsCurrentValueAndRestoresOnlyRealSupportWithLateReadsIsolated: true,
+      oneClickPlanUpdateSavesDraftOnceAndObservesOriginalOperationWithoutReplay: true,
+      definiteApplicationRejectionAndSaveConflictDoNotCreateUnknownUpdates: true,
       usageExactPreviewAtomicMaintenanceExportUnknownRecovery: true,
       sdkReconciliationAndOriginalRevisionRecoveryNoReplay: true,
       conversationDiagnosticsPartialCoverage: true,

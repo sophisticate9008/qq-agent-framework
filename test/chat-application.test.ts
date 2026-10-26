@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ApiError, type ApiClient } from '../web/lib/api.ts';
-import { applyAndStartChat, chatApplicationStore, newChatApplicationId, readChatApplication, type ChatApplicationPhase } from '../web/lib/chat-application.ts';
+import { applyAndStartChat, chatApplicationCanReconcile, chatApplicationStore, newChatApplicationId, readChatApplication, reconcileChatApplication, type ChatApplicationPhase } from '../web/lib/chat-application.ts';
 import { chatRuntimeCanApplyAndStart, parseChatRuntimeStatus } from '../web/lib/chat-runtime.ts';
 import { isNativeApplicationId, parseNativeApplicationEnvelope, type NativeApplicationSnapshot } from '../src/contracts/native-application.ts';
 import { NATIVE_CONFIGURATION_REVISION_KEYS, type NativeConfigurationRevisions } from '../src/contracts/native-revisions.ts';
@@ -177,4 +177,68 @@ test('manual deployment recovery requires a current successful read and explicit
   const persistent = chatApplicationStore(applicationApi);
   persistent.claim('application'); persistent.freeze();
   assert.equal(persistent.reviewManual('deployment'), null);
+});
+
+test('only an explicit original-operation reconciliation can resume a stopped application snapshot', async () => {
+  for (const originalState of ['unknown', 'blocked'] as const) {
+    const original: NativeApplicationSnapshot = { schema: 1, id: '11111111-1111-4111-8111-111111111111', state: originalState,
+      phase: 'apply', phaseState: 'confirmed', revisions, createdAt: 1, updatedAt: 2,
+      reasons: [originalState === 'unknown' ? 'APPLICATION_DEPLOYMENT_UNCONFIRMED' : 'pending_reload'] };
+    const resumed: NativeApplicationSnapshot = { ...original, state: 'running', updatedAt: 3, reasons: [] };
+    const calls: string[] = [];
+    const api: ApiClient = { async get(path) { calls.push(path); return { schema: 1, operation: resumed }; },
+      async post(path, body) {
+        calls.push(path); assert.equal(path, '/api/chat/application/reconcile'); assert.deepEqual(body, { operationId: original.id });
+        return { schema: 1, operation: resumed };
+      } };
+    const store = chatApplicationStore(api);
+    assert(store.observe(original)); assert(chatApplicationCanReconcile(store.getSnapshot()));
+    assert.equal(store.observe(resumed), false);
+    assert.equal(store.getSnapshot().operation?.state, originalState);
+    assert.equal((await reconcileChatApplication(api, original.id)).state, 'running');
+    assert.equal(store.getSnapshot().busy, true); assert.equal(store.getSnapshot().blocked, false);
+    assert.equal(chatApplicationCanReconcile(store.getSnapshot()), false);
+    assert.equal(store.observe({ ...original, updatedAt: 2 }), false);
+    assert(store.observe({ ...resumed, state: 'completed', phase: 'start', phaseState: 'confirmed', updatedAt: 4 }));
+    const token = store.claimReconciliation(original.id);
+    assert.equal(store.observe({ ...resumed, phase: 'start', updatedAt: 5 }, token), false);
+    store.release(token);
+    assert.deepEqual(calls, ['/api/chat/application/reconcile']);
+  }
+});
+
+test('pending reload cannot create a fresh application, while deterministic request rejection stays retryable', async () => {
+  const pending: NativeApplicationSnapshot = { schema: 1, id: '11111111-1111-4111-8111-111111111111', state: 'blocked',
+    phase: 'apply', phaseState: 'confirmed', revisions, createdAt: 1, updatedAt: 2, reasons: ['pending_reload'] };
+  let writes = 0;
+  const pendingApi: ApiClient = { async get(path) { return path === '/api/chat/runtime' ? status() : { schema: 1, operation: pending }; },
+    async post() { writes++; throw new Error('must not create a second application'); } };
+  await assert.rejects(run(pendingApi), /原操作标识/);
+  assert.equal(writes, 0); assert(chatApplicationCanReconcile(chatApplicationStore(pendingApi).getSnapshot()));
+
+  const rejectedApi: ApiClient = { async get(path) { return path === '/api/chat/runtime' ? status() : { schema: 1, operation: null }; },
+    async post() { writes++; throw new ApiError('configuration_revision_conflict', 409); } };
+  await assert.rejects(run(rejectedApi), /configuration_revision_conflict/);
+  assert.equal(chatApplicationStore(rejectedApi).getSnapshot().blocked, false);
+  assert.equal(chatApplicationStore(rejectedApi).getSnapshot().busy, false);
+  assert.equal(chatApplicationStore(rejectedApi).getSnapshot().operationId, null);
+  assert.equal(chatApplicationStore(rejectedApi).getSnapshot().kind, null);
+  await assert.rejects(run(rejectedApi), /configuration_revision_conflict/);
+  assert.equal(writes, 2);
+});
+
+test('a newer completed read wins over a delayed running reconciliation receipt without freezing', async () => {
+  const original: NativeApplicationSnapshot = { schema: 1, id: '11111111-1111-4111-8111-111111111111', state: 'unknown',
+    phase: 'apply', phaseState: 'confirmed', revisions, createdAt: 1, updatedAt: 2, reasons: ['APPLICATION_DEPLOYMENT_UNCONFIRMED'] };
+  const running: NativeApplicationSnapshot = { ...original, state: 'running', phase: 'migrate', phaseState: 'in-flight', updatedAt: 3, reasons: [] };
+  const completed: NativeApplicationSnapshot = { ...running, state: 'completed', phase: 'start', phaseState: 'confirmed', updatedAt: 4 };
+  const api: ApiClient = { get: async () => ({}), async post(path) {
+    assert.equal(path, '/api/chat/application/reconcile');
+    assert(chatApplicationStore(api).observe(completed));
+    return { schema: 1, operation: running };
+  } };
+  const store = chatApplicationStore(api); store.observe(original);
+  assert.deepEqual(await reconcileChatApplication(api, original.id), completed);
+  assert.equal(store.getSnapshot().blocked, false); assert.equal(store.getSnapshot().busy, false);
+  assert.equal(store.getSnapshot().operation?.state, 'completed');
 });

@@ -10,7 +10,7 @@ import { restoreNativeChatRunningIntent } from '../src/admin/runtime.ts'
 import { createNativeApplicationStorage } from '../src/storage/native-application.ts'
 import { isNativeConfigurationRevisions } from '../src/contracts/native-revisions.ts'
 
-for (const state of ['running', 'unknown'] as const) {
+for (const state of ['running', 'unknown', 'blocked'] as const) {
   test(`actual running-intent restoration blocks ${state} application evidence before any runtime status or start`, async context => {
     const directory = await mkdtemp(join(tmpdir(), 'native-application-restore-'))
     const repository = new NativeConfigurationRepository(directory)
@@ -35,7 +35,7 @@ for (const state of ['running', 'unknown'] as const) {
     const journal = { schema: 1 as const, records: [{ instanceId: 'old-process',
       request: { operationId: id, revisions: configuration.revisions, deploy: true },
       snapshot: { schema: 1 as const, id, state, phase: 'apply' as const, phaseState: 'in-flight' as const,
-        revisions: configuration.revisions, createdAt: 1, updatedAt: 1, reasons: [] } }] }
+        revisions: configuration.revisions, createdAt: 1, updatedAt: 1, reasons: state === 'blocked' ? ['pending_reload'] : [] } }] }
     const saved = await storage.write(current.revision, journal)
     const bytes = await readFile(join(directory, 'native-application.json'))
     const files = await readdir(directory)

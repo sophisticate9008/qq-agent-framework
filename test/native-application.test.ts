@@ -8,6 +8,7 @@ import { createNativeApplicationCoordinator, type NativeApplicationPorts, type N
 import { createNativeApplicationStorage } from '../src/storage/native-application.ts';
 import type { NativeApplicationRequest } from '../src/contracts/native-application.ts';
 import type { NativeConfigurationRevisions } from '../src/contracts/native-revisions.ts';
+import type { NativeSessionMigrationBinding } from '../src/host/native-session-migration-state.ts';
 
 const revisions: NativeConfigurationRevisions = { plans: '1'.repeat(64), personas: '2'.repeat(64), access: '3'.repeat(64),
   adapters: '4'.repeat(64), providers: '5'.repeat(64), authorization: '6'.repeat(64), deployment: '7'.repeat(64), execution: '8'.repeat(64) };
@@ -21,6 +22,11 @@ function fixture() {
     async prepare() { calls.push('prepare'); current = { ...current, revisions: { ...revisions, deployment: 'a'.repeat(64) } };
       return { revisions: current.revisions, prepared: { state: 'prepared', targetRevision: 'b'.repeat(64), summary: { ready: true, missingReasons: [] }, preview: null } }; },
     async apply() { calls.push('apply'); return { state: 'verified', backupId: 'backup-1', missingReasons: [] }; },
+    async reconcileDeployment() { calls.push('reconcile-deployment'); return { missingReasons: [],
+      verificationScope: 'provider-preset-and-managed-file-provenance', credentialValueIdentityVerified: false,
+      presetBindings: [{ agentPreset: 'synthetic-preset', definition: { planId: 'synthetic-plan', personaId: 'synthetic-persona',
+        instructions: 'Be concise.', persona: { identity: 'Synthetic.', style: 'Concise.' },
+        model: { provider: 'synthetic-provider', name: 'synthetic-model', reasoningEffort: 'off' } } }] }; },
     async previewMigration() { throw new Error('Unexpected migration'); },
     async migrate() { throw new Error('Unexpected migration'); },
     async start(expected) { calls.push('start'); assert.deepEqual(expected, current.revisions);
@@ -124,4 +130,130 @@ test('parallel journal observation tolerates atomic replacement without misclass
   });
   await Promise.all([writes, ...reads]);
   assert.equal((await storage.read()).value.records[0]?.snapshot.updatedAt, 31);
+});
+
+test('a normal pending reload waits for observed deployment and finishes the same intent without another apply', async t => {
+  const storage = createNativeApplicationStorage(await directory(t)); const f = fixture();
+  f.ports.apply = async () => { f.calls.push('apply'); return { state: 'pending_reload', backupId: 'backup', missingReasons: ['pending_reload'] }; };
+  const verify = f.ports.reconcileDeployment; let observations = 0;
+  f.ports.reconcileDeployment = async (expected, signal) => {
+    assert.equal(expected.deployment, 'a'.repeat(64));
+    if (++observations === 1) {
+      const operation = (await storage.read()).value.records[0]?.snapshot;
+      assert(operation); assert.equal(operation.state, 'running'); assert.deepEqual(operation.reasons, ['pending_reload']);
+      return { missingReasons: ['pending_reload'], presetBindings: [] };
+    }
+    return verify(expected, signal);
+  };
+  const coordinator = createNativeApplicationCoordinator({ storage, ports: f.ports, signal: new AbortController().signal,
+    deploymentVerificationTimeoutMs: 2000, deploymentPollIntervalMs: 1 });
+  const request = { operationId: randomUUID(), revisions, deploy: true };
+  await coordinator.create(request); await coordinator.drain();
+  assert.equal((await coordinator.read(request.operationId))?.state, 'completed');
+  assert.equal(observations, 2); assert.deepEqual(f.calls, ['stop', 'prepare', 'apply', 'reconcile-deployment', 'start']);
+});
+
+test('reload observation expires as pending, blocks replacement intents and resumes only after explicit proof on the same id', async t => {
+  const storage = createNativeApplicationStorage(await directory(t)); const f = fixture();
+  f.ports.apply = async () => { f.calls.push('apply'); return { state: 'pending_reload', backupId: 'backup', missingReasons: ['pending_reload'] }; };
+  const verify = f.ports.reconcileDeployment;
+  f.ports.reconcileDeployment = async () => ({ missingReasons: ['pending_reload'], presetBindings: [] });
+  const coordinator = createNativeApplicationCoordinator({ storage, ports: f.ports, signal: new AbortController().signal,
+    deploymentVerificationTimeoutMs: 20, deploymentPollIntervalMs: 1 });
+  const request = { operationId: randomUUID(), revisions, deploy: true };
+  await coordinator.create(request); await coordinator.drain();
+  const pending = await coordinator.read();
+  assert.equal(pending?.state, 'blocked'); assert.equal(pending?.phase, 'apply'); assert.equal(pending?.phaseState, 'confirmed');
+  assert.deepEqual(pending?.reasons, ['pending_reload']);
+  await assert.rejects(coordinator.create({ ...request, operationId: randomUUID() }), { code: 'APPLICATION_RECONCILIATION_REQUIRED' });
+  assert.deepEqual(await coordinator.reconcile(request.operationId), pending);
+  assert.deepEqual(f.calls, ['stop', 'prepare', 'apply']);
+  const observed = await storage.read();
+  assert.deepEqual(await coordinator.read(), pending);
+  assert.equal((await storage.read()).revision, observed.revision);
+  f.ports.reconcileDeployment = verify;
+  const start = f.ports.start;
+  let release: (() => void) | undefined;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => { release?.(); });
+  f.ports.start = async (expected, signal) => { await waiting; return start(expected, signal); };
+  const continued = await coordinator.reconcile(request.operationId);
+  assert.equal(continued.id, request.operationId); assert.equal(continued.state, 'running');
+  assert.equal((await coordinator.read())?.state, 'running');
+  await assert.rejects(coordinator.reconcile(request.operationId), { code: 'APPLICATION_BUSY' });
+  release!();
+  await coordinator.drain();
+  assert.equal((await coordinator.read())?.state, 'completed');
+  assert.deepEqual(f.calls, ['stop', 'prepare', 'apply', 'reconcile-deployment', 'start']);
+  assert.equal((await storage.read()).value.records.length, 1);
+});
+
+test('old unknown apply resumes with prepared revisions, migrates before start and never replays preparation or writes', async t => {
+  const storage = createNativeApplicationStorage(await directory(t)); const f = fixture();
+  const preparedRevisions = { ...revisions, deployment: 'a'.repeat(64) };
+  f.setStatus({ state: 'stopped', chatReady: false, canStart: false, canApplyDeployment: true,
+    revisions: preparedRevisions, configurationCompatibility: { state: 'blocked' } });
+  const id = randomUUID(); const migrationId = randomUUID(); const migrationRevision = 'c'.repeat(64);
+  const binding: NativeSessionMigrationBinding = { migrationId, conversationId: 'group:123', sourceSessionId: 'parent-history',
+    sourceGeneration: 4, sourceRevision: 8, sourceRequestId: null, expectedPreset: 'old-preset', targetPreset: 'new-preset',
+    issuerEpoch: 'epoch', sourceCursor: 20, sourceDigest: 'd'.repeat(64), targetRevision: 'e'.repeat(64), state: 'available', childSessionId: null };
+  f.ports.previewMigration = async expected => {
+    f.calls.push('preview-migrate'); assert.deepEqual(expected, preparedRevisions);
+    return { schema: 1, state: 'available', migrationId, revision: migrationRevision,
+      revisions: preparedRevisions, bindings: [binding], missingReasons: [] };
+  };
+  f.ports.migrate = async request => {
+    f.calls.push('migrate'); assert.deepEqual(request, { revisions: preparedRevisions, confirm: true, migrationId, revision: migrationRevision });
+    f.setStatus({ canStart: true, configurationCompatibility: { state: 'compatible' } });
+    return { schema: 1, state: 'completed', migrationId, revision: migrationRevision, revisions: preparedRevisions,
+      bindings: [{ ...binding, state: 'bound', childSessionId: 'child-with-preserved-history' }], missingReasons: [] };
+  };
+  const prior = await storage.read();
+  await storage.write(prior.revision, { schema: 1, records: [{ instanceId: 'old-instance', request: { operationId: id, revisions, deploy: true },
+    snapshot: { schema: 1, id, state: 'unknown', phase: 'apply', phaseState: 'in-flight', revisions: preparedRevisions,
+      createdAt: 1, updatedAt: 1, reasons: ['APPLICATION_DEPLOYMENT_UNCONFIRMED'] } }] });
+  const coordinator = createNativeApplicationCoordinator({ storage, ports: f.ports, signal: new AbortController().signal });
+  assert.equal((await coordinator.read())?.phaseState, 'in-flight');
+  assert.equal((await coordinator.reconcile(id)).state, 'running'); await coordinator.drain();
+  assert.equal((await coordinator.read())?.state, 'completed');
+  assert.deepEqual(f.calls, ['reconcile-deployment', 'preview-migrate', 'migrate', 'start']);
+  assert.deepEqual((await storage.read()).value.records[0]?.request.revisions, revisions);
+  assert.equal((await coordinator.reconcile(id)).state, 'completed');
+  assert.deepEqual(f.calls, ['reconcile-deployment', 'preview-migrate', 'migrate', 'start']);
+});
+
+test('unknown apply stays unknown without matching configuration and complete deployment proof', async t => {
+  const storage = createNativeApplicationStorage(await directory(t)); const f = fixture();
+  f.ports.apply = async () => { f.calls.push('apply'); return { state: 'unknown', missingReasons: ['deployment_write_unknown'] }; };
+  const coordinator = createNativeApplicationCoordinator({ storage, ports: f.ports, signal: new AbortController().signal });
+  const id = randomUUID(); await coordinator.create({ operationId: id, revisions, deploy: true }); await coordinator.drain();
+  const unknown = await coordinator.read(); assert(unknown); assert.equal(unknown.state, 'unknown');
+  assert.deepEqual(unknown.reasons, ['deployment_write_unknown']);
+  const verify = f.ports.reconcileDeployment;
+  const proof = await verify({ ...revisions, deployment: 'a'.repeat(64) }, new AbortController().signal);
+  f.calls.pop();
+  for (const incomplete of [{ ...proof, presetBindings: [] }, { ...proof, verificationScope: undefined },
+    { ...proof, missingReasons: ['pending_reload'] }]) {
+    f.ports.reconcileDeployment = async () => incomplete;
+    assert.deepEqual(await coordinator.reconcile(id), unknown);
+  }
+  f.ports.reconcileDeployment = async () => {
+    f.setStatus({ revisions: { ...revisions, deployment: 'a'.repeat(64), access: 'f'.repeat(64) } });
+    return proof;
+  };
+  assert.deepEqual(await coordinator.reconcile(id), unknown);
+  f.ports.reconcileDeployment = verify;
+  f.setStatus({ revisions: { ...revisions, plans: 'f'.repeat(64) } });
+  assert.deepEqual(await coordinator.reconcile(id), unknown);
+  assert.deepEqual(f.calls, ['stop', 'prepare', 'apply']);
+});
+
+test('cancelled reload observation leaves unknown evidence and cannot start or apply a second time', async t => {
+  const storage = createNativeApplicationStorage(await directory(t)); const f = fixture(); const lifetime = new AbortController();
+  f.ports.apply = async () => { f.calls.push('apply'); return { state: 'pending_reload', backupId: 'backup', missingReasons: ['pending_reload'] }; };
+  f.ports.reconcileDeployment = async () => { lifetime.abort(); return { missingReasons: ['pending_reload'], presetBindings: [] }; };
+  const coordinator = createNativeApplicationCoordinator({ storage, ports: f.ports, signal: lifetime.signal });
+  await coordinator.create({ operationId: randomUUID(), revisions, deploy: true }); await coordinator.drain();
+  assert.equal((await coordinator.read())?.state, 'unknown');
+  assert.deepEqual(f.calls, ['stop', 'prepare', 'apply']);
 });

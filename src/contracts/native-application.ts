@@ -17,6 +17,10 @@ export interface NativeApplicationSnapshot {
   readonly updatedAt: number;
   readonly reasons: readonly string[];
 }
+export function nativeApplicationRequiresReconciliation(operation: NativeApplicationSnapshot): boolean {
+  return operation.state === 'running' || operation.state === 'unknown'
+    || operation.state === 'blocked' && operation.phase === 'apply' && operation.reasons.includes('pending_reload');
+}
 export const NATIVE_APPLICATION_PATH = '/api/chat/application';
 export const isNativeApplicationId = (value: unknown): value is string => typeof value === 'string'
   && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);

@@ -44,6 +44,7 @@ import { createNativeWorkRoutes } from './native-work.ts'
 import type { PackageConfigurationRegistry } from '../host/package-configuration.ts'
 import { readNativeRuntimeProjection, nativeRuntimeFeatureResponse } from '../host/native-runtime-projection.ts'
 import { createNativeApplicationStorage } from '../storage/native-application.ts'
+import { nativeApplicationRequiresReconciliation } from '../contracts/native-application.ts'
 import type { NativeInteractions } from '../host/native-interactions.ts'
 import { readImportedChatSessions } from '../host/imported-chat-sessions.ts'
 import { createNativeToolsRoutes, type NativeToolsReader } from './native-tools.ts'
@@ -920,7 +921,7 @@ export async function restoreNativeChatRunningIntent(directory: string, runtime:
   const journal = await createNativeApplicationStorage(directory).read().catch(() => {
     throw new FrameworkError('NATIVE_APPLICATION_STORAGE_UNAVAILABLE', 'The application history could not be verified before restoring chat.')
   })
-  if (journal.value.records.some(record => record.snapshot.state === 'running' || record.snapshot.state === 'unknown')) {
+  if (journal.value.records.some(record => nativeApplicationRequiresReconciliation(record.snapshot))) {
     throw new FrameworkError('NATIVE_APPLICATION_RECONCILIATION_REQUIRED', 'An unfinished application must be reconciled before restoring chat.')
   }
   signal.throwIfAborted()
@@ -1231,6 +1232,17 @@ function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
       if (!(await runtime.status()).canApplyDeployment) requestError(409, 'native_chat_busy')
       signal.throwIfAborted()
       return deploymentResult(() => deploymentRuntime.apply(configuration, signal, targetRevision))
+    }),
+    reconcileDeployment: (revisions, signal) => nativeControl(directory, async () => {
+      if (!deploymentRuntime) requestError(503, 'trusted_deployment_runtime_unavailable')
+      const configuration = await repository.read()
+      if (NATIVE_CONFIGURATION_REVISION_KEYS.some(key => revisions[key] !== configuration.revisions[key])) requestError(409, 'chat_revision_conflict')
+      signal.throwIfAborted()
+      const result = await deploymentResult(() => deploymentRuntime.reconcile(configuration))
+      const current = await repository.read()
+      if (NATIVE_CONFIGURATION_REVISION_KEYS.some(key => revisions[key] !== current.revisions[key])) requestError(409, 'chat_revision_conflict')
+      signal.throwIfAborted()
+      return result
     }),
     previewMigration: (revisions, signal) => nativeControl(directory, () => runtime.previewSessionMigration(revisions, signal)),
     migrate: (request, signal) => nativeControl(directory, () => runtime.migrateSessions(request, signal)),

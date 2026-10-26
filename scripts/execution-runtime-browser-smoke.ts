@@ -640,7 +640,7 @@ export async function verifyExecutionRuntimeUi(page: Page, origin: string, captu
   evidence.featuresUnreadyIsNotMissingModuleOrPermissionAndLinksToStartupChecks = true;
   for (const state of ['stopped', 'error']) {
     await page.goto(`${origin}/test/fixtures/execution-runtime.html?view=plans&catalogState=${state}`);
-    await page.getByText('保存并选择启用方案后，在本页应用到 DSH。', { exact: true }).waitFor();
+    await page.getByText('更新聊天会保存当前方案、选择启用并应用，保留已有上下文。', { exact: true }).waitFor();
     assert.equal((await page.locator('main').innerText()).includes('原生宿主未接入'), false);
     const name = page.getByRole('textbox', { name: '方案名称', exact: true });
     await name.fill('尚未运行也可编辑的方案草稿');

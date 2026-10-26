@@ -10,5 +10,5 @@ export function useChatApplication(api: ApiClient, connected: boolean) {
   const operationId = state.kind === 'application' && (state.busy || state.blocked) ? state.operationId : null;
   const resource = useReadResource(api, chatApplicationPath(operationId), connected, parseNativeApplicationEnvelope, { intervalMs: 2_000 });
   useEffect(() => { if (resource.snapshot?.operation) application.observe(resource.snapshot.operation); }, [application, resource.snapshot]);
-  return { application, state, observationError: resource.error, refresh: resource.refresh };
+  return { application, state, observationError: resource.error, initialLoading: resource.loading && resource.snapshot === null, refresh: resource.refresh };
 }

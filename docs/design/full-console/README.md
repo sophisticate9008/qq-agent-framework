@@ -16,7 +16,7 @@
 
 ## 已批准实施
 
-此离线稿的六个浏览器脚本（`app.js`、`connections.js`、`core.js`、`editors.js`、`overview.js`、`records.js`）由仓库检查显式允许使用 JavaScript，便于直接打开预览，无需构建。例外仅覆盖这些设计文件；文件大小、凭据格式与符号链接检查仍保留，正式源码继续使用 TypeScript。
+仓库检查通过 `scripts/check.ts` 中的 `authoredJavaScriptDirectories` 配置目录例外：`docs/design/full-console/` 及其子目录允许使用 JavaScript，便于直接打开离线预览，无需构建；新增设计脚本无需逐文件登记。文件大小、凭据格式与符号链接检查仍保留，正式源码继续使用 TypeScript。
 
 用户已明确批准实施。九页静态参考已渲染，正式界面按相同卡片组合、内容位置、比例、列宽和视觉层级接入真实数据。此稿的演示按钮不会取代正式页面原有的保存版本核对、权限、未知结果保护与恢复流程。
 

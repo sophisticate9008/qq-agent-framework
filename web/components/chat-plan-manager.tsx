@@ -638,6 +638,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
   const heading = props.compact ? null : <PageHeading title="聊天方案与助手" description="配置聊天模型与回复方式，管理独立工作的后台助手。" actions={connected && catalog ? <div className="flex flex-wrap items-center gap-3 text-xs">
       <StatusPill tone={dirty || creating ? 'warning' : 'neutral'}>{dirty || creating ? '未保存' : '已保存'}</StatusPill>
       <StatusPill tone={runtimeConnected ? 'success' : 'warning'}>{runtimeConnected === null ? '聊天状态待确认' : runtimeConnected ? '聊天可用' : '聊天暂不可用'}</StatusPill>
+      <Button variant="outline" onClick={useBuiltinPlan} disabled={dirty || editingDisabled} title="将内置日常方案填入新的草稿">使用内置方案</Button>
       <Button variant="ghost" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新状态</Button>
     </div> : undefined} />;
 
@@ -681,11 +682,10 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
           </div></SettingsWindow>}</span></div>}>
       {creating && creationDialogOpen ? <p className="small muted">在新建窗口中编辑方案草稿。</p> : editorFields}
     </Section>
-    <div className="summaryline small"><span className="muted">从完整模板开始</span><Button size="sm" variant="ghost" onClick={useBuiltinPlan} disabled={dirty || loading || editingDisabled}>使用内置日常方案</Button></div>
     {props.children}
     </div></div>
 
-    <Dialog open={creating && creationDialogOpen} onOpenChange={open => { if (!saving && !updatingChat) setCreationDialogOpen(open); }}><DialogContent className="sm:max-w-5xl" showCloseButton={!saving && !updatingChat}><DialogHeader><DialogTitle>新建聊天方案</DialogTitle><DialogDescription>选择已登记的模型与人设，创建新的方案草稿。</DialogDescription></DialogHeader>{creating && creationDialogOpen && editorFields}<div className="row border-t pt-2"><Button disabled={!dirty || editingDisabled || blocked} onClick={() => void save()}>{saving ? '正在创建' : '创建方案'}</Button><Button variant="ghost" disabled={saving || updatingChat} onClick={() => setCreationDialogOpen(false)}>返回编辑</Button></div></DialogContent></Dialog>
+    <Dialog open={creating && creationDialogOpen} onOpenChange={open => { if (!saving && !updatingChat) setCreationDialogOpen(open); }}><DialogContent className="sm:max-w-5xl" showCloseButton={!saving && !updatingChat}><DialogHeader><DialogTitle>新建聊天方案</DialogTitle><DialogDescription>选择已登记的模型与人设，创建新的方案草稿。</DialogDescription></DialogHeader>{creating && creationDialogOpen && editorFields}<div className="row border-t pt-2"><Button variant="outline" className="mr-auto" onClick={useBuiltinPlan} disabled={dirty || editingDisabled} title={dirty ? '请先保存或撤销当前草稿' : '填入内置日常方案'}>填入内置方案</Button><Button disabled={!dirty || editingDisabled || blocked} onClick={() => void save()}>{saving ? '正在创建' : '创建方案'}</Button><Button variant="ghost" disabled={saving || updatingChat} onClick={() => setCreationDialogOpen(false)}>返回编辑</Button></div></DialogContent></Dialog>
     <Dialog open={modelEditorOpen} onOpenChange={setModelEditorOpen}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-6xl" finalFocus={() => document.getElementById('chat-plan-model')}>
         <DialogHeader><DialogTitle>就地选择或添加模型</DialogTitle><DialogDescription>方案草稿保留在原处。先单独保存提供方或模型，再选择“在聊天方案中使用此模型”返回；方案仍需明确保存。</DialogDescription></DialogHeader>

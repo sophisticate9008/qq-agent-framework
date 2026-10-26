@@ -16,7 +16,7 @@ async function waitForGate(pending: ReturnType<typeof gate>, description: string
 }
 
 function field(editor: Locator, name: string): Locator {
-  return editor.getByText(name, { exact: true }).locator('xpath=ancestor::label[1]').first();
+  return editor.getByText(name, { exact: true }).locator('xpath=ancestor::label[1]');
 }
 
 interface HeldRead {
@@ -59,6 +59,9 @@ export async function exerciseModelReasoningCapabilities(page: Page, requests: r
   try {
     await navigateConsolePage(page, 'overview');
     await navigateConsolePage(page, 'model');
+    const planCatalog = page.locator('[data-page="model"] section').filter({
+      has: page.getByRole('heading', { name: '聊天方案', exact: true }),
+    }).getByRole('list');
     const editor = page.locator('#native-plan-editor');
     const reasoningField = field(editor, '思考强度');
     const reasoning = reasoningField.locator('select');
@@ -80,7 +83,7 @@ export async function exerciseModelReasoningCapabilities(page: Page, requests: r
     assert.equal(await reasoning.inputValue(), 'high');
     assert.deepEqual(await reasoning.locator('option:enabled').evaluateAll(elements => elements.map(element => (element as HTMLOptionElement).value)), ['off', 'high']);
 
-    await page.getByRole('button', { name: /^Reasoning Fixture B/ }).click();
+    await planCatalog.getByRole('button', { name: /^Reasoning Fixture B/ }).click();
     await reasoningField.getByText('当前模型支持：off、medium。', { exact: true }).waitFor();
     assert.equal(await reasoning.inputValue(), 'medium');
     const delayNextFirstModel = () => {
@@ -91,10 +94,10 @@ export async function exerciseModelReasoningCapabilities(page: Page, requests: r
     const oldPlan = delayNextFirstModel();
     const planRead = page.waitForRequest(request => new URL(request.url()).pathname === '/api/chat/model-capabilities'
       && new URL(request.url()).searchParams.get('model') === 'fixture-model');
-    await page.getByRole('button', { name: /^Reasoning Fixture A/ }).click();
+    await planCatalog.getByRole('button', { name: /^Reasoning Fixture A/ }).click();
     await planRead;
     await waitForGate(oldPlan.entered, 'the held previous-plan capability route');
-    await page.getByRole('button', { name: /^Reasoning Fixture B/ }).click();
+    await planCatalog.getByRole('button', { name: /^Reasoning Fixture B/ }).click();
     await reasoningField.getByText('当前模型支持：off、medium。', { exact: true }).waitFor();
     oldPlan.release.resolve(); await waitForGate(oldPlan.settled, 'the late previous-plan reply');
     assert.equal(await name.inputValue(), 'Reasoning Fixture B');

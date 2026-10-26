@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ApiError, type ApiClient } from '../web/lib/api.ts';
-import { applyAndStartChat, chatApplicationCanReconcile, chatApplicationStore, newChatApplicationId, readChatApplication, reconcileChatApplication, type ChatApplicationPhase } from '../web/lib/chat-application.ts';
+import { applyAndStartChat, chatApplicationCanReconcile, chatApplicationPrimaryAction, chatApplicationStore, newChatApplicationId, readChatApplication, reconcileChatApplication, type ChatApplicationPhase } from '../web/lib/chat-application.ts';
 import { chatRuntimeCanApplyAndStart, parseChatRuntimeStatus } from '../web/lib/chat-runtime.ts';
 import { isNativeApplicationId, parseNativeApplicationEnvelope, type NativeApplicationSnapshot } from '../src/contracts/native-application.ts';
 import { NATIVE_CONFIGURATION_REVISION_KEYS, type NativeConfigurationRevisions } from '../src/contracts/native-revisions.ts';
@@ -241,4 +241,28 @@ test('a newer completed read wins over a delayed running reconciliation receipt 
   assert.deepEqual(await reconcileChatApplication(api, original.id), completed);
   assert.equal(store.getSnapshot().blocked, false); assert.equal(store.getSnapshot().busy, false);
   assert.equal(store.getSnapshot().operation?.state, 'completed');
+});
+
+test('known recovery actions remain reachable when ordinary update prerequisites are unavailable', () => {
+  const api: ApiClient = { get: async () => ({}), post: async () => ({}) };
+  const store = chatApplicationStore(api);
+  const unknown: NativeApplicationSnapshot = { schema: 1, id: '11111111-1111-4111-8111-111111111111', state: 'unknown',
+    phase: 'apply', phaseState: 'confirmed', revisions, createdAt: 1, updatedAt: 2, reasons: ['APPLICATION_DEPLOYMENT_UNCONFIRMED'] };
+  store.observe(unknown);
+  assert.equal(chatApplicationPrimaryAction(store.getSnapshot(), { connected: true, requestActive: false, updateReady: false }), 'reconcile');
+  assert.equal(chatApplicationPrimaryAction(store.getSnapshot(), { connected: true, requestActive: true, updateReady: false }), 'busy');
+  const token = store.claimReconciliation(unknown.id);
+  store.observe({ ...unknown, state: 'running', updatedAt: 3 }, token); store.release(token);
+  assert.equal(chatApplicationPrimaryAction(store.getSnapshot(), { connected: true, requestActive: false, updateReady: false }), 'observe');
+  assert.equal(chatApplicationPrimaryAction(store.getSnapshot(), { connected: false, requestActive: false, updateReady: true }), 'blocked');
+});
+
+test('manual deployment freeze offers explicit restoration without trusting unrelated completed observations', () => {
+  const api: ApiClient = { get: async () => ({}), post: async () => ({}) };
+  const store = chatApplicationStore(api); store.claim('manual', 'deployment'); store.freeze('deployment');
+  assert.equal(store.observe({ schema: 1, id: '11111111-1111-4111-8111-111111111111', state: 'completed', phase: 'start',
+    phaseState: 'confirmed', revisions, createdAt: 1, updatedAt: 2, reasons: [] }), false);
+  assert.equal(chatApplicationPrimaryAction(store.getSnapshot(), { connected: true, requestActive: false, updateReady: false }), 'restore');
+  assert.equal(store.reviewManual('deployment', { verified: true }), null);
+  assert.equal(store.getSnapshot().blocked, true);
 });

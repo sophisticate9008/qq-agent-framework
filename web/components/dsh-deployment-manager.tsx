@@ -11,11 +11,13 @@ import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'reac
 import { Check, Eye, RefreshCw, Upload } from 'lucide-react';
 import { ApiError, asRecord, errorMessage, type ApiClient } from '../lib/api.ts';
 import { chatRuntimeReason, parseChatRuntimeStatus } from '../lib/chat-runtime.ts';
-import { applyAndStartChat, chatApplicationCanReconcile, chatApplicationPhaseLabels, chatApplicationStore, reconcileChatApplication } from '../lib/chat-application.ts';
+import { applyAndStartChat, chatApplicationCanReconcile, chatApplicationPhaseLabels, chatApplicationPrimaryAction, chatApplicationStore, reconcileChatApplication, type ChatApplicationPrimaryAction } from '../lib/chat-application.ts';
 import { Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { Textarea } from './ui/textarea.tsx';
+import { DshRestartControl } from './dsh-restart-control.tsx';
+import { useDshRestart } from '../lib/use-dsh-restart.ts';
 
 type Effort = typeof efforts[number];
 
@@ -109,23 +111,24 @@ function payload(form: DeploymentForm): { readonly deployment?: Record<string, u
 }
 
 export function DshDeploymentManager({ api, connected, setDirty, running = false, configurationDirty = false, configurationRevision = '', configurationDocument = 'plans', compact = false, navigate,
-  prepareConfiguration, configurationUpdateBlocked = false, updateRef, onUpdateAvailable, onReconciliationRequired }: {
+  prepareConfiguration, configurationUpdateBlocked = false, updateRef, onUpdateAvailable, onUpdateActionChange }: {
   readonly api: ApiClient; readonly connected: boolean; readonly running?: boolean; readonly compact?: boolean; readonly navigate?: PageProps['navigate'];
   readonly configurationDirty?: boolean; readonly configurationRevision?: string; readonly configurationDocument?: 'plans' | 'personas'; setDirty(value: boolean, scope?: string): void;
   readonly prepareConfiguration?: (signal: AbortSignal) => Promise<PreparedChatConfiguration | null>;
   readonly configurationUpdateBlocked?: boolean;
   readonly updateRef?: Ref<DshDeploymentHandle>;
   readonly onUpdateAvailable?: (available: boolean) => void;
-  readonly onReconciliationRequired?: (required: boolean) => void;
+  readonly onUpdateActionChange?: (action: ChatApplicationPrimaryAction) => void;
 }) {
   const { application, state: applicationState, observationError, initialLoading: applicationLoading, refresh: refreshApplication } = useChatApplication(api, connected);
+  const restart = useDshRestart(api, connected);
   const runtimeResource = useReadResource(api, '/api/chat/runtime', connected, parseChatRuntimeStatus, { intervalMs: 5_000, pollWhen: () => !application.getSnapshot().busy });
   const [saved, setSaved] = useState<DeploymentSnapshot | null>(null);
   const [form, setForm] = useState<DeploymentForm | null>(null);
   const [localBusy, setBusy] = useState(false);
   const [localBlocked, setBlocked] = useState(false);
   const [manualReview, setManualReview] = useState<symbol | null>(null);
-  const busy = localBusy || applicationState.busy || applicationState.reconciling;
+  const busy = localBusy || applicationState.busy || applicationState.reconciling || restart.pending;
   const blocked = localBlocked || applicationState.blocked;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -134,6 +137,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   const [supportedEfforts, setSupportedEfforts] = useState<readonly Effort[] | null>(null);
   const [reload, setReload] = useState(0);
   const request = useRef<AbortController | null>(null);
+  const recoveryRequest = useRef<AbortController | null>(null);
   const configurationRequest = useRef<{ readonly controller: AbortController; preparing: boolean; prepared: PreparedChatConfiguration | null } | null>(null);
   const committedConfiguration = useRef<{ readonly api: ApiClient; readonly revision: string } | null>(null);
   const reconciledDeployment = useRef<string | null>(null);
@@ -178,6 +182,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   }, [api, connected, reload]);
 
   useEffect(() => {
+    if (request.current && recoveryRequest.current === request.current) return;
     const ownUpdate = configurationRequest.current;
     if (ownUpdate && request.current === ownUpdate.controller && (ownUpdate.preparing || ownUpdate.prepared?.isCurrent())) return;
     if (!configurationDirty && committedConfiguration.current?.api === api && committedConfiguration.current.revision === configurationRevision) {
@@ -229,10 +234,11 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       setError(reasons.length > 0 ? [...new Set(reasons.map(reason => chatRuntimeReason(reason).text))].join(' ') : '应用检查尚未通过，请核对聊天设置。');
       return;
     }
-    if (state === 'unknown' || state === 'conflict') {
+    if (state === 'unknown') {
       frozen.current.add(api); setBlocked(true);
       setError('应用结果尚未确认，请先核对是否生效；不会自动重试。');
     }
+    if (state === 'conflict') setError('设置已变化，本次未应用。请刷新状态并重新预览。');
     setNotice(state === 'verified' ? '聊天设置已通过 DSH 加载与来源检查，本次设置无需重启 DSH。'
       : state === 'pending_reload' ? '聊天设置已写入，等待 DSH 加载；不会自动重启。' : '请核对本次应用结果，不会重复提交。');
     if (reasons.length > 0 && state !== 'unknown' && state !== 'conflict') setError([...new Set(reasons.map(reason => chatRuntimeReason(reason).text))].join(' '));
@@ -253,8 +259,10 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       && connection.current.api === api && connection.current.connected && !connection.current.configurationDirty
       && connection.current.configurationRevision === configurationRevision;
     setBusy(true); setError(''); setNotice(''); setManualReview(null);
+    let mutationStarted = false;
     try {
       if (operation === 'save') {
+        mutationStarted = true;
         const response = await writeResource(api, '/api/chat/deployment', { revision: saved.revision, ...input }, controller.signal);
         if (!current()) return;
         const next = parseDeployment(response);
@@ -273,6 +281,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
         if (operation === 'apply' && (!preview || !sameRevisions(preview.revisions, runtime.revisions))) {
           setPreview(null); setError('设置已变化，请重新预览后再应用。'); return;
         }
+        mutationStarted = operation === 'apply';
         const value = await writeResource(api, `/api/chat/deployment/${operation}`, {
           revisions: operation === 'apply' ? preview?.revisions : runtime.revisions,
           ...(operation === 'apply' ? { targetRevision: preview?.targetRevision } : {}),
@@ -290,7 +299,12 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
         }
       }
     } catch (failure) {
-      if (current()) { frozen.current.add(api); setError(`${errorMessage(failure)} 请重新读取核对，不会自动重试。`); setBlocked(true); setPreview(null); }
+      if (current()) {
+        const rejected = failure instanceof ApiError && failure.status >= 400 && failure.status < 500 && !/unknown/.test(failure.code);
+        if (mutationStarted && !rejected) frozen.current.add(api);
+        setError(`${errorMessage(failure)} 请刷新状态后再操作，不会自动重试。`);
+        setBlocked(frozen.current.has(api)); setPreview(null);
+      }
     } finally {
       if (current()) { request.current = null; setBusy(false); }
       if (sharedOwner) application.release(sharedOwner);
@@ -298,6 +312,9 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   }
 
   async function autoApply(): Promise<void> {
+    const state = application.getSnapshot();
+    if (state.kind === 'manual' && state.blocked && state.manualSource === 'deployment') { await restoreManualOperations(); return; }
+    if (application.getSnapshot().kind === 'application' && application.getSnapshot().busy && !request.current) { refreshApplication(); return; }
     if (chatApplicationCanReconcile(application.getSnapshot())) { await reconcileApplication(); return; }
     if (!saved || !form || !currentDocument() || applicationLoading || (prepareConfiguration ? configurationUpdateBlocked : connection.current.configurationDirty) || busy || blocked || frozen.current.has(api) || dirty || request.current) return;
     if (application.getSnapshot().busy) return;
@@ -350,11 +367,13 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   const canReconcile = chatApplicationCanReconcile(applicationState);
   const waitingForReload = applicationState.operation?.state === 'blocked' && applicationState.operation.phase === 'apply'
     && applicationState.operation.reasons.includes('pending_reload');
-  const updateAvailable = connected && !applicationLoading && !observationError && !busy && (canReconcile || saved !== null && form !== null && currentDocument() && !blocked && !dirty
-    && !(prepareConfiguration ? configurationUpdateBlocked : configurationDirty));
+  const primaryAction = chatApplicationPrimaryAction(applicationState, { connected, requestActive: request.current !== null,
+    updateReady: !applicationLoading && !observationError && !busy && saved !== null && form !== null && currentDocument() && !blocked && !dirty
+      && !(prepareConfiguration ? configurationUpdateBlocked : configurationDirty) });
+  const updateAvailable = primaryAction === 'update' || primaryAction === 'observe' || primaryAction === 'reconcile' || primaryAction === 'restore';
   useImperativeHandle(updateRef, () => ({ updateChat: autoApply }));
   useEffect(() => { onUpdateAvailable?.(updateAvailable); }, [onUpdateAvailable, updateAvailable]);
-  useEffect(() => { onReconciliationRequired?.(canReconcile); }, [onReconciliationRequired, canReconcile]);
+  useEffect(() => { onUpdateActionChange?.(primaryAction); }, [onUpdateActionChange, primaryAction]);
   useEffect(() => {
     if (reconciledDeployment.current === applicationState.operation?.id && applicationState.operation.state === 'completed'
       && !dirty && !request.current) { reconciledDeployment.current = null; setReload(value => value + 1); }
@@ -365,6 +384,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
     if (!operationId || request.current || application.getSnapshot().busy || application.getSnapshot().reconciling) return;
     const controller = new AbortController(); const generation = epoch.current;
     request.current = controller;
+    recoveryRequest.current = controller;
     const current = () => !controller.signal.aborted && request.current === controller && epoch.current === generation
       && connection.current.api === api && connection.current.connected;
     setError(''); setNotice('正在核对原操作的实际结果；加载已确认后继续衔接并启动，不重复应用。');
@@ -373,27 +393,76 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       if (!current()) return;
       setBlocked(application.getSnapshot().blocked);
       if (result.state === 'running') reconciledDeployment.current = result.id;
-      else if (result.state === 'completed' && !dirty) { reconciledDeployment.current = null; setReload(value => value + 1); }
+      else if ((result.state === 'completed' || result.state === 'blocked' && !application.getSnapshot().blocked) && !dirty) {
+        reconciledDeployment.current = null; setReload(value => value + 1);
+      }
       setNotice(result.state === 'completed' ? '已核对：原操作已完成，未重复应用。' : result.state === 'running'
         ? '已核验加载结果，正在继续原更新；不会重复应用。' : result.state === 'blocked'
           ? '原更新仍有条件待处理，请核对下方原因；不会重复应用。' : '现有证据仍不足，原操作保持待核对；不会自动重试。');
       runtimeResource.refresh(); refreshApplication();
     } catch (failure) { if (current()) { setBlocked(true); setError(`${errorMessage(failure)} 核对不会自动重试。`); } }
-    finally { if (request.current === controller) request.current = null; }
+    finally {
+      if (recoveryRequest.current === controller) recoveryRequest.current = null;
+      if (request.current === controller) request.current = null;
+    }
+  }
+
+  async function restoreManualOperations(): Promise<void> {
+    const state = application.getSnapshot();
+    if (!connected || request.current || state.busy || state.reconciling || state.kind !== 'manual'
+      || state.manualSource !== 'deployment' || !state.blocked) return;
+    const controller = new AbortController();
+    const generation = epoch.current;
+    request.current = controller;
+    recoveryRequest.current = controller;
+    const current = () => !controller.signal.aborted && request.current === controller && epoch.current === generation
+      && connection.current.api === api && connection.current.connected;
+    setBusy(true); setError(''); setManualReview(null);
+    try {
+      const runtime = parseChatRuntimeStatus(await api.get('/api/chat/runtime', controller.signal));
+      if (!current()) return;
+      if (!runtime) throw new Error('无法读取当前运行状态，请重试恢复操作。');
+      const result = await writeResource(api, '/api/chat/deployment/reconcile', { revisions: runtime.revisions }, controller.signal);
+      if (!current()) return;
+      const proof = application.reviewManual('deployment', result);
+      if (!proof || !application.acknowledgeManual(proof, 'deployment')) {
+        showResult(result, 'reconcile');
+        setError('尚未确认实际加载结果，原保护保留；可再次恢复操作，不会重复应用。');
+        return;
+      }
+      setBlocked(false); setPreview(null); setNotice('已确认实际加载结果，管理操作已恢复；其他草稿保留，未重复应用。');
+      if (!dirty) setReload(value => value + 1);
+    } catch (failure) {
+      if (current()) setError(`${errorMessage(failure)} 恢复入口仍可重试，不会重复应用。`);
+    } finally {
+      if (recoveryRequest.current === controller) recoveryRequest.current = null;
+      if (request.current === controller) { request.current = null; setBusy(false); }
+    }
   }
 
   if (!connected) return null;
   return <Section id={nativeFormMetadata.deployment.id} title={nativeFormMetadata.deployment.title} description="应用已保存且已启用的聊天方案及其关联人设；其他草稿或未关联人设不会被选择或应用。" scrollable
-    actions={<Button variant="outline" size="sm" disabled={busy || dirty && !blocked} onClick={() => { if (!request.current && connection.current.api === api && connection.current.connected) setReload(value => value + 1); }}><RefreshCw className="size-3.5" />重新读取</Button>}
+    actions={<Button variant="outline" size="sm" onClick={() => { refreshApplication(); runtimeResource.refresh(); if (!request.current && !dirty && connection.current.api === api && connection.current.connected) setReload(value => value + 1); }}><RefreshCw className="size-3.5" />刷新状态</Button>}
     footer={<p className="text-xs leading-6 text-muted-foreground" role="status">{notice || (blocked ? '上次操作结果未确认，应用已冻结；请先核对，不会重复应用。' : dirty ? '手动更改尚未保存；保存本身不会修改 DSH。' : '应用已保存设置并启动／更新聊天，保留上下文；不重启 DSH 进程。')}</p>}>
     <div className="mb-3 flex flex-wrap items-center gap-2 text-xs" role="status"><StatusPill tone={blocked ? 'warning' : runtimeResource.snapshot?.chatReady ? 'success' : 'neutral'}>{waitingForReload ? '等待 DSH 加载核对' : blocked ? '应用结果待核对' : busy ? '正在应用' : applicationState.operation?.state === 'blocked' ? '应用检查未通过' : runtimeResource.error ? '运行状态待确认' : runtimeResource.snapshot?.chatReady && !runtimeResource.snapshot.configurationChanged ? '当前启用方案运行中' : '已保存待应用'}</StatusPill>{applicationState.busy && applicationState.phase && <span>{chatApplicationPhaseLabels[applicationState.phase]}</span>}</div>
     {observationError && <p role="status" className="mb-3 text-xs text-muted-foreground">暂时无法更新持久应用记录；已保留上次阶段，不会重复提交。</p>}
+    <DshRestartControl api={api} connected={connected} />
+    {applicationState.kind === 'application' && applicationState.operationId && (canReconcile || applicationState.busy || observationError || !applicationState.operation) && <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border p-3 text-xs" data-application-recovery>
+      <Button size="sm" variant="outline" onClick={refreshApplication}>读取更新状态</Button>
+      {canReconcile && <Button size="sm" variant="outline" disabled={request.current !== null || applicationState.reconciling} onClick={() => void reconcileApplication()}>核对并继续更新</Button>}
+      {applicationState.busy && <span>原更新仍在处理，可读取进度；不会重复应用。</span>}
+      {canReconcile && <span>核对原更新；当前其他草稿保留。</span>}
+    </div>}
+    {applicationState.kind === 'manual' && applicationState.manualSource === 'deployment' && applicationState.blocked && <div className="mb-3 grid gap-2 rounded-lg border p-3 text-xs" data-manual-deployment-recovery>
+      <p>先前管理请求没有确认结果。恢复操作会读取实际加载证据，不重复应用，保留当前草稿。</p>
+      <Button size="sm" variant="outline" className="justify-self-start" disabled={request.current !== null || applicationState.busy || applicationState.reconciling} onClick={() => void restoreManualOperations()}>恢复操作</Button>
+    </div>}
     {applicationState.kind === 'application' && applicationState.operationId && <details className="mb-3 rounded-lg border p-3 text-xs leading-6"><summary className="cursor-pointer">应用操作详情</summary><p className="mt-2 break-all">操作标识：{applicationState.operationId}</p><p>状态：{applicationState.operation?.state === 'completed' ? '已完成' : applicationState.operation?.state === 'blocked' ? '检查未通过' : applicationState.operation?.state === 'unknown' ? '结果待核对' : applicationState.operation?.state === 'running' ? '后台处理中' : '请求结果待核对'}</p>{applicationState.operation?.reasons.map(reason => <p key={reason}>{chatRuntimeReason(reason).text}</p>)}<div className="mt-2 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={refreshApplication}>读取同一应用操作</Button>{canReconcile && <Button size="sm" variant="outline" disabled={applicationState.busy || applicationState.reconciling} onClick={() => void reconcileApplication()}>{applicationState.reconciling ? '正在核对…' : '核对并继续更新'}</Button>}</div></details>}
     {error && <p className="mb-4 text-xs leading-6 text-destructive" role="alert">{error}</p>}
     {!form ? <p role="status" className="text-xs text-muted-foreground">{busy ? '正在读取应用设置' : '暂时无法读取应用设置，请重试。'}</p> : <div className="grid gap-5">
       <div className="grid gap-3 rounded-lg border bg-accent/20 p-4"><p className="text-sm font-medium">{prepareConfiguration ? '一次更新聊天：保存当前方案、选择启用并应用。' : '保存后，一次应用并启动／更新聊天。'}</p><p className="text-xs leading-6 text-muted-foreground">自动识别并应用已启用方案及关联人设；必要时先停止聊天，核对加载和会话衔接后再启动，保留已有上下文。</p>
-        <span role="group" aria-label="应用并启动／更新聊天" data-page-field className="justify-self-start"><Button disabled={!updateAvailable} onClick={() => void autoApply()}><Upload className="size-3.5" />{busy ? '正在处理…' : canReconcile ? '核对并继续更新' : prepareConfiguration ? '更新聊天' : '应用并启动／更新聊天'}</Button></span>
-        <p className="text-xs leading-6 text-muted-foreground">{prepareConfiguration ? '仅保存当前方案；其他表单草稿保留。' : '不自动保存草稿。'}不清除会话，不重启 DSH。检查未通过或结果未知时停止，不自动重试。</p>
+        <span role="group" aria-label="应用并启动／更新聊天" data-page-field className="justify-self-start"><Button disabled={!updateAvailable} onClick={() => void autoApply()}><Upload className="size-3.5" />{primaryAction === 'restore' ? '恢复操作' : primaryAction === 'observe' ? '读取更新状态' : primaryAction === 'reconcile' ? '核对并继续更新' : busy ? '正在处理…' : prepareConfiguration ? '更新聊天' : '应用并启动／更新聊天'}</Button></span>
+        <p className="text-xs leading-6 text-muted-foreground">{prepareConfiguration ? '仅保存当前方案；其他表单草稿保留。' : '不自动保存草稿。'}更新聊天不清除会话，也不重启 DSH；重启需单独点击“重启 DSH”。检查未通过或结果未知时停止，不自动重试。</p>
         {configurationDirty && !prepareConfiguration && <p className="text-xs text-muted-foreground">请先保存或撤销当前人设、方案更改，并核对保存结果；应用只读取已保存配置。</p>}{dirty && <p className="text-xs text-muted-foreground">请先保存或撤销手动更改，避免覆盖草稿。</p>}</div>
       {supportedEfforts !== null && <p className="text-xs leading-6 text-muted-foreground" role="status">已识别模型支持的推理档位：{supportedEfforts.length > 0 ? supportedEfforts.map(effort => ({ off: '关闭', low: '低（low）', medium: '中（medium）', high: '高（high）', max: '最高（max）' })[effort]).join('、') : '暂未提供'}。不会自动修改聊天方案的档位。</p>}
       {blocked && <p className="text-xs leading-6 text-amber-700 dark:text-amber-400" role="status">{waitingForReload ? '设置已写入，等待 DSH 加载。核对后继续同一次更新，不重复应用。' : '上次操作结果尚未确认，已冻结新的应用请求；重新读取只核对设置，不会解除保护或重放请求。'}</p>}
@@ -412,7 +481,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       <SaveBar dirty={dirty} saving={busy} disabled={blocked || configurationDirty} onSave={() => void perform('save')} onReset={saved && !blocked ? () => { if (!currentDocument() || busy || request.current || frozen.current.has(api)) return; setForm(saved.form); setPreview(null); } : undefined} label="保存应用设置" message={dirty ? '保存手动应用设置，不会写入 DSH。' : '手动设置已保存。'} />
       <div className="flex flex-wrap gap-2 border-t pt-4"><Button variant="outline" disabled={busy || blocked || dirty || configurationDirty} onClick={() => void perform('prepare')}><Eye className="size-3.5" />预览变更</Button></div>
       <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || dirty || configurationDirty} onClick={() => void perform('reconcile')}><Check className="size-3.5" />检查是否生效</Button></div>
-      {pendingReload && <p className="text-xs leading-6 text-amber-700 dark:text-amber-400" role="status">设置已写入，但 DSH 尚未加载。请检查热更新状态；如确需重启，请在明确维护窗口重启该 DSH 实例，再点“检查是否生效”。当前页面没有执行 DSH 重启的接口，不会把检查当作重启。</p>}
+      {pendingReload && <p className="text-xs leading-6 text-amber-700 dark:text-amber-400" role="status">设置已写入，等待 DSH 加载。可在本页明确点击“重启 DSH”；维护流程会暂停聊天并在完成后恢复，不重复应用设置。</p>}
       {preview && <div className="grid gap-3 rounded-lg border p-3 text-xs leading-6">{preview.reasons.length > 0 && <ul>{[...new Set(preview.reasons.map(reason => chatRuntimeReason(reason).text))].map(reason => <li key={reason}>{reason}</li>)}</ul>}{preview.ready && <><p>点击应用将备份并写入当前聊天设置；不会重置会话或重启 DSH。</p>{running && <p className="text-muted-foreground">请先停止聊天，再应用引擎配置。</p>}<Button disabled={busy || blocked || dirty || configurationDirty || running} onClick={() => void perform('apply')}><Upload className="size-3.5" />应用聊天设置</Button></>}</div>}
       </div></details>}
     </div>}

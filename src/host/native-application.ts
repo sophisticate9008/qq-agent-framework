@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { NativeApplicationPhase, NativeApplicationRequest, NativeApplicationSnapshot } from '../contracts/native-application.ts';
 import { nativeApplicationRequiresReconciliation, parseNativeApplicationRequest, parseNativeApplicationSnapshot } from '../contracts/native-application.ts';
 import type { NativeConfigurationRevisions } from '../contracts/native-revisions.ts';
-import { isNativeConfigurationRevisions } from '../contracts/native-revisions.ts';
+import { isNativeConfigurationRevisions, NATIVE_CONFIGURATION_REVISION_KEYS } from '../contracts/native-revisions.ts';
 import type { NativeDeploymentApplyResult, NativeDeploymentPreparationResult, NativeDeploymentReconciliationResult } from '../contracts/native-deployment.ts';
 import { assert, errorCode, snapshot } from '../core/values.ts';
 import type { NativeSessionMigrationCommit, NativeSessionMigrationResult } from './native-session-migration.ts';
@@ -18,6 +18,7 @@ export interface NativeApplicationRuntimeStatus {
   readonly revisions: Readonly<Record<string, string>>;
   readonly missingReasons: readonly string[];
   readonly configurationCompatibility: { readonly state: string };
+  readonly quiescent?: boolean;
 }
 export interface NativeApplicationPorts {
   status(): Promise<NativeApplicationRuntimeStatus>;
@@ -247,7 +248,21 @@ export function createNativeApplicationCoordinator(options: {
         if (current.state !== 'unknown' && !awaitingDeployment) return current;
         const observed = await withDeadline({ signal: options.signal, timeoutMs: 10_000,
           code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
-        if (!same(observed.revisions, current.revisions)) return current;
+        const sameRevisions = same(observed.revisions, current.revisions);
+        const onlyPreparedDeploymentChanged = isNativeConfigurationRevisions(observed.revisions)
+          && NATIVE_CONFIGURATION_REVISION_KEYS.every(key => key === 'deployment' || observed.revisions[key] === current.revisions[key]);
+        const safelyStopped = observed.state === 'stopped' && observed.quiescent === true;
+        const stoppedIntent = current.phase === null || current.phase === 'stop';
+        const preparedIntent = current.phase === 'prepare' && onlyPreparedDeploymentChanged;
+        if (safelyStopped && (stoppedIntent || preparedIntent)) {
+          const settled: NativeApplicationSnapshot = { ...current, state: 'blocked', updatedAt: now(), reasons: [preparedIntent
+            ? 'application_preparation_saved_new_intent_required' : 'application_stopped_verified_new_intent_required'] };
+          await options.storage.write(prior.revision, { schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
+            ? { ...item, instanceId, snapshot: settled } : item) });
+          inMemoryUnknown = undefined;
+          return snapshot(settled);
+        }
+        if (!sameRevisions) return current;
         if (awaitingDeployment && observed.state === 'stopped' && await verifyDeployment(current.revisions, options.signal)) {
           const checked = await withDeadline({ signal: options.signal, timeoutMs: 10_000,
             code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
@@ -262,10 +277,7 @@ export function createNativeApplicationCoordinator(options: {
         let verified: NativeApplicationSnapshot | undefined;
         if (current.phase === 'start' && observed.state === 'running' && observed.chatReady) {
           verified = { ...current, state: 'completed', phaseState: 'confirmed', reasons: [], updatedAt: now() };
-        } else if (observed.state === 'stopped' && (observed.canStart || observed.canApplyDeployment)
-          && (current.phase === null || current.phase === 'stop'
-            || current.phase === 'prepare' && current.phaseState === 'confirmed'
-            || current.phase === 'migrate' && observed.configurationCompatibility.state === 'compatible')) {
+        } else if (safelyStopped && current.phase === 'migrate' && observed.configurationCompatibility.state === 'compatible') {
           verified = { ...current, state: 'blocked', reasons: ['application_stopped_verified_new_intent_required'], updatedAt: now() };
         }
         if (!verified) return current;

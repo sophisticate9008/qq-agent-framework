@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['24.12.0', '24']
+        node: ['24.12.0']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -31,7 +31,6 @@ jobs:
       - name: Browser tests
         id: browser
         run: npm run cli -- test --browser --with-deps
-        if: matrix.node == '24'
         env:
           QQ_AGENT_UI_EVIDENCE_DIR: ${{ github.workspace }}/runtime/execution-journal-smoke
       - name: Prepare browser failure diagnostics
@@ -59,7 +58,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
-          node-version: '24'
+          node-version: '24.12.0'
           cache: npm
           cache-dependency-path: packages/dsh-bridge-plugin/package-lock.json
       - name: Install framework client dependencies

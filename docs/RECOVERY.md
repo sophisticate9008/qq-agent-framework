@@ -36,9 +36,15 @@ GET /api/chat/application?id=<原 operationId>
 
 `POST /api/chat/application/reconcile` 的 body 为 `{ "operationId": "<原 UUID>" }`，界面入口为“核对并继续更新”。对于原 apply 阶段的 unknown，或 blocked/pending_reload，它核对原配置 revision、DSH 实际预设和完整来源证据；满足条件后，保存同一操作的 running 状态并在后台继续 migrate/start，立即返回供页面查询。不会再次 stop、prepare 或 apply，也不创建另一份操作。
 
+停止阶段未知且当前已证实安全停止时，核对可以把原操作记为 blocked 并要求新的明确更新，即使当前配置版本已经变化。原 operationId、请求版本和阶段证据保持不变；它不续跑旧请求，也不执行新的应用。准备阶段未知仅在其他依赖版本未变化、至多 deployment 版本变化时采用这一路径；apply 或 migrate 跨版本未知不能据此解除。
+
+安全停止需要实际状态为 stopped、允许应用，生命周期、控制命令、执行、引擎队列和发送等均无待排空工作，bootstrap 与功能包没有未知状态。历史 `activeRevisions` 可以继续保留，它不是在途运行证据，也不必清空。
+
 其他未知阶段继续采用对应证据核对：确实已按原配置运行时可确认 completed；确实停止且无法证明允许续行时记录 blocked，并给出原因。普通 GET 不续行、不启动；返回 200 只表示读到了快照。明确拒绝受理和已发生动作但回执未知分别呈现，不能一概归为未知应用。
 
 应用中的 maintenance stop 保留持久运行意图，以便成功后启动；但 journal 为 running、unknown 或 apply 阶段的 blocked/pending_reload 时，重启恢复 gate 会阻止自动 start。否则一个未确认应用可能被旧 desiredRunning 意图绕过。见 [native-application.ts](../src/host/native-application.ts)、[native-chat-lifecycle.ts](../src/admin/native-chat-lifecycle.ts)、[native-application.test.ts](../test/native-application.test.ts)。
+
+观察读取失败或迟到时，已知原操作的只读查询与明确核对仍保持可用。运行中的原操作只允许读取进度，不创建第二份应用。旧手动部署请求未知时，可明确“恢复操作”：先核验实际加载证据，再恢复管理入口并保留草稿；证据不完整或读取失败时保留保护。旧手动启停请求则只在上述安全停止证据齐全后恢复操作，检查不会重放启停。
 
 ## DSH 部署与助手目标
 
@@ -49,6 +55,10 @@ GET /api/chat/application?id=<原 operationId>
 助手目标独立使用 `/api/chat/assistant/deployment` 及其 `/prepare`、`/apply`、`/reconcile`。保存 `chat-assistant` 的 provider/model/reasoning 只是选择，明确应用后才部署独立 target；target resolver 仍检查当前配置、已应用证据与模型元数据。unknown 不在工作启动时隐式部署。`fullAccess: true` 不被执行器用来放大 DSH 权限。
 
 本机接入优先自动发现实际 profile、凭据层与所选模型元数据，不要求重复填写已知路径或容量。修改受管配置之外的文件，不应通过“重新生成全部配置”来修复。实现与核对见 [dsh-profile-deployment.ts](../src/adapters/dsh-profile-deployment.ts)、[native-assistant-target.ts](../src/host/native-assistant-target.ts)。
+
+## DSH 重启维护
+
+`/api/chat/dsh/restart` 的 GET 保持只读。明确维护创建独立操作，按停止、重启、验证、恢复记录阶段；未知时不能换 ID 再次重启。`POST /api/chat/dsh/restart/reconcile` 核对原目标、配置版本、排空和加载证据，不重新执行重启命令；证据齐全才继续验证和恢复。已确认重启命令执行与当前引擎可连接分别记录，不等于模型实际生成已经成功。普通 GET 返回 operation:null 不能证明请求从未受理。只有明确核对在服务端原子登记旧 ID 不可再受理，并返回 `409 dsh_restart_not_received` 时，才可明确创建新意图；迟到的旧 ID 不会再执行。支持范围见 [DSH](DSH.md#明确重启本机-dsh)。
 
 ## 会话迁移、重置与执行核对
 

@@ -6,6 +6,7 @@ import { createNativeApplicationStorage } from '../storage/native-application.ts
 import { AdminRequestError, type AdminRoute } from './server.ts';
 
 const services = new WeakMap<NativeChatRuntime, ReturnType<typeof createNativeApplicationCoordinator>>();
+export function nativeApplicationService(runtime: NativeChatRuntime) { return services.get(runtime); }
 export function createNativeApplicationRoutes(options: {
   readonly directory: string;
   readonly runtime: NativeChatRuntime;

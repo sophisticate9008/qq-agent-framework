@@ -2,6 +2,7 @@ import { accountsFixture, exerciseAccountWorkspace } from './management-accounts
 import { exerciseProtocolConnectionDiagnostics } from './management-protocol-status-smoke.ts';
 import { exerciseModelReasoningCapabilities } from './management-model-capabilities-smoke.ts';
 import { exercisePlanUpdate } from './management-plan-update-smoke.ts';
+import { exerciseDshRestart } from './management-dsh-restart-smoke.ts';
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts';
 import { readNativeChatConfiguration } from '../src/admin/native-configuration-repository.ts';
 import { usageMaintenanceFixture, exerciseUsageMaintenance, exerciseExecutionRecovery, exerciseCapacityRecommendations, exerciseMediaAndInteractions } from './management-recovery-smoke.ts';
@@ -21,7 +22,7 @@ import { join } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from 'playwright';
 
 import { createNativeRuntimeRoutes } from '../src/admin/runtime.ts';
-import { createAdminServer } from '../src/admin/server.ts';
+import { createAdminServer, type AdminRoute } from '../src/admin/server.ts';
 import { createNativeReminderRoutes } from '../src/admin/native-reminders.ts';
 import { createNativeToolPermissionRoutes } from '../src/admin/native-tool-permissions.ts';
 import { createNativeMemoryRoutes } from '../src/admin/native-memory.ts';
@@ -630,6 +631,7 @@ async function run(): Promise<void> {
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let page: Page | undefined;
+  const restartUnavailable: AdminRoute = { method: 'GET', pathname: '/api/chat/dsh/restart', handle: () => ({ schema: 1, available: false, missingReasons: ['LOCAL_DSH_RESTART_NOT_CONFIGURED'], operation: null }) };
 
   try {
     server = createAdminServer({
@@ -644,7 +646,7 @@ async function run(): Promise<void> {
         },
         fixtureOnly: true,
       }),
-      routes: [...nativeRoutes.filter(route => !route.pathname.startsWith('/api/chat/reminders') && !route.pathname.startsWith('/api/chat/tool-permissions') && !route.pathname.startsWith('/api/chat/memory')), ...reminderRoutes, ...toolPermissionRoutes, ...memoryRoutes, ...maintenance.routes, ...authorizationRoutes, ...accounts.routes].map(route => route.method === 'GET' && route.pathname === '/api/chat/model-capabilities'
+      routes: [restartUnavailable, ...nativeRoutes.filter(route => route.pathname !== '/api/chat/dsh/restart' && !route.pathname.startsWith('/api/chat/reminders') && !route.pathname.startsWith('/api/chat/tool-permissions') && !route.pathname.startsWith('/api/chat/memory')), ...reminderRoutes, ...toolPermissionRoutes, ...memoryRoutes, ...maintenance.routes, ...authorizationRoutes, ...accounts.routes].map(route => route.method === 'GET' && route.pathname === '/api/chat/model-capabilities'
         ? { ...route, handle: ({ query }: Parameters<typeof route.handle>[0]) => ({
           provider: query.get('provider'), model: query.get('model'), state: 'available',
           reasoningEfforts: ['off', 'low', 'medium', 'high', 'max'], missingReasons: [], capacity: recommendChatCapacity({ contextWindow: 262144, maxTokens: 32768 })
@@ -813,8 +815,8 @@ async function run(): Promise<void> {
     assert.equal(planResponse.value.plans[0].provider, 'fixture-provider-v2');
     assert.equal(planResponse.value.plans[0].model, 'fixture-model-v2');
     assert.deepEqual(planResponse.value.plans[0].contextLimits, { group: 172000, private: 384000 });
-    await page.getByRole('button', { name: '刷新状态', exact: true }).click();
-    await page.getByRole('button', { name: '刷新状态', exact: true }).waitFor();
+    await page.locator('#native-plan-update').locator('..').getByRole('button', { name: '刷新状态', exact: true }).click();
+    await page.locator('#native-plan-update').locator('..').getByRole('button', { name: '刷新状态', exact: true }).waitFor();
     assert.equal(await providerSelect.inputValue(), 'fixture-provider-v2');
     assert.equal(await modelSelect.inputValue(), 'fixture-model-v2');
     assert.equal(await field(page, '群聊上下文').locator('input').inputValue(), '172000');
@@ -1235,6 +1237,7 @@ async function run(): Promise<void> {
     await exerciseProtocolConnectionDiagnostics(page, requests, adaptersCleared.value);
     await exerciseModelReasoningCapabilities(page, requests, fixtureProviders);
     await exercisePlanUpdate(page, requests);
+    await exerciseDshRestart(page, requests);
     let pricingSaves = 0;
     await page.route('**/api/chat/usage/pricing', route => {
       if (route.request().method() === 'POST') { pricingSaves++; return route.fulfill({ status: 504, json: { error: 'usage_pricing_operation_unknown' } }); }
@@ -1307,6 +1310,8 @@ async function run(): Promise<void> {
       websocketConnectedDiagnosticsAndExplicitReconnectRemainIndependent: true,
       reasoningRetainsCurrentValueAndRestoresOnlyRealSupportWithLateReadsIsolated: true,
       oneClickPlanUpdateSavesDraftOnceAndObservesOriginalOperationWithoutReplay: true,
+      unknownReadFailuresLateResponsesAndHistoricalSnapshotsDoNotTrapRecovery: true,
+      explicitDshRestartRetainsOneOperationAndNeverReplaysUnknownRestart: true,
       definiteApplicationRejectionAndSaveConflictDoNotCreateUnknownUpdates: true,
       usageExactPreviewAtomicMaintenanceExportUnknownRecovery: true,
       sdkReconciliationAndOriginalRevisionRecoveryNoReplay: true,

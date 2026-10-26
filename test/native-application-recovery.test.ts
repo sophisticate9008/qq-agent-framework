@@ -9,6 +9,7 @@ import { NativeConfigurationRepository } from '../src/admin/native-configuration
 import { restoreNativeChatRunningIntent } from '../src/admin/runtime.ts'
 import { createNativeApplicationStorage } from '../src/storage/native-application.ts'
 import { isNativeConfigurationRevisions } from '../src/contracts/native-revisions.ts'
+import { createNativeDshRestartStorage } from '../src/storage/native-dsh-restart.ts'
 
 for (const state of ['running', 'unknown', 'blocked'] as const) {
   test(`actual running-intent restoration blocks ${state} application evidence before any runtime status or start`, async context => {
@@ -52,5 +53,24 @@ for (const state of ['running', 'unknown', 'blocked'] as const) {
     assert.equal(result.state, 'skipped')
     assert.equal(statuses > 0, true)
     assert.equal(starts, 0)
+  })
+}
+
+for (const state of ['running', 'unknown'] as const) {
+  test(`actual running-intent restoration blocks ${state} DSH maintenance without starting protocol or chat`, async context => {
+    const directory = await mkdtemp(join(tmpdir(), 'native-dsh-restore-'))
+    const repository = new NativeConfigurationRepository(directory); const configuration = await repository.read()
+    assert(isNativeConfigurationRevisions(configuration.revisions))
+    const runtime = createNativeChatRuntime({ directory, loadConfiguration: () => repository.read(),
+      resolveDeployment: async () => ({ missingReasons: [], presetBindings: [] }) })
+    context.after(async () => { await runtime.close(); await rm(directory, { recursive: true, force: true }) })
+    const storage = createNativeDshRestartStorage(directory); const prior = await storage.read()
+    await storage.write(prior.revision, { schema: 1, records: [{ instanceId: 'old-instance', targetIdentity: 'a'.repeat(64),
+      operation: { schema: 1, id: randomUUID(), state, phase: 'restart', phaseState: 'in-flight', revisions: configuration.revisions,
+        wasRunning: true, restartExecutionVerified: false, createdAt: 1, updatedAt: 1, reasons: [] } }] })
+    await assert.rejects(restoreNativeChatRunningIntent(directory, runtime, new AbortController().signal),
+      { code: 'NATIVE_DSH_RESTART_RECONCILIATION_REQUIRED' })
+    assert.equal(runtime.activity().state, 'stopped')
+    assert.equal((await storage.read()).value.records[0]?.operation.state, state)
   })
 }

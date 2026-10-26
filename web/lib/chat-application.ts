@@ -21,6 +21,19 @@ export function chatApplicationCanReconcile(state: ChatApplicationState): boolea
   return state.kind === 'application' && state.operationId !== null && !state.busy && !state.reconciling
     && (state.blocked || state.operation !== null && nativeApplicationRequiresReconciliation(state.operation));
 }
+export type ChatApplicationPrimaryAction = 'update' | 'observe' | 'reconcile' | 'restore' | 'blocked' | 'busy';
+export function chatApplicationPrimaryAction(state: ChatApplicationState, options: {
+  readonly connected: boolean; readonly requestActive: boolean; readonly updateReady: boolean;
+}): ChatApplicationPrimaryAction {
+  if (!options.connected) return 'blocked';
+  if (options.requestActive || state.reconciling) return 'busy';
+  if (state.kind === 'manual' && state.blocked && state.manualSource === 'deployment' && !state.busy) return 'restore';
+  if (state.kind === 'application' && state.operationId) {
+    if (state.busy) return 'observe';
+    if (chatApplicationCanReconcile(state)) return 'reconcile';
+  }
+  return options.updateReady ? 'update' : 'blocked';
+}
 function createStore() {
   let state: ChatApplicationState = { busy: false, blocked: false, reconciling: false, phase: null, kind: null, operationId: null, operation: null, manualSource: null };
   let owner: symbol | null = null;

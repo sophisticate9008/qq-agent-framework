@@ -24,7 +24,7 @@ export async function verifyExecutionThemes(page: Page, origin: string, capture:
       }
       else if (view === 'bootstrap') { await page.locator('[data-native-bootstrap-summary] > summary').click(); await page.locator('[data-bootstrap-feature="0"]').waitFor(); }
       else if (view === 'features') { await page.getByRole('tab', { name: '功能设置', exact: true }).click(); await page.getByText('合成功能 A 0', { exact: true }).waitFor(); }
-      else await page.getByRole('button', { name: '重新检查', exact: true }).waitFor();
+      else await page.getByRole('button', { name: '刷新状态', exact: true }).waitFor();
       const colors: string[] = [];
       for (const theme of ['light', 'dark']) {
         await page.getByRole('combobox', { name: '隔离显示模式', exact: true }).selectOption(theme);
@@ -359,13 +359,14 @@ export async function verifyExecutionRuntimeUi(page: Page, origin: string, captu
     ['NATIVE_CHAT_SESSION_CONFIGURATION_CONFLICT', '保留上下文'],
   ] as const) {
     await open('runtime');
-    await page.getByRole('button', { name: '重新检查', exact: true }).waitFor();
+    await page.getByRole('button', { name: '刷新状态', exact: true }).waitFor();
     await page.locator(`#runtime-fixture-error-${code}`).click();
-    await page.getByRole('button', { name: '重新检查', exact: true }).click();
+    await page.getByRole('button', { name: '刷新状态', exact: true }).click();
     await page.waitForFunction(text => document.querySelector('#chat-runtime')?.textContent?.includes(text), text);
+    await page.locator('#chat-runtime').getByText('启动检查说明', { exact: true }).click();
     const content = await page.locator('#chat-runtime').innerText();
     assert.equal(content.includes(code), false);
-    assert.match(content, /不验证真实模型调用/);
+    assert.match(content, /启动检查仅核对连接和配置，不发送模型请求/);
     await noWrites();
   }
   evidence.runtimeMissingPluginAndMigrationProtectHistory = true;

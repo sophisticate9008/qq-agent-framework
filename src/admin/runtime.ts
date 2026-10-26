@@ -45,6 +45,8 @@ import type { PackageConfigurationRegistry } from '../host/package-configuration
 import { readNativeRuntimeProjection, nativeRuntimeFeatureResponse } from '../host/native-runtime-projection.ts'
 import { createNativeApplicationStorage } from '../storage/native-application.ts'
 import { nativeApplicationRequiresReconciliation } from '../contracts/native-application.ts'
+import { nativeRuntimeIsQuiescent } from '../contracts/native-runtime-quiescence.ts'
+import { createNativeDshRestartStorage } from '../storage/native-dsh-restart.ts'
 import type { NativeInteractions } from '../host/native-interactions.ts'
 import { readImportedChatSessions } from '../host/imported-chat-sessions.ts'
 import { createNativeToolsRoutes, type NativeToolsReader } from './native-tools.ts'
@@ -918,6 +920,10 @@ export function stopNativeChatRuntime(directory: string, runtime: NativeChatRunt
 export async function restoreNativeChatRunningIntent(directory: string, runtime: NativeChatRuntime, signal: AbortSignal) {
   if (!isAbsolute(directory) || directory.includes('\0')) throw new TypeError('An absolute runtime directory is required')
   signal.throwIfAborted()
+  const maintenance = await createNativeDshRestartStorage(directory).read()
+  if (maintenance.value.records.some(record => record.operation.state === 'running' || record.operation.state === 'unknown')) {
+    throw new FrameworkError('NATIVE_DSH_RESTART_RECONCILIATION_REQUIRED', 'Unfinished DSH maintenance must be reconciled before restoring chat.')
+  }
   const journal = await createNativeApplicationStorage(directory).read().catch(() => {
     throw new FrameworkError('NATIVE_APPLICATION_STORAGE_UNAVAILABLE', 'The application history could not be verified before restoring chat.')
   })
@@ -1222,7 +1228,7 @@ function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
   routes.push(...createNativeMemoryRoutes({ read: options => runtime.readMemory(options),
     entry: id => runtime.readMemoryEntry(id), service: () => runtime.memoryService() }))
   routes.push(...createNativeApplicationRoutes({ directory, runtime, ports: {
-    status: () => runtime.status(),
+    status: async () => { const status = await runtime.status(); return { ...status, quiescent: nativeRuntimeIsQuiescent(status) } },
     stop: async signal => { signal.throwIfAborted(); await application.stop(true); return runtime.status() },
     prepare: (revision, signal) => application.autoPrepareDeployment(revision, signal),
     apply: (revisions, targetRevision, signal) => nativeControl(directory, async () => {

@@ -14,9 +14,10 @@ const interceptedPaths = new Set(['/api/chat/plans', '/api/chat/personas', '/api
   '/api/chat/runtime', '/api/chat/deployment', applicationPath, reconciliationPath]);
 
 export async function exercisePlanUpdate(page: Page, requests: readonly { readonly method: string; readonly pathname: string }[]): Promise<void> {
-  for (const scenario of ['draft', 'lost-acknowledgement', 'continue-verified-apply', 'continue-pending-reload', 'rejected', 'save-conflict'] as const) {
+  for (const scenario of ['draft', 'lost-acknowledgement', 'continue-verified-apply', 'continue-pending-reload', 'continue-observation-error', 'continue-observation-late', 'recover-stop-revision-changed', 'rejected', 'save-conflict'] as const) {
     console.log(`Plan update regression: ${scenario}`);
     const continuation = scenario.startsWith('continue-');
+    const stopRecovery = scenario === 'recover-stop-revision-changed';
     const requestStart = requests.length;
     const assertScopedWrites = () => {
       assert(requests.slice(requestStart).filter(request => request.method === 'POST')
@@ -38,6 +39,10 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
     let complete = false;
     let acceptedCount = 0;
     let deploymentAdvanced = false;
+    let heldObservation: { readonly route: Route; readonly operation: NativeApplicationSnapshot; readonly settled: Promise<boolean> } | null = null;
+    const currentHeldObservation = (): { readonly route: Route; readonly operation: NativeApplicationSnapshot; readonly settled: Promise<boolean> } | null => heldObservation;
+    let observeHeld = () => {};
+    const observationHeld = new Promise<void>(resolve => { observeHeld = resolve; });
     let rejectApplication = scenario === 'rejected';
     const writes: { readonly path: string; readonly body: unknown }[] = [];
     const operationReads: string[] = [];
@@ -59,9 +64,11 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
           return route.fulfill({ json: catalog });
         }
         if (path === reconciliationPath) {
-          assert(operation && (operation.state === 'unknown' || operation.state === 'blocked') && operation.phase === 'apply');
+          assert(operation && (operation.state === 'unknown' || operation.state === 'blocked') && (operation.phase === 'apply' || stopRecovery && operation.phase === 'stop'));
           assert.deepEqual(body, { operationId: operation.id });
-          operation = { ...operation, state: 'running', phase: 'migrate', phaseState: 'pending', reasons: [], updatedAt: Date.now() };
+          operation = stopRecovery
+            ? { ...operation, state: 'blocked', reasons: ['application_stopped_verified_new_intent_required'], updatedAt: Math.max(Date.now(), operation.updatedAt + 1) }
+            : { ...operation, state: 'running', phase: 'migrate', phaseState: 'pending', reasons: [], updatedAt: Math.max(Date.now(), operation.updatedAt + 1) };
           return route.fulfill({ json: { schema: 1, operation } });
         }
         assert.equal(path, applicationPath, 'An update must not orchestrate legacy stop/apply/start writes in the browser.');
@@ -70,13 +77,17 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
         assert.deepEqual(parsed.revisions, revisions, 'The application must carry the actual saved revision, including this click\'s draft.');
         assert.equal(parsed.deploy, true);
         if (rejectApplication) return route.fulfill({ status: 409, json: { error: 'native_chat_busy' } });
-        assert(operation === null || operation.state === 'completed', 'A new application cannot overlap an accepted operation.');
+        assert(operation === null || operation.state === 'completed' || operation.state === 'blocked' && operation.reasons.includes('application_stopped_verified_new_intent_required'), 'A new application cannot overlap an accepted operation.');
         acceptedCount += 1;
         complete = false;
         const now = Date.now();
         operation = { schema: 1, id: parsed.operationId, state: 'running', phase: 'apply', phaseState: 'in-flight',
           revisions: { ...revisions }, createdAt: now, updatedAt: now, reasons: [] };
         if (scenario === 'continue-verified-apply' && acceptedCount === 1) operation = { ...operation, state: 'unknown', reasons: ['deployment_result_unknown'] };
+        if (scenario === 'continue-observation-error' || scenario === 'continue-observation-late') {
+          operation = { ...operation, state: 'unknown', reasons: ['deployment_result_unknown'] };
+        }
+        if (stopRecovery && acceptedCount === 1) operation = { ...operation, state: 'unknown', phase: 'stop', reasons: ['native_stop_unknown'] };
         if (scenario === 'continue-pending-reload') operation = { ...operation, state: 'blocked', phaseState: 'confirmed', reasons: ['pending_reload'] };
         return scenario === 'lost-acknowledgement'
           ? route.fulfill({ status: 504, json: { error: 'operation_unknown' } })
@@ -96,12 +107,25 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
       if (path === '/api/chat/runtime') return route.fulfill({ json: { state: !operation || operation.state === 'completed' ? 'running' : 'stopped',
         canStart: operation !== null && operation.state !== 'completed', canApplyDeployment: operation !== null && operation.state !== 'completed',
         chatReady: !operation || operation.state === 'completed', protocolConnected: true, configurationIssues: [], missingReasons: [], lastError: null,
-        revisions, activeRevisions, sessionMigration: { eligible: true, availability: 'requires-preview', requiresPreview: true, missingReasons: [] } } });
+        revisions, activeRevisions, host: null, lifecycleHooks: { manager: { pendingRaw: 0 }, chat: { pendingRaw: 0 } },
+        controlCommands: { pendingRaw: 0, inflight: 0 }, bootstrap: null, packages: [], sessionMigration: { eligible: true, availability: 'requires-preview', requiresPreview: true, missingReasons: [] } } });
       assert.equal(path, applicationPath);
       if (url.searchParams.has('id')) {
         const id = url.searchParams.get('id');
         if (!operation || id !== operation.id) return route.fulfill({ json: { schema: 1, operation: null } });
         operationReads.push(operation.id);
+        if (operation.state === 'unknown' && scenario === 'continue-observation-error') {
+          return route.fulfill({ status: 503, json: { error: 'application_status_unavailable' } });
+        }
+        if (operation.state === 'unknown' && scenario === 'continue-observation-late' && heldObservation === null) {
+          heldObservation = { route, operation: { ...operation }, settled: request.response().then(response => response !== null) };
+          observeHeld();
+          return;
+        }
+        if (stopRecovery && !deploymentAdvanced) {
+          revisions = { ...revisions, deployment: revision('deployment-edited-after-unknown-stop') };
+          deploymentAdvanced = true;
+        }
         if (scenario === 'continue-verified-apply' && !deploymentAdvanced) {
           // autoPrepare changed the saved deployment after the original acknowledgement.
           revisions = { ...revisions, deployment: revision('auto-prepared-deployment') };
@@ -146,7 +170,10 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
         && response.request().method() === 'POST');
       const observeResponse = () => page.waitForResponse(response => new URL(response.url()).pathname === applicationPath
         && new URL(response.url()).searchParams.get('id') === currentOperation()?.id && response.request().method() === 'GET');
-      let observed = scenario === 'rejected' ? null : observeResponse();
+      const completedResponse = () => page.waitForResponse(async response => new URL(response.url()).pathname === applicationPath
+        && new URL(response.url()).searchParams.get('id') === currentOperation()?.id && response.request().method() === 'GET'
+        && (await response.json() as { operation?: { state?: string } }).operation?.state === 'completed');
+      let observed = scenario === 'rejected' || scenario === 'continue-observation-late' ? null : observeResponse();
       await update.click();
       assert.equal((await created).status(), scenario === 'rejected' ? 409 : scenario === 'lost-acknowledgement' ? 504 : 200);
       if (scenario === 'rejected') {
@@ -158,21 +185,62 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
         observed = observeResponse();
         await update.click();
       }
-      assert(observed);
-      await observed;
-      if (continuation) {
-        await update.filter({ hasText: '核对并继续更新' }).and(page.locator('button:enabled')).waitFor();
-        assert.equal(await update.innerText(), '核对并继续更新');
+      if (scenario === 'continue-observation-late') await observationHeld;
+      else { assert(observed); await observed; }
+      if (continuation || stopRecovery) {
+        // A known original operation must remain actionable even while its observation fails or is pending.
+        await update.and(page.locator('button:enabled')).waitFor();
+        const recoveredDeployment = stopRecovery ? page.waitForResponse(async response =>
+          new URL(response.url()).pathname === '/api/chat/deployment' && response.request().method() === 'GET'
+          && (await response.json() as { revision?: string }).revision === revisions.deployment) : null;
         const continued = page.waitForResponse(response => new URL(response.url()).pathname === reconciliationPath
           && response.request().method() === 'POST');
         await update.click();
         assert.equal((await continued).status(), 200);
+        if (stopRecovery) {
+          const old = currentOperation();
+          assert(old && old.state === 'blocked' && old.phase === 'stop');
+          assert.deepEqual(old.reasons, ['application_stopped_verified_new_intent_required']);
+          assert.notEqual(old.revisions.deployment, revisions.deployment);
+          assert.notEqual(activeRevisions.deployment, revisions.deployment);
+          assert.equal(writes.filter(write => write.path === applicationPath).length, 1, 'Reconciliation must not start a fresh application.');
+          assert(recoveredDeployment); await recoveredDeployment;
+          await update.and(page.locator('button:enabled')).waitFor();
+          const nextCreated = page.waitForResponse(response => new URL(response.url()).pathname === applicationPath
+            && response.request().method() === 'POST');
+          const nextObserved = observeResponse();
+          await update.click();
+          assert.equal((await nextCreated).status(), 200);
+          await nextObserved;
+          assert.notEqual(currentOperation()?.id, old.id);
+          assert.equal(writes.filter(write => write.path === applicationPath).length, 2);
+          assert.equal(writes.filter(write => write.path === reconciliationPath).length, 1);
+          assert.equal(writes.filter(write => write.path === '/api/chat/plans').length, 0);
+          const completed = completedResponse();
+          complete = true;
+          await completed;
+          await update.and(page.locator('button:enabled')).waitFor();
+          assert.equal(currentOperation()?.state, 'completed');
+          assertScopedWrites();
+          continue;
+        }
         assert.equal(currentOperation()?.phase, 'migrate');
         assert.equal(writes.filter(write => write.path === reconciliationPath).length, 1);
+        if (scenario === 'continue-observation-late') {
+          const held = currentHeldObservation();
+          assert(held);
+          try { await held.route.fulfill({ json: { schema: 1, operation: held.operation } }); }
+          catch { assert.equal(await held.settled, false, 'Only an already cancelled observation may reject its delayed response.'); }
+          // The real shared reader may cancel this GET when reconciliation invalidates old reads.
+          // If transport completes instead, its old unknown snapshot must likewise not restore the lock.
+          await held.settled;
+          await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        }
       }
-      await update.and(page.locator('button:disabled')).waitFor();
+      await update.and(page.locator(continuation ? 'button:enabled' : 'button:disabled')).waitFor();
       const secondObservation = observeResponse();
-      await update.evaluate(element => element.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+      if (continuation) await update.click();
+      else await update.evaluate(element => element.dispatchEvent(new MouseEvent('click', { bubbles: true })));
       await secondObservation;
       const accepted = currentOperation();
       assert(accepted);
@@ -188,7 +256,9 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
         ? page.waitForResponse(async response => new URL(response.url()).pathname === '/api/chat/deployment'
           && response.request().method() === 'GET' && (await response.json() as { revision?: string }).revision === revisions.deployment)
         : null;
+      const completed = completedResponse();
       complete = true;
+      await completed;
       if (refreshedDeployment) await refreshedDeployment;
       await update.and(page.locator('button:enabled')).waitFor();
       assert.equal(currentOperation()?.state, 'completed');
@@ -205,13 +275,17 @@ export async function exercisePlanUpdate(page: Page, requests: readonly { readon
         assert.equal(writes.filter(write => write.path === applicationPath).length, 2);
         assert.equal(writes.filter(write => write.path === reconciliationPath).length, 1);
         assert.equal(writes.filter(write => write.path === '/api/chat/plans').length, 0);
+        const nextCompleted = completedResponse();
         complete = true;
+        await nextCompleted;
         await update.and(page.locator('button:enabled')).waitFor();
         assert.equal(currentOperation()?.state, 'completed');
       }
       assertScopedWrites();
     } finally {
       complete = true;
+      const held = currentHeldObservation();
+      if (held) await held.route.abort().catch(() => undefined);
       await page.unroute(matches, handler);
       await page.reload();
     }

@@ -15,10 +15,13 @@ import { NativeConfigurationRepository, createNativeAccessPersistence, prepareNa
 import { createNativeCapabilityApprovalResolver, createNativeCapabilityManagement } from './native-capabilities.ts'
 import { applyNativeAccessRuntime, createNativeRuntimeApplicationPorts, createNativeRuntimeRoutes, restoreNativeChatRunningIntent } from './runtime.ts'
 import { AdminRequestError, type AdminRoute } from './server.ts'
+import { nativeRuntimeIsQuiescent } from '../contracts/native-runtime-quiescence.ts'
+import { NATIVE_DSH_RESTART_PATH } from '../contracts/native-dsh-restart.ts'
 
 export interface NativeAccountRuntimeBundle extends NativeAccountRuntime {
   readonly routes: readonly AdminRoute[]
   restore(signal: AbortSignal): ReturnType<typeof restoreNativeChatRunningIntent>
+  quiescent(): Promise<boolean>
 }
 /** Full default assembly is reused per account, with every private configuration and journal rooted in its directory. */
 export function createNativeAccountRuntimeBundle(options: {
@@ -63,9 +66,13 @@ export function createNativeAccountRuntimeBundle(options: {
   const routes = Object.freeze([
     ...createNativeRuntimeRoutes({ directory, chatRuntime: runtime, adapterRuntime: runtime.adapterRuntime,
       deploymentRuntime, assistantTarget, packageConfigurationRegistry, interactions: () => runtime.interactions(), tools: signal => runtime.tools(signal) }),
+    { method: 'GET' as const, pathname: NATIVE_DSH_RESTART_PATH, async handle() {
+      return { schema: 1, available: false, missingReasons: ['LOCAL_DSH_RESTART_ACCOUNT_UNAVAILABLE'], operation: null }
+    } },
     ...createNativeCapabilityManagement({ directory, deploymentRuntime, canApplyDeployment: async () => (await runtime.status()).canApplyDeployment }).routes
   ])
   return Object.freeze({ routes,
+    async quiescent() { return nativeRuntimeIsQuiescent(await runtime.status()) },
     restore: (signal: AbortSignal) => restoreNativeChatRunningIntent(directory, runtime, signal),
     state() { const state = runtime.activity().state; return state === 'error' ? 'unknown' : state },
     async start(signal: AbortSignal, revisions?: Readonly<Record<string, string>>) { await application.start(revisions ?? (await repository.read()).revisions, signal) },

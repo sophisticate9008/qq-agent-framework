@@ -31,6 +31,9 @@ interface FixtureState {
   authorizationOutcome: Outcome;
   deploymentOutcome: Outcome;
   startOutcome: Outcome;
+  stopOutcome: Outcome;
+  pendingRaw: number;
+  retainedActiveRevisions?: Readonly<Record<string, string>>;
   running: boolean;
   pendingReload: boolean;
   approvedTargetRevision: string | null;
@@ -47,6 +50,7 @@ interface FixtureState {
   readonly posts: Array<{ readonly pathname: string; readonly body: unknown }>;
   application: NativeApplicationSnapshot | null;
   reconciliationVerified: boolean;
+  reconciliationOutcome?: Outcome;
   deploymentReadGate?: Promise<void>;
 }
 
@@ -80,7 +84,7 @@ function fixtureState(): FixtureState {
         credentialsPath: '/fixture/dsh/initial.credentials.yaml', schemaVersion: '0.2.1-rc.2' },
       modelSettings: { contextWindow: 65536, maxTokens: 2048, reasoningEfforts: false }
     } },
-    authorizationOutcome: 'success', deploymentOutcome: 'success', startOutcome: 'success',
+    authorizationOutcome: 'success', deploymentOutcome: 'success', startOutcome: 'success', stopOutcome: 'success', pendingRaw: 0,
     running: false, pendingReload: false, approvedTargetRevision: null,
     previewCount: 0, appliedCount: 0, applyUnknown: false, gatewayScopeEvidence: null,
     runtimeCondition: 'healthy', runtimeStatusCases: [], runtimeTransition: null,
@@ -125,7 +129,9 @@ function runtimeStatus(state: FixtureState): unknown {
     protocolConnected: state.running && state.runtimeCondition !== 'protocol',
     revisions: { ...state.revisions },
     activeRevisions: state.running ? { ...state.revisions,
-      ...(state.runtimeCondition === 'configuration-changed' ? { providers: revision('previous-provider-configuration') } : {}) } : null,
+      ...(state.runtimeCondition === 'configuration-changed' ? { providers: revision('previous-provider-configuration') } : {}) } : state.retainedActiveRevisions ?? null,
+    lifecycleHooks: { manager: { pendingRaw: state.pendingRaw }, chat: { pendingRaw: 0 } },
+    controlCommands: { pendingRaw: 0, inflight: 0 }, host: null, bootstrap: { state: 'stopped', unsettledLifecycle: false }, packages: [],
     lastError: null, modelExecutionVerified: false, readinessScope: 'fixture-protocol-dsh-and-host-only',
     configurationIssues: state.pendingReload ? ['pending_reload'] : [],
     missingReasons: state.pendingReload ? ['pending_reload', 'runtime_not_started']
@@ -154,6 +160,7 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
     }
   };
   return [
+    get('/api/chat/dsh/restart', () => ({ schema: 1, available: false, missingReasons: ['LOCAL_DSH_RESTART_NOT_CONFIGURED'], operation: null })),
     get('/api/chat/status', () => ({ runtimeConnected: state.running, protocolConnected: state.running })),
     get('/api/chat/access', async () => {
       const document: unknown = JSON.parse(await readFile(files.nativeAccess, 'utf8'));
@@ -257,6 +264,7 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
     }),
     post('/api/chat/deployment/reconcile', body => {
       checkRevisions(body);
+      checkOutcome(state.reconciliationOutcome ?? 'success');
       state.pendingReload = false;
       return { verified: state.reconciliationVerified, missingReasons: [],
         verificationScope: 'provider-preset-and-managed-file-provenance', credentialValueIdentityVerified: false,
@@ -272,6 +280,7 @@ function routes(state: FixtureState, files: FixtureFiles): readonly AdminRoute[]
     post('/api/chat/runtime/stop', body => {
       assert.deepEqual(body, {});
       state.running = false;
+      checkOutcome(state.stopOutcome);
       return runtimeStatus(state);
     })
   ];
@@ -343,7 +352,7 @@ async function rereadDeployment(page: Page, state: FixtureState): Promise<void> 
   let release = () => {};
   state.deploymentReadGate = new Promise<void>(resolve => { release = resolve; });
   try {
-    await card.getByRole('button', { name: '重新读取', exact: true }).click();
+    await card.getByRole('button', { name: '刷新状态', exact: true }).click();
     const loading = card.getByText('正在读取应用设置', { exact: true });
     // Hold this GET until the old form has actually unmounted. Its details state
     // cannot stand in for the replacement form's state after the read completes.
@@ -370,6 +379,31 @@ async function acknowledgeDeploymentRecovery(page: Page, state: FixtureState): P
   await card.getByRole('button', { name: '检查是否生效', exact: true }).click();
   await enabled(acknowledge, true);
   await acknowledge.click();
+}
+
+async function restoreDeploymentControls(page: Page, state: FixtureState): Promise<void> {
+  const card = page.locator('#dsh-deployment');
+  const restore = card.locator('[data-manual-deployment-recovery]').getByRole('button', { name: '恢复操作', exact: true });
+  const applies = countPosts(state, '/api/chat/deployment/apply');
+  const saves = countPosts(state, '/api/chat/deployment');
+  await enabled(restore, true);
+  state.reconciliationOutcome = 'unknown';
+  await restore.click();
+  await card.getByRole('alert').filter({ hasText: '恢复入口仍可重试' }).waitFor();
+  await enabled(restore, true);
+  state.reconciliationOutcome = 'success';
+  state.reconciliationVerified = false;
+  await restore.click();
+  await card.getByRole('alert').filter({ hasText: '尚未确认实际加载结果' }).waitFor();
+  await enabled(restore, true);
+  assert.equal(await input(card, 'DSH 配置文件').isDisabled(), true);
+  state.reconciliationVerified = true;
+  await restore.click();
+  await card.getByText('已确认实际加载结果，管理操作已恢复；其他草稿保留，未重复应用。', { exact: true }).waitFor();
+  assert.equal(await input(card, '模型最大输出').inputValue(), '4097');
+  assert.equal(countPosts(state, '/api/chat/deployment/apply'), applies);
+  assert.equal(countPosts(state, '/api/chat/deployment'), saves);
+  await card.getByRole('button', { name: '撤销更改', exact: true }).click();
 }
 
 async function exerciseAuthorization(page: Page, state: FixtureState): Promise<void> {
@@ -484,14 +518,14 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
   const approved = state.approvedTargetRevision;
   state.approvedTargetRevision = revision('another-tab-replaced-approved-preview');
   await apply.click();
-  await card.getByRole('alert').waitFor();
-  await enabled(card.getByRole('button', { name: '预览变更', exact: true }), false);
+  await card.getByRole('alert').filter({ hasText: '设置已变化，本次未应用' }).waitFor();
+  await enabled(card.getByRole('button', { name: '预览变更', exact: true }), true);
+  assert.equal(await input(card, 'DSH 配置文件').isDisabled(), false);
   assert.equal(state.appliedCount, 0);
   const rejectedApply = state.posts.filter(request => request.pathname === '/api/chat/deployment/apply').at(-1)?.body;
   assert(isRecord(rejectedApply));
   assert.equal(rejectedApply.targetRevision, approved);
   await rereadDeployment(page, state);
-  await acknowledgeDeploymentRecovery(page, state);
   await enabled(card.getByRole('button', { name: '预览变更', exact: true }), true);
   await card.getByRole('button', { name: '预览变更', exact: true }).click();
   await enabled(apply, true);
@@ -521,14 +555,19 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
     const before = countPosts(state, '/api/chat/deployment');
     await card.getByRole('button', { name: '保存应用设置', exact: true }).click();
     await card.getByRole('alert').filter({ hasText: outcome === 'unknown' ? '无法确认' : '其他窗口更新' }).waitFor();
-    assert.equal(await input(card, 'DSH 配置文件').isDisabled(), true);
-    await enabled(card.getByRole('button', { name: '保存应用设置', exact: true }), false);
+    assert.equal(await input(card, 'DSH 配置文件').isDisabled(), outcome === 'unknown');
+    await enabled(card.getByRole('button', { name: '保存应用设置', exact: true }), outcome === 'conflict');
     await enabled(card.getByRole('button', { name: '预览变更', exact: true }), false);
     await page.waitForTimeout(250);
     assert.equal(countPosts(state, '/api/chat/deployment'), before + 1);
     state.deploymentOutcome = 'success';
-    await rereadDeployment(page, state);
-    await acknowledgeDeploymentRecovery(page, state);
+    if (outcome === 'unknown') await restoreDeploymentControls(page, state);
+    else {
+      assert.equal(await input(card, '模型最大输出').inputValue(), '4097');
+      assert.equal(await card.locator('[data-manual-deployment-recovery]').count(), 0);
+      await card.getByRole('button', { name: '撤销更改', exact: true }).click();
+      await rereadDeployment(page, state);
+    }
     await input(card, '模型最大输出').waitFor();
     await page.waitForFunction(() => !document.querySelector('#dsh-deployment [role="alert"]'));
     assert.equal(await input(card, '模型最大输出').inputValue(), '4096');
@@ -537,14 +576,15 @@ async function exerciseDeployment(page: Page, state: FixtureState): Promise<void
 
 async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
   const card = page.locator('#chat-runtime');
-  await card.getByRole('button', { name: '重新检查', exact: true }).click();
+  await card.getByRole('button', { name: '刷新状态', exact: true }).click();
   const start = card.getByRole('button', { name: '启动聊天', exact: true });
   await enabled(start, true);
   assert.deepEqual((runtimeStatus(state) as Record<string, unknown>).missingReasons,
     ['runtime_not_started', 'onebot_protocol_not_connected']);
   await start.click();
   await card.getByText('聊天已启用', { exact: true }).waitFor();
-  await card.getByText(/当前就绪检查不验证真实模型调用/).waitFor();
+  await card.getByText('启动检查说明', { exact: true }).click();
+  await card.getByText(/启动检查仅核对连接和配置，不发送模型请求；聊天就绪后即可使用/).waitFor();
   assert.equal(countPosts(state, '/api/chat/application'), 1);
   assert.equal(countPosts(state, '/api/chat/runtime/start'), 0);
   const deployment = page.locator('#dsh-deployment');
@@ -569,7 +609,7 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
   ] as const;
   for (const scenario of cases) {
     state.runtimeCondition = scenario.condition;
-    await card.getByRole('button', { name: '重新检查', exact: true }).click();
+    await card.getByRole('button', { name: '刷新状态', exact: true }).click();
     await card.getByText(scenario.badge, { exact: true }).waitFor();
     assert.equal(await card.getByRole('button', { name: '启动聊天', exact: true }).count(), 0);
     assert.equal(await card.getByText('连接中断', { exact: true }).count(), 0);
@@ -592,7 +632,7 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
     await capture(scenario.condition);
   }
   state.runtimeCondition = 'healthy';
-  await card.getByRole('button', { name: '重新检查', exact: true }).click();
+  await card.getByRole('button', { name: '刷新状态', exact: true }).click();
   await card.getByText('聊天已启用', { exact: true }).waitFor();
   await card.getByRole('button', { name: '停止聊天', exact: true }).click();
   await enabled(start, true);
@@ -605,12 +645,42 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
   assert.equal(countPosts(state, '/api/chat/application'), 2);
   assert.equal(countPosts(state, '/api/chat/runtime/start'), 0);
   state.startOutcome = 'success';
-  await card.getByRole('button', { name: '重新检查', exact: true }).click();
+  await card.getByRole('button', { name: '刷新状态', exact: true }).click();
   await enabled(start, false);
   await deployment.getByText('应用操作详情', { exact: true }).click();
   await deployment.locator('details').filter({ has: page.getByText('应用操作详情', { exact: true }) })
     .getByRole('button', { name: '核对并继续更新', exact: true }).click();
-  await card.getByRole('button', { name: '重新检查', exact: true }).click();
+  await card.getByRole('button', { name: '刷新状态', exact: true }).click();
+  await card.getByRole('button', { name: '停止聊天', exact: true }).click();
+  await enabled(start, true);
+  // A timed-out stop can still have stopped the runtime. Retain its real historical
+  // active snapshot while a subsequent configuration edit changes current revisions.
+  await start.click();
+  await card.getByText('聊天已启用', { exact: true }).waitFor();
+  state.retainedActiveRevisions = { ...state.revisions };
+  state.stopOutcome = 'unknown';
+  state.pendingRaw = 1;
+  await card.getByRole('button', { name: '停止聊天', exact: true }).click();
+  const restore = card.locator('[data-runtime-control-recovery]').getByRole('button', { name: '恢复操作', exact: true });
+  await restore.waitFor();
+  const writesAfterStop = state.posts.length;
+  state.revisions.providers = revision('provider-edited-after-unknown-stop');
+  await restore.click();
+  await card.getByRole('alert').filter({ hasText: '尚未确认聊天已停止并排空' }).waitFor();
+  await enabled(card.getByRole('button', { name: /^(启动聊天|停止聊天|应用并启动)$/ }), false);
+  assert.equal(state.posts.length, writesAfterStop, 'Checking an unsettled stop must not repeat it or call a model.');
+  state.pendingRaw = 0;
+  await restore.click();
+  await card.getByText('已确认聊天停止且没有待排空操作，管理操作已恢复；会话记录保留。', { exact: true }).waitFor();
+  await enabled(start, true);
+  assert.equal(state.posts.length, writesAfterStop, 'Recovery checks only read real stopped/drained evidence.');
+  assert.notEqual(state.retainedActiveRevisions.providers, state.revisions.providers);
+  state.stopOutcome = 'success';
+  const nextUpdate = countPosts(state, '/api/chat/application');
+  await start.click();
+  await card.getByText('聊天已启用', { exact: true }).waitFor();
+  assert.equal(countPosts(state, '/api/chat/application'), nextUpdate + 1);
+  state.retainedActiveRevisions = { ...state.revisions };
   await card.getByRole('button', { name: '停止聊天', exact: true }).click();
   await enabled(start, true);
   await assertBounded(card, 512);
@@ -674,7 +744,7 @@ async function exerciseApplication(page: Page, state: FixtureState): Promise<voi
   assert.equal(state.application?.state, 'completed');
   assert.equal(state.running, true);
   const runtime = page.locator('#chat-runtime');
-  await runtime.getByRole('button', { name: '重新检查', exact: true }).click();
+  await runtime.getByRole('button', { name: '刷新状态', exact: true }).click();
   await runtime.getByRole('button', { name: '停止聊天', exact: true }).click();
   await runtime.getByRole('button', { name: '启动聊天', exact: true }).waitFor();
 }

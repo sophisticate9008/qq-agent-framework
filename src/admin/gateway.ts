@@ -3,6 +3,7 @@ import { createNativeAccountRoutes } from './native-accounts.ts';
 import { createNativeAccountRuntimeBundle, createNativeAccountDispatchRoutes, type NativeAccountRuntimeBundle } from './native-account-runtime.ts';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { isIP, type AddressInfo } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -20,7 +21,14 @@ import type { LoadedNativeBootstrap } from '../host/native-bootstrap.ts';
 import { createSettingsRoutes } from './settings.ts';
 import { createManagementOperations } from './operations.ts';
 import { createConfigurationRoutes } from './configuration.ts';
-import { createNativeRuntimeRoutes, restoreNativeChatRunningIntent, applyNativeAccessRuntime } from './runtime.ts';
+import { createNativeRuntimeRoutes, createNativeRuntimeApplicationPorts, withNativeChatControl, restoreNativeChatRunningIntent, applyNativeAccessRuntime } from './runtime.ts';
+import { nativeApplicationService } from './native-application.ts';
+import { nativeApplicationRequiresReconciliation } from '../contracts/native-application.ts';
+import { createNativeDshRestartRoutes } from './native-dsh-restart.ts';
+import { createNativeDshRestartService } from '../host/native-dsh-restart.ts';
+import { createLocalDshMaintenance } from '../host/local-dsh-maintenance.ts';
+import { nativeRuntimeIsQuiescent } from '../contracts/native-runtime-quiescence.ts';
+import { createNativeDshRestartStorage } from '../storage/native-dsh-restart.ts';
 import { prepareNativeChatAuthorization, readNativeChatConfiguration, readNativeAdapterConfiguration,
   createNativeAccessPersistence } from './native-configuration-repository.ts';
 import { createNativeChatRuntime, type NativeChatRuntime } from '../host/native-chat-runtime.ts';
@@ -563,23 +571,75 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     }
   } });
   const adapterRuntime = chatRuntime.adapterRuntime;
+  const localDsh = createLocalDshMaintenance(configuration.serviceManager);
+  const lifecycle = createNativeRuntimeApplicationPorts({ directory, runtime: chatRuntime, deploymentRuntime });
+  async function assertDshExclusive(current: Awaited<ReturnType<NativeConfigurationRepository['read']>>, signal: AbortSignal) {
+    const application = nativeApplicationService(chatRuntime);
+    const operation = await application?.read();
+    const awaitingApply = operation?.phase === 'apply' && (operation.state === 'unknown'
+      || operation.state === 'blocked' && operation.reasons.includes('pending_reload'));
+    assert(!operation || !nativeApplicationRequiresReconciliation(operation) || awaitingApply,
+      'DSH_RESTART_APPLICATION_BUSY', 'An application phase still requires reconciliation.');
+    for (const [accountDirectory, bundle] of accountBundles) {
+      signal.throwIfAborted();
+      const accountConfiguration = await new NativeConfigurationRepository(accountDirectory).read();
+      const otherAdapter = accountConfiguration.adapters.dshAgent;
+      const currentAdapter = current.adapters.dshAgent;
+      const otherCredentials = otherAdapter.localCredentialsPath ? await realpath(otherAdapter.localCredentialsPath).catch(() => null) : null;
+      const currentCredentials = currentAdapter.localCredentialsPath ? await realpath(currentAdapter.localCredentialsPath).catch(() => null) : null;
+      const sameCredentials = otherCredentials !== null && otherCredentials === currentCredentials;
+      if (sameCredentials || new URL(otherAdapter.endpoint).href === new URL(currentAdapter.endpoint).href) {
+        assert(await bundle.quiescent(), 'DSH_RESTART_SHARED_RUNTIME_ACTIVE', 'Another account is using this DSH service.');
+      }
+    }
+  }
+  const dshRestart = createNativeDshRestartService({ directory, signal: chatRuntime.applicationSignal(), ports: {
+    configuration: () => repository.read(), status: () => chatRuntime.status(), inspect: localDsh.inspect,
+    assertExclusive: assertDshExclusive,
+    stop: async signal => { signal.throwIfAborted(); await lifecycle.stop(true); signal.throwIfAborted(); },
+    restart: (current, signal) => withNativeChatControl(directory, async () => {
+      assert(nativeRuntimeIsQuiescent(await chatRuntime.status()), 'DSH_RESTART_NOT_QUIESCENT', 'Chat resources have not drained.');
+      await assertDshExclusive(current, signal);
+      await localDsh.restart(current, signal);
+    }),
+    verify: localDsh.verify,
+    async restore(revisions, wasRunning, signal) {
+      signal.throwIfAborted();
+      const application = nativeApplicationService(chatRuntime);
+      const operation = await application?.read();
+      if (application && operation && nativeApplicationRequiresReconciliation(operation)) {
+        const continued = await application.reconcile(operation.id);
+        if (continued.state === 'running') await application.drain();
+        assert((await application.read(operation.id))?.state === 'completed', 'DSH_RESTART_APPLICATION_REQUIRES_REVIEW', 'The original application still needs reconciliation.');
+      } else if (wasRunning) await lifecycle.start(revisions, signal);
+      signal.throwIfAborted();
+    }
+  } });
+  const maintenanceGuard = (route: AdminRoute): AdminRoute => ({ ...route, async handle(request) {
+    if (route.method === 'POST' && !route.pathname.startsWith('/api/chat/dsh/restart') && await dshRestart.unresolved()
+      && !(route.pathname === '/api/chat/runtime/stop' && !dshRestart.busy())) {
+      throw new AdminRequestError(409, dshRestart.busy() ? 'dsh_restart_busy' : 'dsh_restart_reconciliation_required');
+    }
+    return route.handle(request);
+  } });
   const routes: AdminRoute[] = [
     healthRoute,
-    ...createNativeAccountRoutes(accounts),
+    ...createNativeAccountRoutes(accounts).map(maintenanceGuard),
     ...createNativeAccountDispatchRoutes({ accounts, async bundle(id) {
       const accountDirectory = await accounts.accountDirectory(id);
       await accounts.runtime(id);
       const bundle = accountBundles.get(accountDirectory);
       assert(bundle, 'ACCOUNT_RUNTIME_UNAVAILABLE', 'The account runtime is unavailable.');
       return bundle;
-    } }),
+    } }).map(maintenanceGuard),
     ...[...createNativeRuntimeRoutes({ directory, adapterRuntime, chatRuntime, deploymentRuntime, assistantTarget, packageConfigurationRegistry,
       interactions: () => chatRuntime.interactions(), tools: signal => chatRuntime.tools(signal) }),
+    ...createNativeDshRestartRoutes(dshRestart),
     ...createNativeCapabilityManagement({ directory, deploymentRuntime,
       canApplyDeployment: async () => (await chatRuntime.status()).canApplyDeployment }).routes].map(route => ({ ...route,
       async handle(request: Parameters<AdminRoute['handle']>[0]) {
         if ((await accounts.read()).legacy.adoptedBy !== null) throw new AdminRequestError(409, 'native_legacy_account_adopted');
-        return route.handle(request);
+        return maintenanceGuard(route).handle(request);
       }
     }))
   ];
@@ -587,10 +647,10 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     const filenames = { adminConfigurationFilename: options.configurationFilename, gatewayConfigurationFilename: configuration.gatewayConfiguration };
     routes.push(...createSettingsRoutes({ ...filenames,
       ...(operations === undefined ? {} : { apply: operations.apply }),
-    }));
+    }).map(maintenanceGuard));
     routes.push(...createConfigurationRoutes({ ...filenames,
       ...(operations === undefined ? {} : { apply: operations.apply }),
-    }));
+    }).map(maintenanceGuard));
   }
   const server = createAdminServer({ token: () => bootstrap.token(), snapshot: snapshotHandler, routes, handlerTimeoutMs: 70_000,
     ...(configuration.accessSessionTtlMs === undefined ? {} : { accessSessionTtlMs: configuration.accessSessionTtlMs }),
@@ -619,6 +679,8 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
   const startupController = new AbortController();
   const startupSignal = AbortSignal.any([startupController.signal, AbortSignal.timeout(45_000)]);
   const startup = (async () => {
+    const maintenance = await createNativeDshRestartStorage(directory).read();
+    if (maintenance.value.records.some(record => record.operation.state === 'running' || record.operation.state === 'unknown')) return;
     const registered = await accounts.read();
     if (registered.legacy.adoptedBy === null) {
       await readNativeAdapterConfiguration(directory)
@@ -652,7 +714,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       stopping ??= (async () => {
         startupController.abort();
         try {
-          const results = await Promise.allSettled([accounts.close(), chatRuntime.close()]);
+          const results = await Promise.allSettled([accounts.close(), chatRuntime.close(), dshRestart.drain()]);
           const failed = results.find(result => result.status === 'rejected');
           if (failed?.status === 'rejected') throw failed.reason;
         } finally {

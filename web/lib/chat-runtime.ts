@@ -1,6 +1,7 @@
 import { isNativeAccessScope } from '../../src/contracts/native-access.ts';
 import { parseNativeConfigurationImpact, type NativeConfigurationImpact } from '../../src/contracts/native-configuration-impact.ts';
 import { NATIVE_CONFIGURATION_REVISION_KEYS } from '../../src/contracts/native-revisions.ts';
+import { nativeRuntimeIsQuiescent } from '../../src/contracts/native-runtime-quiescence.ts';
 import { asRecord } from './api.ts';
 import type { PageDestination, PageId } from './types.ts';
 import { nativeFormMetadata } from './native-form-metadata.ts';
@@ -55,6 +56,16 @@ export function parseChatRuntimeStatus(value: unknown): ChatRuntimeStatus | null
     modelExecutionVerified: typeof root.modelExecutionVerified === 'boolean' ? root.modelExecutionVerified : null,
     ...(root.sessionMigration === undefined ? {} : { sessionMigrationEligible: migration.eligible as boolean }),
   };
+}
+
+export function chatRuntimeEngineReadiness(status: ChatRuntimeStatus | null): string {
+  if (!status) return '未读取';
+  if (status.chatReady) return '已就绪';
+  return { stopped: '未启动', starting: '正在连接', running: '需要处理', stopping: '正在停止', error: '需要处理' }[status.state];
+}
+
+export function chatRuntimeCanRecoverStoppedControl(value: unknown): boolean {
+  return parseChatRuntimeStatus(value) !== null && nativeRuntimeIsQuiescent(value);
 }
 
 const reasons: Readonly<Record<string, { readonly text: string; readonly page: PageId }>> = {

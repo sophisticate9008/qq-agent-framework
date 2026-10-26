@@ -22,6 +22,8 @@ import { ChatCapabilityManager } from './chat-capability-manager.tsx';
 import { VirtualList } from './virtual-list.tsx';
 import { DshDeploymentManager, type DshDeploymentHandle, type PreparedChatConfiguration } from './dsh-deployment-manager.tsx';
 import { modelCapabilitiesUnavailableMessage, modelReasoningEffortLabel, modelReasoningEffortOptions, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
+import type { ChatApplicationPrimaryAction } from '../lib/chat-application.ts';
+import { DshRestartControl } from './dsh-restart-control.tsx';
 
 import { CHAT_PLAN_LIMITS, DEFAULT_CHAT_CONTEXT_LIMITS, isChatContextLimit, isChatPlanReasoningEffort } from '../../src/contracts/chat-plans.ts';
 import { parsePlan, parsePlanCatalog, type ChatPlanCatalogSnapshot, type ChatPlanDraft } from '../lib/chat-plans.ts';
@@ -127,7 +129,7 @@ export function ChatPlanManager(props: PageProps) {
   const [saving, setSaving] = useState(false);
   const [updatingChat, setUpdatingChat] = useState(false);
   const [canUpdateChat, setCanUpdateChat] = useState(false);
-  const [chatUpdateNeedsReconciliation, setChatUpdateNeedsReconciliation] = useState(false);
+  const [chatUpdateAction, setChatUpdateAction] = useState<ChatApplicationPrimaryAction>('blocked');
   const deploymentAction = useRef<DshDeploymentHandle | null>(null);
   const updateOwner = useRef<symbol | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -614,7 +616,8 @@ export function ChatPlanManager(props: PageProps) {
       <StatusPill tone={dirty || creating ? 'warning' : 'neutral'}>{dirty || creating ? '未保存' : '已保存'}</StatusPill>
       <StatusPill tone={runtimeConnected ? 'success' : 'warning'}>{runtimeConnected === null ? '聊天状态待确认' : runtimeConnected ? '聊天可用' : '聊天暂不可用'}</StatusPill>
       <span className="text-muted-foreground">更新聊天会保存当前方案、选择启用并应用，保留已有上下文。</span>
-      <Button id="native-plan-update" disabled={!canUpdateChat || !chatUpdateNeedsReconciliation && (editingDisabled || !draft.id)} onClick={() => void deploymentAction.current?.updateChat()}>{chatUpdateNeedsReconciliation ? '核对并继续更新' : updatingChat ? '正在更新聊天…' : '更新聊天'}</Button>
+      <Button id="native-plan-update" disabled={!canUpdateChat || !['reconcile', 'observe', 'restore'].includes(chatUpdateAction) && (editingDisabled || !draft.id)} onClick={() => void deploymentAction.current?.updateChat()}>{chatUpdateAction === 'restore' ? '恢复操作' : chatUpdateAction === 'reconcile' ? '核对并继续更新' : chatUpdateAction === 'observe' ? '读取更新状态' : updatingChat ? '正在更新聊天…' : '更新聊天'}</Button>
+      <DshRestartControl api={api} connected={connected} compact />
       <Button variant="outline" onClick={showDshApplication}>查看 DSH 应用</Button>
       <Button variant="ghost" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新状态</Button>
     </div>
@@ -669,7 +672,7 @@ export function ChatPlanManager(props: PageProps) {
       </Section>
     </div>
     <DshDeploymentManager compact navigate={navigate} api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans"
-      updateRef={deploymentAction} onUpdateAvailable={setCanUpdateChat} onReconciliationRequired={setChatUpdateNeedsReconciliation} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} />
+      updateRef={deploymentAction} onUpdateAvailable={setCanUpdateChat} onUpdateActionChange={setChatUpdateAction} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} />
     <details className="rounded-xl border bg-muted/10">
       <summary className="cursor-pointer px-4 py-3 text-sm font-medium">高级工具设置</summary>
       <div className="max-h-[32rem] overflow-auto overscroll-contain p-3 pt-0">

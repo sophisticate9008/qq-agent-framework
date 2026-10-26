@@ -138,6 +138,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [reloadVersion, setReloadVersion] = useState(0);
   const [deleteConfirmed, setDeleteConfirmed] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [modelEditorOpen, setModelEditorOpen] = useState(false);
   const [capabilitiesReload, setCapabilitiesReload] = useState(0);
   const [capabilitiesView, setCapabilitiesView] = useState<{
@@ -221,6 +222,9 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
   useEffect(() => {
     const generation = ++epoch.current;
     setSaving(false);
+    setDeleteDialogOpen(false);
+    setDeleteConfirmed(false);
+    deletionTarget.current = null;
     if (!connected) {
       setCatalog(null);
       setRuntimeConnected(null);
@@ -587,7 +591,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
       setCatalog(next); setPendingActivePlanId(next.activePlanId); setSelectedId(preferred?.id ?? null);
       selectedOwner.current = preferred?.id ?? null; deletionTarget.current = null;
       setDraft(preferred ?? emptyPlan); selectContext(preferred ?? emptyPlan); setCreating(preferred === null);
-      setDeleteConfirmed(false); setSaveState('saved');
+      setDeleteConfirmed(false); setDeleteDialogOpen(false); setSaveState('saved');
     } catch (failure) {
       recovery.fail(operationToken, failure);
       if (current()) {
@@ -669,14 +673,15 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
     </Section>
     <div className="stack editor-detail">
     <Section id={nativeFormMetadata.plan.id} title={creating ? '新建聊天方案' : draft.name || '聊天方案'} actions={<StatusPill tone={catalog.activePlanId === draft.id && draft.id !== '' ? 'success' : 'neutral'}>{catalog.activePlanId === draft.id && draft.id !== '' ? '当前启用方案' : '尚未启用'}</StatusPill>} footer={<div className="flex flex-wrap items-center gap-2"><SaveBar compact dirty={dirty} saving={saving} disabled={blocked} message={saveMessage(saveState, dirty)} onSave={() => void save()} onReset={reset} label="保存聊天方案" /><DshDeploymentManager compact api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" configurationActive={catalog.activePlanId === draft.id}
-      prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /><span className="ml-auto">{!creating && <SettingsWindow title="删除聊天方案" label="删除" triggerVariant="destructive" description="删除后无法撤销；当前启用的方案不能删除。"><div className="mt-3 grid gap-2">
+      prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /><span className="ml-auto">{!creating && <SettingsWindow title="删除聊天方案" label="删除" triggerVariant="destructive" open={deleteDialogOpen} disabled={editingDisabled} onOpenChange={open => { if (saving) return; setDeleteDialogOpen(open); setDeleteConfirmed(false); deletionTarget.current = null; }} description="删除后无法撤销；当前启用的方案不能删除。"><div className="mt-3 grid gap-2">
             
             <p role="status">{deletionBlockedReason}</p>
-            <label className="flex items-start gap-2"><input type="checkbox" className="mt-1.5" checked={deleteConfirmed} disabled={editingDisabled || !selectedPlan || selectedOwner.current !== selectedPlan.id} onChange={event => {
+            <label className="flex items-center gap-2"><input type="checkbox" className="m-0 size-[13px] shrink-0 accent-primary" checked={deleteConfirmed} disabled={editingDisabled || !selectedPlan || selectedOwner.current !== selectedPlan.id} onChange={event => {
               if (editingDisabled || !selectedPlan || saveController.current || operationBlocked.current || selectedOwner.current !== selectedPlan.id || connection.current.api !== api || !connection.current.connected) return;
               deletionTarget.current = event.target.checked ? selectedPlan.id : null;
               setDeleteConfirmed(event.target.checked);
             }} /><span>确认删除“{selectedPlan?.name}”。</span></label>
+            {writeError && <p role="alert" className="text-xs text-destructive">{writeError}</p>}
             <Button variant="destructive" disabled={!deleteConfirmed || dirty || editingDisabled || catalog.activePlanId === selectedId} onClick={() => void deletePlan()}><Trash2 className="size-3.5" />确认删除此方案</Button>
           </div></SettingsWindow>}</span></div>}>
       {creating && creationDialogOpen ? <p className="small muted">在新建窗口中编辑方案草稿。</p> : editorFields}

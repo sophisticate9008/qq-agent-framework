@@ -451,11 +451,14 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   }
 
   if (!connected) return null;
+  const runtimeStatus = runtimeResource.snapshot;
   const statusLabel = waitingForReload || pendingReload ? '等待加载' : blocked ? '需要核对' : busy ? '正在应用'
-    : applicationState.operation?.state === 'blocked' ? '应用未完成' : configurationDirty ? '未保存' : !configurationActive ? '待应用' : runtimeResource.error ? '状态未更新'
-      : runtimeResource.snapshot?.chatReady && !runtimeResource.snapshot.configurationChanged ? '已生效' : '待应用';
+    : applicationState.operation?.state === 'blocked' ? '应用未完成' : configurationDirty ? '未保存' : !configurationActive ? '未选用' : runtimeResource.error ? '状态未更新'
+      : !runtimeStatus ? '正在读取状态' : runtimeStatus.state === 'stopped' ? '已选用 · 聊天已停止'
+        : runtimeStatus.state === 'starting' ? '正在启动聊天' : runtimeStatus.state === 'stopping' ? '正在停止聊天'
+          : runtimeStatus.configurationChanged ? '有更改待应用' : runtimeStatus.chatReady ? '已生效' : '聊天未就绪';
   const actionLabel = primaryAction === 'restore' ? '恢复操作' : primaryAction === 'observe' ? '查看进度'
-    : primaryAction === 'reconcile' ? '核对并继续' : busy ? '正在应用…' : '应用';
+    : primaryAction === 'reconcile' ? '核对并继续' : busy ? '正在应用…' : runtimeStatus?.state === 'stopped' ? '应用并启动' : '应用';
   const advanced = <SettingsWindow title="高级应用设置" label="高级设置" open={advancedOpen} onOpenChange={setAdvancedOpen} description="手动指定部署位置与模型能力，适用于远程或自定义接入。关闭窗口保留草稿。">
     {error && <p className="mb-2 text-sm text-destructive" role="alert">{error}</p>}
     {form ? <div className="grid gap-2">

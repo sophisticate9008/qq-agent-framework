@@ -1,0 +1,17 @@
+'use strict';
+window.UI={pages:{},dialogs:{},actions:{},state:'normal',current:'overview'};
+UI.esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+UI.badge=(text,tone='good')=>`<span class="badge ${UI.esc(tone)}">${UI.esc(text)}</span>`;
+UI.button=(text,attrs='',kind='')=>`<button type="button" class="${UI.esc(kind)}" ${attrs}>${text}</button>`;
+UI.tip=text=>`<button type="button" class="tip" data-tip="${UI.esc(text)}" aria-label="${UI.esc(text)}">ⓘ</button>`;
+let fieldSequence=0;
+UI.field=(label,value='',options={})=>{const id=`demo-field-${++fieldSequence}`;return `<div class="setting ${options.wide?'spanall':''}"><label for="${id}">${UI.esc(label)}</label><input id="${id}" type="${UI.esc(options.type||'text')}" value="${UI.esc(value)}" ${options.placeholder?`placeholder="${UI.esc(options.placeholder)}"`:''} ${options.disabled?'disabled':''} ${options.attrs||''}>${options.tip?UI.tip(options.tip):''}</div>`};
+UI.select=(label,values,options={})=>{const id=`demo-field-${++fieldSequence}`;return `<div class="setting ${options.wide?'spanall':''}"><label for="${id}">${UI.esc(label)}</label><select id="${id}" ${options.disabled?'disabled':''} ${options.attrs||''}>${values.map(v=>{const text=typeof v==='object'?v.label:v;const value=typeof v==='object'?v.value:v;return `<option value="${UI.esc(value)}" ${options.value===value?'selected':''}>${UI.esc(text)}</option>`}).join('')}</select>${options.tip?UI.tip(options.tip):''}</div>`};
+UI.area=(label,value='',rows=8)=>{const id=`demo-field-${++fieldSequence}`;return `<div class="textarea-field"><label for="${id}">${UI.esc(label)}</label><textarea id="${id}" rows="${Number(rows)||8}">${UI.esc(value)}</textarea></div>`};
+UI.check=(label,on=false)=>`<label class="check"><input type="checkbox" ${on?'checked':''}>${UI.esc(label)}</label>`;
+UI.panel=(title,body,actions='',cls='')=>`<section class="panel ${cls}"><div class="panelhead"><h2>${title}</h2><div class="row">${actions}</div></div><div class="panelbody">${body}</div></section>`;
+UI.entity=(icon,title,sub,status,meta,summary,actions,tone='good')=>`<article class="panel entity"><div class="row"><span class="avatar" aria-hidden="true">${icon}</span><div class="grow"><h2>${title}</h2><div class="muted small">${sub}</div></div>${UI.badge(status,tone)}</div><div class="meta">${Array.isArray(meta)?meta.map(v=>`<span>${v}</span>`).join(''):meta}</div><div class="strip ${tone==='warn'?'warn':tone==='bad'?'bad':''}">${summary}</div><div class="actions">${actions}</div></article>`;
+UI.table=(heads,rows)=>`<div class="tablewrap"><table><thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr data-search-row>${row.map(cell=>`<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+UI.tabs=(group,labels,contents)=>`<div class="tabs" role="tablist">${labels.map((label,index)=>`<button type="button" role="tab" aria-selected="${index===0}" aria-controls="panel-${UI.esc(group)}-${index}" class="${index===0?'active':''}" data-tab-group="${UI.esc(group)}" data-tab="${UI.esc(group)}-${index}">${label}</button>`).join('')}</div>${contents.map((content,index)=>`<div id="panel-${UI.esc(group)}-${index}" role="tabpanel" class="tab-panel" data-tab-panel="${UI.esc(group)}-${index}" ${index===0?'':'hidden'}>${content}</div>`).join('')}`;
+UI.details=(label,dialogId)=>UI.button(label,`data-open="${UI.esc(dialogId)}"`,'link');
+UI.empty=text=>`<div class="empty">${text}</div>`;

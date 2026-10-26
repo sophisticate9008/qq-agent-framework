@@ -11,7 +11,7 @@ test('current unconnected assistant response stays unavailable independently fro
   assert.equal(snapshot.state, 'unavailable');
   assert.equal(snapshot.executionAvailable, false);
   assert.deepEqual(snapshot.missingReasons, ['assistant_backend_not_connected']);
-  assert.equal(assistantAvailabilityMessage(snapshot), '助手执行待接入');
+  assert.equal(assistantAvailabilityMessage(snapshot), '助手已关闭');
 });
 
 test('assistant parser accepts a future verified available response without rejecting its saved configuration', () => {
@@ -20,14 +20,14 @@ test('assistant parser accepts a future verified available response without reje
   assert.equal(snapshot.state, 'available');
   assert.equal(snapshot.executionAvailable, true);
   assert.deepEqual(snapshot.configuration, current.configuration);
-  assert.equal(assistantAvailabilityMessage(snapshot), '助手执行已就绪');
+  assert.equal(assistantAvailabilityMessage(snapshot), '助手已关闭');
 });
 
-test('future bounded unavailable reason codes remain visible and contradictory or malformed states are rejected', () => {
+test('future bounded unavailable reason codes remain available in details and contradictory or malformed states are rejected', () => {
   const snapshot = parseChatAssistant({ ...current, missingReasons: ['future_backend_condition', 'model.unavailable'] });
   assert(snapshot);
   assert.equal(snapshot.state, 'unavailable');
-  assert.match(assistantAvailabilityMessage(snapshot), /future_backend_condition/);
+  assert.deepEqual(snapshot.missingReasons, ['future_backend_condition', 'model.unavailable']);
   for (const input of [
     { ...current, executionAvailable: true }, { ...current, missingReasons: [] },
     { ...current, executionAvailable: 'true' }, { ...current, missingReasons: [null] },

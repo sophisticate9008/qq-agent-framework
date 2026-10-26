@@ -23,7 +23,7 @@ export async function verifyExecutionThemes(page: Page, origin: string, capture:
         await page.getByRole('spinbutton', { name: /超时停止请求次数/ }).waitFor();
       }
       else if (view === 'bootstrap') { await page.locator('[data-native-bootstrap-summary] > summary').click(); await page.locator('[data-bootstrap-feature="0"]').waitFor(); }
-      else if (view === 'features') { await page.getByRole('tab', { name: '功能设置', exact: true }).click(); await page.getByText('合成功能 A 0', { exact: true }).waitFor(); }
+      else if (view === 'features') { await page.getByRole('tab', { name: 'Agent 扩展', exact: true }).click(); await page.getByText('合成功能 A 0', { exact: true }).waitFor(); }
       else await page.getByRole('button', { name: '刷新状态', exact: true }).waitFor();
       const colors: string[] = [];
       for (const theme of ['light', 'dark']) {
@@ -99,7 +99,7 @@ export async function verifyExecutionRuntimeUi(page: Page, origin: string, captu
   const evidence: Record<string, boolean | number> = {};
   const showFeatureSettings = async () => {
     if (!new URL(page.url()).searchParams.get('view')?.startsWith('features')) return;
-    const tab = page.getByRole('tab', { name: '功能设置', exact: true });
+    const tab = page.getByRole('tab', { name: 'Agent 扩展', exact: true });
     await tab.click();
     await tab.and(page.locator('[aria-selected="true"]')).waitFor();
     await page.getByRole('tabpanel').filter({ has: page.locator('#native-bootstrap-summary') }).waitFor();
@@ -405,10 +405,10 @@ export async function verifyExecutionRuntimeUi(page: Page, origin: string, captu
     await featureRegion.evaluate((element, offset) => { element.scrollTop = offset; }, offset);
     await layoutFrames();
     const visibleHeight = await featureRegion.getByRole('list', { exact: true }).evaluate(element => element.scrollHeight);
-    await page.getByRole('tab', { name: '聊天工具', exact: true }).click();
+    await page.getByRole('tab', { name: '框架内置', exact: true }).click();
     await toolStatus.getByText('当前运行快照没有已装配的功能包。', { exact: true }).waitFor();
-    await toolStatus.getByText('框架工具通道尚未接入。已保存的权限不会使未接入的通道自动可用。', { exact: true }).waitFor();
-    assert.equal(await toolStatus.getByRole('button', { name: '管理框架工具授权', exact: true }).count(), 1);
+    await toolStatus.getByText('框架工具通道尚未接入。请在连接页检查 DSH 工具通道。', { exact: true }).waitFor();
+    assert.equal(await toolStatus.getByRole('button', { name: '管理主人与白名单', exact: true }).count(), 1);
     await featureRegion.waitFor({ state: 'hidden' });
     await page.waitForFunction(() => document.querySelector('[aria-label="功能清单"]')?.querySelectorAll('[data-virtual-index]').length === 0);
     await layoutFrames();

@@ -1,29 +1,26 @@
+import { SettingsWindow } from './settings-window.tsx';
 import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import { catalogFailureState } from '../lib/native-catalog-operation.ts';
 import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.ts';
 import { NativeCatalogRecovery } from './native-catalog-recovery.tsx';
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, CircleAlert, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { CircleAlert, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import { catalogIdentifierDescription, isCatalogIdentifier, newCatalogIdentifier } from '../lib/catalog-identifier.ts';
 import { sameCapabilitySelection } from '../lib/chat-capability-ui.ts';
 import type { PageProps } from '../lib/types.ts';
-import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill } from './management.tsx';
-import { Badge } from './ui/badge.tsx';
+import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section, StatusPill } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { Textarea } from './ui/textarea.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog.tsx';
 import { ProviderManager } from './provider-manager.tsx';
 import { createBuiltinDailyChatPlanDraft } from '../../src/host/chat-templates.ts';
-import { ChatCapabilityManager } from './chat-capability-manager.tsx';
-import { VirtualList } from './virtual-list.tsx';
-import { DshDeploymentManager, type DshDeploymentHandle, type PreparedChatConfiguration } from './dsh-deployment-manager.tsx';
+import { HelpTip } from './help-tip.tsx';
+import { DshDeploymentManager, type PreparedChatConfiguration } from './dsh-deployment-manager.tsx';
 import { modelCapabilitiesUnavailableMessage, modelReasoningEffortLabel, modelReasoningEffortOptions, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
-import type { ChatApplicationPrimaryAction } from '../lib/chat-application.ts';
-import { DshRestartControl } from './dsh-restart-control.tsx';
 
 import { CHAT_PLAN_LIMITS, DEFAULT_CHAT_CONTEXT_LIMITS, isChatContextLimit, isChatPlanReasoningEffort } from '../../src/contracts/chat-plans.ts';
 import { parsePlan, parsePlanCatalog, type ChatPlanCatalogSnapshot, type ChatPlanDraft } from '../lib/chat-plans.ts';
@@ -43,6 +40,10 @@ interface ProviderOption {
 }
 
 type SaveState = 'idle' | 'saved' | 'busy' | 'conflict' | 'unknown';
+
+function PlanField({ id, label, tip, stacked = false, children }: { readonly id: string; readonly label: string; readonly tip?: string; readonly stacked?: boolean; readonly children: ReactNode }) {
+  return <Field id={id} label={label} tip={tip} layout={stacked ? 'stacked' : 'inline'}>{children}</Field>;
+}
 
 const emptyPlan: ChatPlanDraft = {
   id: '', name: '', description: '', instructions: '', personaId: '', provider: '', model: '', reasoningEffort: '',
@@ -108,7 +109,7 @@ const planDraftKey = createDraftKey<{
   readonly creationId: string; readonly contextTouched: { readonly group: boolean; readonly private: boolean };
 }>('chat-plans');
 
-export function ChatPlanManager(props: PageProps) {
+export function ChatPlanManager(props: PageProps & { readonly children?: ReactNode; readonly compact?: boolean }) {
   const { api, connected, connect, setDirty, navigate } = props;
   const recovery = useNativeCatalogOperation(api, 'plans');
   const retained = useMemo(() => retainedDraft(api, planDraftKey), [api]);
@@ -123,14 +124,12 @@ export function ChatPlanManager(props: PageProps) {
   const [privateContext, setPrivateContext] = useState(retained?.privateContext ?? String(emptyPlan.contextLimits.private));
   const [contextTouched, setContextTouched] = useState(retained?.contextTouched ?? { group: false, private: false });
   const [creating, setCreating] = useState(retained?.creating ?? false);
+  const [creationDialogOpen, setCreationDialogOpen] = useState(false);
   const [creationId, setCreationId] = useState(retained?.creationId ?? '');
   const [pendingActivePlanId, setPendingActivePlanId] = useState<string | null>(retained?.pendingActivePlanId ?? null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [updatingChat, setUpdatingChat] = useState(false);
-  const [canUpdateChat, setCanUpdateChat] = useState(false);
-  const [chatUpdateAction, setChatUpdateAction] = useState<ChatApplicationPrimaryAction>('blocked');
-  const deploymentAction = useRef<DshDeploymentHandle | null>(null);
   const updateOwner = useRef<symbol | null>(null);
   const [loadError, setLoadError] = useState('');
   const [auxiliaryWarnings, setAuxiliaryWarnings] = useState<readonly string[]>([]);
@@ -230,7 +229,7 @@ export function ChatPlanManager(props: PageProps) {
       setDraft(emptyPlan);
       selectContext(emptyPlan);
       setProviders([]);
-      setCreating(false);
+      setCreating(false); setCreationDialogOpen(false);
       setLoadError('');
       return;
     }
@@ -370,10 +369,6 @@ export function ChatPlanManager(props: PageProps) {
     return `${provider?.name ?? '未登记提供方'} · ${model?.name ?? '未登记模型'}`;
   }
 
-  function showDshApplication(): void {
-    if (typeof document !== 'undefined') document.getElementById(nativeFormMetadata.deployment.id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  }
-
   function selectPlan(plan: ChatPlanDraft): void {
     if (dirty || editingDisabled) return;
     invalidateCapabilities();
@@ -397,6 +392,7 @@ export function ChatPlanManager(props: PageProps) {
     setSelectedId(null);
     const id = newCatalogIdentifier('plan');
     setCreationId(id);
+    setCreationDialogOpen(true);
     setDraft({ ...emptyPlan, id });
     selectContext(emptyPlan);
     setCreating(true);
@@ -413,6 +409,7 @@ export function ChatPlanManager(props: PageProps) {
     selectedOwner.current = null;
     deletionTarget.current = null;
     setSelectedId(null);
+    setCreationDialogOpen(true);
     setDraft(next);
     selectContext(next);
     setCreating(true);
@@ -519,7 +516,7 @@ export function ChatPlanManager(props: PageProps) {
       deletionTarget.current = null;
       setDraft(saved);
       selectContext(saved);
-      setCreating(false);
+      setCreating(false); setCreationDialogOpen(false);
       setDeleteConfirmed(false);
       recovery.complete(operationToken);
       setSaveState('saved');
@@ -606,80 +603,89 @@ export function ChatPlanManager(props: PageProps) {
     }
   }
 
-  if (!connected) return <ConnectPrompt connect={connect} />;
-  if (loading && !catalog) return <Section title="聊天方案"><div className="flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取聊天方案</div></Section>;
-  if (!catalog) return <Section title="聊天方案暂不可用" description={loadError || '暂时无法读取聊天方案。'} actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重试</Button>}><EmptyState locked title="暂时无法读取" description="已保存的方案不会改变，请稍后重试。" /></Section>;
+  const editorFields = <div className="grid gap-2">
+        <div className="formgrid three">
+          <PlanField id="chat-plan-name" label={nativeFormMetadata.plan.fields.name}><Input id="chat-plan-name" value={draft.name} disabled={editingDisabled} maxLength={CHAT_PLAN_LIMITS.name} placeholder="日常聊天" onChange={event => update('name', event.target.value)} /></PlanField>
+          <PlanField id="chat-plan-description" label={nativeFormMetadata.plan.fields.description} tip="可选，只说明用途，不作为模型指令。"><Input id="chat-plan-description" value={draft.description} disabled={editingDisabled} maxLength={CHAT_PLAN_LIMITS.description} placeholder="用于日常群聊与私聊（可选）" onChange={event => update('description', event.target.value)} /></PlanField>
+          <PlanField id="chat-plan-persona" label={nativeFormMetadata.plan.fields.persona} tip="身份与表达风格在人设库中独立维护。"><div className="flex items-center gap-2"><select id="chat-plan-persona" className="h-[27px] min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" value={draft.personaId} disabled={editingDisabled || personas.length === 0} onChange={event => update('personaId', event.target.value)}><option value="" disabled>{personas.length === 0 ? '请先创建人设' : '选择人设'}</option>{personas.map(persona => <option key={persona.id} value={persona.id}>{persona.name}</option>)}</select><Button type="button" size="sm" variant="outline" aria-label="管理人设" onClick={() => navigate('persona')}>管理</Button></div></PlanField>
+        </div>
+        {creating && <SettingsWindow title="内部标识" description="已自动生成；只在关联现有配置时需要修改。"><div className="mt-3 max-w-sm"><PlanField id="chat-plan-id" label={nativeFormMetadata.plan.fields.id} tip="已自动生成，通常无需修改。需要兼容既有引用时可调整；创建后固定。"><Input id="chat-plan-id" value={draft.id} disabled={!creating || editingDisabled} maxLength={CHAT_PLAN_LIMITS.identifier} onChange={event => update('id', event.target.value)} /></PlanField></div></SettingsWindow>}
+        {creating && !draft.personaId && <p className="text-xs leading-5 text-muted-foreground" role="status">尚未关联人设：可先在人设库使用内置小鲸鱼并保存，或选择其他已登记人设。模板不会自动创建人设。</p>}
+        <div className="border-y -mx-2.5 px-2.5 py-2"><div className="row between mb-1.5"><h3 className="text-xs font-semibold">模型与回复</h3><div className="row"><Button size="sm" variant="outline" disabled={editingDisabled} onClick={() => setModelEditorOpen(true)}>就地选择或添加模型</Button><Button size="sm" variant="ghost" onClick={() => navigate('persona')}>管理人设</Button></div></div>
+        <div className="formgrid three">
+          <PlanField id="chat-plan-provider" label={nativeFormMetadata.plan.fields.provider} tip="连接类型、服务地址、密钥与模型只需集中配置一次。"><div className="flex items-center gap-2"><select id="chat-plan-provider" className="h-[27px] min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" value={draft.provider} disabled={editingDisabled} onChange={event => chooseProvider(event.target.value)}><option value="" disabled>选择模型提供方</option>{draft.provider && !selectedProvider && <option value={draft.provider} disabled>未登记的提供方</option>}{providers.filter(provider => provider.enabled || provider.id === draft.provider).map(provider => <option key={provider.id} value={provider.id} disabled={!provider.enabled}>{provider.name}{provider.enabled ? '' : '（已停用）'}</option>)}</select><Button type="button" size="sm" variant="outline" aria-label="管理提供方" onClick={() => navigate('providers')}>管理</Button></div></PlanField>
+          <PlanField id="chat-plan-model" label={nativeFormMetadata.plan.fields.model} tip="显示在提供方页面设置的模型名称，不用重复填写 API 标识。可以就地添加或选择模型，原方案草稿会保留。"><div className="flex items-center gap-2"><select id="chat-plan-model" className="h-[27px] min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" value={draft.model} disabled={editingDisabled || !selectedProvider?.enabled} onChange={event => update('model', event.target.value)}><option value="" disabled>{selectedProvider ? '选择模型' : '先选择提供方'}</option>{draft.model && !selectedModel && <option value={draft.model} disabled>未登记的模型</option>}{selectedProvider?.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</select></div></PlanField>
+          <PlanField id="chat-plan-reasoning" label={nativeFormMetadata.plan.fields.reasoning} tip={reasoningSupport}><div className="flex items-center gap-2"><select id="chat-plan-reasoning" className="h-[27px] min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" value={draft.reasoningEffort} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}>
+            <option value="" disabled>{supportedEfforts.length === 0 ? '尚无已确认档位' : '选择当前模型支持的档位'}</option>
+            {reasoningOptions.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
+          </select><Button type="button" size="sm" variant="ghost" aria-label="重新读取支持情况" disabled={editingDisabled || !draft.provider || !draft.model || currentCapabilities?.loading === true} onClick={invalidateCapabilities}><RefreshCw className={currentCapabilities?.loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重读</Button></div></PlanField>
+        </div>
+        <div className="row small muted mt-1.5"><span>{currentCapabilities?.loading ? '正在读取模型支持情况' : capacity ? `模型窗口 ${capacity.contextWindow.toLocaleString()} token · 最大输出 ${capacity.maxTokens.toLocaleString()} token` : '尚无实际模型容量元数据'}</span><SettingsWindow title="上下文容量" description="按群聊和私聊分别设置，保存方案后应用。">        <div className="flex flex-wrap items-center gap-2">
+          <div className="w-64 max-w-full"><PlanField id="chat-plan-group-context" label={nativeFormMetadata.plan.fields.groupContext} tip="每个群聊会话的上下文上限，单位 token。容量修改先保存，再明确应用到 DSH；需要迁移时沿用配置应用流程。"><Input id="chat-plan-group-context" type="number" min={CHAT_PLAN_LIMITS.contextMinimum} max={CHAT_PLAN_LIMITS.contextMaximum} step={1} inputMode="numeric" value={groupContext} disabled={editingDisabled} onChange={event => updateContext('group', event.target.value)} /></PlanField></div>
+          <div className="w-64 max-w-full"><PlanField id="chat-plan-private-context" label={nativeFormMetadata.plan.fields.privateContext} tip="每个私聊会话的上下文上限，单位 token，独立于群聊设置。容量修改保存并应用后生效，不自动切换已有会话。"><Input id="chat-plan-private-context" type="number" min={CHAT_PLAN_LIMITS.contextMinimum} max={CHAT_PLAN_LIMITS.contextMaximum} step={1} inputMode="numeric" value={privateContext} disabled={editingDisabled} onChange={event => updateContext('private', event.target.value)} /></PlanField></div>
+          {capacity ? <div className="flex flex-wrap items-center gap-2 pb-1"><span className="text-xs text-muted-foreground">建议群聊 {capacity.recommended.group.toLocaleString()} · 私聊 {capacity.recommended.private.toLocaleString()}</span><HelpTip label="模型容量">{`模型实际窗口 ${capacity.contextWindow.toLocaleString()} token，最大输出 ${capacity.maxTokens.toLocaleString()} token。压缩额外预留群聊 ${capacity.compaction.groupHeadroomTokens.toLocaleString()}、私聊 ${capacity.compaction.privateHeadroomTokens.toLocaleString()} token。采用建议只修改当前草稿，保存并应用后生效。`}</HelpTip><Button size="sm" variant="outline" disabled={editingDisabled} onClick={() => { setGroupContext(String(capacity.recommended.group)); setPrivateContext(String(capacity.recommended.private)); setContextTouched({ group: true, private: true }); setSaveState('idle'); }}>使用模型建议容量</Button></div> : <p className="pb-2 text-xs text-muted-foreground">尚无实际模型容量元数据；保留当前数值。</p>}
+        </div>
+</SettingsWindow></div></div>
+        {currentCapabilities?.error && <p role="alert" className="text-xs leading-5 text-destructive">{currentCapabilities.error}</p>}
+        {draft.reasoningEffort && !effortSupported && <p className="text-xs leading-5 text-muted-foreground">草稿原值“{modelReasoningEffortLabel(draft.reasoningEffort)}”仍保留，当前未确认支持；不会自动降档。支持情况未知时，已有方案可原样保留模型和档位，仅保存其他字段。</p>}
+        {!registeredSelection && <div className="rounded-lg border border-dashed px-3 py-2.5 text-xs leading-5 text-muted-foreground">{draft.provider ? '这份方案的提供方或模型尚未登记、已停用。原有内容会保留，请在“模型提供方”补齐后再启用。' : '先在“模型提供方”添加连接和模型，再回来选择。'}</div>}
+        <PlanField stacked id="chat-plan-instructions" label={nativeFormMetadata.plan.fields.instructions} tip="只放本方案的回复约束；人设正文、能力权限和用户偏好在各自页面管理。"><Textarea id="chat-plan-instructions" value={draft.instructions} maxLength={CHAT_PLAN_LIMITS.instructions} disabled={editingDisabled} rows={9} className="min-h-48 resize-y leading-5" placeholder="描述这份聊天方案如何组织回复" onChange={event => update('instructions', event.target.value)} /></PlanField>
 
-  return <div className="grid gap-5">
-    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { operationBlocked.current = false; setSaveState('idle'); setWriteError(''); }} />
-    <div className="flex flex-wrap items-center gap-3 text-xs">
+          {fieldError && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />{fieldError}</div>}
+          {writeError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown') && <Button size="sm" variant="outline" onClick={() => setReloadVersion(version => version + 1)}>重新载入</Button>}</div>}
+        </div>;
+
+  const heading = props.compact ? null : <PageHeading title="聊天方案与助手" description="配置聊天模型与回复方式，管理独立工作的后台助手。" actions={connected && catalog ? <div className="flex flex-wrap items-center gap-3 text-xs">
       <StatusPill tone={dirty || creating ? 'warning' : 'neutral'}>{dirty || creating ? '未保存' : '已保存'}</StatusPill>
       <StatusPill tone={runtimeConnected ? 'success' : 'warning'}>{runtimeConnected === null ? '聊天状态待确认' : runtimeConnected ? '聊天可用' : '聊天暂不可用'}</StatusPill>
-      <span className="text-muted-foreground">更新聊天会保存当前方案、选择启用并应用，保留已有上下文。</span>
-      <Button id="native-plan-update" disabled={!canUpdateChat || !['reconcile', 'observe', 'restore'].includes(chatUpdateAction) && (editingDisabled || !draft.id)} onClick={() => void deploymentAction.current?.updateChat()}>{chatUpdateAction === 'restore' ? '恢复操作' : chatUpdateAction === 'reconcile' ? '核对并继续更新' : chatUpdateAction === 'observe' ? '读取更新状态' : updatingChat ? '正在更新聊天…' : '更新聊天'}</Button>
-      <DshRestartControl api={api} connected={connected} compact />
-      <Button variant="outline" onClick={showDshApplication}>查看 DSH 应用</Button>
       <Button variant="ghost" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新状态</Button>
+    </div> : undefined} />;
+
+  if (!connected) return <div className="grid gap-2">{heading}<ConnectPrompt connect={connect} />{props.children}</div>;
+  if (loading && !catalog) return <div className="grid gap-2">{heading}<Section title="聊天方案"><div className="flex min-h-32 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取聊天方案</div></Section>{props.children}</div>;
+  if (!catalog) return <div className="grid gap-2">{heading}<Section title="聊天方案暂不可用" description={loadError || '暂时无法读取聊天方案。'} actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重试</Button>}><EmptyState locked title="暂时无法读取" description="已保存的方案不会改变，请稍后重试。" /></Section>{props.children}</div>;
+
+  if (props.compact) return <div className="stack compact-chat-editor">
+    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { operationBlocked.current = false; setSaveState('idle'); setWriteError(''); }} />
+    <div className="formgrid">
+      <PlanField id="overview-chat-plan" label="聊天方案"><select id="overview-chat-plan" className="h-[27px] w-full min-w-0 rounded border bg-background px-2" value={creating ? '' : selectedId ?? ''} disabled={dirty || editingDisabled} onChange={event => { const plan = catalog.plans.find(item => item.id === event.target.value); if (plan) selectPlan(plan); }}><option value="" disabled>选择聊天方案</option>{catalog.plans.map(plan => <option key={plan.id} value={plan.id}>{plan.name}</option>)}</select></PlanField>
+      <PlanField id="overview-chat-persona" label="关联人设"><select id="overview-chat-persona" className="h-[27px] w-full min-w-0 rounded border bg-background px-2" value={draft.personaId} disabled={editingDisabled || personas.length === 0} onChange={event => update('personaId', event.target.value)}><option value="" disabled>选择人设</option>{personas.map(persona => <option key={persona.id} value={persona.id}>{persona.name}</option>)}</select></PlanField>
+      <PlanField id="overview-chat-model" label="聊天模型"><select id="overview-chat-model" className="h-[27px] w-full min-w-0 rounded border bg-background px-2" value={JSON.stringify([draft.provider, draft.model])} disabled={editingDisabled} onChange={event => { const selected = providers.flatMap(provider => provider.enabled ? provider.models.map(model => ({ provider: provider.id, model: model.id })) : []).find(item => JSON.stringify([item.provider, item.model]) === event.target.value); if (!selected) return; invalidateCapabilities(); setDraft(current => ({ ...current, provider: selected.provider, model: selected.model })); setFieldError(''); setWriteError(''); setSaveState('idle'); }}><option value={JSON.stringify([draft.provider, draft.model])} disabled>{selectedModel ? selectedModel.name : '选择聊天模型'}</option>{providers.filter(provider => provider.enabled).flatMap(provider => provider.models.filter(model => provider.id !== draft.provider || model.id !== draft.model).map(model => <option key={JSON.stringify([provider.id, model.id])} value={JSON.stringify([provider.id, model.id])}>{model.name}</option>))}</select></PlanField>
+      <PlanField id="overview-chat-reasoning" label="思考强度" tip={reasoningSupport}><select id="overview-chat-reasoning" className="h-[27px] w-full min-w-0 rounded border bg-background px-2" value={draft.reasoningEffort} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}><option value="" disabled>{supportedEfforts.length === 0 ? '尚无已确认档位' : '选择支持的档位'}</option>{reasoningOptions.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{modelReasoningEffortLabel(option.value)}{option.disabled ? '（未确认）' : ''}</option>)}</select></PlanField>
     </div>
+    {(fieldError || writeError || loadError) && <p className="text-xs text-destructive" role="alert">{fieldError || writeError || loadError}</p>}
+    {props.children}
+    <div className="row border-t pt-2"><Button size="sm" variant="ghost" disabled={!dirty || editingDisabled} onClick={reset}>撤销</Button><DshDeploymentManager compact minimal api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" configurationActive={catalog.activePlanId === draft.id} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /></div>
+  </div>;
+
+  return <div className="grid gap-2">
+    {heading}
+    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { operationBlocked.current = false; setSaveState('idle'); setWriteError(''); }} />
+
     {(loadError || auxiliaryWarnings.length > 0) && <div role="status" className="rounded-lg border p-3 text-xs leading-6 text-muted-foreground">{loadError && <p>{loadError} 暂保留上次方案与草稿。</p>}{auxiliaryWarnings.map(warning => <p key={warning}>{warning}</p>)}</div>}
-    <div className="grid items-start gap-5 lg:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
-      <Section scrollable title="聊天方案" description="保存常用的模型、人设和回复方式。" actions={<Button size="sm" onClick={createPlan} disabled={dirty || editingDisabled}><Plus className="size-3.5" />新建方案</Button>}>
-        <div className="mb-4 grid gap-2 rounded-lg border border-dashed p-3">
-          <Button size="sm" variant="outline" onClick={useBuiltinPlan} disabled={dirty || loading || editingDisabled}>使用内置日常方案</Button>
-          <p className="text-xs leading-5 text-muted-foreground">生成一份可修改的草稿，不覆盖已有方案。选好模型和人设后保存。</p>
-        </div>
-        <div className="min-w-0">{catalog.plans.length === 0 ? <EmptyState title="还没有聊天方案" description="创建第一份方案后，可将它选择为启用方案。" action={<Button size="sm" onClick={createPlan}><Plus className="size-3.5" />新建方案</Button>} /> : <VirtualList items={catalog.plans} getItemKey={plan => plan.id} estimateSize={64} itemClassName="pb-1.5">{plan => <Button key={plan.id} variant={!creating && selectedId === plan.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-2.5 text-left whitespace-normal" disabled={dirty || editingDisabled} onClick={() => selectPlan(plan)}><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{plan.name}</strong><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{modelLabel(plan)}</span></span>{pendingActivePlanId === plan.id && <Badge variant="outline"><Check className="size-3" />启用</Badge>}</Button>}</VirtualList>}</div>
-      </Section>
-      <Section scrollable id={nativeFormMetadata.plan.id} title={creating ? '新建聊天方案' : draft.name || '聊天方案'} description="选择聊天用的模型、人设和回复方式。" actions={<StatusPill tone={pendingActivePlanId === draft.id && draft.id !== '' ? 'success' : 'neutral'}>{pendingActivePlanId === draft.id && draft.id !== '' ? '已选择启用' : '未选择启用'}</StatusPill>} footer={<SaveBar dirty={dirty} saving={saving} disabled={blocked} message={saveMessage(saveState, dirty)} onSave={() => void save()} onReset={reset} label="保存聊天方案"><Button type="button" variant="outline" disabled={creating || !draft.id || pendingActivePlanId === draft.id || editingDisabled || !registeredSelection || !effortSupported} onClick={() => { if (!currentCapabilities || currentCapabilities.generation !== capabilitiesEpoch.current || !effortSupported || !registeredSelection || editingDisabled) return; setPendingActivePlanId(draft.id); setSaveState('idle'); }}><Check className="size-3.5" />选择为启用方案</Button></SaveBar>}>
-        <div className="grid gap-5">
-          <Field label={nativeFormMetadata.plan.fields.name}><Input value={draft.name} disabled={editingDisabled} maxLength={CHAT_PLAN_LIMITS.name} placeholder="日常聊天" onChange={event => update('name', event.target.value)} /></Field>
-          <Field label={nativeFormMetadata.plan.fields.description} description="可选，只说明用途，不作为模型指令。"><Input value={draft.description} disabled={editingDisabled} maxLength={CHAT_PLAN_LIMITS.description} placeholder="用于日常群聊与私聊（可选）" onChange={event => update('description', event.target.value)} /></Field>
-          <details key={selectedId ?? creationId} className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium">高级设置</summary><div className="mt-3"><Field label={nativeFormMetadata.plan.fields.id} description={creating ? '已自动生成，通常无需修改。需要兼容既有引用时可调整；创建后固定。' : '用于稳定关联，现有内部标识不可修改。'}><Input id="chat-plan-id" value={draft.id} disabled={!creating || editingDisabled} maxLength={CHAT_PLAN_LIMITS.identifier} onChange={event => update('id', event.target.value)} /></Field></div></details>
-          <Field label={nativeFormMetadata.plan.fields.instructions} description="只放本方案的回复约束；人设正文、能力权限和用户偏好在各自页面管理。"><Textarea value={draft.instructions} maxLength={CHAT_PLAN_LIMITS.instructions} disabled={editingDisabled} className="h-44 resize-none leading-6" placeholder="描述这份聊天方案如何组织回复" onChange={event => update('instructions', event.target.value)} /></Field>
-          {creating && !draft.personaId && <p className="text-xs leading-5 text-muted-foreground" role="status">尚未关联人设：可先在人设库使用内置小鲸鱼并保存，或选择其他已登记人设。模板不会自动创建人设。</p>}
-          <div className="grid gap-5 sm:grid-cols-2"><Field label={nativeFormMetadata.plan.fields.persona} description="身份与表达风格在人设库中独立维护。"><div className="flex gap-2"><select className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm" value={draft.personaId} disabled={editingDisabled || personas.length === 0} onChange={event => update('personaId', event.target.value)}><option value="" disabled>{personas.length === 0 ? '请先创建人设' : '选择人设'}</option>{personas.map(persona => <option key={persona.id} value={persona.id}>{persona.name}</option>)}</select><Button type="button" variant="outline" onClick={() => navigate('persona')}>管理人设</Button></div></Field><Field label={nativeFormMetadata.plan.fields.reasoning} description={reasoningSupport}>
-            <select className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={draft.reasoningEffort} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}>
-              <option value="" disabled>{supportedEfforts.length === 0 ? '尚无已确认档位' : '选择当前模型支持的档位'}</option>
-              {reasoningOptions.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
-            </select>
-            {draft.reasoningEffort && !effortSupported && <p className="text-xs leading-5 text-muted-foreground">草稿原值“{modelReasoningEffortLabel(draft.reasoningEffort)}”仍保留，当前未确认支持；不会自动降档。支持情况未知时，已有方案可原样保留模型和档位，仅保存其他字段。</p>}
-            <Button type="button" size="sm" variant="ghost" className="justify-self-start" disabled={editingDisabled || !draft.provider || !draft.model || currentCapabilities?.loading === true} onClick={invalidateCapabilities}><RefreshCw className={currentCapabilities?.loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取支持情况</Button>
-          </Field></div>
-          <div className="grid gap-5 sm:grid-cols-2">
-            <Field label={nativeFormMetadata.plan.fields.provider} description="连接类型、服务地址、密钥与模型只需集中配置一次。"><div className="flex gap-2"><select className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm" value={draft.provider} disabled={editingDisabled} onChange={event => chooseProvider(event.target.value)}><option value="" disabled>选择模型提供方</option>{draft.provider && !selectedProvider && <option value={draft.provider} disabled>未登记的提供方</option>}{providers.filter(provider => provider.enabled || provider.id === draft.provider).map(provider => <option key={provider.id} value={provider.id} disabled={!provider.enabled}>{provider.name}{provider.enabled ? '' : '（已停用）'}</option>)}</select><Button type="button" variant="outline" onClick={() => navigate('providers')}>管理提供方</Button></div></Field>
-            <Field label={nativeFormMetadata.plan.fields.model} description="显示在提供方页面设置的模型名称，不用重复填写 API 标识。"><select id="chat-plan-model" className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={draft.model} disabled={editingDisabled || !selectedProvider?.enabled} onChange={event => update('model', event.target.value)}><option value="" disabled>{selectedProvider ? '选择模型' : '先选择提供方'}</option>{draft.model && !selectedModel && <option value={draft.model} disabled>未登记的模型</option>}{selectedProvider?.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</select><Button size="sm" variant="outline" disabled={editingDisabled} onClick={() => setModelEditorOpen(true)}>就地选择或添加模型</Button></Field>
-          </div>
-          {!registeredSelection && <div className="rounded-lg border border-dashed px-3 py-2.5 text-xs leading-5 text-muted-foreground">{draft.provider ? '这份方案的提供方或模型尚未登记、已停用。原有内容会保留，请在“模型提供方”补齐后再启用。' : '先在“模型提供方”添加连接和模型，再回来选择。'}</div>}
-          <div className="grid gap-5 sm:grid-cols-2">
-            <Field label={nativeFormMetadata.plan.fields.groupContext} description="每个群聊会话的上下文上限，单位 token。"><Input type="number" min={CHAT_PLAN_LIMITS.contextMinimum} max={CHAT_PLAN_LIMITS.contextMaximum} step={1} inputMode="numeric" value={groupContext} disabled={editingDisabled} onChange={event => updateContext('group', event.target.value)} /></Field>
-            <Field label={nativeFormMetadata.plan.fields.privateContext} description="每个私聊会话的上下文上限，独立于群聊设置。"><Input type="number" min={CHAT_PLAN_LIMITS.contextMinimum} max={CHAT_PLAN_LIMITS.contextMaximum} step={1} inputMode="numeric" value={privateContext} disabled={editingDisabled} onChange={event => updateContext('private', event.target.value)} /></Field>
-          </div>
-          {capacity ? <div className="grid gap-2 rounded-lg border p-3 text-xs"><p>模型实际窗口 {capacity.contextWindow.toLocaleString()} token，最大输出 {capacity.maxTokens.toLocaleString()} token；建议群聊 {capacity.recommended.group.toLocaleString()}、私聊 {capacity.recommended.private.toLocaleString()}。压缩额外预留群聊 {capacity.compaction.groupHeadroomTokens.toLocaleString()}、私聊 {capacity.compaction.privateHeadroomTokens.toLocaleString()} token。</p><Button size="sm" variant="outline" disabled={editingDisabled} onClick={() => { setGroupContext(String(capacity.recommended.group)); setPrivateContext(String(capacity.recommended.private)); setContextTouched({ group: true, private: true }); setSaveState('idle'); }}>使用模型建议容量</Button></div> : <p className="text-xs text-muted-foreground">尚无实际模型容量元数据；保留当前数值，不推测模型窗口。</p>}
-          <p className="text-xs leading-5 text-muted-foreground">容量修改先保存，再明确应用到 DSH；需要迁移时沿用配置应用流程，不自动切换已有会话。</p>
-          {!creating && <details className="rounded-lg border border-destructive/30 p-3 text-xs leading-6"><summary className="cursor-pointer font-medium">删除此方案</summary><div className="mt-3 grid gap-2">
-            <p>危险操作：删除此方案不删除人设、不切换启用方案、不清空或重置会话，也不停止外部工作。启用中或聊天运行状态未明确停止时禁止删除。</p>
+    <div className="masterdetail editor-workspace">
+    <Section className="editor-directory" title="方案目录" actions={<Button size="sm" variant="ghost" onClick={createPlan} disabled={dirty || editingDisabled}><Plus className="size-3.5" />新建</Button>} footer={<span className="small muted">{catalog.plans.length} 项方案</span>}>
+      {catalog.plans.length === 0 ? <p className="text-xs text-muted-foreground">还没有聊天方案，创建第一份方案开始配置。</p> : <div className="masterlist" role="group" aria-label="选择聊天方案">{catalog.plans.map((plan, index) => <button key={plan.id} type="button" className={!creating && selectedId === plan.id ? 'active' : ''} title={modelLabel(plan)} aria-pressed={!creating && selectedId === plan.id} disabled={dirty || editingDisabled} onClick={() => selectPlan(plan)}><span className="letter">{String(index + 1).padStart(2, '0')}</span><span className="copy"><strong>{plan.name}</strong><span className="muted">{modelLabel(plan)}{catalog.activePlanId === plan.id ? ' · 当前启用' : ''}</span></span></button>)}</div>}
+    </Section>
+    <div className="stack editor-detail">
+    <Section id={nativeFormMetadata.plan.id} title={creating ? '新建聊天方案' : draft.name || '聊天方案'} actions={<StatusPill tone={catalog.activePlanId === draft.id && draft.id !== '' ? 'success' : 'neutral'}>{catalog.activePlanId === draft.id && draft.id !== '' ? '当前启用方案' : '尚未启用'}</StatusPill>} footer={<div className="flex flex-wrap items-center gap-2"><SaveBar compact dirty={dirty} saving={saving} disabled={blocked} message={saveMessage(saveState, dirty)} onSave={() => void save()} onReset={reset} label="保存聊天方案" /><DshDeploymentManager compact api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" configurationActive={catalog.activePlanId === draft.id}
+      prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /><span className="ml-auto">{!creating && <SettingsWindow title="删除聊天方案" label="删除" triggerVariant="destructive" description="删除后无法撤销；启用中或聊天未停止时不能删除。"><div className="mt-3 grid gap-2">
+            
             <div className="flex flex-wrap items-center gap-x-2"><p role="status">{deletionBlockedReason}</p><Button type="button" size="sm" variant="link" onClick={() => navigate('adapters')}>去连接设置</Button></div>
             <label className="flex items-start gap-2"><input type="checkbox" className="mt-1.5" checked={deleteConfirmed} disabled={editingDisabled || !selectedPlan || selectedOwner.current !== selectedPlan.id} onChange={event => {
               if (editingDisabled || !selectedPlan || saveController.current || operationBlocked.current || selectedOwner.current !== selectedPlan.id || connection.current.api !== api || !connection.current.connected) return;
               deletionTarget.current = event.target.checked ? selectedPlan.id : null;
               setDeleteConfirmed(event.target.checked);
-            }} /><span>我确认删除方案“{selectedPlan?.name}”，并已核对没有仍需保留的使用引用。</span></label>
-            <Button variant="outline" disabled={!deleteConfirmed || dirty || editingDisabled || runtimeConnected !== false || catalog.activePlanId === selectedId} onClick={() => void deletePlan()}><Trash2 className="size-3.5" />确认删除此方案</Button>
-          </div></details>}
-          {fieldError && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />{fieldError}</div>}
-          {writeError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown') && <Button size="sm" variant="outline" onClick={() => setReloadVersion(version => version + 1)}>重新载入</Button>}</div>}
-        </div>
-      </Section>
-    </div>
-    <DshDeploymentManager compact navigate={navigate} api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans"
-      updateRef={deploymentAction} onUpdateAvailable={setCanUpdateChat} onUpdateActionChange={setChatUpdateAction} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} />
-    <details className="rounded-xl border bg-muted/10">
-      <summary className="cursor-pointer px-4 py-3 text-sm font-medium">高级工具设置</summary>
-      <div className="max-h-[32rem] overflow-auto overscroll-contain p-3 pt-0">
-    <ChatCapabilityManager api={api} connected={connected} planId={draft.id} selection={draft.capabilitySelection} dirty={dirty}
-      disabled={editingDisabled || loading} planRevision={catalog.revision} onSelect={value => update('capabilitySelection', value)} onApply={showDshApplication} />
-      </div>
-    </details>
+            }} /><span>确认删除“{selectedPlan?.name}”。</span></label>
+            <Button variant="destructive" disabled={!deleteConfirmed || dirty || editingDisabled || runtimeConnected !== false || catalog.activePlanId === selectedId} onClick={() => void deletePlan()}><Trash2 className="size-3.5" />确认删除此方案</Button>
+          </div></SettingsWindow>}</span></div>}>
+      {creating && creationDialogOpen ? <p className="small muted">在新建窗口中编辑方案草稿。</p> : editorFields}
+    </Section>
+    <div className="summaryline small"><span className="muted">从完整模板开始</span><Button size="sm" variant="ghost" onClick={useBuiltinPlan} disabled={dirty || loading || editingDisabled}>使用内置日常方案</Button></div>
+    {props.children}
+    </div></div>
+
+    <Dialog open={creating && creationDialogOpen} onOpenChange={open => { if (!saving && !updatingChat) setCreationDialogOpen(open); }}><DialogContent className="sm:max-w-5xl" showCloseButton={!saving && !updatingChat}><DialogHeader><DialogTitle>新建聊天方案</DialogTitle><DialogDescription>选择已登记的模型与人设，创建新的方案草稿。</DialogDescription></DialogHeader>{creating && creationDialogOpen && editorFields}<div className="row border-t pt-2"><Button disabled={!dirty || editingDisabled || blocked} onClick={() => void save()}>{saving ? '正在创建' : '创建方案'}</Button><Button variant="ghost" disabled={saving || updatingChat} onClick={() => setCreationDialogOpen(false)}>返回编辑</Button></div></DialogContent></Dialog>
     <Dialog open={modelEditorOpen} onOpenChange={setModelEditorOpen}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-6xl" finalFocus={() => document.getElementById('chat-plan-model')}>
         <DialogHeader><DialogTitle>就地选择或添加模型</DialogTitle><DialogDescription>方案草稿保留在原处。先单独保存提供方或模型，再选择“在聊天方案中使用此模型”返回；方案仍需明确保存。</DialogDescription></DialogHeader>

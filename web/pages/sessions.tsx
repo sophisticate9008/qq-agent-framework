@@ -1,16 +1,23 @@
+import { AutomaticMaintenanceStatus } from '../components/automatic-maintenance-status.tsx';
+import { WorkRecords } from '../components/work-records.tsx';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.tsx';
+import { SessionDeleteDialog } from '../components/session-delete-dialog.tsx';
 import { parseNativeInboxSummary } from '../../src/contracts/native-inbox.ts';
 import { useReadResource } from '../lib/use-read-resource.ts';
+import { DetailsWindow, ReadOnlyDetails, TechnicalDetails } from '../components/read-only-details.tsx';
+import { inboxStateLabel } from '../lib/chat-inbox.ts';
 import { ChatInboxState } from '../components/chat-inbox-state.tsx';
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Clipboard, LoaderCircle, RefreshCw, RotateCcw, Search } from 'lucide-react';
+import { AlertTriangle, LoaderCircle, RefreshCw, RotateCcw, Search } from 'lucide-react';
 import { toast } from 'sonner';
-import { ConnectPrompt, EmptyState, PageHeading, Section, StatusPill } from '../components/management.tsx';
+import { ConnectPrompt, EmptyState, PageHeading, Section } from '../components/management.tsx';
 import { Badge } from '../components/ui/badge.tsx';
 import { Button } from '../components/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx';
 import { Input } from '../components/ui/input.tsx';
 import { VirtualTableBody } from '../components/virtual-list.tsx';
+import { ConversationMediaDiagnostics } from '../components/conversation-media-diagnostics.tsx';
 import { ConversationDiagnostics } from '../components/conversation-diagnostics.tsx';
 import { ExecutionJournal } from '../components/execution-journal.tsx';
 import { ChatInteractions } from '../components/chat-interactions.tsx';
@@ -37,8 +44,8 @@ function resetMessage(state: ResetState, error: string): string {
 function sessionError(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === 'session_reset_requires_stopped') return '请先在连接设置中停止聊天，再刷新会话列表。';
-    if (error.code === 'session_reset_busy') return '当前有聊天管理操作正在进行，请稍后刷新核对。';
-    if (error.code === 'session_reset_execution_unsettled') return '这条会话仍有未确认结束的执行记录，暂不能重新开始；请先核对执行状态。';
+    if (error.code === 'session_reset_busy') return '此会话正在处理消息，或已有维护操作在进行，请稍后再试。';
+    if (error.code === 'session_reset_execution_unsettled') return '这条会话还有任务未结束。请打开处理记录核对后再解除绑定。';
     if (error.code === 'session_reset_conflict') return '这条会话绑定已变化，请刷新后重新选择。';
   }
   if (error instanceof ApiError && error.code === 'runtime_not_connected') {
@@ -52,6 +59,10 @@ export function SessionsPage(props: PageProps) {
   const inbox = useReadResource(api, '/api/chat/inbox', connected, parseNativeInboxSummary, { intervalMs: 5_000 });
   const inboxItems = useMemo(() => new Map(inbox.snapshot?.items.map(item => [item.conversationId, item]) ?? []), [inbox.snapshot]);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ManagedSession | null>(null);
+  const [diagnosticKey, setDiagnosticKey] = useState<string | null>(null);
+  const [mediaKey, setMediaKey] = useState<string | null>(null);
+  const [detailTarget, setDetailTarget] = useState<ManagedSession | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const deferredFilter = useDeferredValue(filter);
@@ -78,7 +89,7 @@ export function SessionsPage(props: PageProps) {
     const page = parseSessionSnapshot(await readResource(api, sessionPagePath(), signal));
     if (signal.aborted || lifecycle.current !== epoch || connection.current.api !== api || !connection.current.connected) return;
     if (!page) throw new Error('invalid_sessions_response');
-    const next = { ...mergeSessionPages(null, page).snapshot, source: page.source, historyReadOnly: page.historyReadOnly };
+    const next = { ...mergeSessionPages(null, page).snapshot, source: page.source, historyReadOnly: page.historyReadOnly, deleteAvailable: page.deleteAvailable };
     cursors.current.clear();
     setSnapshot(next);
     setSelectedKey(current => current ?? next.sessions[0]?.key ?? null);
@@ -99,6 +110,10 @@ export function SessionsPage(props: PageProps) {
     setMoreError('');
     setPagingBlocked(false);
     setResetTarget(null);
+    setDiagnosticKey(null);
+    setMediaKey(null);
+    setDetailTarget(null);
+    setDeleteTarget(null);
     setResetState('idle');
     if (loadedApi.current !== api) {
       loadedApi.current = api;
@@ -160,7 +175,7 @@ export function SessionsPage(props: PageProps) {
       }
       cursors.current.add(cursor);
       setSnapshot({ ...merged.snapshot, source: page.source ?? snapshot.source,
-        historyReadOnly: page.historyReadOnly ?? snapshot.historyReadOnly });
+        deleteAvailable: page.deleteAvailable ?? snapshot.deleteAvailable, historyReadOnly: page.historyReadOnly ?? snapshot.historyReadOnly });
       setSelectedKey(current => current ?? merged.snapshot.sessions[0]?.key ?? null);
       if (merged.changed > 0) setNotice(`分页期间发现 ${merged.changed} 条已加载绑定发生变化，已更新显示；分页不是一致快照，请刷新核对。`);
     } catch (error) {
@@ -274,46 +289,56 @@ export function SessionsPage(props: PageProps) {
 
   const navigateToUsage = (): void => props.navigate('usage');
 
-  if (!connected) return <div className="page-stack" data-page="sessions"><PageHeading title="会话管理" description="查看原生聊天宿主保存的真实会话绑定。" /><ConnectPrompt connect={connect} /></div>;
+  if (!connected) return <div className="page-stack" data-page="sessions"><PageHeading title="会话与执行记录" description="查看会话绑定、原执行证据、QQ 互动与独立工作。" /><ConnectPrompt connect={connect} /></div>;
 
   return <div className="page-stack" data-page="sessions">
-    <PageHeading title="会话管理" description={snapshot?.source === 'imported' ? '查看迁入的原有会话记录；尚未由新聊天接管。' : '查看聊天绑定和记录，或为单条会话重新开始对话；提问和工具确认请在 QQ 内回复。'} actions={<Button variant="outline" onClick={reload} disabled={loading || resetState === 'saving'}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button>} />
+    <PageHeading title="会话与执行记录" description={snapshot?.source === 'imported' ? '查看迁入的原有会话记录；尚未由新聊天接管。' : '查看会话、原执行证据、QQ 互动与独立工作。'} actions={<><AutomaticMaintenanceStatus api={api} connected={connected} /><Button variant="outline" onClick={reload} disabled={loading || resetState === 'saving'}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button></>} />
     {snapshot?.source === 'imported' && <p className="rounded-lg border px-4 py-3 text-xs leading-6 text-muted-foreground" role="status">已迁入原有会话记录，尚未由新聊天接管。这里只读查看，不代表原有挂起提问或工具审批已经恢复。</p>}
     {inbox.error && <p role="status" className="rounded-lg border p-3 text-xs text-muted-foreground">收件队列暂时无法读取，已保留上次结果供核对；不会按空队列处理。</p>}
     {notice && <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5 text-foreground" role="status"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" /><span>{notice}</span></div>}
-    {loading && !snapshot ? <Section id="session-bindings" title="会话绑定"><div className="flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取真实会话绑定</div></Section>
+    {loading && !snapshot ? <Section id="session-bindings" title="会话绑定"><div className="flex min-h-32 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取真实会话绑定</div></Section>
       : loadError && !snapshot ? <Section id="sessions-unavailable" title="原生会话不可用" description={loadError} actions={<Button variant="outline" onClick={reload}>重试</Button>}><EmptyState locked title="没有可读取的原生会话" description="当前状态不会按零条会话显示。接入原生聊天宿主后再试。" /></Section>
       : snapshot && <div className="min-w-0">
-        <Section id="session-bindings" title="会话绑定" description={`已加载 ${snapshot.sessions.length} 条绑定${snapshot.next ? "，仍有后续未加载" : "；本次分页读取结束"}。`} actions={<StatusPill tone={snapshot.next ? "warning" : "success"}>{snapshot.next ? "部分结果" : "真实分页结果"}</StatusPill>}>
-          <div className="relative mb-4 max-w-sm"><Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input id="session-filter" value={filter} onChange={event => setFilter(event.target.value)} className="pl-8" placeholder="筛选群聊、私聊或 QQ 号" aria-label="筛选会话" /></div>
-          {snapshot.resetAvailable !== true && <div className="mb-3 flex flex-wrap items-center gap-2 text-xs leading-5 text-muted-foreground" data-session-read-only><span>{snapshot.source === 'imported' ? '迁入档案只读，不能从这里重置原有会话。' : snapshot.resetUnavailableReason === 'runtime_not_stopped' ? '请先停止聊天，再刷新列表，即可为单条会话重新开始对话。' : '当前暂不能安全重置；请先停止聊天并刷新核对。'}</span>{snapshot.source !== 'imported' && <Button size="sm" variant="outline" onClick={() => props.navigate('adapters')}>连接设置</Button>}</div>}
-          {selectionUnconfirmed && selected && <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2 text-xs text-amber-700 dark:text-amber-300" data-session-unconfirmed data-selected-session={selected.key}><span>上次所选 {selected.key} 尚未在本次加载中确认，不可重置；请继续加载、刷新或选择已加载行。</span><code className="max-w-64 truncate select-all" title={selected.sessionId}>{selected.sessionId}</code><Button size="icon-sm" variant="ghost" onClick={() => void copySessionId(selected.sessionId)} title="复制技术会话 ID" aria-label="复制技术会话 ID"><Clipboard className="size-3.5" /></Button><Button size="sm" variant="ghost" onClick={navigateToUsage}>打开用量统计</Button></div>}
+        <Section id="session-bindings" title="会话" className="[&>.panel-body]:p-0">
+          <div className="flex flex-wrap items-center gap-2 px-2.5 py-2"><div className="relative w-64 max-w-full"><Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input id="session-filter" value={filter} onChange={event => setFilter(event.target.value)} className="pl-8" placeholder="筛选群聊、私聊或 QQ 号" aria-label="筛选会话" /></div><span className="text-xs text-muted-foreground">已加载 {snapshot.sessions.length} 条绑定{snapshot.next ? ' · 仍有后续位置' : ''}</span>{inbox.snapshot && inbox.snapshot.blockedConversations > 0 && <Badge variant="outline" className="ml-auto text-status-warning">{inbox.snapshot.blockedConversations} 条收件待核对</Badge>}</div>
+          {snapshot.resetAvailable !== true && <div className="mx-2.5 mb-2 flex flex-wrap items-center gap-2 text-xs leading-5 text-muted-foreground" data-session-read-only><span>{snapshot.source === 'imported' ? '迁入档案只读，不能从这里重置原有会话。' : snapshot.resetUnavailableReason === 'runtime_not_stopped' ? '请先停止聊天，再刷新列表，即可为单条会话重新开始对话。' : '当前暂不能安全重置；请先停止聊天并刷新核对。'}</span>{snapshot.source !== 'imported' && <Button size="sm" variant="outline" onClick={() => props.navigate('adapters')}>连接设置</Button>}</div>}
+          {selectionUnconfirmed && selected && <div className="mx-2.5 mb-2 flex min-w-0 flex-wrap items-center gap-2 text-xs text-status-warning" data-session-unconfirmed data-selected-session={selected.key}><span>上次所选会话尚未在本批次确认，不可解除绑定；请继续加载或选择已加载行。</span><ReadOnlyDetails title="待核对的会话"><TechnicalDetails fields={[{ label: '会话', value: selected.key }, { label: '模型会话标识', value: selected.sessionId }]} /><Button size="sm" variant="outline" onClick={() => void copySessionId(selected.sessionId)}>复制标识</Button></ReadOnlyDetails><Button size="sm" variant="ghost" onClick={navigateToUsage}>用量统计</Button></div>}
           {snapshot.sessions.length === 0 ? <EmptyState title={snapshot.next ? "当前批次没有可显示绑定" : "暂无会话绑定"} description={snapshot.next ? "服务端仍有后续记录，可继续加载；当前批次可能只有尚未就绪的会话。" : "聊天宿主已返回空列表；收到新的有效对话后可能建立绑定。"} />
             : filteredSessions.length === 0 ? <EmptyState title="没有匹配的会话" description={snapshot.next ? "只筛选当前已加载记录；后续页仍可能有匹配项，可继续加载，不会修改服务端数据。" : "调整筛选词后再试；筛选不会修改服务端数据。"} />
-              : <div id="session-details" className="h-96 overflow-auto overscroll-contain rounded-lg border" tabIndex={0} role="region" aria-label="会话绑定列表"><table aria-rowcount={filteredSessions.length + 1} className="w-full min-w-[70rem] text-left text-xs"><thead className="sticky top-0 z-10 border-b bg-muted text-muted-foreground"><tr><th className="px-3 py-2.5 font-medium">类型</th><th className="px-3 py-2.5 font-medium">会话号</th><th className="px-3 py-2.5 font-medium">身份</th><th className="px-3 py-2.5 font-medium">DSH 会话 ID</th><th className="px-3 py-2.5 font-medium">记录状态</th><th className="px-3 py-2.5 font-medium">收件处理</th><th className="px-3 py-2.5 text-right font-medium">操作</th></tr></thead><VirtualTableBody items={filteredSessions} getItemKey={session => session.key} columns={7} estimateSize={72}>{session => {
+              : <div id="session-details" className="tablewrap overscroll-contain border-y" tabIndex={0} role="region" aria-label="会话绑定列表"><table aria-rowcount={filteredSessions.length + 1} className="w-full min-w-[54rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-muted-foreground"><tr><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 font-medium">类型</th><th className="px-2 py-1 font-medium">身份</th><th className="px-2 py-1 font-medium">收件处理</th><th className="px-2 py-1 font-medium">队列</th><th className="px-2 py-1 font-medium">最近记录</th><th className="px-2 py-1 text-right font-medium">操作</th></tr></thead><VirtualTableBody items={filteredSessions} getItemKey={session => session.key} columns={7} estimateSize={30}>{session => {
                 const identity = describeConversationKey(session.key);
+                const queue = inboxItems.get(session.key);
                 return <tr key={session.key} data-session-key={session.key} data-selected-session={selectedKey === session.key ? session.key : undefined} className={selectedKey === session.key ? 'bg-accent/45' : 'hover:bg-muted/30'}>
-                  <td className="whitespace-nowrap px-3 py-2"><Badge variant="outline">{identity.label}</Badge></td>
-                  <td className="px-3 py-2"><Button size="sm" variant="ghost" className="-ml-2 max-w-44 px-2 font-medium tabular-nums" aria-pressed={selectedKey === session.key} title={session.key} onClick={() => setSelectedKey(session.key)}><span className="truncate">{identity.identifier}</span></Button></td>
-                  <td className="whitespace-nowrap px-3 py-2">{session.owner ? <Badge variant="secondary">主人</Badge> : <span className="text-muted-foreground">普通会话</span>}</td>
-                  <td className="px-3 py-2"><div className="flex items-center gap-1.5"><code className="block w-56 truncate text-[11px] select-all" title={session.sessionId}>{session.sessionId}</code><Button size="icon-sm" variant="ghost" onClick={() => void copySessionId(session.sessionId)} title="复制技术会话 ID" aria-label={`复制 ${session.key} 的技术会话 ID`}><Clipboard className="size-3.5" /></Button></div></td>
-                  <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{snapshot.source === 'imported' ? '迁入只读' : snapshot.historyReadOnly ? '历史只读' : '已记录绑定'}</td>
-                  <td className="px-3 py-2"><ChatInboxState item={inboxItems.get(session.key)} known={inbox.snapshot !== null} stale={inbox.error !== null} imported={snapshot.source === 'imported'} /></td>
-                  <td className="px-3 py-2"><div className="flex items-center justify-end gap-1"><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); navigateToUsage(); }}>用量统计</Button><Button id={selectedKey === session.key ? 'session-reset-open' : undefined} size="sm" variant="destructive" disabled={snapshot.resetAvailable !== true || !hasSessionResetTarget(session) || selectionUnconfirmed || loading || moreLoading || resetState === 'saving'} onClick={() => { setSelectedKey(session.key); openReset(session); }}><RotateCcw className="size-3.5" />重新开始对话</Button></div></td>
+                  <td className="px-2 py-0.5"><Button size="sm" variant="ghost" className="-ml-2 h-6 max-w-44 px-2 text-[11px] font-medium text-primary tabular-nums" aria-pressed={selectedKey === session.key} title={session.key} onClick={() => { setSelectedKey(session.key); setDetailTarget(session); }}><span className="truncate">{identity.identifier}</span></Button></td>
+                  <td className="whitespace-nowrap px-2 py-0.5">{identity.label}</td>
+                  <td className="whitespace-nowrap px-2 py-0.5">{session.owner ? <Badge variant="secondary">主人</Badge> : <span className="text-muted-foreground">普通会话</span>}</td>
+                  <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{inbox.error || !inbox.snapshot ? '状态待更新' : inboxStateLabel(queue)}</td>
+                  <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{inbox.error || !inbox.snapshot ? '未知' : queue?.pending ?? 0}</td>
+                  <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground" title="会话绑定未提供最近记录时间，请查看执行日志">未提供</td>
+                  <td className="px-2 py-0.5"><div className="flex items-center justify-end gap-0.5 [&>button]:h-6 [&>button]:px-1.5 [&>button]:text-[11px]"><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); setDiagnosticKey(session.key); }}>检查未回复</Button><Button size="sm" variant="ghost" onClick={() => setMediaKey(session.key)}>媒体</Button><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); setDetailTarget(session); }}>详情</Button><Button id={selectedKey === session.key ? 'session-reset-open' : undefined} size="sm" variant="ghost" className="text-destructive" disabled={snapshot.resetAvailable !== true || !hasSessionResetTarget(session) || selectionUnconfirmed || loading || moreLoading || resetState === 'saving'} onClick={() => { setSelectedKey(session.key); openReset(session); }}><RotateCcw className="size-3.5" />解除绑定</Button><Button size="sm" variant="ghost" className="text-destructive" disabled={!snapshot.deleteAvailable || !hasSessionResetTarget(session) || loading || moreLoading || resetState === 'saving'} title={snapshot.deleteAvailable ? '删除此模型会话和当前绑定' : '此接入暂不支持本机删除'} onClick={() => setDeleteTarget(session)}>删除</Button></div></td>
                 </tr>;
               }}</VirtualTableBody></table></div>}
-          <div className="mt-3 flex flex-wrap items-center gap-2" data-session-pagination><p className="mr-auto text-[11px] leading-5 text-muted-foreground">分页不是一致快照，读取期间绑定可能变化；刷新会重新读取首批，筛选仅作用于已加载记录。</p>{snapshot.next && <Button id="session-load-more" size="sm" variant="outline" disabled={loading || moreLoading || pagingBlocked} onClick={() => void loadMore()}>{moreLoading && <LoaderCircle className="size-3.5 animate-spin" />}{moreLoading ? "正在加载下一批" : "继续加载会话"}</Button>}{moreLoading && <Button id="session-load-cancel" size="sm" variant="ghost" onClick={cancelMore}>取消加载</Button>}</div>
+          <div className="flex flex-wrap items-center gap-2 bg-muted/20 px-2.5 py-2" data-session-pagination><p className="mr-auto text-xs leading-5 text-muted-foreground">搜索仅筛选已加载的会话。</p>{snapshot.next && <Button id="session-load-more" size="sm" variant="outline" disabled={loading || moreLoading || pagingBlocked} onClick={() => void loadMore()}>{moreLoading && <LoaderCircle className="size-3.5 animate-spin" />}{moreLoading ? "正在加载下一批" : "继续加载会话"}</Button>}{moreLoading && <Button id="session-load-cancel" size="sm" variant="ghost" onClick={cancelMore}>取消加载</Button>}</div>
           {moreError && <p className="mt-2 text-xs leading-5 text-amber-700 dark:text-amber-300" role="status">{moreError}</p>}
         </Section>
       </div>}
-    <ConversationDiagnostics {...props} conversationId={selectedKey} />
-    <ChatInteractions key={reloadVersion} api={api} connected={connected} />
-    <ExecutionJournal api={api} connected={connected} />
+    <DetailsWindow open={detailTarget !== null} onOpenChange={open => { if (!open) setDetailTarget(null); }} title="会话详情" description={detailTarget ? `${describeConversationKey(detailTarget.key).label} ${describeConversationKey(detailTarget.key).identifier}` : '当前会话绑定'}>{detailTarget && <div className="grid gap-3"><ChatInboxState item={inboxItems.get(detailTarget.key)} known={inbox.snapshot !== null} stale={inbox.error !== null} /><TechnicalDetails fields={[{ label: '所属会话', value: detailTarget.key }, { label: '模型会话标识', value: detailTarget.sessionId }, { label: '绑定版本', value: detailTarget.bindingRevision }, { label: '第几次建立对话', value: detailTarget.generation }]} /><div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => void copySessionId(detailTarget.sessionId)}>复制会话标识</Button><Button variant="outline" onClick={navigateToUsage}>用量统计</Button></div></div>}</DetailsWindow>
+    <DetailsWindow open={mediaKey !== null} onOpenChange={open => { if (!open) setMediaKey(null); }} title="媒体与引用记录" description={mediaKey ? `${describeConversationKey(mediaKey).label} ${describeConversationKey(mediaKey).identifier}` : '媒体读取记录'}>{mediaKey && <ConversationMediaDiagnostics api={api} connected={connected} conversationId={mediaKey} />}</DetailsWindow>
+    <DetailsWindow open={diagnosticKey !== null} onOpenChange={open => { if (!open) setDiagnosticKey(null); }} title="检查未回复原因" description={diagnosticKey ? `${describeConversationKey(diagnosticKey).label} ${describeConversationKey(diagnosticKey).identifier}` : '会话检查'}>{diagnosticKey && <ConversationDiagnostics {...props} conversationId={diagnosticKey} />}</DetailsWindow>
+    <Section title="相关记录" className="[&>.panel-body]:p-0">
+      <Tabs defaultValue="executions" className="gap-0">
+        <TabsList aria-label="会话相关记录" className="h-[34px] w-full justify-start bg-muted/30 px-2"><TabsTrigger value="executions">执行日志</TabsTrigger><TabsTrigger value="interactions">QQ 互动</TabsTrigger><TabsTrigger value="work">独立工作</TabsTrigger></TabsList>
+        <TabsContent value="executions" keepMounted className="[&[hidden]]:hidden"><ExecutionJournal api={api} connected={connected} embedded /></TabsContent>
+        <TabsContent value="interactions" keepMounted className="[&[hidden]]:hidden"><ChatInteractions key={reloadVersion} api={api} connected={connected} embedded /></TabsContent>
+        <TabsContent value="work" keepMounted className="[&[hidden]]:hidden"><WorkRecords api={api} connected={connected} embedded /></TabsContent>
+      </Tabs>
+    </Section>
+    <SessionDeleteDialog api={api} target={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={reload} />
     <Dialog open={resetTarget !== null} onOpenChange={open => { if (!open) closeReset(); }}>
       <DialogContent showCloseButton={resetState !== 'saving' && resetState !== 'conflict' && resetState !== 'unknown'}>
-        <DialogHeader><DialogTitle>重新开始这条对话？</DialogTitle><DialogDescription>仅解除所选 QQ 会话与当前 DSH 上下文的绑定，下次聊天将新建上下文。旧 DSH 历史、用量及执行记录保留，不清除档案，也不会停止外部任务。</DialogDescription></DialogHeader>
-        {resetTarget && <div className="grid gap-3"><div className="rounded-lg border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-xs leading-5"><strong className="block text-destructive">{describeConversationKey(resetTarget.key).label}：{describeConversationKey(resetTarget.key).identifier}</strong><code className="block truncate text-muted-foreground" title={resetTarget.sessionId}>{resetTarget.sessionId}</code><span className="text-muted-foreground">只操作这一条绑定，不影响其他会话；结果未知时不会自动重试。</span></div>{resetState !== 'idle' && resetState !== 'saving' && <p className="text-xs leading-5 text-destructive" role="alert">{resetMessage(resetState, resetErrorText)}</p>}</div>}
-        <DialogFooter>{resetState !== 'conflict' && resetState !== 'unknown' && <Button variant="outline" onClick={closeReset} disabled={resetState === 'saving'}>取消</Button>}{(resetState === 'conflict' || resetState === 'unknown') && <Button variant="outline" onClick={closeReset}>关闭并刷新</Button>}<Button id="session-reset-submit" variant="destructive" disabled={snapshot?.resetAvailable !== true || selectionUnconfirmed || !resetTarget || !hasSessionResetTarget(resetTarget) || resetState === 'saving' || resetState === 'conflict' || resetState === 'unknown'} onClick={() => void resetSession()}>{resetState === 'saving' && <LoaderCircle className="size-3.5 animate-spin" />}{resetState === 'saving' ? '正在重置' : '确认重新开始'}</Button></DialogFooter>
+        <DialogHeader><DialogTitle>解除这条会话的绑定？</DialogTitle><DialogDescription>下次聊天将开始一段新对话。旧聊天历史和用量保留。</DialogDescription></DialogHeader>
+        {resetTarget && <div className="grid gap-3"><div className="rounded-lg border border-destructive/25 bg-destructive/5 px-2 py-1 text-xs leading-5"><strong className="block text-destructive">{describeConversationKey(resetTarget.key).label}：{describeConversationKey(resetTarget.key).identifier}</strong><code className="block truncate text-muted-foreground" title={resetTarget.sessionId}>{resetTarget.sessionId}</code><span className="text-muted-foreground">只操作这一条绑定，不影响其他会话；结果未知时不会自动重试。</span></div>{resetState !== 'idle' && resetState !== 'saving' && <p className="text-xs leading-5 text-destructive" role="alert">{resetMessage(resetState, resetErrorText)}</p>}</div>}
+        <DialogFooter>{resetState !== 'conflict' && resetState !== 'unknown' && <Button variant="outline" onClick={closeReset} disabled={resetState === 'saving'}>取消</Button>}{(resetState === 'conflict' || resetState === 'unknown') && <Button variant="outline" onClick={closeReset}>关闭并刷新</Button>}<Button id="session-reset-submit" variant="destructive" disabled={snapshot?.resetAvailable !== true || selectionUnconfirmed || !resetTarget || !hasSessionResetTarget(resetTarget) || resetState === 'saving' || resetState === 'conflict' || resetState === 'unknown'} onClick={() => void resetSession()}>{resetState === 'saving' && <LoaderCircle className="size-3.5 animate-spin" />}{resetState === 'saving' ? '正在解除' : '确认解除绑定'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </div>;

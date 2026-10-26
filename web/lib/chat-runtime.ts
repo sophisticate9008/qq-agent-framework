@@ -83,8 +83,8 @@ const reasons: Readonly<Record<string, { readonly text: string; readonly page: P
   APPLICATION_MIGRATION_UNCONFIRMED: { text: '会话衔接尚未全部确认，已停止后续启动，不会重建或清空会话。', page: 'adapters' },
   APPLICATION_START_UNCONFIRMED: { text: '启动聊天尚未确认，请核对实际运行结果；不会再次启动。', page: 'adapters' },
   active_plan_or_persona_missing: { text: '先选择聊天方案，并为方案关联人设。', page: 'model' },
-  persisted_session_configuration_conflict: { text: '方案已更新，但已有会话尚未完成方案衔接。聊天记录已保留，当前不能启动；协议连接正常不代表此项已完成。', page: 'model' },
-  persisted_persona_identity_conflict: { text: '已保存的人设正文尚未应用到现有会话，请在伙伴页应用并启动／更新聊天；上下文仍保留。', page: 'model' },
+  persisted_session_configuration_conflict: { text: '方案已保存，请到聊天方案卡片点击“应用”。', page: 'model' },
+  persisted_persona_identity_conflict: { text: '人设已保存，请到人设卡片点击“应用”。', page: 'persona' },
   provider_model_missing_or_disabled: { text: '方案使用的提供方或模型尚未启用。', page: 'providers' },
   provider_not_usable: { text: '请补全已启用的模型提供方、模型和密钥。', page: 'providers' },
   onebot_ws_not_enabled: { text: '启用 WebSocket 收消息并保存连接。', page: 'adapters' },
@@ -181,8 +181,8 @@ export function chatRuntimeReason(code: string): { readonly text: string; readon
   });
   const locations: Readonly<Record<string, { readonly page: PageId; readonly target: PageDestination }>> = {
     active_plan_or_persona_missing: { page: 'model', target: { title: '聊天方案', sectionTitle: '聊天方案', kind: 'section' } },
-    persisted_session_configuration_conflict: form(nativeFormMetadata.deployment, '应用并启动／更新聊天'),
-    persisted_persona_identity_conflict: form(nativeFormMetadata.deployment, '应用并启动／更新聊天'),
+    persisted_session_configuration_conflict: form(nativeFormMetadata.deployment, '应用'),
+    persisted_persona_identity_conflict: form(nativeFormMetadata.persona, '应用'),
     provider_model_missing_or_disabled: { page: 'providers', target: { title: '提供方目录', sectionTitle: '提供方目录', kind: 'section' } },
     provider_not_usable: form(nativeFormMetadata.provider),
     onebot_ws_not_enabled: form(nativeFormMetadata.onebot, nativeFormMetadata.onebot.fields.websocket),

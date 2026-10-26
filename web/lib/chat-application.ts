@@ -4,6 +4,7 @@ import { ApiError, type ApiClient } from './api.ts';
 import { parseChatRuntimeStatus, type ChatRuntimeStatus } from './chat-runtime.ts';
 import { readResource, writeResource } from './resource-reader.ts';
 import { verifiedManualDeploymentReview } from './deployment-review.ts';
+import { parsePlanCatalog } from './chat-plans.ts';
 
 export type ChatApplicationPhase = NativeApplicationPhase;
 const phaseOrder: Readonly<Record<ChatApplicationPhase, number>> = { stop: 0, prepare: 1, apply: 2, migrate: 3, start: 4 };
@@ -169,6 +170,7 @@ export async function applyAndStartChat(options: {
   readonly expectedRevisions?: Readonly<Record<string, string>>;
   readonly configurationDocument?: 'plans' | 'personas';
   readonly configurationRevision?: string;
+  readonly selectedPersonaId?: string;
   readonly onPhase?: (phase: ChatApplicationPhase) => void;
 }): Promise<{ readonly state: 'running' | 'blocked'; readonly runtime: ChatRuntimeStatus; readonly reasons: readonly string[] }> {
   const { api, signal } = options;
@@ -195,6 +197,13 @@ export async function applyAndStartChat(options: {
       '伙伴配置版本已变化，请先保存或重新读取核对。');
     requireState(options.expectedDeploymentRevision === undefined || revisions.deployment === options.expectedDeploymentRevision,
       '应用设置版本已变化，请重新读取核对。');
+    if (options.selectedPersonaId !== undefined) {
+      const plans = parsePlanCatalog(await readResource(api, '/api/chat/plans', signal));
+      guard();
+      requireState(plans && plans.revision === revisions.plans
+        && plans.plans.find(plan => plan.id === plans.activePlanId)?.personaId === options.selectedPersonaId,
+      '当前聊天方案没有使用此人设，请先在聊天方案中选择它。');
+    }
     const existing = await readChatApplication(api, signal);
     guard();
     if (existing && nativeApplicationRequiresReconciliation(existing)) {

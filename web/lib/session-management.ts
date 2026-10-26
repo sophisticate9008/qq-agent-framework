@@ -7,6 +7,7 @@ export interface ManagedSession extends BaseSession {
 export interface SessionSnapshot extends BaseSnapshot {
   readonly sessions: readonly ManagedSession[];
   readonly resetUnavailableReason?: string;
+  readonly deleteAvailable?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -34,7 +35,7 @@ export function parseSessionSnapshot(value: unknown): SessionSnapshot | null {
       ...(typeof entry.bindingRevision === 'string' ? { bindingRevision: entry.bindingRevision } : {}) });
   }
   const resetAvailable = base.resetAvailable === true && sessions.every(hasSessionResetTarget);
-  return { ...base, sessions, resetAvailable,
+  return { ...base, sessions, resetAvailable, deleteAvailable: value.deleteAvailable === true,
     ...(typeof value.resetUnavailableReason === 'string' && value.resetUnavailableReason.length <= 128
       ? { resetUnavailableReason: value.resetUnavailableReason } : {}) };
 }

@@ -136,7 +136,7 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
   const configurationTargets: WorkspaceSearchTarget[] = [];
 
   for (const group of groups) {
-    if (group.id === 'gateway-targets') continue;
+    if (group.id === 'gateway-targets' || group.category === 'settings' && group.id.startsWith('gateway-')) continue;
     const groupVisibility = visibility.get(group.id);
     if (!groupVisibility?.visible) continue;
     configurationTargets.push({
@@ -164,7 +164,7 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     { page: 'security', title: '运行设置', sectionTitle: '运行设置', sectionId: 'security-settings', kind: 'section' },
     { page: 'overview', title: '最近活动（100 条）', sectionTitle: '最近活动（100 条）', sectionId: 'recent-activity', kind: 'section' },
     { page: 'sessions', title: '待处理提问与工具审批', sectionTitle: '待处理提问与工具审批', sectionId: 'chat-interactions', kind: 'section' },
-    { page: 'features', title: '聊天工具', sectionTitle: '聊天工具', sectionId: 'chat-tools', kind: 'section' },
+    { page: 'features', title: 'Agent 扩展工具', sectionTitle: 'Agent 扩展工具', sectionId: 'chat-tools', kind: 'section' },
     { page: 'persona', title: '人设库', sectionTitle: '人设库', kind: 'section' },
     { page: 'adapters', title: '聊天运行', sectionTitle: '聊天运行', kind: 'section' },
     ...(runtimeConnected ? Object.values(usageSectionLabels).map(title => ({

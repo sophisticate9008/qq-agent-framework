@@ -1,5 +1,3 @@
-import { DshDeploymentManager } from './dsh-deployment-manager.tsx';
-import { NativeRuntimeCompatibility } from './native-runtime-compatibility.tsx';
 import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import { catalogFailureState } from '../lib/native-catalog-operation.ts';
 import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.ts';
@@ -8,14 +6,16 @@ import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
 import { presentOneBotConnection, type OneBotConnectionSnapshot } from '../lib/onebot-connection-presentation.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, LoaderCircle, MessagesSquare, Plug, RefreshCw, ShieldCheck, Unplug, Workflow } from 'lucide-react';
-import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
+import { CircleAlert, LoaderCircle, Plug, RefreshCw, Unplug } from 'lucide-react';
+import { asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 import { AdapterCredentialField, AdapterEndpointField, AdapterNumberField, unchangedCredential, type CredentialDraft } from './adapter-connection-fields.tsx';
 import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { ChatRuntimeControls } from './chat-runtime-controls.tsx';
+import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
+import { SettingsWindow } from './settings-window.tsx';
 
 type OutboundId = 'onebotHttp' | 'dshAgent';
 type AdapterId = OutboundId | 'onebotWebhook' | 'onebotWs';
@@ -70,8 +70,8 @@ interface AdapterDraft {
 }
 
 const definitions = [
-  { id: 'onebotHttp', title: nativeFormMetadata.onebot.title, description: 'HTTP 用于发送，WebSocket 用于收消息；连接后自动识别机器人账号。', credentialFlag: 'secretConfigured', credentialKey: 'secret', clearKey: 'clearSecret', credentialLabel: nativeFormMetadata.onebot.fields.credential, credentialDescription: '复制协议端 HTTP 服务设置中的 accessToken。不是本管理后台的管理员令牌或登录会话；协议端未启用认证时可不填。', placeholder: 'http://127.0.0.1:3000', icon: MessagesSquare },
-  { id: 'dshAgent', title: nativeFormMetadata.dsh.title, description: '自动发现本机 DSH；远程连接可在手动设置中配置。', credentialFlag: 'authConfigured', credentialKey: 'auth', clearKey: 'clearAuth', credentialLabel: nativeFormMetadata.dsh.fields.credential, credentialDescription: '由 DSH 服务提供，与管理后台登录凭据分开。', placeholder: 'https://agent.example.com', icon: Workflow },
+  { id: 'onebotHttp', title: nativeFormMetadata.onebot.title, description: 'HTTP 用于发送，WebSocket 用于收消息；连接后自动识别机器人账号。', credentialFlag: 'secretConfigured', credentialKey: 'secret', clearKey: 'clearSecret', credentialLabel: nativeFormMetadata.onebot.fields.credential, credentialDescription: '复制协议端 HTTP 服务设置中的 accessToken。不是本管理后台的管理员令牌或登录会话；协议端未启用认证时可不填。', placeholder: 'http://127.0.0.1:3000' },
+  { id: 'dshAgent', title: nativeFormMetadata.dsh.title, description: '自动发现本机 DSH；远程连接可在手动设置中配置。', credentialFlag: 'authConfigured', credentialKey: 'auth', clearKey: 'clearAuth', credentialLabel: nativeFormMetadata.dsh.fields.credential, credentialDescription: '由 DSH 服务提供，与管理后台登录凭据分开。', placeholder: 'https://agent.example.com' },
 ] as const;
 
 function parseSnapshot(value: unknown): AdapterSnapshot | null {
@@ -231,23 +231,27 @@ function writeState(error: unknown): WriteState {
 }
 
 function writeMessage(state: WriteState, dirty: boolean): string {
-  if (state === 'saved') return '连接配置已保存；聊天停止时，已启用的 WebSocket 会自动尝试连接，禁用则断开。聊天不会自动启动。';
+  if (state === 'saved') return '连接配置已保存，聊天需单独启动。';
   if (state === 'conflict') return '配置已在其他窗口更新，请先重新读取后再编辑。';
   if (state === 'busy') return '另一项配置正在保存，请稍后重新读取；不会自动重试。';
   if (state === 'unknown') return '保存结果未知，请先重新读取核对；不要重复提交。';
-  return dirty ? '连接设置有尚未保存的更改。' : '已配置不代表运行中。';
+  return dirty ? '连接设置有尚未保存的更改。' : '连接配置已读取。';
 }
 
 function OutboundStatus({ adapter }: { readonly adapter: OutboundConfiguration }) {
-  if (adapter.localAuthConfigured === true) return <StatusPill tone="success">已自动连接本机 DSH</StatusPill>;
+  if (adapter.localAuthConfigured === true) return <StatusPill tone={adapter.enabled ? 'success' : 'neutral'}>{adapter.enabled ? '本机连接已配置' : '本机连接 · 未启用'}</StatusPill>;
   return <StatusPill>{adapter.endpoint ? adapter.enabled ? '已配置' : '已配置 · 未启用' : '未配置'}</StatusPill>;
 }
 
-const adapterDraftKey = createDraftKey<{ readonly snapshot: AdapterSnapshot; readonly draft: AdapterDraft }>('adapters');
+type AdapterRetainedDraft = { readonly snapshot: AdapterSnapshot; readonly draft: AdapterDraft };
+const adapterDraftKey = createDraftKey<AdapterRetainedDraft>('adapters');
+const compactAdapterDraftKeys = { onebot: createDraftKey<AdapterRetainedDraft>('adapters-home-onebot'), dsh: createDraftKey<AdapterRetainedDraft>('adapters-home-dsh') };
 
-export function AdapterManager({ api, connected, connect, setDirty, navigate }: PageProps) {
+export function AdapterManager({ api, connected, connect, setDirty, navigate, compact, active = true }: PageProps & { readonly compact?: 'onebot' | 'dsh'; readonly active?: boolean }) {
   const recovery = useNativeCatalogOperation(api, 'adapters');
-  const retained = useMemo(() => retainedDraft(api, adapterDraftKey), [api]);
+  const draftKey = compact ? compactAdapterDraftKeys[compact] : adapterDraftKey;
+  const dirtyScope = compact ? `adapters-home-${compact}` : 'adapters';
+  const retained = useMemo(() => retainedDraft(api, draftKey), [api, draftKey]);
   const draftApi = useRef(api);
   const [snapshot, setSnapshot] = useState<AdapterSnapshot | null>(retained?.snapshot ?? null);
   const [draft, setDraft] = useState<AdapterDraft | null>(retained?.draft ?? null);
@@ -274,17 +278,17 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
 
   useEffect(() => {
     if (draftApi.current !== api) return;
-    retainDraft(api, adapterDraftKey, connected && dirty && snapshot && draft ? { snapshot, draft: clearCredentials(draft) } : null);
-  }, [api, connected, dirty, snapshot, draft]);
+    retainDraft(api, draftKey, connected && dirty && snapshot && draft ? { snapshot, draft: clearCredentials(draft) } : null);
+  }, [api, connected, dirty, snapshot, draft, draftKey]);
   useEffect(() => { setDirtyRef.current = setDirty; }, [setDirty]);
   useEffect(() => {
     if (reportedDirty.current === dirty) return;
     reportedDirty.current = dirty;
-    setDirty(dirty, 'adapters');
-  }, [dirty, setDirty]);
+    setDirty(dirty, dirtyScope);
+  }, [dirty, setDirty, dirtyScope]);
   useEffect(() => () => {
     saveController.current?.abort();
-    setDirtyRef.current(false, 'adapters');
+    setDirtyRef.current(false, dirtyScope);
   }, []);
 
   useEffect(() => {
@@ -327,7 +331,7 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
   }, [api, connected, reloadVersion]);
 
   useEffect(() => {
-    if (!connected || !snapshot?.status.applyAvailable || dirty || disabled) return;
+    if (!active || !connected || !snapshot?.status.applyAvailable || dirty || disabled) return;
     const controller = new AbortController();
     let pending = false;
     const timer = setInterval(() => {
@@ -342,7 +346,11 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
       }).catch(() => undefined).finally(() => { pending = false; });
     }, 2_500);
     return () => { clearInterval(timer); controller.abort(); };
-  }, [api, connected, dirty, disabled, snapshot?.status.applyAvailable]);
+  }, [api, connected, dirty, disabled, active, snapshot?.status.applyAvailable]);
+
+  useEffect(() => {
+    if (!active) setDraft(current => current ? clearCredentials(current) : current);
+  }, [active]);
 
   function updateWebSocket(patch: Partial<OutboundDraft>): void {
     if (disabled || saveController.current) return;
@@ -369,7 +377,6 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
 
   function reload(): void {
     if (saving || controlling || loading || saveController.current) return;
-    setDraft(null);
     setReloadVersion(version => version + 1);
   }
 
@@ -499,74 +506,81 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate }: 
     }
   }
 
-  const heading = <PageHeading title="连接" description="设置消息收发和聊天引擎连接。启用的 WebSocket 自动尝试连接，聊天模型仍需单独启停。" actions={connected && <Button variant="outline" disabled={saving || controlling || loading || dirty && !blocked} onClick={reload}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>} />;
+  const heading = compact ? null : <PageHeading title="连接" description="QQ 收发、聊天引擎与运行状态" actions={connected && <Button variant="ghost" disabled={saving || controlling || loading || dirty && !blocked} onClick={reload}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>} />;
   if (!connected) return <>{heading}<ConnectPrompt connect={connect} /></>;
-  if (loading) return <>{heading}<Section scrollable title="连接配置"><div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取连接配置</div></Section></>;
-  if (!snapshot || !draft) return <>{heading}<Section scrollable title="连接设置暂时不可用" description={loadError || '暂时无法读取连接配置。'}><EmptyState locked title="无法读取连接配置" description="检查管理服务连接后重新读取。" action={<Button variant="outline" onClick={reload}><RefreshCw className="size-3.5" />重试</Button>} /></Section></>;
+  if (loading && !snapshot) return <>{heading}<Section title="连接配置"><div className="empty" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取连接配置</div></Section></>;
+  if (!snapshot || !draft) return <>{heading}<Section title="连接设置暂时不可用" description={loadError || '暂时无法读取连接配置。'}><EmptyState locked title="无法读取连接配置" description="检查管理服务连接后重新读取。" action={<Button variant="outline" onClick={reload}><RefreshCw className="size-3.5" />重试</Button>} /></Section></>;
   const protocol = snapshot.connection ? presentOneBotConnection(snapshot.connection) : null;
+  const savedDsh = snapshot.outbound.dshAgent;
+  const saveBar = <div className="flex flex-wrap items-center gap-1.5 border-t pt-2" data-adapter-save-bar><SaveBar dirty={dirty} saving={saving} disabled={blocked || loading || controlling} message={writeMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存连接配置" /></div>;
+  const operationRecovery = <NativeCatalogRecovery recovery={recovery} reading={loading || saving || controlling} onRead={reload} onReleased={() => { setResult('idle'); setFormError(''); }} />;
+  const feedback = <>{loadError && <p className="text-xs text-destructive" role="alert">读取失败，保留当前快照与草稿：{loadError}</p>}{operationRecovery}{formError && <p role="alert" className="text-xs leading-5 text-destructive">{formError}</p>}{saveBar}</>;
+  const connectionFields = (id: OutboundId) => {
+    const definition = definitions[id === 'onebotHttp' ? 0 : 1];
+    const adapter = draft.outbound[id];
+    return <>
+      <ToggleField label={id === 'onebotHttp' ? nativeFormMetadata.onebot.fields.enabled : nativeFormMetadata.dsh.fields.enabled} tip="保存连接设置后，仍需单独启动聊天。" checked={adapter.enabled} disabled={disabled} onChange={enabled => updateOutbound(id, { enabled })} />
+      <AdapterEndpointField id={`adapter-${id}-endpoint`} label={id === 'onebotHttp' ? nativeFormMetadata.onebot.fields.endpoint : nativeFormMetadata.dsh.fields.endpoint} value={adapter.endpoint} placeholder={definition.placeholder} disabled={disabled} onChange={endpoint => updateOutbound(id, { endpoint })} />
+      <AdapterCredentialField id={`adapter-${id}-credential`} label={definition.credentialLabel} description={definition.credentialDescription} configured={snapshot.outbound[id].credentialConfigured} draft={adapter.credential} disabled={disabled} onChange={credential => updateOutbound(id, { credential })} />
+    </>;
+  };
+  const qqDetails = <ReadOnlyDetails title="QQ 连接详情" description="消息接收情况、连接设置与最近诊断。"><TechnicalDetails fields={[
+    { label: '连接状态', value: protocol?.statusLabel ?? '未知' }, { label: '机器人账号', value: snapshot.connection?.selfId ?? '尚未识别' },
+    { label: '接收消息', value: snapshot.connection?.received ?? '未知' }, { label: '丢弃消息', value: snapshot.connection?.dropped ?? '未知' },
+    { label: 'WebSocket', value: snapshot.websocket.enabled ? snapshot.websocket.endpoint : '未启用' },
+    { label: 'HTTP 发送', value: snapshot.outbound.onebotHttp.enabled ? snapshot.outbound.onebotHttp.endpoint : '未启用' },
+    ...(protocol?.diagnostic ? [{ label: '最近诊断', value: protocol.diagnostic.title }, { label: '诊断说明', value: protocol.diagnostic.message }, ...(protocol.diagnostic.code ? [{ label: '诊断码', value: protocol.diagnostic.code }] : [])] : []),
+  ]} /></ReadOnlyDetails>;
+
+  const qqEditor = <div className="stack">
+            <h3>WebSocket 收消息</h3>
+            <ToggleField label={nativeFormMetadata.onebot.fields.websocket} tip="聊天停止时，保存启用设置会自动连接，保存禁用设置则断开；账号自动识别。" checked={draft.websocket.enabled} disabled={disabled} onChange={enabled => updateWebSocket({ enabled })} />
+            <AdapterEndpointField id="adapter-onebotWs-endpoint" label={nativeFormMetadata.onebot.fields.websocketEndpoint} value={draft.websocket.endpoint} placeholder="ws://127.0.0.1:3001" disabled={disabled} onChange={endpoint => updateWebSocket({ endpoint })} />
+            <AdapterCredentialField id="adapter-onebotWs-credential" label={nativeFormMetadata.onebot.fields.websocketKey} description="填写协议端 WebSocket 服务的 accessToken，可能与 HTTP 密钥不同。" configured={snapshot.websocket.credentialConfigured} draft={draft.websocket.credential} disabled={disabled} onChange={credential => updateWebSocket({ credential })} />
+            <h3 className="border-t pt-2">HTTP 发送</h3>{connectionFields('onebotHttp')}
+            <div className="strip">聊天停止时，保存启用设置会自动尝试连接 WebSocket；运行期间的连接变更需重启聊天生效。</div>
+            <SettingsWindow title="Webhook 收消息" label="其他接收方式：Webhook" description="协议端主动推送的替代接收方式，与 WebSocket 二选一。关闭保留草稿。"><div className="stack">
+              <div className="strip warn">当前实例未启动 webhook 监听，配置状态不代表监听已运行。</div>
+              <ToggleField label={nativeFormMetadata.onebot.fields.webhook} tip="需要配置机器人账号与签名密钥。" checked={draft.webhook.enabled} disabled={disabled} onChange={enabled => updateWebhook({ enabled })} />
+              <div className="formgrid"><Field label={nativeFormMetadata.onebot.fields.host} tip="只监听本机回环地址。"><Input id="adapter-webhook-host" autoComplete="off" spellCheck={false} value={draft.webhook.host} disabled={disabled} placeholder="127.0.0.1" onChange={event => updateWebhook({ host: event.target.value })} /></Field><AdapterNumberField id="adapter-webhook-port" label={nativeFormMetadata.onebot.fields.port} value={draft.webhook.port} minimum={draft.webhook.enabled ? 1 : 0} maximum={65535} disabled={disabled} onChange={port => updateWebhook({ port })} /></div>
+              <Field label={nativeFormMetadata.onebot.fields.account}><Input id="adapter-webhook-self-id" inputMode="numeric" autoComplete="off" maxLength={32} value={draft.webhook.selfId} disabled={disabled} placeholder="机器人 QQ 号" onChange={event => updateWebhook({ selfId: event.target.value })} /></Field>
+              <AdapterCredentialField id="adapter-webhook-hmac" label={nativeFormMetadata.onebot.fields.hmac} configured={snapshot.webhook.hmacConfigured} draft={draft.webhook.credential} disabled={disabled} onChange={credential => updateWebhook({ credential })} />{feedback}
+            </div></SettingsWindow>{feedback}
+          </div>;
+  const dshEditor = <div className="stack">{connectionFields('dshAgent')}{feedback}</div>;
+  if (compact === 'onebot') return qqEditor;
+  if (compact === 'dsh') return <div className="stack">{loadError && <p role="alert" className="text-xs text-destructive">读取失败，保留当前快照与草稿：{loadError}</p>}<div className="row"><OutboundStatus adapter={savedDsh} /><span className="muted small">{savedDsh.localAuthConfigured ? '本机自动发现与鉴权' : '聊天引擎连接'}</span></div><div className="strip">自动发现本机服务地址与鉴权；配置保存后单独启动聊天。</div><div className="actions"><Button disabled={disabled || dirty} onClick={() => void discoverLocalDsh()}><Plug className="size-3.5" />{controlling ? '正在处理…' : '自动连接本机 DSH'}</Button><SettingsWindow title="手动或远程 DSH 连接" label="手动连接" description="填写服务地址与访问凭据，关闭保留常规草稿。" onOpenChange={open => { if (!open) setDraft(current => current ? clearCredentials(current) : current); }}>{dshEditor}</SettingsWindow></div>{dirty && <p className="small muted">先保存或撤销当前草稿，再自动连接。</p>}{operationRecovery}{formError && <p className="text-xs text-destructive" role="alert">{formError}</p>}</div>;
 
   return <>
     {heading}
-    <NativeCatalogRecovery recovery={recovery} reading={loading || saving || controlling} onRead={reload} onReleased={() => { setResult('idle'); setFormError(''); }} />
-    <ChatRuntimeControls api={api} connected={connected} dirty={dirty} navigate={navigate} onRunningChange={setChatRunning} connectionPanel={<div id="adapter-runtime" className="mt-4 grid gap-3 border-t pt-4">
-      <h3 className="text-xs font-medium">协议连接管理</h3>
-      {protocol && <div className="flex flex-wrap items-center gap-2" data-protocol-connection-state={snapshot.connection?.state}><StatusPill tone={protocol.statusTone}>{protocol.statusLabel}</StatusPill><span className="text-xs text-muted-foreground">接收计数 {snapshot.connection?.received}；丢弃计数 {snapshot.connection?.dropped}</span></div>}
-      <p className="text-xs leading-6 text-muted-foreground">管理服务启动时，以及聊天停止状态下保存参数后，会自动尝试连接已启用的 WebSocket；连接协议不会调用模型。手动断开将保留到下一次保存、管理服务重启或启动聊天，不会被轮询强行复连；已有连接掉线仍有有限重试。聊天运行期间保存参数不会热切连接。{snapshot.connection?.selfId && <span className="block">自动识别账号：{snapshot.connection.selfId}</span>}</p>
-      <div className="flex flex-wrap items-center gap-2">
-      <span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置；聊天停止时将自动尝试连接已启用的 WebSocket。' : chatRunning ? '运行期间保存参数不会热切连接；手动操作协议连接前请先停止聊天。' : snapshot.connection?.state === 'connected' ? '当前协议已连接；维护时可明确重新连接或断开。' : snapshot.status.applyAvailable ? '连接尚未就绪时，可核对具体诊断后手动重试。' : '当前管理实例没有接入协议连接控制。'}</span>
-      <Button disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接 WebSocket' : '重试连接 WebSocket'}</Button>
-      <Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开 WebSocket</Button>
-      </div>
-      {connectionError && <p className="text-xs leading-5 text-destructive" role="alert">{connectionError}</p>}
-      {protocol?.diagnostic && <div className={`grid gap-1 text-xs leading-5 ${protocol.diagnostic.tone === 'error' ? 'text-destructive' : protocol.diagnostic.tone === 'warning' ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'}`} role="status" data-protocol-diagnostic={protocol.diagnostic.category}><strong>{protocol.diagnostic.title}</strong><p>{protocol.diagnostic.message}</p>{protocol.diagnostic.code && <details><summary className="cursor-pointer">最近诊断码</summary><code>{protocol.diagnostic.code}</code></details>}</div>}
-    </div>} />
-    <div className="grid items-start gap-5 xl:grid-cols-2">
-      {definitions.map(definition => {
-        const adapter = draft.outbound[definition.id];
-        const saved = snapshot.outbound[definition.id];
-        const Icon = definition.icon;
-        const connectionFields = <>
-          <ToggleField label={definition.id === 'onebotHttp' ? nativeFormMetadata.onebot.fields.enabled : nativeFormMetadata.dsh.fields.enabled} description="保存此连接的启用选项；聊天模型仍需单独启动。" checked={adapter.enabled} disabled={disabled} onChange={enabled => updateOutbound(definition.id, { enabled })} />
-          <AdapterEndpointField id={`adapter-${definition.id}-endpoint`} label={definition.id === 'onebotHttp' ? nativeFormMetadata.onebot.fields.endpoint : nativeFormMetadata.dsh.fields.endpoint} value={adapter.endpoint} placeholder={definition.placeholder} disabled={disabled} onChange={endpoint => updateOutbound(definition.id, { endpoint })} />
-          <AdapterCredentialField id={`adapter-${definition.id}-credential`} label={definition.credentialLabel} description={definition.credentialDescription} configured={saved.credentialConfigured} draft={adapter.credential} disabled={disabled} onChange={credential => updateOutbound(definition.id, { credential })} />
-        </>;
-        return <Section scrollable key={definition.id} id={definition.id === 'onebotHttp' ? nativeFormMetadata.onebot.id : nativeFormMetadata.dsh.id} title={definition.title} description={definition.description} actions={<OutboundStatus adapter={saved} />} footer={<span className="flex items-center gap-2 text-xs text-muted-foreground"><Icon className="size-3.5" />{saved.enabled ? '已启用；实际状态见“聊天运行”。' : '此连接已停用，填写的设置仍会保留。'}</span>}>
-          <div className="grid gap-5">
-            {definition.id === 'onebotHttp' && <div className="grid gap-5">
-              <h3 className="text-xs font-medium">WebSocket 收消息</h3>
-              <ToggleField label={nativeFormMetadata.onebot.fields.websocket} description="聊天停止时，保存启用设置会自动尝试连接，保存禁用设置则断开；账号自动识别。" checked={draft.websocket.enabled} disabled={disabled} onChange={enabled => updateWebSocket({ enabled })} />
-              {(draft.websocket.enabled || changedOutbound(snapshot.websocket, draft.websocket)) && <>
-                <AdapterEndpointField id="adapter-onebotWs-endpoint" label={nativeFormMetadata.onebot.fields.websocketEndpoint} value={draft.websocket.endpoint} placeholder="ws://127.0.0.1:3001" disabled={disabled} onChange={endpoint => updateWebSocket({ endpoint })} />
-                <AdapterCredentialField id="adapter-onebotWs-credential" label={nativeFormMetadata.onebot.fields.websocketKey} description="填写协议端 WebSocket 服务的 accessToken，它可能与 HTTP 密钥不同；不使用管理后台登录令牌。" configured={snapshot.websocket.credentialConfigured} draft={draft.websocket.credential} disabled={disabled} onChange={credential => updateWebSocket({ credential })} />
-              </>}
-              <details className="min-w-0 border-t pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">其他接收方式（高级）</summary><div className="mt-4 grid gap-5"><p className="text-xs leading-5 text-muted-foreground">HTTP webhook 是协议端主动推送消息的替代方式，不是测试功能。使用 WebSocket 时无需设置；当前实例未启动 webhook 监听。</p>
-              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-medium">webhook 消息收取</h3><StatusPill>{snapshot.webhook.port > 0 && snapshot.webhook.selfId && snapshot.webhook.hmacConfigured ? snapshot.webhook.enabled ? '已配置' : '已配置 · 未启用' : '未配置'}</StatusPill></div>
-              <ToggleField label={nativeFormMetadata.onebot.fields.webhook} description="可选；需要单独配置机器人账号与签名密钥。" checked={draft.webhook.enabled} disabled={disabled} onChange={enabled => updateWebhook({ enabled })} />
-              {(draft.webhook.enabled || changedWebhook(snapshot.webhook, draft.webhook)) && <>
-              <Field label={nativeFormMetadata.onebot.fields.host} description="只监听本机回环地址。"><Input id="adapter-webhook-host" list="adapter-webhook-hosts" autoComplete="off" spellCheck={false} value={draft.webhook.host} disabled={disabled} placeholder="127.0.0.1" onChange={event => updateWebhook({ host: event.target.value })} /><datalist id="adapter-webhook-hosts"><option value="127.0.0.1" /><option value="::1" /><option value="localhost" /></datalist></Field>
-              <AdapterNumberField id="adapter-webhook-port" label={nativeFormMetadata.onebot.fields.port} value={draft.webhook.port} minimum={draft.webhook.enabled ? 1 : 0} maximum={65535} disabled={disabled} onChange={port => updateWebhook({ port })} />
-              <Field label={nativeFormMetadata.onebot.fields.account}><Input id="adapter-webhook-self-id" inputMode="numeric" autoComplete="off" maxLength={32} value={draft.webhook.selfId} disabled={disabled} placeholder="机器人 QQ 号" onChange={event => updateWebhook({ selfId: event.target.value })} /></Field>
-              <AdapterCredentialField id="adapter-webhook-hmac" label={nativeFormMetadata.onebot.fields.hmac} configured={snapshot.webhook.hmacConfigured} draft={draft.webhook.credential} disabled={disabled} onChange={credential => updateWebhook({ credential })} />
-              </>}
-              </div></details>
-            </div>}
-            {definition.id === 'onebotHttp' && <h3 className="border-t pt-5 text-xs font-medium">HTTP 发送</h3>}
-            {definition.id === 'dshAgent' ? <>
-              <div className="grid gap-3 rounded-lg border bg-accent/20 p-4">
-                {saved.localAuthConfigured === true ? <p className="text-sm font-medium" role="status">已自动连接本机 DSH / 无需填写令牌</p> : <p className="text-sm font-medium">使用本机 DSH，无需手填地址或令牌。</p>}
-                <Button variant={saved.localAuthConfigured === true ? 'outline' : 'default'} disabled={disabled || dirty} onClick={() => void discoverLocalDsh()}><Plug className="size-3.5" />{controlling ? '正在处理…' : '自动连接本机 DSH'}</Button>
-                <p className="text-xs leading-6 text-muted-foreground">{dirty ? '请先保存或撤销尚未保存的连接设置，避免覆盖草稿。' : '只设置本机连接，不会自动启动聊天，也不会调用模型；已有手动设置不会自行切换。'}</p>
-              </div>
-              <details className="min-w-0 rounded-lg border px-4 py-3"><summary className="cursor-pointer text-xs font-medium">手动连接/远程DSH</summary><div className="mt-4 grid gap-5">{connectionFields}</div></details>
-            </> : connectionFields}
-          </div>
-        </Section>;
-      })}
+    {operationRecovery}
+    {loadError && <div className="strip bad" role="alert">读取失败，保留当前快照与草稿：{loadError}</div>}
+    {loading && <div className="summaryline" role="status">正在读取连接状态，当前草稿保留。</div>}
+    <div className="grid3">
+      <section id={nativeFormMetadata.onebot.id} className="panel entity">
+        <div className="row"><span className="avatar" aria-hidden="true">↔</span><div className="grow"><h2 className="panel-title">QQ 消息连接</h2><p className="muted small">OneBot · HTTP 发送 / WebSocket 接收</p></div><span data-protocol-connection-state={snapshot.connection?.state}><StatusPill tone={protocol?.statusTone ?? 'neutral'}>{protocol?.statusLabel ?? '连接状态未知'}</StatusPill></span></div>
+        <div className="meta"><span>HTTP 发送{snapshot.outbound.onebotHttp.enabled ? '已启用' : '未启用'}</span><span>消息接收：{snapshot.websocket.enabled ? 'WebSocket' : snapshot.webhook.enabled ? 'Webhook' : '未启用'}</span><span>账号：{snapshot.connection?.selfId ?? '尚未识别'}</span></div>
+        <div className={`strip ${protocol?.diagnostic?.tone === 'error' ? 'bad' : protocol?.diagnostic?.tone === 'warning' ? 'warn' : ''}`} role="status" data-protocol-diagnostic={protocol?.diagnostic?.category}>{protocol?.diagnostic && protocol.diagnostic.tone !== 'neutral' ? protocol.diagnostic.message : `接收 ${snapshot.connection?.received ?? '未知'} 条 · 丢弃 ${snapshot.connection?.dropped ?? '未知'} 条。协议连接与聊天启停分别管理。`}</div>
+        <div className="actions">
+          <SettingsWindow title="QQ 消息收发" label="编辑连接" description="HTTP 发送与 WebSocket 接收分别配置；关闭保留常规草稿。" onOpenChange={open => { if (!open) setDraft(current => current ? clearCredentials(current) : current); }}>{qqEditor}</SettingsWindow>
+          <SettingsWindow title="QQ 连接维护" label="连接维护" description="先保存连接设置并停止聊天，再重新连接或断开 WebSocket。"><div className="stack"><div className="row">{protocol && <StatusPill tone={protocol.statusTone}>{protocol.statusLabel}</StatusPill>}<span className="muted">{snapshot.connection?.selfId ? `账号 ${snapshot.connection.selfId}` : '机器人账号尚未识别'}</span></div><p className="small muted">管理服务启动时，以及聊天停止状态下保存参数后，会自动连接已启用的 WebSocket。手动断开保持到下次保存、服务重启或启动聊天。</p>
+            <div className="actions"><Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接' : '重试连接'}</Button><Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开连接</Button></div>{connectionError && <p role="alert" className="text-xs text-destructive">{connectionError}</p>}{operationRecovery}
+          </div></SettingsWindow>{qqDetails}
+        </div>
+      </section>
+      <section id={nativeFormMetadata.dsh.id} className="panel entity">
+        <div className="row"><span className="avatar" aria-hidden="true">◇</span><div className="grow"><h2 className="panel-title">DSH 聊天引擎</h2><p className="muted small">{savedDsh.localAuthConfigured ? '本机自动发现与鉴权' : '聊天引擎连接'}</p></div><OutboundStatus adapter={savedDsh} /></div>
+        <div className="meta"><span>连接{savedDsh.enabled ? '已启用' : '未启用'}</span><span>{savedDsh.localAuthConfigured ? '本机鉴权已配置' : savedDsh.credentialConfigured ? '访问凭据已保存' : '访问凭据未设置'}</span></div>
+        <div className="strip">配置就绪与运行状态分别显示；启动聊天时核对实际连接。</div>
+        <div className="actions">
+          <SettingsWindow title="自动连接本机 DSH" label="自动连接本机" triggerVariant="default" description="自动发现本机服务地址并保存本机鉴权，连接后单独启动聊天。"><div className="stack"><div className="strip">将明确切换为本机自动发现的地址与鉴权；已有会话历史保留。</div>{dirty && <p className="small muted">先保存或撤销当前草稿，再自动连接。</p>}<Button disabled={disabled || dirty} onClick={() => void discoverLocalDsh()}><Plug className="size-3.5" />{controlling ? '正在处理…' : '自动连接本机 DSH'}</Button>{operationRecovery}{formError && <p className="text-xs text-destructive" role="alert">{formError}</p>}</div></SettingsWindow>
+          <SettingsWindow title="手动或远程 DSH 连接" label="手动连接" description="填写服务地址与访问凭据。关闭保留常规草稿，保存后需重启聊天生效。" onOpenChange={open => { if (!open) setDraft(current => current ? clearCredentials(current) : current); }}>{dshEditor}</SettingsWindow>
+          <ReadOnlyDetails title="DSH 连接详情"><TechnicalDetails fields={[{ label: '服务地址', value: savedDsh.endpoint || '未配置' }, { label: '连接启用', value: savedDsh.enabled }, { label: '本机鉴权', value: savedDsh.localAuthConfigured === true }, { label: '访问凭据', value: savedDsh.credentialConfigured ? '已保存' : '未设置' }]} /></ReadOnlyDetails>
+        </div>
+      </section>
+      <ChatRuntimeControls api={api} connected={connected} dirty={dirty} navigate={navigate} onRunningChange={setChatRunning} />
     </div>
-    <DshDeploymentManager api={api} connected={connected} setDirty={setDirty} running={chatRunning} configurationDirty={dirty || disabled} />
-    <NativeRuntimeCompatibility api={api} connected={connected} dirty={dirty || disabled} navigate={navigate} />
-    {formError && <div className="flex max-h-32 items-start gap-2 overflow-auto overscroll-contain rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs leading-5 text-destructive" role="alert"><CircleAlert className="mt-0.5 size-4 shrink-0" /><span className="min-w-0 flex-1 break-words">{formError}</span>{blocked && <Button size="sm" variant="outline" disabled={loading || saving} onClick={reload}><RefreshCw className="size-3.5" />重新读取</Button>}</div>}
-    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="size-3.5 shrink-0" /><span>凭据只写入服务端，不会回显；本次输入在提交后清空。</span></div>
-    <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-2 border-t bg-background py-3" data-adapter-save-bar><SaveBar dirty={dirty} saving={saving} disabled={blocked || loading || controlling} message={writeMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存连接配置" />{blocked && <Button variant="outline" disabled={loading || saving || controlling} onClick={reload}><RefreshCw className="size-3.5" />重新读取</Button>}</div>
+    <div className="summaryline"><span className="muted">相关设置</span><Button variant="ghost" size="sm" onClick={() => navigate('security')}>主人与白名单</Button><Button variant="ghost" size="sm" onClick={() => navigate('model')}>聊天方案</Button><span className="push muted small" role="status">{writeMessage(result, dirty)}</span></div>
+    {(formError || connectionError) && <div className="strip bad row" role="alert"><CircleAlert className="size-3.5 shrink-0" /><span className="grow">{formError || connectionError}</span>{blocked && <Button size="sm" variant="outline" disabled={loading || saving || controlling} onClick={reload}>重新读取</Button>}</div>}
   </>;
 }

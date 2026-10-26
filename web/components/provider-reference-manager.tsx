@@ -12,7 +12,8 @@ import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.t
 import { writeResource } from '../lib/resource-reader.ts';
 import { NativeCatalogRecovery } from './native-catalog-recovery.tsx';
 import { Button } from './ui/button.tsx';
-import { Field, Section } from './management.tsx';
+import { Field } from './management.tsx';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog.tsx';
 
 interface ProviderChoice {
   readonly id: string; readonly name: string; readonly enabled: boolean;
@@ -35,6 +36,7 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
   const planRecovery = useNativeCatalogOperation(api, 'plans');
   const assistantRecovery = useNativeCatalogOperation(api, 'assistant');
   const [editing, setEditing] = useState<ProviderReference | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [target, setTarget] = useState('');
   const [effort, setEffort] = useState('');
   const [confirmed, setConfirmed] = useState(false);
@@ -69,6 +71,7 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
     const retained = retainedDraft(api, referenceDraftKey);
     const restored = retained?.providerId === providerId ? retained : undefined;
     draftOwner.current = { api, providerId };
+    setEditorOpen(restored !== undefined);
     setEditing(restored?.editing ?? null); setTarget(restored?.target ?? ''); setEffort(restored?.effort ?? ''); setConfirmed(false); setUnlink(restored?.unlink ?? false); setMessage(''); setSaving(false);
     return () => request.current?.abort();
   }, [api, providerId]);
@@ -78,6 +81,8 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
 
   function edit(reference: ProviderReference): void {
     if (locked) return;
+    setEditorOpen(true);
+    if (editing?.kind === reference.kind && editing.id === reference.id) return;
     setEditing(reference); setTarget(''); setEffort(''); setConfirmed(false); setUnlink(false); setMessage('');
   }
 
@@ -118,26 +123,29 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
     }
   }
 
-  return <Section title="模型使用者" description="全部方案和助手保留的模型选择都会限制删除。修改引用会单独保存，不会自动删除提供方或切换运行中的聊天。">
-    <div className="grid gap-3 text-xs leading-6">
+  return <div className="stack"><div className="strip">方案与助手保留的模型选择都会限制删除。引用更改单独保存，运行中的聊天另行应用。</div>
+    <div className="grid gap-2 text-sm leading-5">
       <NativeCatalogRecovery recovery={planRecovery} reading={plans.loading || saving} onRead={plans.refresh} onReleased={() => setMessage('')} />
       <NativeCatalogRecovery recovery={assistantRecovery} reading={assistant.loading || saving} onRead={assistant.refresh} onReleased={() => setMessage('')} />
       <Button size="sm" variant="outline" className="justify-self-start" disabled={saving} onClick={() => { plans.refresh(); assistant.refresh(); }}>重新读取引用</Button>
       {unavailable && <p role="status" className="text-muted-foreground">部分引用尚未读到，不能确认没有使用者。</p>}
       {!unavailable && references.length === 0 && <p className="text-muted-foreground">当前没有方案或助手引用此提供方。</p>}
-      {references.map(reference => <div key={`${reference.kind}:${reference.id}`} className="flex flex-wrap items-center gap-3 rounded-lg border p-3"><span className="mr-auto min-w-0 break-words"><strong>{reference.kind === 'plan' ? '聊天方案：' : ''}{reference.name}</strong><span className="block text-muted-foreground">API 模型：{reference.model}</span></span><Button size="sm" variant="outline" disabled={disabled || saving || (reference.kind === 'plan' ? planRecovery.blocked : assistantRecovery.blocked)} onClick={() => edit(reference)}>更换模型{reference.kind === 'assistant' ? '或解除引用' : ''}</Button></div>)}
-      {editing && <div className="grid gap-3 rounded-lg border bg-muted/20 p-3" aria-label="修改模型引用">
+      {references.length > 0 && <div className="tablewrap"><table><thead><tr><th>使用者</th><th>API 模型 ID</th><th>操作</th></tr></thead><tbody>{references.map(reference => <tr key={`${reference.kind}:${reference.id}`}><td>{reference.name}</td><td className="font-mono">{reference.model}</td><td><Button size="sm" variant="link" disabled={disabled || saving || (reference.kind === 'plan' ? planRecovery.blocked : assistantRecovery.blocked)} onClick={() => edit(reference)}>{editing?.kind === reference.kind && editing.id === reference.id ? '继续修改' : reference.kind === 'assistant' ? '更换或解除' : '更换模型'}</Button></td></tr>)}</tbody></table></div>}
+      <Dialog open={editing !== null && editorOpen} onOpenChange={open => { if (!saving) setEditorOpen(open); }}><DialogContent showCloseButton={!saving}><DialogHeader><DialogTitle>{editing?.kind === 'assistant' ? '更换或解除助手引用' : '更换方案模型引用'}</DialogTitle><DialogDescription>保留其他配置，单独保存这项引用更改。</DialogDescription></DialogHeader>
+      {editing && <div className="stack" aria-label="修改模型引用">
         <p>正在修改：{editing.name}</p>
         {editing.kind === 'assistant' && <label className="flex gap-2"><input type="checkbox" checked={unlink} disabled={locked} onChange={event => { setUnlink(event.target.checked); setConfirmed(false); }} />停用独立助手并清除其模型引用</label>}
         {!unlink && <>
-          <Field label="更换到模型"><select className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={target} disabled={locked} onChange={event => { setTarget(event.target.value); setEffort(''); setConfirmed(false); }}><option value="">选择其他提供方或模型</option>{choices.filter(choice => choice.provider !== editing.provider || choice.model !== editing.model).map(choice => <option key={choice.key} value={choice.key}>{choice.label}</option>)}</select></Field>
-          <Field label="新模型思考强度" description={choice && !knownCapabilities ? '需要读取新模型实际支持的档位，未知时不能保存。' : '明确选择新模型支持的档位，原方案的其他配置保持。'}><select className="h-9 w-full rounded-md border bg-background px-3 text-sm" value={effort} disabled={locked || !knownCapabilities} onChange={event => { setEffort(event.target.value); setConfirmed(false); }}><option value="">选择已确认支持的档位</option>{knownCapabilities?.reasoningEfforts.map(value => <option key={value} value={value}>{modelReasoningEffortLabel(value)}</option>)}</select></Field>
+          <Field label="更换到模型"><select className="h-[27px] w-full rounded-md border bg-background px-2 text-sm" value={target} disabled={locked} onChange={event => { setTarget(event.target.value); setEffort(''); setConfirmed(false); }}><option value="">选择其他提供方或模型</option>{choices.filter(choice => choice.provider !== editing.provider || choice.model !== editing.model).map(choice => <option key={choice.key} value={choice.key}>{choice.label}</option>)}</select></Field>
+          <Field label="新模型思考强度" description={choice && !knownCapabilities ? '需要读取新模型实际支持的档位，未知时不能保存。' : '明确选择新模型支持的档位，原方案的其他配置保持。'}><select className="h-[27px] w-full rounded-md border bg-background px-2 text-sm" value={effort} disabled={locked || !knownCapabilities} onChange={event => { setEffort(event.target.value); setConfirmed(false); }}><option value="">选择已确认支持的档位</option>{knownCapabilities?.reasoningEfforts.map(value => <option key={value} value={value}>{modelReasoningEffortLabel(value)}</option>)}</select></Field>
           {choice && !knownCapabilities && <Button size="sm" variant="outline" disabled={capabilities.loading || locked} onClick={capabilities.refresh}>重新读取模型支持情况</Button>}
         </>}
         <label className="flex gap-2"><input type="checkbox" checked={confirmed} disabled={locked} onChange={event => setConfirmed(event.target.checked)} />确认单独保存这项引用更改</label>
         <div className="flex flex-wrap gap-2"><Button size="sm" disabled={locked || unavailable || !confirmed || !unlink && (!choice || !knownCapabilities || !isChatPlanReasoningEffort(effort) || !knownCapabilities.reasoningEfforts.includes(effort))} onClick={() => void save()}>{saving ? '正在保存引用' : '保存引用更改'}</Button><Button size="sm" variant="ghost" disabled={saving} onClick={() => setEditing(null)}>取消修改</Button></div>
       </div>}
+      {message && <p role="status" className="text-xs">{message}</p>}
+      </DialogContent></Dialog>
       {message && <p role="status">{message}</p>}
     </div>
-  </Section>;
+  </div>;
 }

@@ -344,7 +344,7 @@ async function run(): Promise<void> {
     await bootstrapSearch.fill('可信扩展装配摘要');
     await page.locator('[role="option"][data-search-title="可信扩展装配摘要"]').click();
     await page.locator('[data-page="features"]').waitFor();
-    await page.waitForFunction(() => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent === '功能设置');
+    await page.waitForFunction(() => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent === 'Agent 扩展');
     await page.locator('#native-bootstrap-summary h2[data-page-nav-target="true"]').waitFor();
     assert.equal(await page.locator('[data-native-bootstrap-summary]').evaluate(element => element instanceof HTMLDetailsElement && element.open), true);
     assert.equal(state.postRequests.length, writesBeforeBootstrapSearch);
@@ -379,23 +379,12 @@ async function run(): Promise<void> {
 
     const settingsPosts = state.postRequests.length;
     await navigate(page, 'settings', '运行设置', '运行设置');
-    const gatewayAdvanced = page.locator('#program-gateway-settings');
-    if (await gatewayAdvanced.getAttribute('open') !== null) await gatewayAdvanced.locator('summary').first().click();
-    assert.equal(await field(page, '出站网关请求期限').locator('input').isVisible(), false);
-    await gatewayAdvanced.locator('summary').first().click();
-    const requestDeadline = field(page, '出站网关请求期限').locator('input');
-    await requestDeadline.fill('18');
     await field(page, '监听端口').locator('input').fill('3333');
-    await gatewayAdvanced.locator('summary').first().click();
     await navigate(page, 'overview', '概览', '工作台概览');
     assert.equal(await page.getByRole('dialog', { name: '还有未保存的更改', exact: true }).count(), 0);
     await navigate(page, 'settings', '运行设置', '运行设置');
-    await gatewayAdvanced.locator('summary').first().click();
-    await requestDeadline.waitFor();
-    assert.equal(await requestDeadline.inputValue(), '18');
     assert.equal(await field(page, '监听端口').locator('input').inputValue(), '3333');
     assert.equal(state.postRequests.length, settingsPosts);
-    await section(page, '网关请求与容量').getByRole('button', { name: '撤销更改', exact: true }).click();
     await section(page, '管理端监听').getByRole('button', { name: '撤销更改', exact: true }).click();
     await openWorkspaceSearch(page);
     assert.equal(await page.getByRole('option').count(), pageRegistry.length);
@@ -408,11 +397,11 @@ async function run(): Promise<void> {
     assert(await page.locator('[data-page="providers"] [data-bounded-card]').count() >= 2);
 
     await navigate(page, 'adapters', '连接', '连接');
-    for (const title of ['聊天运行', 'OneBot', 'DSH 聊天引擎', '保留会话兼容性 / 原配置核对', '应用聊天设置到 DSH']) {
+    for (const title of ['聊天运行', 'OneBot', 'DSH 聊天引擎']) {
       await section(page, title).waitFor();
     }
     await page.getByText('协议连接管理', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 5);
+    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 3);
 
     const desktopNavigator = visibleNavigator(page);
     const sticky = await desktopNavigator.evaluate(element => {

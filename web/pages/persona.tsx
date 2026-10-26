@@ -1,4 +1,4 @@
-import { AppearanceManager } from '../components/appearance-manager.tsx';
+import { SettingsWindow } from '../components/settings-window.tsx';
 import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import { catalogFailureState } from '../lib/native-catalog-operation.ts';
 import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.ts';
@@ -6,7 +6,7 @@ import { NativeCatalogRecovery } from '../components/native-catalog-recovery.tsx
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, LoaderCircle, Plus, RefreshCw, Trash2, UserRound } from 'lucide-react';
+import { CircleAlert, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import { catalogIdentifierDescription, isCatalogIdentifier, newCatalogIdentifier } from '../lib/catalog-identifier.ts';
 import type { PageProps } from '../lib/types.ts';
@@ -16,15 +16,13 @@ import { Input } from '../components/ui/input.tsx';
 import { Textarea } from '../components/ui/textarea.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx';
 import { createBuiltinWhalePersonaDraft } from '../../src/host/chat-templates.ts';
-import { VirtualList } from '../components/virtual-list.tsx';
+import { HelpTip } from '../components/help-tip.tsx';
+import { useReadResource } from '../lib/use-read-resource.ts';
+import { parsePlanCatalog } from '../lib/chat-plans.ts';
 import { DshDeploymentManager } from '../components/dsh-deployment-manager.tsx';
 
-interface Persona {
-  readonly id: string;
-  readonly name: string;
-  readonly identity: string;
-  readonly style: string;
-}
+import { validateChatPersona, type ChatPersona as Persona } from '../../src/contracts/chat-plans.ts';
+import { DEFAULT_PERSONA_WAKE, validatePersonaWake } from '../../src/contracts/persona-wake.ts';
 
 interface PersonaCatalog {
   readonly revision: string;
@@ -42,10 +40,7 @@ type SaveState = 'idle' | 'saved' | 'deleted' | 'busy' | 'conflict' | 'unknown';
 const emptyPersona: Persona = { id: '', name: '', identity: '', style: '' };
 
 function parsePersona(value: unknown): Persona | null {
-  const record = asRecord(value);
-  if (typeof record.id !== 'string' || typeof record.name !== 'string'
-    || typeof record.identity !== 'string' || typeof record.style !== 'string') return null;
-  return { id: record.id, name: record.name, identity: record.identity, style: record.style };
+  try { return validateChatPersona(value); } catch { return null; }
 }
 
 function parseCatalog(value: unknown): PersonaCatalog | null {
@@ -59,7 +54,8 @@ function parseCatalog(value: unknown): PersonaCatalog | null {
 }
 
 function samePersona(left: Persona, right: Persona): boolean {
-  return left.id === right.id && left.name === right.name && left.identity === right.identity && left.style === right.style;
+  return left.id === right.id && left.name === right.name && left.identity === right.identity && left.style === right.style
+    && JSON.stringify(left.wake ?? DEFAULT_PERSONA_WAKE) === JSON.stringify(right.wake ?? DEFAULT_PERSONA_WAKE);
 }
 
 function stateForError(error: unknown): SaveState {
@@ -80,12 +76,15 @@ const personaDraftKey = createDraftKey<{ readonly catalog: PersonaCatalog; reado
 export function PersonaPage(props: PageProps) {
   const { api, connected, connect, setDirty, navigate } = props;
   const recovery = useNativeCatalogOperation(api, 'personas');
+  const plans = useReadResource(api, '/api/chat/plans', connected, parsePlanCatalog);
+  const activePlan = plans.snapshot?.plans.find(plan => plan.id === plans.snapshot?.activePlanId);
   const retained = useMemo(() => retainedDraft(api, personaDraftKey), [api]);
   const draftApi = useRef(api);
   const [catalog, setCatalog] = useState<PersonaCatalog | null>(retained?.catalog ?? null);
   const [selectedId, setSelectedId] = useState<string | null>(retained?.selectedId ?? null);
   const [draft, setDraft] = useState<Persona>(retained?.draft ?? emptyPersona);
   const [creating, setCreating] = useState(retained?.creating ?? false);
+  const [creationDialogOpen, setCreationDialogOpen] = useState(false);
   const [creationId, setCreationId] = useState(retained?.creationId ?? '');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -108,7 +107,7 @@ export function PersonaPage(props: PageProps) {
   connection.current = { api, connected };
   const selected = catalog?.personas.find(persona => persona.id === selectedId) ?? null;
   const dirty = creating
-    ? draft.id !== creationId || [draft.name, draft.identity, draft.style].some(value => value.trim() !== '')
+    ? draft.id !== creationId || [draft.name, draft.identity, draft.style].some(value => value.trim() !== '') || JSON.stringify(draft.wake ?? DEFAULT_PERSONA_WAKE) !== JSON.stringify(DEFAULT_PERSONA_WAKE)
     : selected !== null && !samePersona(draft, selected);
   const idConflict = useMemo(() => creating && catalog?.personas.some(persona => persona.id === draft.id.trim()) === true, [catalog, creating, draft.id]);
   const blocked = recovery.blocked || saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown';
@@ -142,6 +141,7 @@ export function PersonaPage(props: PageProps) {
     saveController.current?.abort();
     saveController.current = null;
     clearDelete();
+    setCreationDialogOpen(false);
     const isCurrent = () => !controller.signal.aborted && lifecycleEpoch.current === epoch
       && connection.current.api === api && connection.current.connected;
     const prior = currentView.current.api === api ? currentView.current : null;
@@ -210,6 +210,7 @@ export function PersonaPage(props: PageProps) {
   function createPersona(): void {
     if (dirty || currentView.current.dirty || editingDisabled || currentView.current.blocked || pendingDelete.current || saveController.current) return;
     currentView.current.creating = true;
+    setCreationDialogOpen(true);
     setSelectedId(null);
     const id = newCatalogIdentifier('persona');
     setCreationId(id);
@@ -223,6 +224,7 @@ export function PersonaPage(props: PageProps) {
   function useBuiltinPersona(): void {
     if (!catalog || templateDisabled || currentView.current.dirty || currentView.current.blocked || pendingDelete.current || saveController.current) return;
     currentView.current.creating = true;
+    setCreationDialogOpen(true);
     setCreationId('');
     setSelectedId(null);
     setDraft(createBuiltinWhalePersonaDraft(catalog.personas));
@@ -235,6 +237,8 @@ export function PersonaPage(props: PageProps) {
   async function save(): Promise<void> {
     if (!connected || connection.current.api !== api || !connection.current.connected || !catalog || !dirty || editingDisabled || currentView.current.blocked || pendingDelete.current || saveController.current) return;
     const normalized = { ...draft, id: draft.id.trim(), name: draft.name.trim() };
+    try { if (normalized.wake) normalized.wake = validatePersonaWake({ ...normalized.wake, nicknames: normalized.wake.nicknames.filter(name => name.length > 0) }); }
+    catch { setFieldError('昵称最多 16 个，每个不超过 128 字且不能重复；续聊时长为 0–300 秒。'); return; }
     if (!normalized.id || !normalized.name || !normalized.identity.trim() || !normalized.style.trim()) {
       setFieldError('内部标识、名称、身份和表达风格必须填写。');
       return;
@@ -269,6 +273,7 @@ export function PersonaPage(props: PageProps) {
       setSelectedId(saved.id);
       setDraft(saved);
       setCreating(false);
+      setCreationDialogOpen(false);
       recovery.complete(operationToken);
       setSaveState('saved');
     } catch (error) {
@@ -335,7 +340,7 @@ export function PersonaPage(props: PageProps) {
   async function removePersona(): Promise<void> {
     const target = deleteTarget;
     const view = currentView.current;
-    if (!target || pendingDelete.current !== target || confirmationValue.current !== target.persona.id
+    if (!target || pendingDelete.current !== target || confirmationValue.current !== target.persona.name
       || !connected || !connection.current.connected || connection.current.api !== api || lifecycleEpoch.current !== target.epoch
       || !catalog || view.catalog !== catalog || catalog.revision !== target.revision || view.selectedId !== target.persona.id
       || view.dirty || view.creating || view.loading || view.blocked || saveController.current) return;
@@ -368,8 +373,8 @@ export function PersonaPage(props: PageProps) {
       recovery.fail(operationToken, error);
       if (!isCurrent()) return;
       setSaveState(stateForError(error));
-      setWriteError(error instanceof ApiError && (error.code === 'persona_in_use_or_missing' || error.code === 'persona_in_use_by_appearance')
-        ? '该人设仍被聊天方案或角色参考图绑定引用，或目录已变化。请先调整关联或解除参考图绑定，再重新载入核对；不会自动删除其他配置。'
+      setWriteError(error instanceof ApiError && error.code === 'persona_in_use_or_missing'
+        ? '该人设仍被聊天方案引用，或目录已变化。请先调整关联，再重新载入核对；不会自动删除其他配置。'
         : errorMessage(error));
     } finally {
       if (isCurrent()) {
@@ -379,44 +384,55 @@ export function PersonaPage(props: PageProps) {
     }
   }
 
-  if (!connected) return <div className="page-stack" data-page="persona"><PageHeading title="人设与形象" description="独立管理身份定义与表达风格。" /><ConnectPrompt connect={connect} /></div>;
+  const editorFields = <div className="grid min-w-0 gap-2">
+              <div className="formgrid">
+                <Field id="chat-persona-name" label={nativeFormMetadata.persona.fields.name}><Input id="chat-persona-name" value={draft.name} disabled={editingDisabled} maxLength={128} placeholder="日常伙伴" onChange={event => update('name', event.target.value)} /></Field>
+                <Field id="chat-persona-nicknames" label="呼叫昵称" tip="用逗号分隔，最多 16 个。人设名称也可用于呼叫。"><Input id="chat-persona-nicknames" disabled={editingDisabled} value={(draft.wake ?? DEFAULT_PERSONA_WAKE).nicknames.join('，')} onChange={event => update('wake', { ...(draft.wake ?? DEFAULT_PERSONA_WAKE), nicknames: event.target.value.split(/[,，]/).map(value => value.trim()) })} /></Field></div><div className="row small muted"><span className={activePlan?.personaId === draft.id && !creating ? 'badge good' : 'badge'}>{activePlan?.personaId === draft.id && !creating ? '当前方案正在使用' : '可供方案选择'}</span><span>唤醒设置保存后即时生效</span><span className="push"><SettingsWindow title="唤醒与续聊" description="白名单内私聊和群聊 @ 必定唤醒，其他方式随人设保存。">              <div id="persona-wake" className="grid gap-2"><Field id="persona-wake-nicknames" label="额外昵称" tip="最多 16 个，逗号分隔；人设名称本身可用于呼叫。"><Input id="persona-wake-nicknames" disabled={editingDisabled} value={(draft.wake ?? DEFAULT_PERSONA_WAKE).nicknames.join('，')} onChange={event => update('wake', { ...(draft.wake ?? DEFAULT_PERSONA_WAKE), nicknames: event.target.value.split(/[,，]/).map(value => value.trim()) })} /></Field>
+                <div className="flex items-center gap-0.5"><h3 className="text-xs font-medium">唤醒与续聊</h3><HelpTip label="唤醒与续聊">保存后即时生效。白名单内的私聊和群聊 @ 必定唤醒。</HelpTip></div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                  <label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={editingDisabled} checked={(draft.wake ?? DEFAULT_PERSONA_WAKE).wakeOnReply} onChange={event => update('wake', { ...(draft.wake ?? DEFAULT_PERSONA_WAKE), wakeOnReply: event.target.checked })} />引用机器人时唤醒</label>
+                  <div className="flex flex-wrap items-center gap-2"><div className="flex items-center gap-0.5"><label className="field-label" htmlFor="chat-persona-continuation">同人续聊时长</label><HelpTip label="同人续聊时长">回复后，同一发言者可在这段时间内续聊；0 表示关闭，最长 300 秒。</HelpTip></div><Input id="chat-persona-continuation" className="w-24" type="number" min={0} max={300} step={1} disabled={editingDisabled} value={(draft.wake ?? DEFAULT_PERSONA_WAKE).continuationMs / 1000} onChange={event => update('wake', { ...(draft.wake ?? DEFAULT_PERSONA_WAKE), continuationMs: Number(event.target.value) * 1000 })} /><span className="text-xs text-muted-foreground">秒</span></div>
+                </div>
+                <div className="row border-t pt-2"><Button disabled={!dirty || editingDisabled} onClick={() => void save()}>{saving ? '正在保存' : '保存人设设置'}</Button></div>
+              </div>
+</SettingsWindow></span>
+              </div>
+              {creating && <SettingsWindow title="内部标识" label="内部标识" description="已自动生成；只在关联现有配置时需要修改。"><div className="mt-3"><Field className="max-w-sm" label={nativeFormMetadata.persona.fields.id} description="已自动生成，通常无需修改。需要兼容既有引用时可调整；创建后固定。"><Input id="chat-persona-id" value={draft.id} disabled={!creating || editingDisabled} maxLength={128} onChange={event => update('id', event.target.value)} /></Field></div></SettingsWindow>}
+              <div className="editorgrid">
+              <div className="grid gap-2"><div className="flex items-center gap-0.5"><label className="field-label" htmlFor="chat-persona-identity">{nativeFormMetadata.persona.fields.identity}</label><HelpTip label={nativeFormMetadata.persona.fields.identity}>说明角色身份、关系边界和稳定事实。</HelpTip></div><Textarea id="chat-persona-identity" value={draft.identity} disabled={editingDisabled} rows={13} className="min-h-64 resize-y leading-5" placeholder="描述这个角色是谁" onChange={event => update('identity', event.target.value)} /></div>
+              <div className="grid gap-2"><div className="flex items-center gap-0.5"><label className="field-label" htmlFor="chat-persona-style">{nativeFormMetadata.persona.fields.style}</label><HelpTip label={nativeFormMetadata.persona.fields.style}>说明语气、措辞和表达边界。能力与权限由框架配置。</HelpTip></div><Textarea id="chat-persona-style" value={draft.style} disabled={editingDisabled} rows={13} className="min-h-64 resize-y leading-5" placeholder="描述这个角色如何表达" onChange={event => update('style', event.target.value)} /></div>
+              </div>
 
-  return <div className="page-stack" data-page="persona">
-    <PageHeading title="人设与形象" description="人设库只定义身份和表达风格。聊天方案可以选择关联人设，能力、访问授权和用户偏好仍分别管理。" actions={<Button variant="outline" onClick={reload} disabled={loading || saving || dirty && !blocked || deleteTarget !== null}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />
-    <NativeCatalogRecovery recovery={recovery} reading={loading || saving || deleteTarget !== null} onRead={reload} onReleased={() => { setSaveState('idle'); setWriteError(''); }} />
-    {loading && !catalog ? <Section scrollable title="人设库"><div className="flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取人设库</div></Section>
-      : !catalog ? <Section title="人设库不可用" description={loadError || '服务没有返回可识别的人设库。'}><EmptyState locked title="无法读取原生人设库" description="暂时无法读取人设内容，请稍后重试。" /></Section>
-        : <div className="grid items-start gap-5 lg:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
-          <Section scrollable title="人设库" description="这里保存可被聊天方案引用的人设。" actions={<Button id="persona-create-open" ref={createButton} size="sm" onClick={createPersona} disabled={dirty || editingDisabled}><Plus className="size-3.5" />新建人设</Button>}>
-            {catalog.personas.length > 0 && <div className="mb-4 grid gap-2 rounded-lg border border-dashed p-3">
-              <Button size="sm" variant="outline" onClick={useBuiltinPersona} disabled={templateDisabled}>使用内置小鲸鱼</Button>
-              <p className="text-xs leading-5 text-muted-foreground">完整角色草稿，身份定义与表达风格分开填写。只填入新的未保存草稿，不覆盖现有人设；保存后仍需在聊天方案中选择关联。</p>
-            </div>}
-            <div className="min-w-0">{catalog.personas.length === 0 ? <EmptyState title="还没有人设" description="从内置小鲸鱼创建完整角色草稿，身份定义与表达风格分开填写；也可使用上方新建人设。不会自动保存或启用；保存后仍需在聊天方案中选择关联。" action={<Button size="sm" onClick={useBuiltinPersona} disabled={templateDisabled}>使用内置小鲸鱼</Button>} /> : <VirtualList items={catalog.personas} getItemKey={persona => persona.id} estimateSize={64} itemClassName="pb-1.5">{persona => <Button key={persona.id} variant={!creating && selectedId === persona.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-2.5 text-left whitespace-normal" disabled={dirty || editingDisabled} onClick={() => choose(persona)}><UserRound className="size-4 shrink-0" /><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{persona.name}</strong><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{persona.id}</span></span></Button>}</VirtualList>}</div>
-          </Section>
-          <Section scrollable id={nativeFormMetadata.persona.id} title={creating ? '新建人设' : draft.name || '人设内容'} description="只描述这个角色是谁、如何表达；不要在这里写工具权限、触发条件或用户偏好。" footer={<SaveBar dirty={dirty} saving={saving} disabled={blocked || loading || deleteTarget !== null} message={stateMessage(saveState, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label={creating ? '创建人设' : '保存人设'}><Button variant="outline" onClick={() => navigate('model')}>查看聊天方案</Button></SaveBar>}>
-            <div className="grid gap-5">
-              <Field label={nativeFormMetadata.persona.fields.name}><Input value={draft.name} disabled={editingDisabled} maxLength={128} placeholder="日常伙伴" onChange={event => update('name', event.target.value)} /></Field>
-              <details key={selectedId ?? creationId} className="rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer text-xs font-medium">高级设置</summary><div className="mt-3"><Field label={nativeFormMetadata.persona.fields.id} description={creating ? '已自动生成，通常无需修改。需要兼容既有引用时可调整；创建后固定。' : '用于稳定关联，现有内部标识不可修改。'}><Input id="chat-persona-id" value={draft.id} disabled={!creating || editingDisabled} maxLength={128} onChange={event => update('id', event.target.value)} /></Field></div></details>
-              <Field label={nativeFormMetadata.persona.fields.identity} description="说明角色身份、关系边界和稳定事实。"><Textarea value={draft.identity} disabled={editingDisabled} className="h-44 resize-none leading-6" placeholder="描述这个角色是谁" onChange={event => update('identity', event.target.value)} /></Field>
-              <Field label={nativeFormMetadata.persona.fields.style} description="说明语气、措辞和表达边界，不包含能力授权。"><Textarea value={draft.style} disabled={editingDisabled} className="h-36 resize-none leading-6" placeholder="描述这个角色如何表达" onChange={event => update('style', event.target.value)} /></Field>
-              {!creating && selected && <details className="rounded-lg border border-destructive/30 p-3 text-xs leading-6"><summary className="cursor-pointer font-medium">删除此人设</summary><div className="mt-3 grid gap-3"><p>被方案引用时不能删除。确认后仅移除此人设，不删除会话、历史或授权。</p><Button id="persona-delete-open" ref={deleteButton} variant="destructive" disabled={dirty || editingDisabled} onClick={openDelete}><Trash2 className="size-3.5" />删除人设</Button></div></details>}
+              <div className="strip">身份与表达分开编辑；模型、能力与权限在各自设置中维护。</div>
               {fieldError && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" />{fieldError}</div>}
               {writeError && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown') && <Button size="sm" variant="outline" disabled={deleteTarget !== null || saving || loading} onClick={reload}>重新载入</Button>}</div>}
-            </div>
+            </div>;
+
+  if (!connected) return <div className="page-stack" data-page="persona"><PageHeading title="人设与唤醒" description="管理身份、表达风格和唤醒方式。" /><ConnectPrompt connect={connect} /></div>;
+
+  return <div className="page-stack" data-page="persona">
+    <PageHeading title="人设与唤醒" description="每个人设保存身份、表达风格和唤醒方式，随聊天方案选用。" actions={<Button variant="outline" onClick={reload} disabled={loading || saving || dirty && !blocked || deleteTarget !== null}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />
+    <NativeCatalogRecovery recovery={recovery} reading={loading || saving || deleteTarget !== null} onRead={reload} onReleased={() => { setSaveState('idle'); setWriteError(''); }} />
+    {loading && !catalog ? <Section title="人设库"><div className="flex min-h-32 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取人设库</div></Section>
+      : !catalog ? <Section title="人设库不可用" description={loadError || '服务没有返回可识别的人设库。'}><EmptyState locked title="无法读取原生人设库" description="暂时无法读取人设内容，请稍后重试。" /></Section>
+        : <div className="masterdetail editor-workspace">
+          <Section className="editor-directory" title="人设目录" actions={<Button id="persona-create-open" ref={createButton} size="sm" variant="ghost" onClick={createPersona} disabled={dirty || editingDisabled}><Plus className="size-3.5" />新建</Button>} footer={<span className="text-xs text-muted-foreground">{catalog.personas.length} 项人设</span>}>
+            {catalog.personas.length === 0 ? <p className="text-xs text-muted-foreground">还没有人设，可新建或使用内置小鲸鱼。</p> : <div className="masterlist" aria-label="人设目录">{catalog.personas.map((persona, index) => <button key={persona.id} type="button" className={!creating && selectedId === persona.id ? 'active' : ''} aria-pressed={!creating && selectedId === persona.id} disabled={dirty || editingDisabled} onClick={() => choose(persona)}><span className="letter">{String(index + 1).padStart(2, '0')}</span><span className="copy"><strong>{persona.name}</strong><span className="muted">{plans.snapshot?.plans.filter(plan => plan.personaId === persona.id).map(plan => plan.name).join('、') || (plans.snapshot ? '尚未关联方案' : '身份与表达风格')}</span></span></button>)}</div>}
           </Section>
+          <div className="stack editor-detail"><Section id={nativeFormMetadata.persona.id} actions={<span className="badge">人设草稿</span>} title={creating ? '新建人设' : draft.name || '人设内容'} footer={<div className="flex flex-wrap items-center gap-2"><SaveBar compact dirty={dirty} saving={saving} disabled={blocked || loading || deleteTarget !== null} message={stateMessage(saveState, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label={creating ? '创建人设' : '保存人设'} /><DshDeploymentManager compact api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="personas" selectedPersonaId={selectedId ?? ''} />{!creating && selected && <Button id="persona-delete-open" ref={deleteButton} size="sm" variant="destructive" className="ml-auto" disabled={dirty || editingDisabled} onClick={openDelete}><Trash2 className="size-3.5" />删除</Button>}</div>}>
+            {creating && creationDialogOpen ? <p className="small muted">在新建窗口中编辑人设草稿。</p> : editorFields}
+          </Section><div className="summaryline small"><span className="muted">需要新的完整角色草稿？</span><Button size="sm" variant="ghost" onClick={useBuiltinPersona} disabled={templateDisabled}>使用内置小鲸鱼</Button><span className="muted">创建草稿，保存后再在方案中选择。</span></div></div>
         </div>}
-    {catalog && <DshDeploymentManager compact navigate={navigate} api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="personas" />}
-    <AppearanceManager api={api} connected={connected} personaId={creating ? null : selectedId} personaDirty={dirty || editingDisabled} setDirty={setDirty} />
+    <Dialog open={creating && creationDialogOpen} onOpenChange={open => { if (!saving) setCreationDialogOpen(open); }}><DialogContent className="sm:max-w-5xl" showCloseButton={!saving}><DialogHeader><DialogTitle>新建人设</DialogTitle><DialogDescription>编辑新的草稿，保存后可在聊天方案中选择。</DialogDescription></DialogHeader>{creating && creationDialogOpen && editorFields}<DialogFooter><Button disabled={!dirty || editingDisabled} onClick={() => void save()}>{saving ? '正在创建' : '创建人设'}</Button><Button variant="ghost" disabled={saving} onClick={() => setCreationDialogOpen(false)}>返回编辑</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={deleteTarget !== null} onOpenChange={open => { if (!open) closeDelete(); }}>
       <DialogContent showCloseButton={!saving} finalFocus={deleteFinalFocus}>
-        <DialogHeader><DialogTitle>删除选中的人设？</DialogTitle><DialogDescription>只从人设库移除这一项，不能撤销；不会删除聊天方案、会话、历史、上下文、资源或授权。被方案引用的人设会由服务端拒绝删除。</DialogDescription></DialogHeader>
-        {deleteTarget && <div className="grid min-w-0 gap-4">
-          <p className="break-words rounded-lg border border-destructive/30 p-3 text-xs leading-6"><strong className="block">{deleteTarget.persona.name}</strong><span className="select-all break-all">{deleteTarget.persona.id}</span></p>
-          <Field label="输入完整人设标识以确认"><Input id="persona-delete-confirm-id" value={deleteConfirmation} autoComplete="off" spellCheck={false} disabled={saving || blocked} placeholder={deleteTarget.persona.id} onChange={event => { if (saveController.current || blocked || pendingDelete.current !== deleteTarget) return; confirmationValue.current = event.target.value; setDeleteConfirmation(event.target.value); }} /></Field>
+        <DialogHeader><DialogTitle>删除选中的人设？</DialogTitle><DialogDescription>删除后无法撤销。仍被聊天方案使用的人设不能删除。</DialogDescription></DialogHeader>
+        {deleteTarget && <div className="grid min-w-0 gap-2">
+          <p className="break-words rounded-lg border border-destructive/30 p-3 text-xs leading-6"><strong className="block">{deleteTarget.persona.name}</strong></p>
+          <Field label="输入人设名称确认"><Input id="persona-delete-confirm-id" value={deleteConfirmation} autoComplete="off" spellCheck={false} disabled={saving || blocked} placeholder={deleteTarget.persona.name} onChange={event => { if (saveController.current || blocked || pendingDelete.current !== deleteTarget) return; confirmationValue.current = event.target.value; setDeleteConfirmation(event.target.value); }} /></Field>
           {writeError && <p role="alert" className="text-xs leading-6 text-destructive">{writeError}{blocked && ' 请关闭确认并重新载入核对，不会自动重试。'}</p>}
         </div>}
-        <DialogFooter><Button id="persona-delete-cancel" variant="outline" disabled={saving} onClick={closeDelete}>{blocked ? '关闭确认' : '取消'}</Button><Button id="persona-delete-submit" variant="destructive" disabled={!deleteTarget || deleteConfirmation !== deleteTarget.persona.id || saving || blocked || loading} onClick={() => void removePersona()}>{saving && <LoaderCircle className="size-3.5 animate-spin" />}{saving ? '正在删除' : '确认删除人设'}</Button></DialogFooter>
+        <DialogFooter><Button id="persona-delete-cancel" variant="outline" disabled={saving} onClick={closeDelete}>{blocked ? '关闭确认' : '取消'}</Button><Button id="persona-delete-submit" variant="destructive" disabled={!deleteTarget || deleteConfirmation !== deleteTarget.persona.name || saving || blocked || loading} onClick={() => void removePersona()}>{saving && <LoaderCircle className="size-3.5 animate-spin" />}{saving ? '正在删除' : '确认删除人设'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </div>;

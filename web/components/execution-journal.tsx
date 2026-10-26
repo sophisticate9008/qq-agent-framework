@@ -1,3 +1,4 @@
+import { DetailsWindow, ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
 import { ExecutionManagement } from './execution-management.tsx';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
@@ -7,6 +8,7 @@ import { executionCancelLabel, executionContinuationLabel, executionConversation
 import { Field, Section, StatusPill } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
+import { HelpTip } from './help-tip.tsx';
 import { VirtualTableBody } from './virtual-list.tsx';
 
 function readErrorMessage(error: unknown): string {
@@ -37,8 +39,10 @@ function technicalFields(record: ExecutionJournalEntry): readonly { readonly lab
   ];
 }
 
-export function ExecutionJournal({ api, connected }: { readonly api: ApiClient; readonly connected: boolean }) {
+export function ExecutionJournal({ api, connected, embedded = false }: { readonly api: ApiClient; readonly connected: boolean; readonly embedded?: boolean }) {
   const [page, setPage] = useState<ExecutionJournalPage | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
   const deferredFilter = useDeferredValue(filter);
@@ -68,7 +72,7 @@ export function ExecutionJournal({ api, connected }: { readonly api: ApiClient; 
     readController.current = controller;
     moreController.current = null;
     const current = () => !controller.signal.aborted && epoch.current === request && connection.current.api === api && connection.current.connected;
-    if (loadedApi.current !== api || !connected) { setPage(null); setSelectedId(null); }
+    if (loadedApi.current !== api || !connected) { setPage(null); setSelectedId(null); setDetailsOpen(false); setManageOpen(false); }
     loadedApi.current = api;
     setLoading(connected);
     setMoreLoading(false);
@@ -183,29 +187,31 @@ export function ExecutionJournal({ api, connected }: { readonly api: ApiClient; 
   const selectionUnconfirmed = available !== null && selectedId !== null && selected === null;
   const selectedState = selected ? executionPresentation(selected) : null;
 
-  return <Section id={nativeFormMetadata.journal.id} title={nativeFormMetadata.journal.title} description="查看处理与超时记录；隔离执行可明确核对持久证据，或预览保留上下文恢复。"
-    actions={<><Button size="sm" variant="outline" disabled={!connected || loading || moreLoading} onClick={reloadJournal}><RefreshCw className="size-3.5" />重新读取日志</Button>{(loading || moreLoading) && <Button size="sm" variant="ghost" onClick={cancelRead}>取消读取</Button>}</>}>
-    <details data-execution-journal>
-      <summary className="cursor-pointer text-xs font-medium">查看执行记录与结果确认</summary>
-      <div className="mt-3 grid gap-3">
-        <p className="text-xs leading-5 text-muted-foreground">协作停止受理不代表已经停止；提醒发送未知时不自动重发。记录按存储位置分页，并非开始时间排序；分页期间状态可能变化，没有总数或完整历史的保证。本页不实时跟踪，请重新读取核对。</p>
+  const journalActions = <><HelpTip label="执行记录保留">已结束记录默认保留 7 天，容量紧张时优先回收较旧记录。未完成记录继续保留。点击会话可查看完整处理结果。</HelpTip><Button size="sm" variant="outline" disabled={!connected || loading || moreLoading} onClick={reloadJournal}><RefreshCw className="size-3.5" />重新读取日志</Button>{(loading || moreLoading) && <Button size="sm" variant="ghost" onClick={cancelRead}>取消读取</Button>}</>;
+
+  return <Section id={nativeFormMetadata.journal.id} title={nativeFormMetadata.journal.title} className={embedded ? 'rounded-none border-0 shadow-none [&>.panel-header]:hidden' : undefined} 
+    actions={embedded ? undefined : journalActions}>
+    <div data-execution-journal>
+      <div className="grid gap-2">
+        {embedded && !available && <div className="flex flex-wrap justify-end gap-2">{journalActions}</div>}
         {!connected && <p role="status" className="text-xs text-muted-foreground">连接后才能核对任务执行日志。</p>}
         {(loading || moreLoading) && <p role="status" className="flex items-center gap-2 text-xs"><LoaderCircle className="size-3.5 animate-spin" />正在读取日志{available ? '；当前显示上次读取的状态' : ''}</p>}
         {error && <p role="alert" className="text-xs leading-5 text-destructive">{error}{available ? ' 当前保留的记录尚未重新确认。' : ''}</p>}
         {notice && <p role="status" className="text-xs leading-5 text-muted-foreground">{notice}</p>}
         {available && <>
-          <div className="flex flex-wrap items-end justify-between gap-3"><Field label={nativeFormMetadata.journal.fields.filter} className="min-w-48 flex-1"><Input id="execution-journal-filter" placeholder="会话、状态或已知技术标识" maxLength={160} value={filter} onChange={event => setFilter(event.target.value)} /></Field><span className="text-xs text-muted-foreground">已读取 {available.items.length} 条 · 当前匹配 {filtered.length} 条</span></div>
+          <div className="flex flex-wrap items-end justify-between gap-3"><Field label={nativeFormMetadata.journal.fields.filter} className="max-w-64"><Input id="execution-journal-filter" placeholder="会话、状态或已知技术标识" maxLength={160} value={filter} onChange={event => setFilter(event.target.value)} /></Field><span className="text-xs text-muted-foreground">已读取 {available.items.length} 条 · 当前匹配 {filtered.length} 条</span>{embedded && <div className="ml-auto flex flex-wrap items-center gap-2">{journalActions}</div>}</div>
           {available.partial && <p role="status" className="text-xs text-status-warning">服务仅提供部分记录；缺失状态保持未知，不以成功或空日志代替。</p>}
-          <div className="h-96 overflow-auto overscroll-contain rounded-lg border" data-execution-journal-scroll role="region" tabIndex={0} aria-label="执行记录列表" aria-busy={loading || moreLoading}>
-            <table className="w-full min-w-[36rem] text-left text-xs" aria-rowcount={filtered.length + 1}>
-              <thead className="sticky top-0 z-10 bg-background"><tr className="border-b text-muted-foreground"><th scope="col" className="px-3 py-2 font-medium">会话与记录</th><th scope="col" className="px-3 py-2 font-medium">登记时间</th><th scope="col" className="px-3 py-2 font-medium">处理状态</th><th scope="col" className="px-3 py-2 font-medium">该会话后续</th></tr></thead>
-              <VirtualTableBody items={filtered} getItemKey={executionKey} estimateSize={58} columns={4}>{(item, index) => {
+          <div className={embedded ? 'max-h-96 overflow-auto overscroll-contain' : 'max-h-96 overflow-auto overscroll-contain rounded-lg border'} data-execution-journal-scroll role="region" tabIndex={0} aria-label="执行记录列表" aria-busy={loading || moreLoading}>
+            <table className="w-full min-w-[36rem] text-left text-[11px]" aria-rowcount={filtered.length + 1}>
+              <thead className={embedded ? 'sr-only' : 'sticky top-0 z-10 bg-muted'}><tr className="border-b text-muted-foreground"><th scope="col" className="px-2 py-1 font-medium">时间</th><th scope="col" className="px-2 py-1 font-medium">状态</th><th scope="col" className="px-2 py-1 font-medium">所属会话</th><th scope="col" className="px-2 py-1 font-medium">处理摘要</th><th scope="col" className="px-2 py-1 font-medium">操作</th></tr></thead>
+              <VirtualTableBody items={filtered} getItemKey={executionKey} estimateSize={22} columns={5}>{(item, index) => {
                 const state = executionPresentation(item);
-                return <tr data-execution-row={index} className={item.id === selectedId ? 'bg-muted/50' : ''}>
-                  <td className="px-3 py-2"><Button size="sm" variant="ghost" aria-label={`查看执行记录 ${index + 1}`} aria-pressed={item.id === selectedId} onClick={() => { setSelectedId(item.id); setCopyStatus(''); }}>{executionConversationLabel(item.binding.conversationId)}</Button></td>
-                  <td className="whitespace-nowrap px-3 py-2"><time dateTime={new Date(item.admittedAt).toISOString()}>{timeLabel(item.admittedAt)}</time></td>
-                  <td className="px-3 py-2"><StatusPill tone={state.tone}>{state.label}</StatusPill></td>
-                  <td className="px-3 py-2">{executionContinuationLabel(item)}</td>
+                return <tr data-execution-row={index} className={item.id === selectedId ? 'bg-accent/50' : 'odd:bg-muted/15 even:bg-muted/45 hover:bg-accent/30 focus-within:bg-accent/30'}>
+                  <td className="whitespace-nowrap px-2 py-px leading-[18px]"><time dateTime={new Date(item.admittedAt).toISOString()} title={timeLabel(item.admittedAt)}>{new Date(item.admittedAt).toLocaleTimeString('zh-CN', { hour12: false })}</time></td>
+                  <td className="px-2 py-px leading-[18px]"><span className={`whitespace-nowrap ${state.tone === 'warning' ? 'text-status-warning' : state.tone === 'success' ? 'text-status-success' : 'text-muted-foreground'}`}>{state.label}</span></td>
+                  <td className="whitespace-nowrap px-2 py-px leading-[18px]">{executionConversationLabel(item.binding.conversationId)}</td>
+                  <td className="max-w-80 px-2 py-px leading-[18px]"><span className="block truncate" title={`${state.explanation} ${executionContinuationLabel(item)}`}>{state.explanation}</span></td>
+                  <td className="px-2 py-px leading-[18px]"><Button size="xs" variant="ghost" className="h-[18px] min-h-0 px-1 py-0 text-xs text-primary" aria-label={`查看执行记录 ${index + 1}`} aria-pressed={item.id === selectedId} onClick={() => { setSelectedId(item.id); setCopyStatus(''); setDetailsOpen(true); }}>详情</Button></td>
                 </tr>;
               }}</VirtualTableBody>
             </table>
@@ -213,7 +219,7 @@ export function ExecutionJournal({ api, connected }: { readonly api: ApiClient; 
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">{available.next ? '尚有未读取的后续位置。' : '本次分页暂未提供后续位置；不代表任务均已结束。'}</p>{available.next && <Button size="sm" variant="outline" disabled={loading || moreLoading || pagingBlocked} onClick={() => void loadMore()}>继续加载执行记录</Button>}</div>
           {selectionUnconfirmed && <p role="status" className="text-xs leading-5 text-muted-foreground" data-execution-selection-unconfirmed>所选执行尚未在本次已读取批次中确认；未加载不代表记录不存在。可继续加载或主动选择另一条记录，不会把旧状态当成新结果。</p>}
-          {selected && selectedState && <div className="h-64 overflow-auto overscroll-contain rounded-lg border p-4" data-execution-detail role="region" tabIndex={0} aria-label="所选执行记录详情">
+          <DetailsWindow open={detailsOpen && selected !== null} onOpenChange={setDetailsOpen} title="处理记录详情" description="查看这轮处理、超时与发送结果。">{selected && selectedState && <div className="p-1" data-execution-detail>
             <div className="flex flex-wrap items-center gap-2"><h3 className="text-xs font-medium">{executionConversationLabel(selected.binding.conversationId)} · 所选执行</h3><StatusPill tone={selectedState.tone}>{selectedState.label}</StatusPill></div>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedState.explanation}</p>
             <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-muted-foreground">该会话后续</dt><dd className="mt-1">{executionContinuationLabel(selected)}。{selected.isolated ? '其他会话可独立处理，不会自动换会话或清空上下文。' : '这不代表已有其他调用授权。'}</dd></div>
@@ -224,12 +230,11 @@ export function ExecutionJournal({ api, connected }: { readonly api: ApiClient; 
               <div><dt className="text-muted-foreground">会话代次</dt><dd className="mt-1">第 {selected.binding.generation} 代，仅归属本次绑定</dd></div></dl>
             {executionLateLabel(selected) && <p className="mt-3 text-xs leading-5 text-muted-foreground">{executionLateLabel(selected)}</p>}
             {selected.lastError && <p className="mt-3 text-xs text-muted-foreground">此记录包含异常标记；不会直接展示上游错误原文或据此重试。</p>}
-            <details className="mt-3" key={selected.id}><summary className="cursor-pointer text-xs text-muted-foreground">技术标识（按需展开复制）</summary><dl className="mt-3 grid gap-2">{technicalFields(selected).map(field => <div className="grid gap-1 text-xs" key={field.label}><dt className="text-muted-foreground">{field.label}</dt><dd className="flex min-w-0 items-start gap-2"><code className="min-w-0 flex-1 select-text break-all">{field.value}</code><Button size="icon-xs" variant="ghost" aria-label={`复制${field.label}`} onClick={() => void copyIdentifier(field.label, field.value)}><Clipboard className="size-3.5" /></Button></dd></div>)}</dl><p className="mt-2 text-xs" role="status">{copyStatus}</p></details>
-          </div>}
-          {selected && <ExecutionManagement key={selected.id} api={api} connected={connected} entry={selected} onRead={reloadJournal} />}
-          <p className="text-xs leading-5 text-muted-foreground">模型提问和工具确认仍在所属 QQ 会话内处理；管理核对不重放原请求。</p>
+            <div className="mt-3"><ReadOnlyDetails title="处理记录技术详情" label="技术详情" description="标识和原始原因码，可选中文本复制。"><TechnicalDetails fields={[...technicalFields(selected), { label: '技术原因', value: selected.lastError ?? '无' }]} /></ReadOnlyDetails>{selected.isolated && <Button size="sm" variant="outline" onClick={() => { setDetailsOpen(false); setManageOpen(true); }}>处理未完成任务</Button>}</div>
+          </div>}</DetailsWindow>
+          <DetailsWindow open={manageOpen && selected !== null} onOpenChange={setManageOpen} title="处理未完成任务" description="核对这轮处理的结果，再选择恢复操作。">{selected && <ExecutionManagement key={selected.id} api={api} connected={connected} entry={selected} onRead={reloadJournal} />}</DetailsWindow>
         </>}
       </div>
-    </details>
+    </div>
   </Section>;
 }

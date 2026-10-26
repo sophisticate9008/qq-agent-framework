@@ -98,7 +98,8 @@ function parse<Result>(value: unknown, read: (source: Record<string, unknown>) =
 
 export function parseNativeUsageSnapshot(value: unknown): UsageSnapshot | null {
   return parse(value, source => {
-    if (source.source !== 'chat-ledger' || source.resetAvailable !== false) invalid();
+    if (source.source !== 'chat-ledger') invalid();
+    const resetAvailable = bool(source.resetAvailable);
     const metadata = coverage(source);
     const limit = count(source.limit);
     if (limit < 1 || limit > 500) invalid();
@@ -127,7 +128,7 @@ export function parseNativeUsageSnapshot(value: unknown): UsageSnapshot | null {
       if (selection.source !== 'query' && selection.source !== 'observed-history' && selection.source !== 'operator-example' && selection.source !== 'builtin-reference') invalid();
       priceSelection = { model: text(selection.model, 160), provider: selection.provider === null ? null : text(selection.provider, 160), source: selection.source };
     }
-    return { native: true, coverage: metadata, resetAvailable: false, source: 'chat-ledger', revision: text(source.revision), generatedAt: new Date(time(source.generatedAt)).toISOString(),
+    return { native: true, coverage: metadata, resetAvailable, source: 'chat-ledger', revision: text(source.revision), generatedAt: new Date(time(source.generatedAt)).toISOString(),
       currency: text(source.currency, 16), symbol: text(source.symbol, 16), totals: totals(source.totals, metadata.records > 0), conversations, limit, limited: bool(source.limited),
       unavailable, priceVersion: source.priceVersion === null ? null : text(source.priceVersion), priceTable: table, nowTier: tier, ledger: null,
       pricingEstimateAvailable: estimate, pricingEstimateMissingReasons: missingReasons, ...(priceSelection === undefined ? {} : { priceSelection }) };

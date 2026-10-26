@@ -334,11 +334,10 @@ async function assertDirtyNavigation(page: Page, destination: 'access' | 'adapte
   if (discard) await page.locator(`[data-page="${destination}"]`).waitFor();
 }
 
-async function showCountedAuthorization(page: Page): Promise<void> {
-  const summary = page.getByText('高级：旧模式授权与次数', { exact: true });
-  await summary.waitFor();
-  if (!await summary.evaluate(element => element.closest('details')?.open === true)) await summary.click();
-  await page.locator('#chat-authorization input').first().waitFor();
+async function showWhitelistAccess(page: Page): Promise<void> {
+  await page.locator('#native-access').waitFor();
+  assert.equal(await page.locator('#chat-authorization').count(), 0);
+  assert.equal(await page.locator('#native-tool-permissions').count(), 0);
 }
 
 async function showAdvancedDeployment(page: Page): Promise<void> {
@@ -408,68 +407,9 @@ async function restoreDeploymentControls(page: Page, state: FixtureState): Promi
 
 async function exerciseAuthorization(page: Page, state: FixtureState): Promise<void> {
   await navigate(page, 'access');
-  await showCountedAuthorization(page);
-  const card = page.locator('#chat-authorization');
-  const accessMode = page.getByRole('region', { name: '访问模式', exact: true });
-  await input(card, '群号').waitFor();
-  await assertBounded(card, 384);
-  await card.getByRole('button', { name: '添加会话授权', exact: true }).click();
-  await card.getByText('会话类型', { exact: true }).last().locator('xpath=ancestor::label[1]').locator('select').selectOption('private');
-  await input(card, '用户号').fill('420002');
-  await input(card, '模型提交次数').last().fill('15');
-  await input(card, '回复发送次数').last().fill('15');
-  const save = card.getByRole('button', { name: '保存新授权', exact: true });
-  await enabled(save, false);
-  await card.getByRole('checkbox').check();
-  await enabled(save, true);
-  await input(card, '回复发送次数').last().fill('16');
-  assert.equal(await card.getByRole('checkbox').isChecked(), false);
-  await enabled(save, false);
-  await card.getByRole('checkbox').check();
-  await save.click();
-  await accessMode.getByText(/授权已保存/).waitFor();
-  assert.equal(state.authorization.grants.length, 2);
-  assert.equal(state.authorization.grants[1]?.sendUses, 16);
-  assert.equal(countPosts(state, '/api/chat/authorization'), 1);
-  await assertBounded(card, 384);
-  await input(card, '模型提交次数').first().fill('31');
-  await navigate(page, 'adapters');
-  assert.equal(await page.getByRole('dialog', { name: '还有未保存的更改', exact: true }).count(), 0);
-  assert.equal(countPosts(state, '/api/chat/authorization'), 1);
-  await navigate(page, 'access');
-  await showCountedAuthorization(page);
-  assert.equal(await input(card, '模型提交次数').first().inputValue(), '31');
-  await card.getByRole('button', { name: '撤销更改', exact: true }).click();
-  for (const outcome of ['unknown', 'conflict'] as const) {
-    state.authorizationOutcome = outcome;
-    await input(card, '模型提交次数').first().fill('32');
-    await card.getByRole('checkbox').check();
-    const before = countPosts(state, '/api/chat/authorization');
-    await save.click();
-    await accessMode.getByRole('alert').filter({ hasText: outcome === 'unknown' ? '无法确认' : '其他窗口更新' }).waitFor();
-    await enabled(save, false);
-    assert.equal(await input(card, '模型提交次数').first().isDisabled(), true);
-    await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), false);
-    await page.waitForTimeout(250);
-    assert.equal(countPosts(state, '/api/chat/authorization'), before + 1);
-    state.authorizationOutcome = 'success';
-    const reread = page.waitForResponse(response => response.request().method() === 'GET'
-      && new URL(response.url()).pathname === '/api/chat/authorization');
-    await card.getByRole('button', { name: '重新读取', exact: true }).click();
-    const response = await reread;
-    assert.equal(response.status(), 200, `${outcome}: authorization reread failed`);
-    assert.deepEqual(await response.json(), state.authorization, `${outcome}: authorization reread DTO differs`);
-    await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), false);
-    const recoveryPosts = countPosts(state, '/api/chat/authorization');
-    const acknowledge = accessMode.getByRole('button', { name: '我已核对，允许新的管理操作', exact: true });
-    await enabled(acknowledge, true);
-    await acknowledge.click();
-    assert.equal(countPosts(state, '/api/chat/authorization'), recoveryPosts);
-    await enabled(card.getByRole('button', { name: '添加会话授权', exact: true }), true);
-    assert.equal(await input(card, '模型提交次数').first().inputValue(), '32');
-    await card.getByRole('button', { name: '撤销更改', exact: true }).click();
-    assert.equal(await input(card, '模型提交次数').first().inputValue(), '20');
-  }
+  await showWhitelistAccess(page);
+  assert.equal(countPosts(state, '/api/chat/authorization'), 0);
+  assert.equal(await page.getByRole('button', { name: '保存新授权', exact: true }).count(), 0);
 }
 
 async function exerciseDeployment(page: Page, state: FixtureState): Promise<void> {
@@ -620,7 +560,7 @@ async function exerciseRuntime(page: Page, state: FixtureState): Promise<void> {
       assert.equal(await card.getByText('协议连接中断', { exact: true }).count(), 0);
       await card.getByRole('button', { name: '去设置', exact: true }).click();
       await page.locator('[data-page="access"]').waitFor();
-      await showCountedAuthorization(page);
+      await showWhitelistAccess(page);
       await navigate(page, 'adapters');
       await card.getByText(scenario.badge, { exact: true }).waitFor();
     } else if (scenario.condition === 'follow') {
@@ -702,17 +642,17 @@ async function exercisePresentation(page: Page): Promise<void> {
       for (const destination of ['access', 'adapters'] as const) {
         await page.evaluate(target => { location.hash = `#${target}`; }, destination);
         await page.locator(`[data-page="${destination}"]`).waitFor();
-        if (destination === 'access') await showCountedAuthorization(page);
+        if (destination === 'access') await showWhitelistAccess(page);
         else await page.locator('#dsh-deployment').getByRole('button', { name: '应用并启动／更新聊天', exact: true }).waitFor();
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
-        if (destination === 'access') await assertBounded(page.locator('#chat-authorization'), 384);
+        if (destination === 'access') await page.locator('#native-access').waitFor();
         else {
           await assertBounded(page.locator('#chat-runtime'), 512);
           await assertBounded(page.locator('#dsh-deployment'), 384);
         }
         if (viewport.width === 390) {
           await page.getByRole('button', { name: '展开本页目录', exact: true }).click();
-          const title = destination === 'access' ? '消息处理授权' : '应用聊天设置到 DSH';
+          const title = destination === 'access' ? '消息白名单' : '应用聊天设置到 DSH';
           await page.locator('[aria-label="本页目录"]:visible').first().getByRole('button', { name: title, exact: true }).click();
         }
         const filename = new URL(`${destination}-${theme}-${viewport.width}-${runId}.png`, output);
@@ -723,10 +663,10 @@ async function exercisePresentation(page: Page): Promise<void> {
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
   await navigate(page, 'access');
-  await showCountedAuthorization(page);
+  await showWhitelistAccess(page);
   await page.getByRole('button', { name: '搜索工作台', exact: true }).click();
-  await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).fill('消息处理授权');
-  await page.locator('[role="option"][data-search-title="消息处理授权"]').first().click();
+  await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).fill('消息白名单');
+  await page.locator('[role="option"][data-search-title="消息白名单"]').first().click();
   await page.getByRole('combobox', { name: '搜索设置或功能', exact: true }).waitFor({ state: 'hidden' });
 }
 
@@ -780,112 +720,22 @@ async function exerciseCapabilitySelection(page: Page, fixture: NativeCapability
 }
 
 async function exerciseCapabilityApproval(page: Page, fixture: NativeCapabilityFixture, posts: readonly string[]): Promise<void> {
+  const authorization = await fixture.api('/api/chat/authorization');
+  await navigate(page, 'model');
   await page.getByText('高级工具设置', { exact: true }).click();
   const card = page.locator('#native-chat-capabilities');
-  const preview = card.getByRole('button', { name: '检查方案', exact: true });
-  const approve = card.getByRole('button', { name: '确认使用', exact: true });
-  const revoke = card.getByRole('button', { name: '取消确认', exact: true });
-  const confirm = card.getByRole('checkbox', { name: '我确认使用这个工具组合', exact: true });
   await card.getByRole('heading', { name: '聊天工具', exact: true }).waitFor();
-  const advanced = card.locator('details').filter({ has: card.page().getByText('高级设置', { exact: true }) });
-  assert.equal(await advanced.getAttribute('open'), null);
-  assert.equal(await card.getByText('外部工具授权未由桥核验', { exact: true }).isVisible(), false);
-  await advanced.locator('summary').click();
-  const authorization = await fixture.api('/api/chat/authorization');
-  const profile = await readFile(fixture.profilePath);
-  const credentials = await readFile(fixture.credentialsPath);
-  assert.equal((await fixture.api('/api/chat/capabilities')).approval, null);
-  await enabled(preview, true);
-  const count = posts.length;
-  await enabled(approve, false);
-  assert.equal(posts.length, count);
-  await preview.click();
-  await card.getByText(/群聊设置/).waitFor();
-  await card.getByText(/私聊设置/).waitFor();
-  await enabled(approve, false);
-  assert.equal(posts.filter(path => path === '/api/chat/capabilities/preview').length, 1);
-  assert.deepEqual(await readFile(fixture.profilePath), profile);
-  assert.deepEqual(await readFile(fixture.credentialsPath), credentials);
-  await confirm.check();
-  await approve.click();
-  await card.getByRole('status').filter({ hasText: '已确认，请到“连接与安全”应用。' }).waitFor();
-  const approved = await fixture.api('/api/chat/capabilities');
-  assert(isRecord(approved.approval));
-  assert.equal(approved.approval.authority, 'owner');
-  assert.equal(approved.approval.externalTools, 'separate-runtime-authorization-required');
-  assert(isRecord(approved.catalog));
-  assert.equal(approved.catalog.externalToolAuthorizationVerified, false);
+  for (const title of ['检查方案', '确认使用', '取消确认']) assert.equal(await card.getByRole('button', { name: title, exact: true }).count(), 0);
   assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization);
-  assert.deepEqual(await readFile(fixture.profilePath), profile);
-  assert.deepEqual(await readFile(fixture.credentialsPath), credentials);
-  await enabled(approve, false);
-  assert.equal(await confirm.isChecked(), false);
-  await preview.click();
-  await card.getByText(/已确认方案与本次检查一致/).waitFor();
-  await enabled(revoke, false);
-  await confirm.check();
-  await revoke.click();
-  await card.getByRole('status').filter({ hasText: '已取消确认，正在运行的工具不受影响。' }).waitFor();
-  assert.equal((await fixture.api('/api/chat/capabilities')).approval, null);
-  assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization);
-  assert.deepEqual(await readFile(fixture.profilePath), profile);
-  assert.deepEqual(await readFile(fixture.credentialsPath), credentials);
-  assert.deepEqual(posts.filter(path => path.startsWith('/api/chat/capabilities/')), [
-    '/api/chat/capabilities/preview', '/api/chat/capabilities/approval', '/api/chat/capabilities/preview', '/api/chat/capabilities/revoke'
-  ]);
+  assert.equal(posts.some(path => path.startsWith('/api/chat/capabilities/')), false);
 }
 
 async function exerciseToolDelegation(page: Page, fixture: NativeCapabilityFixture): Promise<void> {
-  const accessMode = page.getByRole('region', { name: '访问模式', exact: true });
   const original = await fixture.api('/api/chat/authorization');
-  const legacy = { version: original.version, grants: nativeRecords(original.grants) };
-  for (const grant of legacy.grants) {
-    assert.equal(Object.hasOwn(grant, 'toolDelegationUses'), false);
-    assert.equal(Object.hasOwn(grant, 'cancelUses'), false);
-  }
-  assert.equal(revision(validateNativeChatAuthorization(legacy)), revision(legacy));
-  const rewritten = await fixture.api('/api/chat/authorization', { revision: original.revision, ...legacy });
-  assert.equal(rewritten.revision, original.revision);
-  const explicitZero = { ...legacy, grants: legacy.grants.map((grant, index) => index === 0 ? { ...grant, toolDelegationUses: 0 } : grant) };
-  assert.notEqual(revision(validateNativeChatAuthorization(explicitZero)), revision(validateNativeChatAuthorization(legacy)));
   await navigate(page, 'access');
-  await showCountedAuthorization(page);
-  const card = page.locator('#chat-authorization');
-  const toggle = card.getByRole('checkbox', { name: /^启用有限工具委派/ }).first();
-  const confirm = card.getByRole('checkbox', { name: /^我确认这些数值/ });
-  const save = card.getByRole('button', { name: '保存新授权', exact: true });
-  await toggle.waitFor();
-  assert.equal(await toggle.isChecked(), false);
-  assert.equal(await card.getByText('工具委派尝试次数（按轮）', { exact: true }).count(), 0);
-  const sendUses = legacy.grants[0]?.sendUses;
-  assert(typeof sendUses === 'number');
-  await input(card, '回复发送次数').first().fill(String(sendUses + 1));
-  await enabled(save, false);
-  await confirm.check();
-  await save.click();
-  await accessMode.getByRole('status').filter({ hasText: '授权已保存' }).waitFor();
-  const unrelated = await fixture.api('/api/chat/authorization');
-  const unrelatedGrants = nativeRecords(unrelated.grants);
-  assert.notEqual(unrelated.version, original.version);
-  assert.deepEqual(unrelatedGrants, legacy.grants.map((grant, index) => index === 0 ? { ...grant, sendUses: sendUses + 1 } : grant));
-  await toggle.check();
-  assert.equal(await input(card, '工具委派尝试次数（按轮）').inputValue(), '0');
-  await input(card, '工具委派尝试次数（按轮）').fill('2');
-  await enabled(save, false);
-  await confirm.check();
-  await save.click();
-  await accessMode.getByRole('status').filter({ hasText: '授权已保存' }).waitFor();
-  const delegated = await fixture.api('/api/chat/authorization');
-  assert.notEqual(delegated.version, unrelated.version);
-  assert.deepEqual(nativeRecords(delegated.grants), unrelatedGrants.map((grant, index) => index === 0 ? { ...grant, toolDelegationUses: 2 } : grant));
-  await toggle.uncheck();
-  await confirm.check();
-  await save.click();
-  await accessMode.getByRole('status').filter({ hasText: '授权已保存' }).waitFor();
-  const disabled = await fixture.api('/api/chat/authorization');
-  assert.notEqual(disabled.version, delegated.version);
-  assert.deepEqual(disabled.grants, unrelated.grants);
-  assert.equal((await fixture.api('/api/chat/capabilities')).approval, null);
+  await showWhitelistAccess(page);
+  assert.equal(await page.getByText('工具委派尝试次数（按轮）', { exact: true }).count(), 0);
+  assert.deepEqual(await fixture.api('/api/chat/authorization'), original);
 }
 
 async function exercisePlanDeletion(page: Page, fixture: NativeCapabilityFixture, posts: readonly string[]): Promise<Record<string, boolean>> {
@@ -954,10 +804,7 @@ async function exerciseWhitelistDefaults(page: Page, fixture: NativeCapabilityFi
   const beforePlans = await fixture.api('/api/chat/plans');
   const beforeAccess = await fixture.api('/api/chat/access');
   await navigate(page, 'access');
-  const accessMode = page.getByRole('region', { name: '访问模式', exact: true });
-  await accessMode.getByText(/已保存白名单模式/).waitFor();
-  assert.equal(await accessMode.locator('input').count(), 0);
-  assert.equal(await accessMode.getByText('高级：旧模式授权与次数', { exact: true }).count(), 0);
+  await showWhitelistAccess(page);
   await navigate(page, 'model');
   const card = page.locator('#native-chat-capabilities');
   await page.getByText('高级工具设置', { exact: true }).click();

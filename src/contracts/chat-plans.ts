@@ -1,3 +1,5 @@
+import { isPersonaWake, validatePersonaWake, type PersonaWake } from './persona-wake.ts'
+
 export const CHAT_PLAN_REASONING_EFFORTS = ['off', 'low', 'medium', 'high', 'max'] as const
 
 export type ChatPlanReasoningEffort = typeof CHAT_PLAN_REASONING_EFFORTS[number]
@@ -42,6 +44,7 @@ export interface ChatPersona {
   readonly name: string
   readonly identity: string
   readonly style: string
+  readonly wake?: PersonaWake
 }
 
 const PLAN_KEYS = [
@@ -139,7 +142,8 @@ export function validateChatPlan(value: unknown): NormalizedChatPlan {
 
 export function isChatPersona(value: unknown): value is ChatPersona {
   return isRecord(value)
-    && hasExactKeys(value, PERSONA_KEYS)
+    && hasExactKeys(value, Object.hasOwn(value, 'wake') ? [...PERSONA_KEYS, 'wake'] : PERSONA_KEYS)
+    && (!Object.hasOwn(value, 'wake') || isPersonaWake(value.wake))
     && isChatPlanIdentifier(value.id)
     && boundedString(value.name, CHAT_PLAN_LIMITS.name, false)
     && boundedString(value.identity, CHAT_PLAN_LIMITS.personaSection, false)
@@ -152,7 +156,8 @@ export function validateChatPersona(value: unknown): ChatPersona {
     id: value.id,
     name: value.name,
     identity: value.identity,
-    style: value.style
+    style: value.style,
+    ...(value.wake ? { wake: validatePersonaWake(value.wake) } : {})
   })
 }
 

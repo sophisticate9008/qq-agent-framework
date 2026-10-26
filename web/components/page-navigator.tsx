@@ -1,5 +1,7 @@
+import { Popover } from '@base-ui/react/popover';
+import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { ArrowUp, ChevronDown, ListTree } from 'lucide-react';
+import { ArrowUp, ListTree } from 'lucide-react';
 import { Button } from './ui/button.tsx';
 import { indexPage, resolvePageFocusTarget, resolvePageSearchTarget, type PageIndexEntry } from '../lib/page-index.ts';
 
@@ -20,13 +22,16 @@ function sameIndex(left: readonly PageIndexEntry[], right: readonly PageIndexEnt
   });
 }
 
-export function PageNavigator({ children, target, onIndexChange, onTargetHandled }: {
+export function PageNavigator({ children, target, onIndexChange, onTargetHandled, toolbarTargetId }: {
   children: ReactNode;
+  toolbarTargetId?: string;
   target?: PageNavigationTarget | null;
   onIndexChange?(entries: readonly PageIndexEntry[]): void;
   onTargetHandled?(): void;
 }) {
   const root = useRef<HTMLDivElement>(null);
+  const [toolbarHost, setToolbarHost] = useState<HTMLElement | null>(null);
+  useEffect(() => { setToolbarHost(toolbarTargetId ? document.getElementById(toolbarTargetId) : null); }, [toolbarTargetId]);
   const [entries, setEntries] = useState<readonly PageIndexEntry[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [active, setActive] = useState('');
@@ -163,22 +168,22 @@ export function PageNavigator({ children, target, onIndexChange, onTargetHandled
 
   const results = entries.filter(entry => entry.kind === 'section');
 
-  return <div className="page-explorer">
-    <aside className="page-explorer-navigation" aria-label="页内目录">
-      <div className="rounded-xl border bg-card p-3 shadow-xs">
-        <div className="mb-3 flex items-center justify-between gap-2"><span className="flex items-center gap-2 text-xs font-semibold"><ListTree className="size-4 text-primary" />本页目录</span><Button type="button" variant="ghost" size="icon-xs" aria-label="返回本页顶部" title="返回本页顶部" onClick={() => { setExpanded(false); root.current?.scrollIntoView({ behavior: 'auto', block: 'start' }); }}><ArrowUp className="size-3.5" /></Button></div>
-        <button type="button" className="page-explorer-toggle mt-2 w-full items-center justify-between rounded-md px-1 py-1.5 text-xs text-muted-foreground" aria-label="展开本页目录" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><span>{`${results.length} 个分组`}</span><ChevronDown className={`size-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} /></button>
-        <nav aria-label="本页目录" className={`page-explorer-links ${expanded ? 'is-expanded' : ''}`}>
-          <div className="grid gap-1 py-2">{results.map(entry => <button key={entry.id} type="button" aria-current={active === entry.id ? 'location' : undefined} onClick={() => jump(entry)} className="page-explorer-link"><span className="block text-xs leading-5">{entry.title}</span></button>)}</div>
-          {results.length === 0 && <p className="px-2 py-3 text-xs leading-5 text-muted-foreground" role="status">页面加载后会显示可用分组</p>}
+  const directory = <Popover.Root open={expanded} onOpenChange={setExpanded} modal={false}>
+    <Popover.Trigger render={<Button type="button" variant="ghost" size="icon" />} aria-label="展开本页目录" title="本页目录"><ListTree className="size-4" /></Popover.Trigger>
+    <Popover.Portal><Popover.Positioner side="bottom" align="end" sideOffset={6} collisionPadding={8} className="z-50">
+      <Popover.Popup finalFocus={false} className="w-56 max-w-[calc(100vw-2rem)] rounded-md border bg-popover p-1.5 text-popover-foreground shadow-lg outline-none">
+        <div className="mb-1 flex items-center justify-between px-2"><Popover.Title className="text-base font-medium">本页目录</Popover.Title><Button type="button" variant="ghost" size="icon" aria-label="返回本页顶部" onClick={() => { setExpanded(false); root.current?.scrollIntoView({ behavior: 'auto', block: 'start' }); }}><ArrowUp className="size-4" /></Button></div>
+        <nav aria-label="本页目录" className="grid max-h-[60vh] gap-1 overflow-auto">
+          {results.map(entry => <button key={entry.id} type="button" aria-current={active === entry.id ? 'location' : undefined} onClick={() => jump(entry)} className="page-explorer-link text-sm leading-[1.45]">{entry.title}</button>)}
+          {results.length === 0 && <p className="p-2 text-xs text-muted-foreground" role="status">页面加载后会显示可用分组</p>}
         </nav>
-      </div>
-    </aside>
-    <div className="page-explorer-content">
-      {searchNotice && <div role="status" className="mb-4 rounded-lg border px-4 py-3 text-xs leading-6">
-        <span>{searchNotice}</span><Button size="xs" variant="ghost" className="ml-2" onClick={() => { setSearchNotice(''); onTargetHandled?.(); }}>关闭定位提示</Button>
-      </div>}
-      <div ref={root}>{children}</div>
-    </div>
+      </Popover.Popup>
+    </Popover.Positioner></Popover.Portal>
+  </Popover.Root>;
+
+  return <div className="min-w-0">
+    {toolbarHost ? createPortal(directory, toolbarHost) : !toolbarTargetId && <div className="mb-2 flex justify-end">{directory}</div>}
+    {searchNotice && <div role="status" className="mb-2 flex flex-wrap items-center gap-1.5 rounded border px-2 py-1.5 text-xs leading-[1.45]"><span className="min-w-0 flex-1">{searchNotice}</span><Button size="sm" variant="ghost" onClick={() => { setSearchNotice(''); onTargetHandled?.(); }}>关闭定位提示</Button></div>}
+    <div ref={root}>{children}</div>
   </div>;
 }

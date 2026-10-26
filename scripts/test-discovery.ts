@@ -8,7 +8,7 @@ const integrationFiles = new Set([
   'native-chat-runtime', 'native-chat-gateway', 'native-account-gateway', 'native-message-sources-default', 'native-access-default',
   'native-capability-default', 'native-bootstrap-default-path', 'native-bootstrap-example',
   'native-activity-runtime', 'native-configuration-compatibility', 'native-configuration-recovery',
-  'native-runtime-compatibility-ui', 'native-admission-follow', 'native-control-hooks', 'cli-bootstrap', 'cli-lifecycle',
+  'native-admission-follow', 'native-control-hooks', 'cli-bootstrap', 'cli-lifecycle',
 ]);
 
 /** Longer real-time acceptance stays explicit; these tests never become part of the fast suite. */

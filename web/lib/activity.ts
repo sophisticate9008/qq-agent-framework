@@ -229,7 +229,7 @@ export interface UsageCoverage {
 export interface UsageSnapshot {
   readonly native?: true;
   readonly coverage?: UsageCoverage;
-  readonly resetAvailable?: false;
+  readonly resetAvailable?: boolean;
   readonly source: 'chat-ledger';
   readonly revision: string | null;
   readonly generatedAt: string;

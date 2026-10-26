@@ -11,6 +11,8 @@ export interface ActivityEntry {
   readonly conversationId: string | null;
   readonly summary: string;
   readonly content?: string | null;
+  readonly count?: number;
+  readonly errorCode?: string | null;
 }
 
 export interface RecentActivitySnapshot {
@@ -42,7 +44,8 @@ export function parseRecentActivity(value: unknown): RecentActivitySnapshot | nu
       || typeof entry.summary !== 'string' || entry.summary.trim() === '' || entry.summary.length > 2048
       || entry.content !== undefined && entry.content !== null && (typeof entry.content !== 'string' || entry.content.length > 2000)) return null;
     ids.add(entry.id);
-    items.push({ id: entry.id, at: entry.at, level: entry.level as ActivityEntry['level'], type: entry.type as ActivityType,
+    items.push({ count: typeof entry.count === 'number' && Number.isSafeInteger(entry.count) && entry.count > 0 ? entry.count : 1,
+      errorCode: typeof entry.errorCode === 'string' && /^[A-Z][A-Z_]{1,63}$/.test(entry.errorCode) ? entry.errorCode : null, id: entry.id, at: entry.at, level: entry.level as ActivityEntry['level'], type: entry.type as ActivityType,
       conversationId: entry.conversationId as string | null, summary: entry.summary,
       content: (entry.type === 'received' || entry.type === 'sent') && typeof entry.content === 'string' ? entry.content : null });
   }

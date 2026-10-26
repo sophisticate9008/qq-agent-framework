@@ -5,32 +5,27 @@ import { NativeCatalogRecovery } from './native-catalog-recovery.tsx';
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
 import { validModelProviderApi, type ModelProviderApi } from '../../src/host/model-provider-protocols.ts';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, KeyRound, LoaderCircle, Plus, RefreshCw, Server, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { CircleAlert, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
-import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
+import { ConnectPrompt, Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { Button } from './ui/button.tsx';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog.tsx';
+import { HelpTip } from './help-tip.tsx';
+import { SettingsWindow } from './settings-window.tsx';
 import { Input } from './ui/input.tsx';
-import { VirtualList, type VirtualListHandle } from './virtual-list.tsx';
 import { ProviderApiInput } from './provider-api-input.tsx';
 import { newCatalogIdentifier } from '../lib/catalog-identifier.ts';
 import { ProviderReferenceManager, retainedProviderReferenceId } from './provider-reference-manager.tsx';
+import { useReadResource } from '../lib/use-read-resource.ts';
+import { parsePlanCatalog } from '../lib/chat-plans.ts';
+import { parseChatAssistant } from '../lib/chat-assistant.ts';
+import { providerReferences } from '../lib/provider-references.ts';
 
 export interface ProviderModel {
   readonly id: string;
   readonly name: string;
-}
-
-const modelRowKeys = new WeakMap<ProviderModel, number>();
-let nextModelRowKey = 0;
-
-function modelRowKey(model: ProviderModel): number {
-  const existing = modelRowKeys.get(model);
-  if (existing !== undefined) return existing;
-  const key = nextModelRowKey++;
-  modelRowKeys.set(model, key);
-  return key;
 }
 
 interface ProviderDraft {
@@ -58,6 +53,10 @@ interface ProviderWrite extends ProviderDraft {
 }
 
 type SaveState = 'idle' | 'saved' | 'busy' | 'conflict' | 'unknown';
+
+function ProviderField({ id, label, tip, children }: { readonly id: string; readonly label: string; readonly tip?: string; readonly children: ReactNode }) {
+  return <Field className="provider-field" id={id} label={label} tip={tip}>{children}</Field>;
+}
 
 function parseCatalog(value: unknown): ProviderCatalog | null {
   const record = asRecord(value);
@@ -98,11 +97,11 @@ function stateForError(error: unknown): SaveState {
 }
 
 function stateMessage(state: SaveState, dirty: boolean): string {
-  if (state === 'saved') return '提供方目录已保存；未测试连通性，也未同步外部运行环境。';
+  if (state === 'saved') return '提供方已保存。';
   if (state === 'busy') return '另一项写入正在进行。请重新载入后再编辑，不会自动重试。';
   if (state === 'conflict') return '目录已被其他窗口修改。请重新载入后再编辑。';
   if (state === 'unknown') return '无法确认保存结果。请重新载入核对，不会自动重试。';
-  return dirty ? '有未保存的更改，请保存或撤销后再切换、新建或删除。' : '目录与已保存内容一致。';
+  return dirty ? '未保存' : '未修改';
 }
 
 function validationError(provider: ProviderDraft, catalog: ProviderCatalog, creating: boolean): string {
@@ -141,6 +140,7 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
   const [selectedId, setSelectedId] = useState<string | null>(retained?.selectedId ?? null);
   const [draft, setDraft] = useState<ProviderDraft | null>(retained?.draft ?? null);
   const [creating, setCreating] = useState(retained?.creating ?? false);
+  const [creationDialogOpen, setCreationDialogOpen] = useState(false);
   const [keyEntered, setKeyEntered] = useState(false);
   const [clearApiKey, setClearApiKey] = useState(retained?.clearApiKey ?? false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -154,8 +154,13 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
   const [reloadVersion, setReloadVersion] = useState(0);
   const [referenceEditing, setReferenceEditing] = useState(false);
   const keyInput = useRef<HTMLInputElement>(null);
-  const modelList = useRef<VirtualListHandle>(null);
-  const revealNewModel = useRef(false);
+  const [modelFilter, setModelFilter] = useState('');
+  const [modelEditor, setModelEditor] = useState<{ readonly ownerId: string; readonly index: number | null; readonly value: ProviderModel } | null>(null);
+  const [modelEditorOpen, setModelEditorOpen] = useState(false);
+  const [modelDelete, setModelDelete] = useState<{ readonly ownerId: string; readonly index: number; readonly value: ProviderModel } | null>(null);
+  const [modelError, setModelError] = useState('');
+  const plans = useReadResource(api, '/api/chat/plans', connected, parsePlanCatalog);
+  const assistant = useReadResource(api, '/api/chat/assistant', connected, parseChatAssistant);
   const lifecycle = useRef<AbortController | null>(null);
   const writeController = useRef<AbortController | null>(null);
   const connection = useRef({ connected, api });
@@ -170,12 +175,6 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
   draftOwner.current = { api: draftApi.current, catalog, draft, selectedId, creating, clearApiKey, dirty };
   const blocked = recovery.blocked || saveState === 'busy' || saveState === 'conflict' || saveState === 'unknown';
   const locked = loading || saving || blocked || referenceEditing;
-
-  useEffect(() => {
-    if (!revealNewModel.current || !draft) return;
-    revealNewModel.current = false;
-    modelList.current?.scrollToIndex(draft.models.length - 1);
-  }, [draft]);
 
   useEffect(() => {
     if (draftApi.current !== api) return;
@@ -200,6 +199,7 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
     setClearApiKey(false);
     setConfirmDelete(false);
     setConfirmReload(false);
+    setModelEditor(null); setModelEditorOpen(false); setModelDelete(null); setModelFilter(''); setCreationDialogOpen(false);
     const prior = draftOwner.current.api === api ? draftOwner.current : null;
     draftApi.current = api;
     const preserveDraft = connected && prior?.dirty === true && prior.catalog !== null && prior.draft !== null;
@@ -270,6 +270,7 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
     clearKeyInput();
     setClearApiKey(false);
     setSelectedId(null);
+    setCreationDialogOpen(true);
     setDraft({ id: newCatalogIdentifier('provider'), name: '', api: 'openai-responses', baseUrl: '', enabled: true, models: [] });
     setCreating(true);
     clearFeedback();
@@ -329,6 +330,7 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
       setSelectedId(preferred?.id ?? null);
       setDraft(preferred ? editable(preferred) : null);
       setCreating(false);
+      setCreationDialogOpen(false);
       recovery.complete(operationToken);
       setSaveState('saved');
     } catch (error) {
@@ -376,80 +378,65 @@ export function ProviderManager({ api, connected, connect, setDirty, preferredPr
     void commit(catalog.providers.filter(provider => provider.id !== selected.id).map(editable), null);
   }
 
-  function updateModel(index: number, key: keyof ProviderModel, value: string): void {
-    if (!draft) return;
-    update('models', draft.models.map((model, modelIndex) => {
-      if (modelIndex !== index) return model;
-      const changed = { ...model, [key]: value };
-      modelRowKeys.set(changed, modelRowKey(model));
-      return changed;
-    }));
+  function editModel(index: number | null): void {
+    if (!draft || locked || index === null && draft.models.length >= 128) return;
+    const value = index === null ? { id: '', name: '' } : draft.models[index];
+    if (!value) return;
+    if (modelEditor?.ownerId !== draft.id || modelEditor.index !== index) setModelEditor({ ownerId: draft.id, index, value });
+    setModelError(''); setModelEditorOpen(true);
   }
+
+  function commitModel(): void {
+    if (!draft || !modelEditor || modelEditor.ownerId !== draft.id || locked) return;
+    const next = { id: modelEditor.value.id.trim(), name: modelEditor.value.name.trim() };
+    if (!/^[a-z0-9][a-z0-9._:/-]{0,127}$/i.test(next.id) || next.id.includes('..') || next.id.includes('//') || next.id.endsWith('/')) { setModelError('请填写有效的 API 模型 ID，最多 128 个字符。'); return; }
+    if (draft.models.some((model, index) => index !== modelEditor.index && model.id === next.id)) { setModelError('此 API 模型 ID 已在当前服务中登记。'); return; }
+    if (next.name.length > 128 || /[\u0000-\u001f\u007f]/.test(next.name)) { setModelError('显示名称最多 128 个字符，不能包含控制字符。'); return; }
+    update('models', modelEditor.index === null ? [...draft.models, next] : draft.models.map((model, index) => index === modelEditor.index ? next : model));
+    setModelEditorOpen(false); setModelEditor(null);
+  }
+
+  const connectionFields = !draft ? <p className="small muted">从左侧选择模型服务，或新建服务开始配置。</p> : <div className="stack provider-editor">
+          <div className="formgrid">
+            <ProviderField id="provider-name" label="服务名称" tip="用于目录和聊天方案展示。"><Input id="provider-name" value={draft.name} disabled={locked} maxLength={128} placeholder="例如：我的模型服务" onChange={event => update('name', event.target.value)} /></ProviderField>
+            <ProviderField id="provider-api" label="接口协议" tip="选择常用协议，或输入自定义 DSH api 标识。"><ProviderApiInput key={selectedId ?? 'new-provider'} value={draft.api} disabled={locked} onChange={value => update('api', value)} /></ProviderField>
+            <div className="spanall"><ProviderField id="provider-base-url" label="基础地址" tip="填写完整接口基础地址，地址中不含查询参数或密钥。"><Input id="provider-base-url" type="url" value={draft.baseUrl} maxLength={2048} disabled={locked} placeholder="https://api.example.com/v1" onChange={event => update('baseUrl', event.target.value)} /></ProviderField></div>
+            <div className="spanall"><ProviderField id="provider-api-key" label={selected?.apiKeyConfigured ? '替换密钥' : 'API 密钥'} tip="密钥只写入；留空保留原值。提交或离开编辑后清空尚未提交的密钥。"><Input id="provider-api-key" ref={keyInput} type="password" autoComplete="new-password" spellCheck={false} maxLength={4096} disabled={locked || clearApiKey} placeholder={selected?.apiKeyConfigured ? '已保存 · 留空保留原密钥' : '仅在服务需要认证时填写'} onChange={event => { setKeyEntered(event.target.value.length > 0); clearFeedback(); }} /></ProviderField></div>
+          </div>
+          <div className="row between"><div className="row"><label className="row small"><input type="checkbox" checked={draft.enabled} disabled={locked} onChange={event => update('enabled', event.target.checked)} />在模型目录中启用</label>{!creating && selected?.apiKeyConfigured && <label className="row small"><input type="checkbox" checked={clearApiKey} disabled={locked} onChange={event => { if (locked) return; clearKeyInput(); setClearApiKey(event.target.checked); clearFeedback(); }} />保存时清除已保存密钥</label>}</div><SettingsWindow title="连接高级设置" description="维护内部标识与 HTTP 兼容选项，与当前服务一起保存。"><div className="stack"><ProviderField id="provider-id" label={nativeFormMetadata.provider.fields.id} tip="新建时自动生成，创建后固定。"><Input id="provider-id" value={draft.id} disabled={locked || !creating} maxLength={128} className="font-mono" onChange={event => update('id', event.target.value)} /></ProviderField><ToggleField label={nativeFormMetadata.provider.fields.allowInsecureHttp} description="允许需要明文 HTTP 的远程接口。" checked={draft.allowInsecureHttp === true} disabled={locked} onChange={value => update('allowInsecureHttp', value)} /></div></SettingsWindow></div>
+          <div className="strip">密钥只写入；留空保留原值。保存服务后，模型目录才会供方案和助手选择。</div>
+        </div>;
 
   if (!connected) return <ConnectPrompt connect={connect} />;
 
-  return <div className="grid min-w-0 gap-5">
+  return <div className="grid min-w-0 gap-2">
     <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { setSaveState('idle'); setWriteError(''); }} />
-    <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5">
-      <CircleAlert className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" />
-      <p><strong>这里仅保存框架自己的提供方目录。</strong><span className="mt-1 block text-muted-foreground">保存不代表接口可用；不会发起模型测试，也不会自动同步外部 DSH 运行环境或切换已有会话。</span></p>
+    {confirmReload && <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-5" role="alert" aria-label="确认重新载入提供方目录"><span className="mr-auto min-w-0 flex-1 basis-56">重新载入将丢弃本页未保存的更改和未提交的密钥。保留当前内容不会重新提交，也不会解除保存限制。</span><Button variant="ghost" size="sm" disabled={loading || saving} onClick={() => setConfirmReload(false)}>保留当前内容</Button><Button variant="destructive" size="sm" disabled={loading || saving} onClick={discardAndReload}>放弃更改并重新载入</Button></div>}
+    {(fieldError || writeError || blocked) && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive" role="alert"><CircleAlert className="mt-0.5 size-4 shrink-0" /><span>{writeError || fieldError || stateMessage(saveState, dirty)}</span></div>}
+    <div className="masterdetail editor-workspace">
+      <Section className="editor-directory" title="模型服务目录" actions={<Button size="sm" variant="ghost" disabled={dirty || locked || !catalog || catalog.providers.length >= 128} onClick={create}><Plus className="size-3.5" />新建</Button>} footer={<div className="row"><span className="small muted">{catalog?.providers.length ?? 0} 项服务</span><Button variant="ghost" size="sm" disabled={loading || saving} onClick={reload}><RefreshCw className={loading ? 'size-3 animate-spin' : 'size-3'} />重读</Button></div>}>
+        {loading ? <p className="row small muted" role="status"><LoaderCircle className="size-3.5 animate-spin" />正在读取目录</p> : !catalog ? <p className="text-xs text-destructive" role="alert">{loadError || '暂时无法读取提供方，请重新载入。'}</p> : catalog.providers.length === 0 ? <p className="small muted">新建模型服务，登记连接与模型。</p> : <div className="masterlist" role="group" aria-label="选择模型提供方">{catalog.providers.map((provider, index) => <button key={provider.id} type="button" className={!creating && selectedId === provider.id ? 'active' : ''} disabled={dirty || locked} onClick={() => choose(provider)} aria-pressed={!creating && selectedId === provider.id}><span className="letter">{String(index + 1).padStart(2, '0')}</span><span className="copy"><strong>{provider.name}</strong><span className="muted">{provider.enabled ? '已启用' : '未启用'} · {provider.models.length} 个模型</span></span></button>)}</div>}
+      </Section>
+      <div className="stack editor-detail">
+      {!loading && catalog && <>
+      <Section id={nativeFormMetadata.provider.id} title={creating ? '新建模型服务' : selected?.name || '模型服务'} actions={draft && <StatusPill tone={draft.enabled ? 'success' : 'neutral'}>{draft.enabled ? '已启用' : '未启用'}</StatusPill>} footer={draft && <div className="row">
+        <SaveBar compact dirty={dirty} saving={saving} disabled={blocked || loading || referenceEditing} message={stateMessage(saveState, dirty)} onSave={save} onReset={blocked ? undefined : reset} label={creating ? '创建提供方' : '保存提供方'} />
+        {selected && !onUseModel && <SettingsWindow title="模型使用者" label="使用者与引用" description="方案与助手保留的模型选择；引用更改单独保存。"><ProviderReferenceManager key={selected.id} api={api} connected={connected} providerId={selected.id} revision={catalog.revision} providers={catalog.providers} disabled={loading || saving || blocked || dirty} setDirty={setDirty} onEditingChange={setReferenceEditing} /></SettingsWindow>}
+        <span className="push small muted">{dirty ? '未保存草稿' : '已载入'}</span>
+        {!creating && selected && <Button variant="destructive" size="sm" disabled={dirty || locked || confirmDelete} onClick={() => setConfirmDelete(true)}>删除服务</Button>}
+      </div>}>
+        {creating && creationDialogOpen ? <p className="small muted">在新建窗口中编辑服务草稿。</p> : connectionFields}
+      </Section>
+      {draft && <Section title="模型目录" actions={<Button size="sm" variant="outline" disabled={locked || draft.models.length >= 128} onClick={() => editModel(null)}><Plus className="size-3.5" />添加模型</Button>}>
+        <div className="row mb-2"><Input aria-label="搜索模型目录" className="max-w-[270px]" value={modelFilter} onChange={event => setModelFilter(event.target.value)} placeholder="搜索模型显示名称或 API 标识" /><span className="push small muted">显示名称用于选择，API 标识用于实际请求</span></div>
+        <div className="tablewrap" role="group" aria-label="可用模型列表"><table><thead><tr><th>模型显示名称</th><th>API 模型 ID</th><th>使用者</th><th>操作</th></tr></thead><tbody>{draft.models.map((model, index) => ({ model, index })).filter(({ model }) => `${model.name} ${model.id}`.toLowerCase().includes(modelFilter.trim().toLowerCase())).map(({ model, index }) => <tr key={index}><td>{model.name || model.id}</td><td className="font-mono">{model.id}</td><td className="muted">{!plans.snapshot || !assistant.snapshot || plans.error || assistant.error ? '待核对' : providerReferences(draft.id, plans.snapshot, assistant.snapshot).filter(reference => reference.model === model.id).map(reference => reference.name).join('、') || '无引用'}</td><td><div className="row"><Button size="sm" variant="link" disabled={locked} onClick={() => editModel(index)}>编辑</Button><Button size="sm" variant="link" disabled={locked} onClick={() => setModelDelete({ ownerId: draft.id, index, value: model })}>删除</Button>{onUseModel && <Button size="sm" variant="link" disabled={dirty || locked || !selected?.enabled || !selected.models.some(saved => saved.id === model.id)} onClick={() => { const saved = selected?.models.find(saved => saved.id === model.id); if (selected?.enabled && saved && !dirty && !locked) onUseModel(selected, saved); }}>用于当前方案</Button>}</div></td></tr>)}</tbody></table>{draft.models.length === 0 && <p className="small muted p-3">还没有模型，添加后保存服务即可选择。</p>}</div>
+      </Section>}
+      </>}
+      </div>
     </div>
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <span className="text-xs text-muted-foreground">{catalog ? `${catalog.providers.length} 个提供方 · ${catalog.providers.reduce((total, provider) => total + provider.models.length, 0)} 个模型` : '提供方与模型集中维护，聊天方案按目录选择。'}</span>
-      <Button variant="outline" disabled={loading || saving} onClick={reload}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入目录</Button>
-    </div>
-    {confirmReload && <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5" role="alert" aria-label="确认重新载入提供方目录"><span className="mr-auto min-w-0 flex-1 basis-56">重新载入将丢弃本页未保存的更改和未提交的密钥。保留当前内容不会重新提交，也不会解除保存限制。</span><Button variant="ghost" disabled={loading || saving} onClick={() => setConfirmReload(false)}>保留当前内容</Button><Button variant="destructive" disabled={loading || saving} onClick={discardAndReload}>放弃更改并重新载入</Button></div>}
-    {(fieldError || writeError || blocked) && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs leading-5 text-destructive" role="alert"><CircleAlert className="mt-0.5 size-3.5 shrink-0" /><span>{writeError || fieldError || stateMessage(saveState, dirty)}</span></div>}
-    {loading ? <Section scrollable title="提供方目录"><div className="flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取提供方目录</div></Section>
-      : !catalog ? <Section scrollable title="提供方目录不可用"><EmptyState locked title="暂时无法读取提供方" description={loadError || '服务没有返回可识别的目录，请重新载入后再编辑。'} /></Section>
-        : <div className="grid items-start gap-5 lg:grid-cols-[minmax(14rem,0.32fr)_minmax(0,1fr)]">
-          <Section scrollable title="提供方目录" description="按显示名称选择接口并维护其模型。最多 128 个提供方。" actions={<Button size="sm" disabled={dirty || locked || catalog.providers.length >= 128} onClick={create}><Plus className="size-3.5" />新建提供方</Button>}>
-            {catalog.providers.length === 0 ? <EmptyState title="还没有模型提供方" description="添加提供方，填写名称、接口类型和基础地址；需要认证时填写密钥。录入服务商的 API 模型 ID 并保存后，即可在聊天方案中选择。" action={<Button size="sm" disabled={dirty || locked} onClick={create}><Plus className="size-3.5" />添加提供方</Button>} />
-              : <VirtualList items={catalog.providers} getItemKey={provider => provider.id} estimateSize={74} itemClassName="pb-1.5">{provider => <Button key={provider.id} variant={!creating && selectedId === provider.id ? 'secondary' : 'ghost'} className="h-auto w-full justify-start px-3 py-3 text-left whitespace-normal" disabled={dirty || locked} onClick={() => choose(provider)} aria-pressed={!creating && selectedId === provider.id}>
-                <Server className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1"><strong className="block truncate text-xs font-medium">{provider.name}</strong><span className="mt-1 block truncate text-[10px] text-muted-foreground">{provider.api} · {provider.models.length} 个模型</span></span><StatusPill tone={provider.enabled ? 'success' : 'neutral'}>{provider.enabled ? '启用' : '停用'}</StatusPill>
-              </Button>}</VirtualList>}
-          </Section>
-          <Section scrollable id={nativeFormMetadata.provider.id} title={creating ? '新建提供方' : selected?.name || nativeFormMetadata.provider.title} description="接口配置与模型名称分别维护；密钥仅写入，不会回显。" actions={draft ? <StatusPill tone={dirty ? 'warning' : 'neutral'}>{dirty ? '尚未保存' : '已载入'}</StatusPill> : undefined} footer={draft ? <>
-            {confirmDelete && <div className="flex w-full flex-wrap items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs" role="alert"><span className="mr-auto min-w-0 flex-1 basis-48 break-words">确认从目录删除「{selected?.name}」？此操作会同时移除其模型和已保存密钥；若被聊天方案引用，服务可能拒绝删除。</span><Button variant="ghost" disabled={locked} onClick={() => setConfirmDelete(false)}>取消</Button><Button variant="destructive" disabled={dirty || locked} onClick={remove}>确认删除</Button></div>}
-            <SaveBar dirty={dirty} saving={saving} disabled={blocked || loading} message={stateMessage(saveState, dirty)} onSave={save} onReset={blocked ? undefined : reset} label={creating ? '创建提供方' : '保存提供方'}>
-              {!creating && <Button variant="destructive" disabled={dirty || locked || confirmDelete} onClick={() => setConfirmDelete(true)}><Trash2 className="size-3.5" />删除提供方</Button>}
-            </SaveBar>
-          </> : undefined}>
-            {!draft ? <EmptyState title="集中管理接口与模型" description="从左侧选择提供方，或新建一个提供方开始配置。" /> : <div className="grid gap-5">
-              <div className="grid gap-5 sm:grid-cols-2">
-                <Field label={nativeFormMetadata.provider.fields.name} description="用于列表和聊天方案展示，不是接口参数。"><Input id="provider-name" value={draft.name} disabled={locked} maxLength={128} placeholder="例如：我的模型服务" onChange={event => update('name', event.target.value)} /></Field>
-                <Field label={nativeFormMetadata.provider.fields.type} description="下拉快速选择，输入名称搜索，也可填写自定义 DSH api 标识。实际支持情况以服务渠道和 DSH 为准，不会自动切换协议。"><ProviderApiInput key={selectedId ?? 'new-provider'} value={draft.api} disabled={locked} onChange={value => update('api', value)} /></Field>
-              </div>
-              <Field label={nativeFormMetadata.provider.fields.baseUrl} description="填写 DSH 要使用的基础地址，不含查询参数或密钥；建议使用 HTTPS。"><Input id="provider-base-url" type="url" value={draft.baseUrl} maxLength={2048} disabled={locked} placeholder="https://api.example.com/v1" onChange={event => update('baseUrl', event.target.value)} /></Field>
-              {(draft.baseUrl.startsWith('http://') || draft.allowInsecureHttp) && <ToggleField label={nativeFormMetadata.provider.fields.allowInsecureHttp} description="远程 HTTP 会明文传输 API 密钥和消息。仅在了解风险且确需使用此地址时允许；不影响协议端连接设置。" checked={draft.allowInsecureHttp === true} disabled={locked} onChange={value => update('allowInsecureHttp', value)} />}
-              <ToggleField label={nativeFormMetadata.provider.fields.enabled} description="控制目录中的可选状态，不代表已经连接或切换运行中的模型。" checked={draft.enabled} disabled={locked} onChange={value => update('enabled', value)} />
-              <div className="grid gap-3 rounded-lg border bg-muted/20 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2"><span className="flex items-center gap-2 text-xs font-medium"><KeyRound className="size-3.5" />API 密钥</span><StatusPill tone="neutral">{selected?.apiKeyConfigured ? '已保存密钥 · 不回显' : '未保存密钥'}</StatusPill></div>
-                <Field label={selected?.apiKeyConfigured ? nativeFormMetadata.provider.fields.replaceKey : nativeFormMetadata.provider.fields.fillKey} description="留空保留已保存的密钥；提交后无论成功或失败，输入都会清空。切页或关闭编辑时未提交的密钥也会清空。">
-                  <Input id="provider-api-key" ref={keyInput} type="password" autoComplete="new-password" spellCheck={false} maxLength={4096} disabled={locked || clearApiKey} placeholder={selected?.apiKeyConfigured ? '留空不更换' : '仅在需要认证时填写'} onChange={event => { setKeyEntered(event.target.value.length > 0); clearFeedback(); }} />
-                </Field>
-                {!creating && selected?.apiKeyConfigured && <ToggleField label={nativeFormMetadata.provider.fields.clearKey} description="仅在明确打开此选项并保存时清除；留空不会清除。" checked={clearApiKey} disabled={locked} onChange={value => { if (locked) return; clearKeyInput(); setClearApiKey(value); clearFeedback(); }} />}
-              </div>
-              <div className="grid min-w-0 gap-3">
-                <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-xs font-medium">模型列表 <span className="text-muted-foreground">({draft.models.length}/128)</span></h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">API 模型 ID 按服务商填写一次；显示名称可选，留空时使用 API ID。</p></div><Button size="sm" variant="outline" disabled={locked || draft.models.length >= 128} onClick={() => { revealNewModel.current = true; update('models', [...draft.models, { id: '', name: '' }]); }}><Plus className="size-3.5" />添加模型</Button></div>
-                <div className="h-60 min-h-0 overflow-auto overscroll-contain rounded-lg border p-3" role="group" aria-label="可用模型列表">
-                  {draft.models.length === 0 ? <div className="flex h-full items-center justify-center px-4 text-center text-xs leading-6 text-muted-foreground">还没有模型。添加后，聊天方案才能从此提供方选择模型。</div>
-                    : <VirtualList items={draft.models} getItemKey={modelRowKey} estimateSize={142} listRef={modelList} itemClassName="pb-3">{(model, index) => <div className="grid gap-3 rounded-lg border bg-background p-3">
-                      <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium text-muted-foreground">模型 {index + 1}</span><Button size="icon-xs" variant="ghost" disabled={locked} aria-label={`删除模型 ${index + 1}`} onClick={() => update('models', draft.models.filter((_, modelIndex) => modelIndex !== index))}><Trash2 className="size-3.5" /></Button></div>
-                      <div className="grid gap-3 sm:grid-cols-2"><Field label={nativeFormMetadata.provider.fields.modelId}><Input id={`provider-model-id-${index}`} value={model.id} maxLength={128} disabled={locked} placeholder="服务商要求的模型标识" onChange={event => updateModel(index, 'id', event.target.value)} /></Field><Field label={nativeFormMetadata.provider.fields.modelName}><Input id={`provider-model-name-${index}`} value={model.name} maxLength={128} disabled={locked} placeholder="留空使用 API 模型 ID" onChange={event => updateModel(index, 'name', event.target.value)} /></Field></div>
-                      {onUseModel && <Button size="sm" variant="outline" disabled={dirty || locked || !selected?.enabled || !selected.models.some(saved => saved.id === model.id)} onClick={() => { const saved = selected?.models.find(saved => saved.id === model.id); if (selected?.enabled && saved && !dirty && !locked) onUseModel(selected, saved); }}>在聊天方案中使用此模型</Button>}
-                    </div>}</VirtualList>}
-                </div>
-              </div>
-              <details key={selectedId ?? 'new-provider'} className="rounded-lg border bg-muted/20 p-4">
-                <summary className="cursor-pointer text-xs font-medium">高级设置</summary>
-                <div className="mt-4"><Field label={nativeFormMetadata.provider.fields.id} description={creating ? '已自动生成，通常无需修改。仅需兼容已有聊天方案引用时，按原标识登记；保存后固定。' : '用于关联聊天方案和密钥，创建后不可修改；显示名称可以随时修改。'}><Input id="provider-id" value={draft.id} disabled={locked || !creating} maxLength={128} className="font-mono text-xs" onChange={event => update('id', event.target.value)} /></Field></div>
-              </details>
-            </div>}
-          </Section>
-        </div>}
-    {catalog && selected && !onUseModel && <ProviderReferenceManager key={selected.id} api={api} connected={connected} providerId={selected.id}
-      revision={catalog.revision} providers={catalog.providers} disabled={loading || saving || blocked || dirty} setDirty={setDirty}
-      onEditingChange={setReferenceEditing} />}
+    <Dialog open={creating && creationDialogOpen} onOpenChange={open => { if (!saving) { if (!open) clearKeyInput(); setCreationDialogOpen(open); } }}><DialogContent className="sm:max-w-3xl" showCloseButton={!saving}><DialogHeader><DialogTitle>新建模型服务</DialogTitle><DialogDescription>登记连接参数，保存后添加服务支持的模型。</DialogDescription></DialogHeader>{creating && creationDialogOpen && connectionFields}{(fieldError || writeError) && <p role="alert" className="text-xs text-destructive">{fieldError || writeError}</p>}<DialogFooter><Button disabled={!dirty || locked} onClick={save}>{saving ? '正在创建' : '创建模型服务'}</Button><Button variant="ghost" disabled={saving} onClick={() => { clearKeyInput(); setCreationDialogOpen(false); }}>返回编辑</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={modelEditorOpen} onOpenChange={setModelEditorOpen}><DialogContent><DialogHeader><DialogTitle>{modelEditor?.index === null ? '添加模型' : '编辑模型'}</DialogTitle><DialogDescription>修改进入当前服务草稿，保存提供方后才写入模型目录。</DialogDescription></DialogHeader>{modelEditor && <div className="stack"><div className="formgrid"><Field id="provider-model-name" label="显示名称" tip="可选，留空时使用 API 模型 ID。"><Input id="provider-model-name" maxLength={128} disabled={locked} value={modelEditor.value.name} onChange={event => { setModelEditor({ ...modelEditor, value: { ...modelEditor.value, name: event.target.value } }); setModelError(''); }} /></Field><Field id="provider-model-id" label="API 模型 ID"><Input id="provider-model-id" maxLength={128} disabled={locked} value={modelEditor.value.id} onChange={event => { setModelEditor({ ...modelEditor, value: { ...modelEditor.value, id: event.target.value } }); setModelError(''); }} /></Field></div><div className="strip">模型能力以实际元数据为准，登记目录不会调用模型。</div>{modelError && <p role="alert" className="text-xs text-destructive">{modelError}</p>}</div>}<DialogFooter><Button disabled={locked || !modelEditor || modelEditor.ownerId !== draft?.id} onClick={commitModel}>{modelEditor?.index === null ? '添加到服务草稿' : '更新服务草稿'}</Button><Button variant="ghost" onClick={() => setModelEditorOpen(false)}>返回编辑</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={modelDelete !== null} onOpenChange={open => { if (!open) setModelDelete(null); }}><DialogContent><DialogHeader><DialogTitle>移除模型</DialogTitle><DialogDescription>从当前服务草稿移除；保存提供方时核验实际引用。</DialogDescription></DialogHeader><p>{modelDelete?.value.name || modelDelete?.value.id}</p><p className="text-xs text-muted-foreground">被方案或助手使用的模型会在保存时拒绝删除。请先更换对应引用。</p><DialogFooter><Button variant="destructive" disabled={locked || !draft || modelDelete?.ownerId !== draft.id || draft.models[modelDelete?.index ?? -1] !== modelDelete?.value} onClick={() => { if (!draft || !modelDelete || locked || modelDelete.ownerId !== draft.id || draft.models[modelDelete.index] !== modelDelete.value) return; update('models', draft.models.filter((_, index) => index !== modelDelete.index)); setModelDelete(null); }}>从服务草稿移除</Button><Button variant="ghost" onClick={() => setModelDelete(null)}>取消</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={confirmDelete} onOpenChange={value => { if (!saving) setConfirmDelete(value); }}><DialogContent showCloseButton={!saving}><DialogHeader><DialogTitle>删除提供方“{selected?.name}”？</DialogTitle><DialogDescription>同时删除其模型和已保存密钥，无法撤销。被方案或助手引用的服务不能删除。</DialogDescription></DialogHeader>{writeError && <p role="alert" className="text-destructive">{writeError}</p>}<DialogFooter><Button variant="outline" disabled={saving} onClick={() => setConfirmDelete(false)}>取消</Button><Button variant="destructive" disabled={dirty || locked} onClick={remove}>确认删除服务</Button></DialogFooter></DialogContent></Dialog>
   </div>;
 }

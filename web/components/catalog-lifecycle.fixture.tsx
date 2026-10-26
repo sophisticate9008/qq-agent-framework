@@ -59,7 +59,6 @@ function fixtureApi(generation: number): ApiClient {
       if (path === '/api/chat/plans') return plans;
       if (path === '/api/chat/deployment') return { revision: 'e'.repeat(64), deployment: { target: null, modelSettings: null, namespace: 'fixture' } };
       if (path === '/api/chat/application') return { schema: 1, operation: null };
-      if (path === '/api/chat/appearance') return { schema: 1, revision: 'e'.repeat(64), assets: [], bindings: [] };
       if (path === '/api/chat/status') return { runtimeConnected: false };
       if (path === '/api/chat/providers') return { revision: 'fixture-providers', providers: [{ id: 'fixture-provider', name: '合成提供方', enabled: true, models: [{ id: 'fixture-model', name: '合成模型' }] }] };
       if (path === '/api/configuration') return configuration();

@@ -1,33 +1,49 @@
+import { chatRuntimeReason } from '../lib/chat-runtime.ts';
 import { ConversationMediaDiagnostics } from './conversation-media-diagnostics.tsx';
 import { useEffect, useState } from 'react';
 import { parseNativeConversationDiagnostics, type NativeConversationDiagnostics } from '../../src/contracts/native-diagnostics.ts';
 import { readResource } from '../lib/resource-reader.ts';
-import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import type { PageId, PageProps } from '../lib/types.ts';
 import { Button } from './ui/button.tsx';
-import { Input } from './ui/input.tsx';
-import { Field, Section, StatusPill } from './management.tsx';
-const draftKey = createDraftKey<string>('conversation-diagnostics-filter', { kind: 'state' });
-const destinations: Readonly<Record<string, PageId>> = { chat: 'adapters', adapters: 'adapters', security: 'security', input: 'features', features: 'features', executions: 'sessions', sessions: 'sessions', assistant: 'model', model: 'model' };
-const labels = { ready: '已核对可用', waiting: '等待处理', blocked: '需要处理', unknown: '尚未确认' };
+import { StatusPill } from './management.tsx';
+import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
+const destinations: Readonly<Record<string, PageId>> = { chat: 'adapters', adapters: 'adapters', security: 'security', input: 'persona', features: 'features', executions: 'sessions', sessions: 'sessions', assistant: 'model', model: 'model' };
+const labels = { ready: '未发现阻碍', waiting: '正在等待', blocked: '需要处理', unknown: '尚未确认' };
+function plain(text: string): string { return text.replace(/（[A-Z][A-Z0-9_:-]+）/g, '').replace(/\b[a-zA-Z]+(?:_[a-zA-Z0-9]+)+\b/g, '具体原因见技术详情'); }
 export function ConversationDiagnostics({ api, connected, navigate, conversationId }: PageProps & { readonly conversationId: string | null }) {
-  const [filter, setFilter] = useState(() => retainedDraft(api, draftKey) ?? conversationId ?? ''); const [target, setTarget] = useState(''); const [readVersion, setReadVersion] = useState(0);
-  const [value, setValue] = useState<NativeConversationDiagnostics | null>(null); const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
-  useEffect(() => { if (conversationId && /^(group|private):[1-9][0-9]{0,31}$/.test(conversationId)) { setFilter(conversationId); retainDraft(api, draftKey, conversationId); } }, [api, conversationId]);
+  const [version, setVersion] = useState(0);
+  const [value, setValue] = useState<NativeConversationDiagnostics | null>(null);
+  const [error, setError] = useState(''); const [loading, setLoading] = useState(false);
   useEffect(() => {
-    if (!target || !connected) return;
-    const controller = new AbortController(); setLoading(true); setError('');
-    void readResource(api, `/api/chat/diagnostics?conversationId=${encodeURIComponent(target)}`, controller.signal).then(input => { const parsed = parseNativeConversationDiagnostics(input); if (!parsed || parsed.conversationId !== target) throw new Error('invalid_diagnostics'); if (!controller.signal.aborted) setValue(parsed); }).catch(() => { if (!controller.signal.aborted) setError('诊断暂时无法读取；保留上次证据，当前状态未知。'); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    setValue(null); setError('');
+    if (!conversationId || !connected) return;
+    const controller = new AbortController(); setLoading(true);
+    void readResource(api, `/api/chat/diagnostics?conversationId=${encodeURIComponent(conversationId)}`, controller.signal).then(input => {
+      const parsed = parseNativeConversationDiagnostics(input);
+      if (!parsed || parsed.conversationId !== conversationId) throw new Error('invalid_diagnostics');
+      if (!controller.signal.aborted) setValue(parsed);
+    }).catch(() => { if (!controller.signal.aborted) setError('暂时无法检查，请稍后重试。'); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [api, connected, target, readVersion]);
-  function check(): void { const selected = filter.trim(); if (!/^(group|private):[1-9][0-9]{0,31}$/.test(selected)) { setError('请输入 group:群号 或 private:QQ号。'); return; } setTarget(selected); setReadVersion(value => value + 1); }
-  return <Section id="conversation-diagnostics" title="检查此会话为何没有回复" description="只读核对运行、访问、唤醒方式、执行隔离与发送证据；不会提交新消息。">
-    <div className="grid gap-3"><div className="flex flex-wrap items-end gap-2"><Field label="诊断会话" className="min-w-48 flex-1"><Input value={filter} onChange={event => { setFilter(event.target.value); retainDraft(api, draftKey, event.target.value); }} placeholder="group:123 / private:123" /></Field><Button disabled={!connected || loading} onClick={check}>{loading ? '正在检查' : '检查会话'}</Button></div>
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-      {value && <div className="grid gap-3 text-xs"><div className="flex flex-wrap gap-2"><strong>{value.conversationId}</strong><StatusPill tone={error ? 'warning' : value.state === 'ready' ? 'success' : value.state === 'blocked' ? 'warning' : 'warning'}>{error ? '上次结果，尚未刷新' : labels[value.state]}</StatusPill></div><p className="text-muted-foreground">核对时间 {new Date(value.observedAt).toLocaleString()}；历史覆盖 {value.coverage.history}，每个目录扫描上限 {value.coverage.scannedPerNamespace}；运行实例{value.coverage.live ? '已运行' : '未运行'}。{value.coverage.history !== 'complete' && '历史不完整，未发现不能等同于没有阻碍。'}</p>{value.input && <p>唤醒方式：@提及{value.input.mention ? '开启' : '关闭'}、引用回复{value.input.reply ? '开启' : '关闭'}、称呼 {value.input.nicknames.join('、') || '未配置'}；连续对话窗口 {value.input.continuationMs / 1000} 秒。</p>}
-        {value.context ? <p>上下文策略来源：{value.context.source === 'active-session' ? '当前运行会话' : '已保存方案，尚不代表运行值'}；容量 {value.context.limit.toLocaleString()} token；模型窗口 {value.context.modelWindow?.toLocaleString() ?? '未核实'}，最大输出 {value.context.maxOutput?.toLocaleString() ?? '未核实'}，压缩预留 {value.context.headroomTokens?.toLocaleString() ?? '未核实'}。</p> : <p className="text-muted-foreground">尚未核实当前绑定的运行容量；已保存方案不等于此会话已应用。</p>}
-        {value.checks.map((item, index) => { const page = item.href ? destinations[item.href.replace(/^[#/]/, '')] : undefined; return <div key={`${item.code}:${index}`} className="rounded-lg border p-3"><p><strong>{labels[item.state]}</strong> · {item.summary}</p>{item.nextAction && <p className="mt-1 text-muted-foreground">{item.nextAction}</p>}{page && <Button size="sm" variant="ghost" onClick={() => navigate(page)}>打开相关设置或记录</Button>}</div>; })}</div>}
-      <ConversationMediaDiagnostics api={api} connected={connected} conversationId={target || conversationId} />
-    </div>
-  </Section>;
+  }, [api, connected, conversationId, version]);
+  const current = connected && value?.conversationId === conversationId ? value : null;
+  const checks = current ? [...current.checks].sort((a, b) => ({ blocked: 0, waiting: 1, unknown: 2, ready: 3 })[a.state] - ({ blocked: 0, waiting: 1, unknown: 2, ready: 3 })[b.state]) : [];
+  return <div className="grid gap-4" id="conversation-diagnostics">
+    <div className="flex items-center justify-between gap-2"><span className="text-sm text-muted-foreground">{loading ? '正在检查…' : current ? `检查于 ${new Date(current.observedAt).toLocaleTimeString()}` : '选择会话后自动检查'}</span><Button size="sm" variant="outline" disabled={!connected || loading || !conversationId} onClick={() => setVersion(value => value + 1)}>重新检查</Button></div>
+    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    {current && <><StatusPill tone={current.state === 'ready' ? 'success' : 'warning'}>{labels[current.state]}</StatusPill>
+      {current.state === 'ready' && <p>当前连接与会话状态正常。此检查不能确认历史上每条消息都已回复。</p>}
+      {checks.map((item, index) => {
+        const page = item.href ? destinations[item.href.replace(/^[#/]/, '')] : undefined;
+        return <div key={`${item.code}:${index}`} className="rounded-lg border p-3 text-sm"><p className="font-medium">{plain(item.summary.startsWith('运行条件未满足：') ? chatRuntimeReason(item.code).text : item.summary)}</p>{item.nextAction && <p className="mt-1 text-muted-foreground">{plain(item.nextAction)}</p>}{page && page !== 'sessions' && <Button size="sm" variant="ghost" onClick={() => navigate(page)}>打开设置</Button>}</div>;
+      })}
+      {current.coverage.history !== 'complete' && <p className="text-xs text-muted-foreground">历史记录不完整，以上只列出目前能够确认的情况。</p>}
+      <ReadOnlyDetails title="检查详情" label="技术详情" description="运行状态、配置与原始原因码。"><TechnicalDetails fields={[
+        { label: '会话', value: current.conversationId }, { label: '检查时间', value: new Date(current.observedAt).toLocaleString() },
+        { label: '唤醒设置', value: current.input }, { label: '模型容量', value: current.context ?? '尚未确认' },
+        { label: '记录覆盖', value: current.coverage }, { label: '检查记录与原因码', value: current.checks },
+      ]} /></ReadOnlyDetails>
+    </>}
+    <ConversationMediaDiagnostics api={api} connected={connected} conversationId={conversationId} />
+  </div>;
 }

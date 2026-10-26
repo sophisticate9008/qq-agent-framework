@@ -72,17 +72,6 @@ test('usage sections are indexed only when native runtime reports connected', ()
   assert.equal(searchWorkspaceTargets(disconnected, '逐轮').length, 0);
 });
 
-test('disabled budgets remain discoverable as fields without claiming focus availability', () => {
-  const targets = buildWorkspaceSearchTargets({ configuration, settings });
-  assert(searchWorkspaceTargets(targets, nativeFormMetadata.budget.fields.enabled).length > 0);
-  assert.equal(searchWorkspaceSearchTitles(targets).includes(nativeFormMetadata.budget.fields.uses), true);
-  assert.equal(targets.find(target => target.title === nativeFormMetadata.budget.fields.uses)?.availability, 'unknown');
-  const disabled = applyCurrentPageVisibility(targets, 'security', [{ kind: 'field', title: nativeFormMetadata.budget.fields.enabled, sectionTitle: nativeFormMetadata.budget.title, sectionId: nativeFormMetadata.budget.id }]);
-  const dependent = disabled.find(target => target.title === nativeFormMetadata.budget.fields.uses);
-  assert.equal(dependent?.kind, 'field');
-  assert.equal(dependent?.availability, 'requires-setup');
-  assert(searchWorkspaceTargets(disabled, nativeFormMetadata.budget.fields.uses).some(target => target === dependent));
-});
 
 test('Q1 first overview with empty groups finds real native fields without draft or runtime data', () => {
   const targets = buildWorkspaceSearchTargets({ configuration: { groups: [] }, settings: {},

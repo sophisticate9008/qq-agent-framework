@@ -8,14 +8,15 @@ import { Clock3, RefreshCw } from 'lucide-react';
 import { errorMessage } from '../lib/api.ts';
 import { defaultTimeoutNotice, executionForm, executionPolicy, parseExecutionConfiguration, type ExecutionConfiguration, type ExecutionForm } from '../lib/execution-policy.ts';
 import type { PageProps } from '../lib/types.ts';
-import { Field, SaveBar, Section, ToggleField } from './management.tsx';
+import { Field, SaveBar, Section } from './management.tsx';
+import { SettingsWindow } from './settings-window.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { Textarea } from './ui/textarea.tsx';
 
 const executionDraftKey = createDraftKey<{ readonly saved: ExecutionConfiguration; readonly form: ExecutionForm }>('chat-execution');
 
-export function ChatExecutionSettings({ api, connected, navigate, setDirty }: PageProps) {
+export function ChatExecutionSettings({ api, connected, setDirty }: PageProps) {
   const recovery = useNativeCatalogOperation(api, 'execution');
   const retained = useMemo(() => retainedDraft(api, executionDraftKey), [api]);
   const draftApi = useRef(api);
@@ -26,7 +27,6 @@ export function ChatExecutionSettings({ api, connected, navigate, setDirty }: Pa
   const [localBlocked, setBlocked] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [confirmReload, setConfirmReload] = useState(false);
   const [reload, setReload] = useState(0);
   const epoch = useRef(0);
   const writeController = useRef<AbortController | null>(null);
@@ -57,7 +57,7 @@ export function ChatExecutionSettings({ api, connected, navigate, setDirty }: Pa
     const preserveDraft = prior?.dirty === true && prior.form !== null;
     if (!prior || !connected) { setSaved(null); setForm(null); }
     setLoading(connected); setSaving(false); setBlocked(false);
-    setError(''); setNotice(''); setConfirmReload(false);
+    setError(''); setNotice('');
     if (connected) void readResource(api, '/api/chat/execution', controller.signal).then(value => {
       if (!current()) return;
       const parsed = parseExecutionConfiguration(value);
@@ -98,7 +98,7 @@ export function ChatExecutionSettings({ api, connected, navigate, setDirty }: Pa
       if (!parsed) throw new Error('invalid_execution_configuration');
       setSaved(parsed); setForm(executionForm(parsed.policy));
       recovery.complete(operationToken);
-      setNotice('处理策略已保存；停止并重新启动聊天后生效，不会重置既有会话或补充授权。');
+      setNotice('处理策略已保存，重启聊天后生效。');
     } catch (failure) {
       const failureState = recovery.fail(operationToken, failure);
       if (current()) { setError(`${errorMessage(failure)} 请重新读取核对，不会自动重复提交。`); setBlocked(failureState !== 'idle'); }
@@ -109,20 +109,32 @@ export function ChatExecutionSettings({ api, connected, navigate, setDirty }: Pa
   }
 
   if (!connected) return null;
-  return <Section id={nativeFormMetadata.execution.id} title={nativeFormMetadata.execution.title} description="默认每次处理最多 120 秒，持续输出进度不会延长期限。其他会话不必等待超时任务。" scrollable
-    actions={<Button variant="outline" size="sm" disabled={saving || loading} onClick={readAgain}><RefreshCw className="size-3.5" />重新读取策略</Button>}
-    footer={<SaveBar dirty={dirty} saving={saving} disabled={loading || blocked} onSave={() => void save()} onReset={saved && !blocked ? () => { setForm(executionForm(saved.policy)); setError(''); } : undefined} label="保存处理策略" message={notice || (blocked ? '保存结果需核对，不能重复提交。' : dirty ? '策略更改尚未保存。' : '保存不等于已应用，不会自动重启聊天。')} />}>
-    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={readAgain} onReleased={() => { setBlocked(false); setError(''); }} />
-    {error && <p role="alert" className="mb-4 text-xs leading-6 text-destructive">{error}</p>}
-    {!form ? <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><Clock3 className="size-4" />{loading ? '正在读取回复处理策略' : '当前服务尚未提供回复处理策略，请检查管理服务版本。'}</p> : <div className="grid gap-4">
-      <Field label={nativeFormMetadata.execution.fields.turnSeconds} description="单位为秒，包含提交和等待完整回复；从框架接收任务开始计时。"><Input id="execution-turn-seconds" type="number" min={0.01} max={300} step={0.01} value={form.turnSeconds} disabled={disabled} onChange={event => update({ turnSeconds: event.target.value })} /></Field>
-      <ToggleField label={nativeFormMetadata.execution.fields.noticeEnabled} description="默认关闭；开启后超时会向对应 QQ 会话发送一条提醒，失败详情只留控制台。" checked={form.noticeEnabled} disabled={disabled} onChange={noticeEnabled => update({ noticeEnabled, ...(noticeEnabled && !form.noticeText.trim() ? { noticeText: defaultTimeoutNotice } : {}) })} />
-      {form.noticeEnabled && <Field label={nativeFormMetadata.execution.fields.noticeText}><Textarea id="execution-notice-text" className="h-24 resize-none text-xs" maxLength={8000} value={form.noticeText} disabled={disabled} onChange={event => update({ noticeText: event.target.value })} /></Field>}
-      <ToggleField label={nativeFormMetadata.execution.fields.cancelOnTimeout} description="超时后只向当前执行发起一次协作停止；请求受理不代表模型已经停止。" checked={form.cancelOnTimeout} disabled={disabled} onChange={cancelOnTimeout => update({ cancelOnTimeout })} />
-      {form.cancelOnTimeout && <details><summary className="cursor-pointer text-xs text-muted-foreground">旧限制模式的停止设置</summary><p className="mt-2 text-xs text-muted-foreground">旧限制模式仍保留原有次数上限，可在高级访问设置中查看。</p><Button variant="outline" size="sm" className="mt-2" onClick={() => navigate('access')}>高级访问设置</Button></details>}
-      <details><summary className="cursor-pointer text-xs text-muted-foreground">高级：并行数与确认期限</summary><div className="mt-4 grid gap-4 sm:grid-cols-2"><Field label={nativeFormMetadata.execution.fields.maxActive}><Input id="execution-max-active" type="number" min={1} max={256} value={form.maxActive} disabled={disabled} onChange={event => update({ maxActive: event.target.value })} /></Field>{form.cancelOnTimeout && <Field label={nativeFormMetadata.execution.fields.cancelSeconds} description="秒；超时后仍按结果未确认处理。"><Input id="execution-cancel-seconds" type="number" min={0.01} max={30} step={0.01} value={form.cancelSeconds} disabled={disabled} onChange={event => update({ cancelSeconds: event.target.value })} /></Field>}{form.noticeEnabled && <Field label={nativeFormMetadata.execution.fields.noticeSeconds} description="秒；无法确认发送时不会自动重发。"><Input id="execution-notice-seconds" type="number" min={0.01} max={30} step={0.01} value={form.noticeSeconds} disabled={disabled} onChange={event => update({ noticeSeconds: event.target.value })} /></Field>}</div></details>
-      <p className="border-t pt-3 text-xs leading-6 text-muted-foreground">结果未确认时暂停该会话的后续任务，不自动重发、换会话或清空上下文。迟到结果只留档，不冒充下一条请求的回复；其他会话继续处理。</p>
+  const saveControls = <SaveBar dirty={dirty} saving={saving} disabled={loading || blocked} onSave={() => void save()} onReset={saved && !blocked ? () => { setForm(executionForm(saved.policy)); setError(''); } : undefined} label="保存处理策略" message={notice || (blocked ? '保存结果需核对，不能重复提交。' : dirty ? '尚未保存，保存后重启聊天生效。' : '保存后重启聊天生效。')} />;
+  const advanced = <SettingsWindow title="高级处理设置" label="高级处理设置" description="设置停止与提醒的等待时间。关闭窗口保留草稿。"><div className="stack">
+    <div className="strip">旧请求结果不明时自动核对，不重复提交；新消息按原期限排队，过期后结束，不永久锁住会话。</div>
+    {form && <div className="formgrid">
+      <Field id="execution-cancel-seconds" label={nativeFormMetadata.execution.fields.cancelSeconds} tip="范围 0.01–30 秒；等待结束后仍未确认停止的任务，继续按结果未知处理。"><Input id="execution-cancel-seconds" type="number" min={0.01} max={30} step={0.01} value={form.cancelSeconds} disabled={disabled || !form.cancelOnTimeout} onChange={event => update({ cancelSeconds: event.target.value })} /></Field>
+      <Field id="execution-notice-seconds" label={nativeFormMetadata.execution.fields.noticeSeconds} tip="范围 0.01–30 秒；无法确认提醒是否发送时，不会自动重发。"><Input id="execution-notice-seconds" type="number" min={0.01} max={30} step={0.01} value={form.noticeSeconds} disabled={disabled || !form.noticeEnabled} onChange={event => update({ noticeSeconds: event.target.value })} /></Field>
     </div>}
-    {confirmReload && <div role="alert" className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border p-3 text-xs"><span className="mr-auto">重新读取会丢弃当前未保存的策略草稿。</span><Button size="sm" variant="outline" onClick={() => setConfirmReload(false)}>保留草稿</Button><Button size="sm" variant="destructive" onClick={() => setReload(value => value + 1)}>放弃草稿并重新读取</Button></div>}
+    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={readAgain} onReleased={() => { setBlocked(false); setError(''); }} />
+    {error && <p role="alert" className="text-xs text-destructive">{error}</p>}<div className="actions border-t pt-2">{saveControls}</div>
+  </div></SettingsWindow>;
+  return <Section id={nativeFormMetadata.execution.id} title="回复与超时"
+    actions={<Button variant="ghost" size="sm" disabled={saving || loading} onClick={readAgain}><RefreshCw className="size-3.5" />重新读取</Button>}
+    footer={<>{advanced}{saveControls}</>}>
+    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={readAgain} onReleased={() => { setBlocked(false); setError(''); }} />
+    {error && <p role="alert" className="mb-2 text-xs leading-5 text-destructive">{error}</p>}
+    {!form ? <p role="status" className="row small muted"><Clock3 className="size-3.5" />{loading ? '正在读取回复处理策略' : '当前服务尚未提供回复处理策略，请检查管理服务版本。'}</p> : <div className="stack">
+      <div className="formgrid">
+        <Field id="execution-turn-seconds" label="总期限（秒）" tip="范围 0.01–300 秒；从收到任务起计时，进度输出不延长期限。"><Input id="execution-turn-seconds" type="number" min={0.01} max={300} step={0.01} value={form.turnSeconds} disabled={disabled} onChange={event => update({ turnSeconds: event.target.value })} /></Field>
+        <Field id="execution-max-active" label="并行会话" tip="范围 1–256 个活动执行。"><Input id="execution-max-active" type="number" min={1} max={256} value={form.maxActive} disabled={disabled} onChange={event => update({ maxActive: event.target.value })} /></Field>
+      </div>
+      <div className="checks">
+        <label className="check"><input id="execution-cancel-on-timeout" type="checkbox" checked={form.cancelOnTimeout} disabled={disabled} onChange={event => update({ cancelOnTimeout: event.target.checked })} />请求停止超时任务</label>
+        <label className="check"><input id="execution-notice-enabled" type="checkbox" checked={form.noticeEnabled} disabled={disabled} onChange={event => { const noticeEnabled = event.target.checked; update({ noticeEnabled, ...(noticeEnabled && !form.noticeText.trim() ? { noticeText: defaultTimeoutNotice } : {}) }); }} />超时后发送提醒</label>
+      </div>
+      {form.noticeEnabled && <Field layout="stacked" label={nativeFormMetadata.execution.fields.noticeText}><Textarea id="execution-notice-text" rows={3} className="resize-y text-xs" maxLength={8000} value={form.noticeText} disabled={disabled} onChange={event => update({ noticeText: event.target.value })} /></Field>}
+      <div className="strip">新消息有界排队，过期后结束；旧请求自动核对，迟到结果仅留档。</div>
+    </div>}
   </Section>;
 }

@@ -1,7 +1,7 @@
 import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react';
-import { AlertCircle, CheckCircle2, ChevronDown, CircleOff, LoaderCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleOff, LoaderCircle } from 'lucide-react';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select.tsx';
@@ -9,6 +9,7 @@ import { Switch } from './ui/switch.tsx';
 import { Textarea } from './ui/textarea.tsx';
 import { ConnectPrompt, EmptyState, Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
 import { StructuredFields, type StructuredFieldFormat, type StructuredFieldState } from './structured-fields.tsx';
+import { HelpTip } from './help-tip.tsx';
 import { ApiError, asRecord, errorMessage, isRecord } from '../lib/api.ts';
 import { resolveConfigurationVisibility } from '../lib/configuration-visibility.ts';
 import { readConfigurationDraft } from '../lib/configuration-drafts.ts';
@@ -250,7 +251,7 @@ function FieldEditor({ field, draft, disabled, resetToken, onChange, onStructure
 
   if (field.format) {
     return <div role="group" aria-label={field.label} className="grid content-start gap-2 md:col-span-2">
-      <span className="field-label">{field.label}</span>
+      <div className="flex items-center gap-0.5"><span className="field-label">{field.label}</span>{field.description && <HelpTip label={field.label}>{field.description}</HelpTip>}</div>
       <StructuredFields
         format={field.format}
         value={typeof draft === 'string' ? draft : null}
@@ -259,24 +260,21 @@ function FieldEditor({ field, draft, disabled, resetToken, onChange, onStructure
         resetToken={resetToken}
         onStateChange={onStructuredChange}
       />
-      {field.description && <span className="field-hint">{field.description}</span>}
     </div>;
   }
 
   if (field.type === 'boolean') {
-    return <div className="border-b pb-2 last:border-0">
-      <ToggleField label={field.label} description={description} checked={draft === true} disabled={disabled} onChange={onChange} />
-      <div className="flex min-h-7 items-center justify-end gap-2">
+    return <div className="flex min-h-[30px] flex-wrap items-center gap-2">
+      <div className="min-w-0 flex-1"><ToggleField label={field.label} tip={description} checked={draft === true} disabled={disabled} onChange={onChange} /></div>
         {draft === null && field.editable !== false && <Button type="button" variant="ghost" size="xs" disabled={disabled} onClick={() => onChange(false)}>单独关闭</Button>}
         {inheritAction}
-      </div>
     </div>;
   }
 
   if (field.type === 'secret') {
-    return <Field label={field.label} description={field.description}>
+    return <Field label={field.label} layout="stacked" tip={field.description}>
       <Input type="password" autoComplete="new-password" spellCheck={false} value={typeof draft === 'string' ? draft : ''} disabled={disabled} placeholder={field.configured === true ? '已配置，留空则保持不变' : '尚未配置，留空则不写入'} onChange={event => onChange(event.target.value)} />
-      <span className="flex items-center gap-2 text-[11px] text-muted-foreground"><StatusPill tone={field.configured === true ? 'success' : 'neutral'}>{field.configured === true ? '已配置' : '未配置'}</StatusPill>密码不会在页面中回显</span>
+      <span className="flex items-center gap-2 text-xs text-muted-foreground"><StatusPill tone={field.configured === true ? 'success' : 'neutral'}>{field.configured === true ? '已配置' : '未配置'}</StatusPill>密码不会在页面中回显</span>
     </Field>;
   }
 
@@ -305,10 +303,10 @@ function FieldEditor({ field, draft, disabled, resetToken, onChange, onStructure
     </div>;
   }
 
-  return <Field label={field.label} description={description}>
-    {control}
-    {field.type === 'list' && <span className="text-[11px] text-muted-foreground">每行填写一项</span>}
-    {inheritAction && <span className="flex justify-end">{inheritAction}</span>}
+  return <Field label={field.label} layout={field.type === 'textarea' || field.type === 'list' ? 'stacked' : 'inline'} tip={description}>
+    {field.type === 'textarea' || field.type === 'list' ? control : <div className="flex min-w-0 items-center gap-1"><div className="min-w-0 flex-1">{control}</div>{inheritAction}</div>}
+    {field.type === 'list' && <span className="text-xs text-muted-foreground">每行填写一项</span>}
+    {(field.type === 'textarea' || field.type === 'list') && inheritAction && <span className="flex justify-end">{inheritAction}</span>}
   </Field>;
 }
 
@@ -321,7 +319,6 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [showInactive, setShowInactive] = useState(false);
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [savingGroup, setSavingGroup] = useState<string | null>(null);
   const [applyingSource, setApplyingSource] = useState<ConfigurationSource | null>(null);
   const [checkingSource, setCheckingSource] = useState<ConfigurationSource | null>(null);
@@ -386,14 +383,13 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     void readResource(api, '/api/configuration', controller.signal).then(result => {
       if (!current()) return;
       const configuration = parseConfiguration(result);
-      const groups = configuration.groups.filter(group => group.category === category);
+      const groups = configuration.groups.filter(group => group.category === category && (category !== 'settings' || group.source === 'admin'));
       editorOwner.current = { api, category, epoch: generation };
-      setEditor(retained ?? stateFromGroups(groups));
+      setEditor(retained && retained.groups.every(group => category !== 'settings' || group.source === 'admin') ? retained : stateFromGroups(groups));
       setFieldErrors({});
       setStructuredVersions({});
       setStructuredEpoch(current => current + 1);
       setCapabilities(configuration.capabilities);
-      setExpanded(new Set(groups[0] ? [groups[0].id] : []));
     }).catch(error => {
       if (current()) setLoadError(unavailableMessage(error) ?? errorMessage(error));
     }).finally(() => {
@@ -547,7 +543,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
       try {
         const refreshed = parseConfiguration(await readResource(api, '/api/configuration', controller.signal));
         if (!current()) return;
-        const groups = refreshed.groups.filter(item => item.category === category);
+        const groups = refreshed.groups.filter(item => item.category === category && (category !== 'settings' || item.source === 'admin'));
         setEditor(current => reconcileState(current, groups, completedKeys));
         setCapabilities(refreshed.capabilities);
         setGroupStatuses(current => ({ ...current, [group.id]: { text: applyRequired ? '已保存，等待应用' : '设置已保存', tone: applyRequired ? 'warning' : 'success' } }));
@@ -645,7 +641,7 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
     try {
       const refreshed = parseConfiguration(await readResource(api, '/api/configuration', controller.signal));
       if (!current()) return;
-      const groups = refreshed.groups.filter(group => group.source === source && group.category === category);
+      const groups = refreshed.groups.filter(group => group.source === source && group.category === category && (category !== 'settings' || group.source === 'admin'));
       const expected = editor.groups.filter(group => group.source === source);
       if (new Set(groups.map(group => group.id)).size !== groups.length
         || groups.some(group => new Set(group.fields.map(field => field.id)).size !== group.fields.length)
@@ -714,15 +710,15 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
   }, [editor.groups, visibility, visibilityValues]);
 
   if (!connected) return <ConnectPrompt connect={connect} />;
-  if (loading || !loadError && !hasCurrentEditor()) return <div className="panel flex min-h-52 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取设置</div>;
+  if (loading || !loadError && !hasCurrentEditor()) return <div className="panel flex min-h-32 items-center justify-center gap-2 text-xs text-muted-foreground" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取设置</div>;
   if (loadError) return <Section title="配置暂不可用"><EmptyState title="无法读取当前设置" description={loadError} action={<Button variant="outline" onClick={() => location.reload()}>重新加载页面</Button>} /></Section>;
   if (editor.groups.length === 0) return null;
 
-  return <div className="grid gap-5">
-    <div className="flex flex-wrap items-center gap-3">
+  return <div className="grid gap-3">
+    {category === 'features' && <div className="flex flex-wrap items-center gap-3">
       {category === 'features' && <label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch size="sm" checked={showInactive} onCheckedChange={setShowInactive} aria-label="显示停用配置" /><span>显示停用配置</span></label>}
       {category === 'features' && (featureSummary.enabled > 0 || featureSummary.disabled > 0) && <div className="flex items-center gap-2" aria-label="功能状态摘要"><StatusPill tone="success">配置开启 {featureSummary.enabled} 项</StatusPill><StatusPill tone="neutral">配置关闭 {featureSummary.disabled} 项</StatusPill></div>}
-    </div>
+    </div>}
     {matchingGroups.size === 0 && <div className="panel"><EmptyState title="没有匹配的设置" description="换一个功能或设置名称试试。" /></div>}
     {editor.groups.map(group => {
       const groupVisible = matchingGroups.has(group.id);
@@ -739,13 +735,9 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
       const recoveryOwner = editorOwner.current;
       const status = groupStatuses[group.id] ?? sourceStatuses[group.source];
       const busy = savingGroup !== null || applyingSource !== null;
-      const visibleFieldCount = visibleFieldIds === null
-        ? groupVisibility?.fieldIds.size ?? 0
-        : visibleFieldIds?.size ?? 0;
-      const open = inactiveDirtyCount > 0 || expanded.has(group.id);
       const message = block?.phase === 'blocked' ? '此配置来源的保存和应用已冻结，请先核对实际服务。'
         : status?.text ?? (groupDirty ? `${dirtyCount} 项更改尚未保存` : pending ? (capabilities.apply ? '已保存，等待应用' : '已保存，需要稍后重启服务') : '已读取保存的配置');
-      return <Section scrollable={open} key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} description={group.description} actions={status && <StatusPill tone={status.tone}>{status.text}</StatusPill>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid || Boolean(block) || checkingSource !== null} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty || Boolean(block) || checkingSource !== null} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
+      return <Section scrollable key={group.id} className={groupVisible ? undefined : 'hidden'} title={group.title} actions={<>{group.description && <HelpTip label={group.title}>{group.description}</HelpTip>}{status && <StatusPill tone={status.tone}>{status.text}</StatusPill>}</>} footer={<SaveBar dirty={groupDirty} disabled={busy || groupInvalid || Boolean(block) || checkingSource !== null} saving={savingGroup === group.id} message={message} label="保存本组" onSave={() => void saveGroup(group)} onReset={() => resetGroup(group)}>{capabilities.apply && group.applyLabel && <Button variant="outline" disabled={busy || sourceDirty || Boolean(block) || checkingSource !== null} onClick={() => void applyGroup(group)}>{applyingSource === group.source ? <LoaderCircle className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}{applyingSource === group.source ? '正在应用' : group.applyLabel ?? '应用更改'}</Button>}</SaveBar>}>
         {block?.phase === 'blocked' && editor.groups.find(item => item.source === group.source && matchingGroups.has(item.id))?.id === group.id && <div className="mb-3 grid max-h-48 gap-2 overflow-y-auto rounded-md border border-amber-500/30 p-3 text-xs" role="status">
           <p>{block.reason === 'conflict' ? '配置存在冲突。' : block.reason === 'accepted' ? '重启请求已被接受，完成情况仍待核对。' : '旧操作结果无法确认。'}请先核对实际服务和旧操作是否已结束；配置读取相同不代表应用或重启已完成。</p>
           {sourceStatuses[group.source] && <p>{sourceStatuses[group.source]?.text}</p>}
@@ -755,24 +747,13 @@ export function ConfigurationEditor({ connected, api, setDirty, category, connec
           </div>
           <p>重新读取保留草稿；确认仅允许新的操作，不会自动保存、应用或重试。</p>
         </div>}
-        <details open={open} onToggle={event => {
-          const isOpen = event.currentTarget.open;
-          setExpanded(current => {
-            const next = new Set(current);
-            if (isOpen) next.add(group.id);
-            else next.delete(group.id);
-            return next;
-          });
-        }}>
-          <summary className="flex cursor-pointer list-none items-center justify-between rounded-lg px-1 py-2 text-xs font-medium text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50"><span>{open ? '收起设置' : `展开 ${visibleFieldCount} 项设置`}</span><ChevronDown className={`size-4 transition-transform ${open ? 'rotate-180' : ''}`} /></summary>
-          {inactiveDirtyCount > 0 && <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4 text-amber-600" />仍显示 {inactiveDirtyCount} 项受停用开关隐藏的草稿；保存只写入草稿值，不会开启父功能。</p>}
-          <div className="grid gap-5 pt-5 md:grid-cols-2">{group.fields.map(field => {
+          {inactiveDirtyCount > 0 && <p className="mb-3 flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4 text-amber-600" />仍显示 {inactiveDirtyCount} 项受停用开关隐藏的草稿；保存只写入草稿值，不会开启父功能。</p>}
+          <div className="grid gap-3 md:grid-cols-2">{group.fields.map(field => {
             const key = fieldKey(group.id, field.id);
             const fieldVisible = groupVisibility?.fieldIds.has(field.id) === true && (visibleFieldIds === null || visibleFieldIds?.has(field.id) === true);
             return <div key={field.id} className={fieldVisible ? 'contents' : 'hidden'}><FieldEditor field={field} draft={readConfigurationDraft(editor.drafts, key, initialDraft(field))} disabled={busy || field.editable === false} resetToken={`${structuredEpoch}:${structuredVersions[key] ?? 0}`} onChange={value => updateField(group, field, value)} onStructuredChange={state => updateStructuredField(group, field, state)} /></div>;
           })}</div>
           {group.fields.length === 0 && <div className="flex items-center gap-2 py-5 text-xs text-muted-foreground"><CircleOff className="size-4" />此分组没有可显示的设置</div>}
-        </details>
       </Section>;
     })}
     {(Object.values(groupStatuses).some(status => status.tone === 'warning') || Object.values(sourceStatuses).some(status => status?.tone === 'warning')) && <p className="flex items-center gap-2 text-xs text-muted-foreground" role="status"><AlertCircle className="size-4" />结果待确认时不会自动重试或重复写入。</p>}
@@ -786,5 +767,5 @@ export function PackageConfigurationFieldEditor({ field, value, disabled, onChan
 }) {
   if (field.kind === 'boolean') return <ToggleField label={field.label} description={field.description} checked={value === true} disabled={disabled} onChange={onChange} />;
   if (field.kind === 'integer') return <Field label={field.label} description={`${field.description}${field.unit ? `（${field.unit}）` : ''}`}><Input aria-label={field.label} type="number" min={field.minimum} max={field.maximum} step={1} disabled={disabled} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)} /></Field>;
-  return <Field label={field.label} description={`${field.description} 每行一项，最多 ${field.maximumEntries} 项，每项 ${field.maximumLength} 字符。`}><Textarea aria-label={field.label} disabled={disabled} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)} /></Field>;
+  return <Field label={field.label} layout="stacked" description={`${field.description} 每行一项，最多 ${field.maximumEntries} 项，每项 ${field.maximumLength} 字符。`}><Textarea aria-label={field.label} disabled={disabled} value={typeof value === 'string' ? value : ''} onChange={event => onChange(event.target.value)} /></Field>;
 }

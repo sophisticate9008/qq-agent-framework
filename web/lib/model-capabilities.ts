@@ -12,7 +12,7 @@ export interface ModelCapabilities {
 }
 
 const effortLabels: Readonly<Record<ChatPlanReasoningEffort, string>> = {
-  off: 'off', low: 'low', medium: 'medium', high: 'high', max: 'max',
+  off: '关闭', low: '低', medium: '中', high: '高', max: '最高',
 };
 
 export function modelReasoningEffortLabel(effort: string): string {

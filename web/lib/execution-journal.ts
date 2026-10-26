@@ -123,9 +123,9 @@ export function executionPresentation(record: ExecutionJournalEntry): ExecutionP
   if (record.status === 'unknown' || record.externalStatus === 'unknown') return { label: '结果未知', tone: 'warning', explanation: '尚无法确认外部执行结果，不会自动重放、重置会话或补发请求。' };
   if (record.status === 'completed' && record.externalStatus === 'completed' && !record.isolated && record.lateOutcome === null
     && record.userMessage !== null && record.turn !== null && record.lastEventId !== null
-    && !['requesting', 'accepted', 'unknown'].includes(record.cancelStatus)) return { label: '已完成', tone: 'success', explanation: '已观察到本次执行的完成终态；不代表所有出站消息都已送达。' };
-  if (record.externalStatus === 'cancelled') return { label: '已确认停止', tone: 'neutral', explanation: '已收到本次外部执行的停止终态，已发生的外部副作用不会撤回。' };
-  if (record.status === 'failed' && record.externalStatus === 'failed') return { label: '执行失败', tone: 'warning', explanation: '已观察到失败终态；不会从此日志自动重放。' };
+    && !['requesting', 'accepted', 'unknown'].includes(record.cancelStatus)) return { label: '已完成', tone: 'success', explanation: '已观察到本次执行的处理完成；不代表所有出站消息都已送达。' };
+  if (record.externalStatus === 'cancelled') return { label: '已确认停止', tone: 'neutral', explanation: '已收到本次外部执行的停止确认，已发生的外部副作用不会撤回。' };
+  if (record.status === 'failed' && record.externalStatus === 'failed') return { label: '执行失败', tone: 'warning', explanation: '已观察到处理失败；不会从此日志自动重放。' };
   if (record.status === 'rejected' && ['not-started', 'rejected'].includes(record.externalStatus)) return { label: '未受理', tone: 'neutral', explanation: '本次执行未被受理；不会通过日志按钮重新提交。' };
   if (record.status === 'prepared' && record.externalStatus === 'not-started') return { label: '准备中', tone: 'neutral', explanation: '已登记本次任务，尚未确认外部受理。' };
   if (record.status === 'submitting' && ['submitting', 'accepted'].includes(record.externalStatus)) return { label: '正在提交', tone: 'neutral', explanation: '正在等待本次任务的受理或完整结果。' };
@@ -135,8 +135,8 @@ export function executionPresentation(record: ExecutionJournalEntry): ExecutionP
 
 export function executionCancelLabel(status: ExecutionJournalEntry['cancelStatus']): string {
   return {
-    'not-requested': '未发起协作停止', unavailable: '协作停止不可用', requesting: '正在请求协作停止',
-    accepted: '协作停止仅已受理，尚未确认停止', rejected: '协作停止请求被拒绝', unknown: '协作停止结果未知', confirmed: '已收到停止确认',
+    'not-requested': '未发起停止任务', unavailable: '停止任务不可用', requesting: '正在请求停止任务',
+    accepted: '停止任务仅已受理，尚未确认停止', rejected: '停止任务请求被拒绝', unknown: '停止任务结果未知', confirmed: '已收到停止确认',
   }[status];
 }
 

@@ -1,17 +1,14 @@
-import { ForwardAuthorizationManager } from '../components/forward-authorization-manager.tsx';
+import { ChatExecutionSettings } from '../components/chat-execution-settings.tsx';
 import { ConnectPrompt, PageHeading } from '../components/management.tsx';
 import type { PageProps } from '../lib/types.ts';
 import { AccessPage } from './access.tsx';
 import { SettingsPage } from './settings.tsx';
-import { ToolPermissionsManager } from '../components/tool-permissions-manager.tsx';
 
 export function SecurityPage(props: PageProps) {
   return <div className="page-stack" data-page="security">
-    <PageHeading title="安全" description="配置访问控制与工具授权、聊天处理、管理服务和独立出站网关；各项更改分别保存。" />
+    <PageHeading title="访问与设置" description="主人、会话范围、处理期限与管理服务" />
     {!props.connected ? <ConnectPrompt connect={props.connect} /> : <>
-      <section id="security-access" className="min-w-0"><AccessPage {...props} embedded /></section>
-      <ForwardAuthorizationManager api={props.api} connected={props.connected} setDirty={props.setDirty} navigate={props.navigate} />
-      <ToolPermissionsManager api={props.api} connected={props.connected} setDirty={props.setDirty} />
+      <div className="grid2"><section id="security-access" className="min-w-0"><AccessPage {...props} embedded /></section><ChatExecutionSettings {...props} /></div>
       <section id="security-settings" className="min-w-0"><SettingsPage {...props} embedded /></section>
     </>}
   </div>;

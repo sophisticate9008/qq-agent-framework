@@ -1,4 +1,4 @@
-import { accountsFixture, exerciseAccountWorkspace } from './management-accounts-smoke.ts';
+import { accountsFixture } from './management-accounts-smoke.ts';
 import { exerciseProtocolConnectionDiagnostics } from './management-protocol-status-smoke.ts';
 import { exerciseModelReasoningCapabilities } from './management-model-capabilities-smoke.ts';
 import { exercisePlanUpdate } from './management-plan-update-smoke.ts';
@@ -92,25 +92,9 @@ async function exerciseAssistantAndReadOnlyWork(page: Page, requests: readonly R
     configuration: { schema: 1, mode: 'chat-assistant', provider: provider.id, model: provider.models[0].id, nickname: 'Browser Assistant', reasoningEffort: null } } });
   assert.equal(saved.status, 200); assert(isRecord(saved.value) && typeof saved.value.revision === 'string');
   const savedAssistant = saved.value;
-  let target = { schema: 1, state: 'blocked', assistantRevision: savedAssistant.revision, configurationRevision: 'a'.repeat(64),
-    targetRevision: 'b'.repeat(64), operationRevision: 'c'.repeat(64), provider: provider.id, model: provider.models[0].id,
-    agentPreset: 'browser-assistant', externalProvider: 'browser-provider', fullAccess: false, missingReasons: ['assistant_target_unavailable'] };
-  let applies = 0; let reconciles = 0;
   await page.route('**/api/chat/assistant', async route => {
     if (route.request().method() !== 'GET') return route.continue();
-    await route.fulfill({ json: { ...savedAssistant, executionAvailable: target.state === 'verified', missingReasons: target.state === 'verified' ? [] : ['assistant_target_unavailable'] } });
-  });
-  await page.route('**/api/chat/assistant/deployment**', async route => {
-    const path = new URL(route.request().url()).pathname;
-    if (route.request().method() === 'POST') {
-      const body: unknown = route.request().postDataJSON(); assert(isRecord(body));
-      assert.equal(body.assistantRevision, savedAssistant.revision);
-      if (path.endsWith('/prepare')) { assert.deepEqual(Object.keys(body), ['assistantRevision']); target = { ...target, state: 'prepared', missingReasons: [] }; }
-      else if (path.endsWith('/apply')) { applies++; assert.equal(body.targetRevision, target.targetRevision); assert.equal(body.operationRevision, target.operationRevision); target = { ...target, state: 'unknown', missingReasons: ['assistant_deployment_result_unknown'] }; }
-      else if (path.endsWith('/reconcile')) { reconciles++; assert.equal(Object.hasOwn(body, 'targetRevision'), false); target = { ...target, state: 'verified', missingReasons: [] }; }
-      else assert.fail(`Unexpected assistant action ${path}`);
-    }
-    await route.fulfill({ json: target });
+    await route.fulfill({ json: { ...savedAssistant, executionAvailable: true, missingReasons: [] } });
   });
   const record = { id: 'browser-work-record', childId: 'browser-child', parentSessionId: 'browser-parent', conversationId: 'group:456001',
     generation: 1, createdAt: 1000, deadlineAt: 2000, status: 'completed', result: { stopReason: 'completed', output: [{ type: 'text', text: 'Browser readonly work result' }, { type: 'file', name: 'report.txt', assetId: 'browser-output-asset' }] },
@@ -120,20 +104,7 @@ async function exerciseAssistantAndReadOnlyWork(page: Page, requests: readonly R
     await route.fulfill({ json: query.has('id') ? { schema: 1, record } : { schema: 1, records: query.get('conversationId') === 'group:999' ? [] : [record], next: null } });
   });
   await navigate(page, '聊天方案', 'model', '聊天方案');
-  const deployment = page.locator('#assistant-deployment');
-  await deployment.getByRole('button', { name: '检查助手部署', exact: true }).click();
-  await deployment.getByText('已检查，等待明确应用', { exact: true }).waitFor();
-  assert.equal(applies, 0);
-  await deployment.getByRole('checkbox', { name: '确认应用已保存的独立助手模型配置', exact: true }).check();
-  await deployment.getByRole('button', { name: '应用助手目标', exact: true }).click();
-  await deployment.getByText('助手应用结果待核对', { exact: true }).waitFor();
-  assert.equal(applies, 1); assert.equal(await deployment.getByRole('button', { name: '应用助手目标', exact: true }).isDisabled(), true);
-  await deployment.getByRole('button', { name: '读取助手部署状态', exact: true }).click();
-  await deployment.getByText('助手应用结果待核对', { exact: true }).waitFor(); assert.equal(applies, 1);
-  await deployment.getByRole('button', { name: '核对助手目标实际结果', exact: true }).click();
-  await deployment.getByText('助手目标已核验', { exact: true }).waitFor();
-  await page.locator('#chat-assistant').getByText('助手执行已就绪', { exact: true }).waitFor();
-  assert.equal(applies, 1); assert.equal(reconciles, 1);
+  await page.locator('#chat-assistant').getByText('助手已启用', { exact: true }).waitFor();
   const works = page.locator('#native-work-records');
   await works.getByRole('button', { name: /browser-work-record/ }).click();
   await works.getByText('Browser readonly work result', { exact: false }).waitFor();
@@ -875,53 +846,6 @@ async function run(): Promise<void> {
     await assertBoundedLongText(section(page, 'Fixture Persona'), style, personaStyle);
     await page.getByRole('button', { name: '保存人设', exact: true }).click();
     await page.getByText('人设库已保存。', { exact: true }).waitFor();
-    const appearance = page.locator('#native-appearance');
-    await appearance.getByText('上传参考图或新版本', { exact: true }).click();
-    await appearance.getByRole('textbox', { name: '参考图名称', exact: true }).fill('Browser Role Reference');
-    await appearance.getByRole('textbox', { name: '参考图说明', exact: true }).fill('Synthetic browser reference image');
-    const fixtureImage = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHd8AAAAASUVORK5CYII=', 'base64');
-    await appearance.getByLabel('参考图片文件', { exact: true }).setInputFiles({ name: 'reference.png', mimeType: 'image/png', buffer: fixtureImage });
-    await appearance.getByText('已选择：reference.png', { exact: true }).waitFor();
-    const appearanceWrites = requests.filter(request => request.method === 'POST' && request.pathname === '/api/chat/appearance').length;
-    await navigate(page, '概览', 'overview', '工作台概览');
-    await navigate(page, '人设与形象', 'persona', '人设与形象');
-    await appearance.getByText('上传参考图或新版本', { exact: true }).click();
-    assert.equal(await appearance.getByRole('textbox', { name: '参考图名称', exact: true }).inputValue(), 'Browser Role Reference');
-    await appearance.getByText('已选择：reference.png', { exact: true }).waitFor();
-    assert.equal(requests.filter(request => request.method === 'POST' && request.pathname === '/api/chat/appearance').length, appearanceWrites);
-    await appearance.getByRole('checkbox', { name: '确认保存参考图，不更改人设绑定', exact: true }).check();
-    await appearance.getByRole('button', { name: '保存参考图版本', exact: true }).click();
-    await appearance.getByText('参考图版本已保存；人设绑定保持原样。', { exact: true }).waitFor();
-    await appearance.getByRole('img', { name: '角色参考图预览：Browser Role Reference，版本 1', exact: true }).waitFor();
-    await page.waitForFunction(() => { const image = document.querySelector('#native-appearance img'); return image instanceof HTMLImageElement && image.complete && image.naturalWidth === 1; });
-    const appearanceSaved = await apiJson(page, '/api/chat/appearance'); assert(isRecord(appearanceSaved.value) && Array.isArray(appearanceSaved.value.assets));
-    assert.equal(appearanceSaved.value.bindings instanceof Array && appearanceSaved.value.bindings.length, 0);
-    await appearance.getByRole('checkbox', { name: '确认将这版参考图用于当前人设', exact: true }).check();
-    await appearance.getByRole('button', { name: '绑定当前人设', exact: true }).click();
-    await appearance.getByText('当前绑定：Browser Role Reference · 版本 1', { exact: true }).waitFor();
-    await appearance.getByText('删除参考素材', { exact: true }).click();
-    assert.equal(await appearance.getByRole('button', { name: '删除参考素材及版本', exact: true }).isDisabled(), true);
-    await appearance.getByLabel('参考图片文件', { exact: true }).setInputFiles({ name: 'reference-v2.png', mimeType: 'image/png', buffer: fixtureImage });
-    await appearance.getByText('已选择：reference-v2.png', { exact: true }).waitFor();
-    await appearance.getByRole('textbox', { name: '参考图名称', exact: true }).fill('Browser Role Reference');
-    await appearance.getByRole('checkbox', { name: '保存为选中素材的新版本', exact: true }).check();
-    await appearance.getByRole('checkbox', { name: '确认保存参考图，不更改人设绑定', exact: true }).check();
-    await appearance.getByRole('button', { name: '保存参考图版本', exact: true }).click();
-    await appearance.getByRole('img', { name: '角色参考图预览：Browser Role Reference，版本 2', exact: true }).waitFor();
-    await appearance.getByText('当前绑定：Browser Role Reference · 版本 1', { exact: true }).waitFor();
-    await appearance.getByRole('combobox', { name: '参考素材与版本', exact: true }).selectOption({ label: 'Browser Role Reference · 版本 1' });
-    await appearance.getByRole('img', { name: '角色参考图预览：Browser Role Reference，版本 1', exact: true }).waitFor();
-    await appearance.getByText('解除当前人设参考图', { exact: true }).click();
-    await appearance.getByRole('checkbox', { name: '确认解除当前人设参考图绑定', exact: true }).check();
-    await appearance.getByRole('button', { name: '解除参考图绑定', exact: true }).click();
-    await appearance.getByText('人设参考图绑定已解除。', { exact: true }).waitFor();
-    const removeAppearance = appearance.getByText('删除参考素材', { exact: true }).locator('xpath=ancestor::details[1]');
-    if (await removeAppearance.getAttribute('open') === null) await removeAppearance.locator('summary').click();
-    await appearance.getByRole('checkbox', { name: '确认删除未被人设使用的素材及全部版本', exact: true }).check();
-    await appearance.getByRole('button', { name: '删除参考素材及版本', exact: true }).click();
-    await appearance.getByText('未被引用的素材及版本已删除。', { exact: true }).waitFor();
-
-
     await navigate(page, '访问范围', 'access', '访问范围');
     await page.getByText('当前默认全部拒绝。', { exact: true }).waitFor();
     const allow = field(page, '群聊白名单').locator('textarea');
@@ -943,24 +867,9 @@ async function run(): Promise<void> {
     await field(page, '私聊拒绝名单').locator('textarea').fill('999002');
     await page.getByRole('button', { name: '保存名单', exact: true }).click();
     await page.getByText('聊天名单已保存。', { exact: true }).waitFor();
-    const authorizationBeforeToolGrant = await apiJson(page, '/api/chat/authorization');
-    const toolPermissions = page.locator('#native-tool-permissions');
-    await field(toolPermissions, '授权 QQ 会话').locator('input').fill('group:456001');
-    await toolPermissions.getByRole('checkbox', { name: '查看媒体状态', exact: true }).check();
-    await field(toolPermissions, '查看媒体状态最多调用次数').locator('input').fill('3');
-    await toolPermissions.getByRole('checkbox', { name: '确认独立授予以上会话、能力、次数和期限', exact: true }).check();
-    await toolPermissions.getByRole('button', { name: '创建工具授权', exact: true }).click();
-    await toolPermissions.getByText('授权配置已保存，当前运行权限尚未确认应用。', { exact: true }).waitFor();
-    const permissionsSaved = await apiJson(page, '/api/chat/tool-permissions');
-    assert(isRecord(permissionsSaved.value) && Array.isArray(permissionsSaved.value.grants));
-    assert.equal(permissionsSaved.value.grants.length, 1);
-    assert.deepEqual(await apiJson(page, '/api/chat/authorization'), authorizationBeforeToolGrant);
-    await toolPermissions.getByRole('button', { name: '撤销此授权', exact: true }).click();
-    await toolPermissions.getByRole('button', { name: '确认撤销工具授权', exact: true }).click();
-    await toolPermissions.getByText('group:456001 · 已撤销', { exact: true }).waitFor();
-    const permissionsRevoked = await apiJson(page, '/api/chat/tool-permissions');
-    assert(isRecord(permissionsRevoked.value) && Array.isArray(permissionsRevoked.value.grants) && isRecord(permissionsRevoked.value.grants[0]));
-    assert.equal(typeof permissionsRevoked.value.grants[0].revokedAt, 'number');
+    assert.equal(await page.locator('#native-tool-permissions').count(), 0);
+    assert.equal(await page.locator('#forward-authorization').count(), 0);
+    assert.equal(requests.some(request => request.method === 'POST' && request.pathname === '/api/chat/tool-permissions'), false);
 
     const adaptersBefore = await apiJson(page, '/api/chat/adapters');
     assert.equal(adaptersBefore.status, 200);
@@ -1010,11 +919,10 @@ async function run(): Promise<void> {
     await navigate(page, '连接', 'adapters', '连接');
     await section(page, '聊天运行').waitFor();
     await page.getByText('协议连接管理', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 5);
+    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 3);
     for (const [id, title] of [
       ['chat-runtime', '聊天运行'],
-      ['adapter-onebotHttp', 'OneBot'], ['adapter-dshAgent', 'DSH 聊天引擎'],
-      ['native-runtime-compatibility', '保留会话兼容性 / 原配置核对']
+      ['adapter-onebotHttp', 'OneBot'], ['adapter-dshAgent', 'DSH 聊天引擎']
     ]) {
       const card = page.locator(`[data-page="adapters"] section[id="${id}"]`);
       assert.equal(await card.count(), 1);
@@ -1206,13 +1114,8 @@ async function run(): Promise<void> {
     const outputSaved = await apiJson(page, '/api/chat/packages/configuration?id=chat-output'); assert(isRecord(outputSaved.value) && isRecord(outputSaved.value.configuration));
     assert.equal(outputSaved.value.configuration.longTextAsForward, true); assert.equal(outputSaved.value.configuration.longTextThreshold, 4000);
     assert.deepEqual(await apiJson(page, '/api/chat/authorization'), outputAuth);
-    const forwardCard = page.locator('#forward-authorization');
-    await forwardCard.getByRole('textbox', { name: '允许合并转发的会话', exact: true }).fill('group:456001');
-    await forwardCard.getByRole('checkbox', { name: '确认以新授权版本保存合并转发会话范围', exact: true }).check();
-    await forwardCard.getByRole('button', { name: '保存合并转发权限', exact: true }).click();
-    await forwardCard.getByText('合并转发权限已保存为新授权版本；请到连接页明确应用。输出开关不会代替这项授权。', { exact: true }).waitFor();
-    const forwardSaved = await apiJson(page, '/api/chat/authorization'); assert(isRecord(forwardSaved.value)); assert.deepEqual(forwardSaved.value.forwardAllow, ['group:456001']);
-    await page.getByRole('tab', { name: '功能设置', exact: true }).click();
+    assert.equal(await page.locator('#forward-authorization').count(), 0);
+    await page.getByRole('tab', { name: 'Agent 扩展', exact: true }).click();
     const packageCard = page.locator('#package-configuration-browser-settings');
     await packageCard.getByRole('checkbox', { name: '确认迁移已保存的配置到当前字段版本', exact: true }).check();
     await packageCard.getByRole('button', { name: '迁移此功能配置', exact: true }).click();
@@ -1222,7 +1125,7 @@ async function run(): Promise<void> {
     await packageCard.getByRole('textbox', { name: '测试扩展别名', exact: true }).fill('alpha\nbeta');
     await navigate(page, '概览', 'overview', '工作台概览');
     await navigate(page, '功能与触发', 'features', '功能与触发');
-    await page.getByRole('tab', { name: '功能设置', exact: true }).click();
+    await page.getByRole('tab', { name: 'Agent 扩展', exact: true }).click();
     assert.equal(await packageCard.getByRole('switch', { name: '启用测试扩展', exact: true }).isChecked(), true);
     assert.equal(await packageCard.getByRole('spinbutton', { name: '测试扩展期限', exact: true }).inputValue(), '8');
     assert.equal(await packageCard.getByRole('textbox', { name: '测试扩展别名', exact: true }).inputValue(), 'alpha\nbeta');
@@ -1272,7 +1175,6 @@ async function run(): Promise<void> {
     await exerciseUsageMaintenance(page, maintenance);
     await exerciseExecutionRecovery(page);
     await exerciseMediaAndInteractions(page);
-    await exerciseAccountWorkspace(page);
     const sessionsUnavailable = await apiJson(page, '/api/chat/sessions');
     const usageUnavailable = await apiJson(page, '/api/chat/usage');
     assert.deepEqual(sessionsUnavailable, { status: 503, value: { error: 'runtime_not_connected' } });
@@ -1367,7 +1269,7 @@ async function run(): Promise<void> {
       inputTriggerDraftAndExplicitSave: true,
       toolPermissionGrantAndTombstoneRevokeAreIndependent: true,
       realReminderCrudSendHistoryAndCancel: true,
-      assistantDeploymentExplicitAndUnknownReconciledWithoutReplay: true,
+      assistantAndReadOnlyWorkVisible: true,
       workResultsAndReceiptsReadOnly: true,
       roleReferencesUploadPreviewVersionBindingAndDelete: true,
       genericPackageFieldsMigrationAndRetainedDrafts: true,

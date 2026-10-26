@@ -1,3 +1,4 @@
+import { SettingsWindow } from '../components/settings-window.tsx';
 import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import { catalogFailureState } from '../lib/native-catalog-operation.ts';
 import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.ts';
@@ -5,14 +6,14 @@ import { NativeCatalogRecovery } from '../components/native-catalog-recovery.tsx
 import { readResource, writeResource } from '../lib/resource-reader.ts';
 import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LoaderCircle, RefreshCw, ShieldCheck, ShieldX } from 'lucide-react';
-import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
+import { LoaderCircle, RefreshCw } from 'lucide-react';
+import { asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 import { ConnectPrompt, Field, PageHeading, SaveBar, Section, StatusPill } from '../components/management.tsx';
+import { ReadOnlyDetails } from '../components/read-only-details.tsx';
 import { Button } from '../components/ui/button.tsx';
 import { Input } from '../components/ui/input.tsx';
 import { Textarea } from '../components/ui/textarea.tsx';
-import { ChatAuthorizationManager } from '../components/chat-authorization-manager.tsx';
 import { formatAccessLists, parseAccessLists, type AccessListFields } from '../lib/access-lists.ts';
 
 interface AccessState {
@@ -232,29 +233,36 @@ export function AccessPage(props: PageProps & { readonly embedded?: boolean }) {
 
   if (!connected) return <div className="page-stack" data-page="access">{!props.embedded && <PageHeading title="访问范围" description="同一份白名单同时允许接收和回复；群聊和私聊分开填写。" />}<ConnectPrompt connect={connect} /></div>;
 
+  const reloadButton = <Button variant="ghost" size="sm" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty && !blocked}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>;
+  const recoveryPanel = <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { setResult('idle'); setWriteError(''); }} />;
+  const saveControls = <div className="actions border-t pt-2"><SaveBar dirty={dirty} saving={saving} disabled={blocked || loading} message={saveMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存名单" /></div>;
+  const feedback = <>{recoveryPanel}{validationError && <p className="text-xs text-destructive" role="alert">{validationError}</p>}{writeError && <p className="text-xs text-destructive" role="alert">{writeError}</p>}{saveControls}</>;
+  const disabled = saving || blocked || loading;
+  const groups = access?.allow.filter(value => value.startsWith('group:')).map(value => value.slice(6)) ?? [];
+  const privateChats = access?.allow.filter(value => value.startsWith('private:')).map(value => value.slice(8)) ?? [];
+  const ownerField = form && <Field id="access-owner" label={nativeFormMetadata.access.fields.owner} tip="真实 QQ 用户号；留空表示没有主人。昵称、群身份和网页登录身份均不会授予主人权限。"><Input id="access-owner" value={form.owner} onChange={event => update('owner', event.target.value)} disabled={disabled} inputMode="numeric" maxLength={20} placeholder="填写主人 QQ 号" /></Field>;
   return <div className="page-stack" data-page="access">
-    {props.embedded ? <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base font-semibold">访问控制</h2><Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty && !blocked}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入名单</Button></div>
-      : <PageHeading title="访问范围" description="同一份白名单同时允许接收和回复；群聊、私聊分开填写，主人账号单独指定。" actions={<Button variant="outline" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty && !blocked}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新载入</Button>} />}
-    <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { setResult('idle'); setWriteError(''); }} />
-    {loading && !access ? <Section title="原生访问授权"><div className="flex min-h-44 items-center justify-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在读取授权目录</div></Section>
-      : !access || !form ? <Section title="原生访问授权不可用" description={loadError || '服务没有返回可识别的授权目录。'}><div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-6">暂时无法读取访问授权，请稍后重试。</div></Section>
-        : <>
-          {parseAccessLists(form.allow).values?.length === 0 && <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5"><ShieldX className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" /><p><strong>当前默认全部拒绝。</strong><span className="mt-1 block text-muted-foreground">白名单为空时，不会接收或回复任何群聊、私聊消息。</span></p></div>}
-          <Section id={nativeFormMetadata.access.id} title={nativeFormMetadata.access.title} description="群号和私聊账号分开填，多个号码用逗号隔开。群名单允许该群会话接收和回复；私聊名单只控制私聊，不额外过滤群成员。" actions={<StatusPill tone={parseAccessLists(form.allow).values?.length ? 'success' : 'warning'}>{parseAccessLists(form.allow).values?.length ?? 0} 项</StatusPill>} footer={<SaveBar dirty={dirty} saving={saving} disabled={blocked} message={saveMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存名单" />}>
-            <div className="h-96 min-h-0 overflow-auto overscroll-contain pr-1"><div className="grid gap-5 sm:grid-cols-2">
-              <Field label={nativeFormMetadata.access.fields.allowGroups} description="只填群号，例如：123456, 234567"><Textarea value={form.allow.groups} onChange={event => updateList('allow', 'groups', event.target.value)} disabled={saving || blocked} maxLength={32_768} className="h-24 resize-none text-xs leading-6" placeholder="123456, 234567" /></Field>
-              <Field label={nativeFormMetadata.access.fields.allowPrivate} description="只填私聊账号，例如：345678, 456789"><Textarea value={form.allow.privateChats} onChange={event => updateList('allow', 'privateChats', event.target.value)} disabled={saving || blocked} maxLength={32_768} className="h-24 resize-none text-xs leading-6" placeholder="345678, 456789" /></Field>
-            </div>
-            <details className="mt-5 rounded-lg border bg-muted/20 p-3"><summary className="cursor-pointer text-xs text-muted-foreground">拒绝名单（可选）{access.deny.length > 0 ? ` · 已设置 ${access.deny.length} 项` : ''}</summary><div className="mt-4 grid gap-5 sm:grid-cols-2">
-              <Field label={nativeFormMetadata.access.fields.denyGroups} description="即使在白名单中，这些群也不接收或回复。"><Textarea value={form.deny.groups} onChange={event => updateList('deny', 'groups', event.target.value)} disabled={saving || blocked} maxLength={32_768} className="h-24 resize-none text-xs leading-6" placeholder="123456, 234567" /></Field>
-              <Field label={nativeFormMetadata.access.fields.denyPrivate} description="即使在白名单中，这些私聊也不接收或回复。"><Textarea value={form.deny.privateChats} onChange={event => updateList('deny', 'privateChats', event.target.value)} disabled={saving || blocked} maxLength={32_768} className="h-24 resize-none text-xs leading-6" placeholder="345678, 456789" /></Field>
-            </div></details>
-            <div className="mt-5 grid gap-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><Field label={nativeFormMetadata.access.fields.owner} description="只认这个账号为主人，留空表示没有主人。普通聊天和已接入工具不要求主人身份；独立工作委派的身份核验使用此账号。"><Input value={form.owner} onChange={event => update('owner', event.target.value)} disabled={saving || blocked} inputMode="numeric" maxLength={20} placeholder="654321" /></Field><div className="flex h-9 items-center gap-2 text-xs text-muted-foreground"><ShieldCheck className="size-4" />不按昵称或群身份认主</div></div>
-            {validationError && <p className="mt-4 text-xs text-destructive" role="alert">{validationError}</p>}
-            {writeError && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-xs text-destructive" role="alert"><span>{writeError}</span>{(result === 'busy' || result === 'conflict' || result === 'unknown') && <Button size="sm" variant="outline" onClick={() => setReloadVersion(version => version + 1)}>重新载入</Button>}</div>}
-            </div>
-          </Section>
-        </>}
-    <ChatAuthorizationManager api={api} connected={connected} setDirty={setDirty} />
+    {!props.embedded && <PageHeading title="访问范围" description="主人与会话白名单；群聊与私聊分开维护。" actions={reloadButton} />}
+    <Section id={nativeFormMetadata.access.id} title="主人与白名单" actions={access ? <StatusPill tone={access.allow.length ? 'success' : 'warning'}>{access.allow.length} 项会话</StatusPill> : reloadButton}
+      footer={form && access && <>
+        <SettingsWindow title="主人与白名单" triggerVariant="default" label={dirty ? '继续编辑名单 · 未保存' : '编辑名单'} description="群聊与私聊分开填写，多个号码用逗号隔开。关闭窗口保留未保存草稿。"><div className="stack">{ownerField}<div className="formgrid">
+          <Field layout="stacked" label={nativeFormMetadata.access.fields.allowGroups} tip="群白名单允许该群会话接收与回复，不额外过滤群成员。"><Textarea value={form.allow.groups} onChange={event => updateList('allow', 'groups', event.target.value)} disabled={disabled} maxLength={32_768} rows={5} className="resize-y text-xs" placeholder="填写群号，多个号码用逗号隔开" /></Field>
+          <Field layout="stacked" label={nativeFormMetadata.access.fields.allowPrivate} tip="私聊白名单只控制对应用户的私聊。"><Textarea value={form.allow.privateChats} onChange={event => updateList('allow', 'privateChats', event.target.value)} disabled={disabled} maxLength={32_768} rows={5} className="resize-y text-xs" placeholder="填写私聊账号，多个号码用逗号隔开" /></Field>
+        </div><div className="strip">同一份白名单允许接收和回复；敏感操作核验实际主人。</div>{feedback}</div></SettingsWindow>
+        <SettingsWindow title="拒绝名单" description="拒绝项与白名单不能重叠；保存名单会同时保存当前主人与访问草稿。关闭窗口保留草稿。"><div className="stack"><div className="formgrid">
+          <Field layout="stacked" label={nativeFormMetadata.access.fields.denyGroups}><Textarea value={form.deny.groups} onChange={event => updateList('deny', 'groups', event.target.value)} disabled={disabled} maxLength={32_768} rows={5} className="resize-y text-xs" placeholder="填写拒绝的群号" /></Field>
+          <Field layout="stacked" label={nativeFormMetadata.access.fields.denyPrivate}><Textarea value={form.deny.privateChats} onChange={event => updateList('deny', 'privateChats', event.target.value)} disabled={disabled} maxLength={32_768} rows={5} className="resize-y text-xs" placeholder="填写拒绝的私聊账号" /></Field>
+        </div>{feedback}</div></SettingsWindow>
+        <ReadOnlyDetails title="访问规则说明" label="规则说明"><div className="stack"><p>主人由真实 QQ 用户号确定，管理页面登录身份不会授予 QQ 主人权限。</p><p>同一份白名单允许接收与回复；群会话与私聊分别授权，白名单内工具直接开放，敏感操作核验实际主人。</p><p>群聊 @ 与白名单内私聊固定唤醒，额外昵称和引用唤醒在人设中配置。</p><p>拒绝项与白名单不能重叠；主人账号本身不会隐式扩大会话准入范围。</p></div></ReadOnlyDetails>
+      </>}>
+      {loading && !access ? <div className="empty" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取访问名单</div> : !access || !form ? <div className="stack"><p className="small text-destructive" role="alert">{loadError || '暂时无法读取访问授权。'}</p>{reloadButton}</div> : <div className="stack">
+        <div className="row"><span className="muted">主人账号</span><strong>{access.owner ?? '尚未指定'}</strong>{dirty && <StatusPill tone="warning">草稿未保存</StatusPill>}</div>
+        <div className="row"><strong>群聊</strong><span className="muted small">{groups.length} 项</span>{groups.slice(0, 5).map(value => <span className="chip" key={value}>群号 {value}</span>)}{groups.length > 5 && <span className="muted small">另 {groups.length - 5} 项</span>}</div>
+        <div className="row"><strong>私聊</strong><span className="muted small">{privateChats.length} 项</span>{privateChats.slice(0, 5).map(value => <span className="chip" key={value}>用户号 {value}</span>)}{privateChats.length > 5 && <span className="muted small">另 {privateChats.length - 5} 项</span>}</div>
+        <div className={`strip ${access.allow.length ? '' : 'warn'}`}>{access.allow.length ? '同一份白名单允许接收和回复；敏感操作核验实际主人。' : '当前白名单为空，不会接收或回复群聊、私聊消息。'}</div>
+        {recoveryPanel}{loadError && <p role="alert" className="text-xs text-destructive">读取失败，保留当前快照与草稿：{loadError}</p>}{writeError && <p role="alert" className="text-xs text-destructive">{writeError}</p>}
+        <div className="row small muted"><span className="grow" role="status">{saveMessage(result, dirty)}</span>{reloadButton}</div>
+      </div>}
+    </Section>
   </div>;
 }

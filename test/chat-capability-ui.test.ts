@@ -69,6 +69,6 @@ test('capability revisions require all eight keys and metadata includes only pub
   assert.equal(capabilityRevisions({ ...revisions, authorization: 'latest' }), null);
   assert.equal(capabilityRevisions({ ...revisions, grant: revision }), null);
   assert(nativeFormSearchTargets().some(target => target.title === nativeFormMetadata.capabilities.fields.selection));
-  assert(nativeFormSearchTargets().some(target => target.title === '工具委派尝试次数（按轮）'));
+  assert(!nativeFormSearchTargets().some(target => target.title === '工具委派尝试次数（按轮）'));
   assert.equal(JSON.stringify(nativeFormSearchTargets()).includes('/synthetic/credentials'), false);
 });

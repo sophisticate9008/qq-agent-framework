@@ -65,9 +65,17 @@ export function parseChatAssistant(value: unknown): ChatAssistantSnapshot | null
 }
 
 export function assistantAvailabilityMessage(snapshot: ChatAssistantSnapshot): string {
-  if (snapshot.state === 'available') return '助手执行已就绪';
-  if (snapshot.missingReasons.length === 1 && snapshot.missingReasons[0] === 'assistant_backend_not_connected') return '助手执行待接入';
-  return `助手执行暂不可用：${snapshot.missingReasons.join('、')}`;
+  if (snapshot.configuration.mode === 'chat-only') return '助手已关闭';
+  if (snapshot.state === 'available') return '助手已启用';
+  const reasons = snapshot.missingReasons.join(' ');
+  if (/not_running/.test(reasons)) return '助手已保存，聊天尚未启动';
+  if (/not_applied/.test(reasons)) return '助手尚未启用';
+  if (/reconciliation|unknown|interrupted/.test(reasons)) return '助手加载结果待确认，请刷新状态';
+  if (/pending_reload|reload/.test(reasons)) return '助手模型等待 DSH 加载';
+  if (/model_unavailable|model_not_configured|provider/.test(reasons)) return '所选助手模型不可用，请检查模型连接';
+  if (/reasoning/.test(reasons)) return '助手思考等级不受支持，请重新选择';
+  if (/connect|backend|channel|local_target/.test(reasons)) return '助手连接不可用，请检查 DSH';
+  return '助手未就绪，请查看详情';
 }
 
 export function sameAssistantConfiguration(left: ChatAssistantConfiguration, right: ChatAssistantConfiguration): boolean {

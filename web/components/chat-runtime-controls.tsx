@@ -7,14 +7,16 @@ import { errorMessage, type ApiClient } from '../lib/api.ts';
 import { chatRuntimeBadge, chatRuntimeCanApplyAndStart, chatRuntimeCanRecoverStoppedControl, chatRuntimeEngineReadiness, chatRuntimeLastError, chatRuntimeNeedsSessionMigration, chatRuntimeReason, chatRuntimeVisibleReasons, parseChatRuntimeStatus, type ChatRuntimeStatus } from '../lib/chat-runtime.ts';
 import { applyAndStartChat, chatApplicationPhaseLabels } from '../lib/chat-application.ts';
 import type { PageProps } from '../lib/types.ts';
-import { Section, StatusPill } from './management.tsx';
+import { StatusPill } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { SessionMigrationControl } from './session-migration-control.tsx';
+import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
+import { SettingsWindow } from './settings-window.tsx';
 import { useDshRestart } from '../lib/use-dsh-restart.ts';
 
-export function ChatRuntimeControls({ api, connected, dirty, navigate, onRunningChange, connectionPanel }: {
+export function ChatRuntimeControls({ api, connected, dirty, navigate, onRunningChange, connectionPanel, compact = false }: {
   readonly api: ApiClient; readonly connected: boolean; readonly dirty: boolean; readonly navigate: PageProps['navigate'];
-  onRunningChange?(running: boolean): void; readonly connectionPanel?: ReactNode;
+  onRunningChange?(running: boolean): void; readonly connectionPanel?: ReactNode; readonly compact?: boolean;
 }) {
   const { application, state: applicationState, observationError, refresh: refreshApplication } = useChatApplication(api, connected);
   const restart = useDshRestart(api, connected);
@@ -122,29 +124,48 @@ export function ChatRuntimeControls({ api, connected, dirty, navigate, onRunning
   }
 
   if (!connected) return null;
-  return <Section id="chat-runtime" scrollable height={connectionPanel ? "lg" : "sm"} title="聊天运行" description="确认设置已应用后再启动聊天。WebSocket 可自动连接；聊天模型仍需单独启停。"
-    actions={<StatusPill tone={status?.chatReady && !resource.error ? 'success' : 'warning'}>{active ? '正在处理' : resource.error ? '运行状态待确认' : chatRuntimeBadge(status)}</StatusPill>}
-    footer={<><span className="mr-auto text-xs text-muted-foreground">{dirty ? '请先保存连接设置。' : uncertain ? '操作结果待确认，请先重新检查。' : status?.configurationChanged ? '有新的已保存设置；停止后重新启动才会生效。' : '不会自动启动，也不会清空会话。'}</span>
-      <Button variant="outline" onClick={() => { resource.refresh(); refreshApplication(); }}><RefreshCw className="size-3.5" />刷新状态</Button>
-      {running || status?.state === 'error' ? <Button variant="outline" disabled={active || uncertain || restart.pending || loading || applicationState.busy || applicationState.blocked} onClick={() => void control('stop')}><Square className="size-3.5" />停止聊天</Button>
-        : <span role="group" aria-label="启动聊天" data-page-field><Button id="chat-runtime-start" disabled={!status?.canStart && !applyBeforeStart || active || uncertain || restart.pending || dirty || loading || applicationState.busy || applicationState.blocked} onClick={() => void control('start')}><Play className="size-3.5" />{applyBeforeStart ? '应用并启动' : '启动聊天'}</Button></span>}</>}>
-    {observationError && <p role="status" className="mb-3 text-xs text-muted-foreground">暂时无法读取应用操作；后台阶段不会因此重复执行，请重新检查。</p>}
-    {notice && <p role="status" className="mb-3 text-xs leading-6 text-muted-foreground">{notice}</p>}
-    {loading && <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />正在检查聊天条件</p>}
-    {error && <p role="alert" className="mb-3 flex items-start gap-2 text-xs leading-6 text-destructive"><CircleAlert className="mt-1 size-4 shrink-0" />{error}</p>}
-    {applicationState.kind === 'manual' && applicationState.manualSource === 'runtime' && applicationState.blocked && <div className="mb-3 grid gap-2 rounded-lg border p-3 text-xs" data-runtime-control-recovery><p>先前启停请求没有确认结果。恢复操作只读取实际停止与排空状态，不重复启停。</p><Button size="sm" variant="outline" className="justify-self-start" disabled={request.current !== null || restart.pending || applicationState.busy || applicationState.reconciling} onClick={() => void restoreStoppedControls()}>恢复操作</Button></div>}
-    {status && <>
-      <dl className="grid grid-cols-3 gap-4 text-xs"><div><dt className="text-muted-foreground">QQ 消息连接</dt><dd className="mt-2 font-medium">{status.protocolConnected ? '已连接' : '未连接'}</dd></div><div><dt className="text-muted-foreground">DSH 聊天引擎</dt><dd className="mt-2 font-medium">{chatRuntimeEngineReadiness(status)}</dd></div><div><dt className="text-muted-foreground">聊天处理</dt><dd className="mt-2 font-medium">{status.chatReady ? '已启用' : running ? '暂不可用' : '未启动'}</dd></div></dl>
-      {visibleReasons.length > 0 ? <ul className="mt-4 grid gap-2 border-t pt-3">{visibleReasons.map(reason => {
-        const item = chatRuntimeReason(reason);
-        return <li key={reason} className="flex items-start justify-between gap-3 text-xs leading-5"><span>{item.text}</span><Button variant="ghost" size="sm" onClick={() => navigate(item.page, item.target)}>去设置</Button></li>;
-      })}</ul> : <p className="mt-4 border-t pt-3 text-xs leading-6 text-muted-foreground">{status.chatReady ? '正在处理已授权的会话；停止聊天会保留历史与发送记录。' : running ? '聊天处理暂不可用，请重新检查当前状态。' : '本地配置检查通过。点击启动后还会验证协议账号与 DSH 连接，验证通过才接收消息。'}</p>}
-      {status.state === 'stopped' && chatRuntimeNeedsSessionMigration(status)
-        && <SessionMigrationControl api={api} connected={connected} disabled={dirty || active || uncertain || loading} onComplete={() => resource.refresh()} />}
-      {applicationState.blocked && <p role="status" className="mt-3 text-xs text-muted-foreground">先前应用或启动结果尚未确认，已停止后续操作；重新检查只读取状态，不会重试。</p>}
-      <details className="mt-3 rounded-lg border p-3 text-xs leading-5"><summary className="cursor-pointer">启动检查说明</summary><p className="mt-2">{status.modelExecutionVerified === true ? '服务报告模型执行已验证。' : ''}启动检查仅核对连接和配置，不发送模型请求；聊天就绪后即可使用。</p></details>
-      {status.lastError && <p role="alert" className="mt-3 text-xs leading-5 text-destructive">{chatRuntimeLastError(status.lastError)}</p>}
-    </>}
-    {connectionPanel}
-  </Section>;
+  const refreshControl = <Button variant="ghost" size="sm" disabled={active} onClick={() => { resource.refresh(); refreshApplication(); }}><RefreshCw className="size-3.5" />刷新状态</Button>;
+  const statusTone = status?.chatReady && !resource.error ? 'success' : uncertain || resource.error || applicationState.blocked ? 'warning' : 'neutral';
+  const statusLabel = active ? '正在处理' : resource.error ? '运行状态待确认' : chatRuntimeBadge(status);
+  const controlButton = running || status?.state === 'error'
+    ? <Button variant="outline" disabled={active || uncertain || restart.pending || loading || applicationState.busy || applicationState.blocked} onClick={() => void control('stop')}><Square className="size-3.5" />停止聊天</Button>
+    : <span role="group" aria-label="启动聊天" data-page-field><Button id="chat-runtime-start" disabled={!status?.canStart && !applyBeforeStart || active || uncertain || restart.pending || dirty || loading || applicationState.busy || applicationState.blocked} onClick={() => void control('start')}><Play className="size-3.5" />{applyBeforeStart ? '应用并启动' : '启动聊天'}</Button></span>;
+  const recovery = <>
+    {applicationState.kind === 'manual' && applicationState.manualSource === 'runtime' && applicationState.blocked && <div className="strip warn stack" data-runtime-control-recovery><p>先前启停请求没有确认结果。恢复只读取实际停止与排空状态，不重复启停。</p><Button size="sm" variant="outline" className="justify-self-start" disabled={request.current !== null || restart.pending || applicationState.busy || applicationState.reconciling} onClick={() => void restoreStoppedControls()}>恢复操作</Button></div>}
+    {applicationState.blocked && <p role="status" className="small muted">先前应用或启动结果尚未确认，后续操作暂时锁定；刷新只读取状态。</p>}
+  </>;
+  const checks = <>
+    {status && <dl className="info"><dt>QQ 消息</dt><dd>{status.protocolConnected ? '已连接' : '未连接'}</dd><dt>DSH</dt><dd>{chatRuntimeEngineReadiness(status)}</dd><dt>聊天处理</dt><dd>{status.chatReady ? '已启用' : running ? '暂不可用' : '未启动'}</dd></dl>}
+    {visibleReasons.length > 0 && <ul className="stack">{visibleReasons.map(reason => {
+      const item = chatRuntimeReason(reason);
+      return <li key={reason} className="row"><span className="grow text-xs">{item.text}</span><Button variant="ghost" size="sm" onClick={() => navigate(item.page, item.target)}>去设置</Button></li>;
+    })}</ul>}
+  </>;
+  const controlBody = <div className="stack">
+        <div className="row"><StatusPill tone={statusTone}>{statusLabel}</StatusPill>{refreshControl}</div>
+        {loading && <p role="status" className="row muted small"><LoaderCircle className="size-3.5 animate-spin" />正在检查聊天条件</p>}
+        {checks}
+        {status?.state === 'stopped' && chatRuntimeNeedsSessionMigration(status) && <SessionMigrationControl api={api} connected={connected} disabled={dirty || active || uncertain || loading} onComplete={() => resource.refresh()} />}
+        <div className="strip">{running ? '停止接收新的聊天消息，保留已有聊天记录与发送证据。' : applyBeforeStart ? '将应用已保存的聊天设置并启动，原有上下文保留。' : '启动前核对连接与配置；实际模型请求通过 QQ 消息验证。'}</div>
+        {dirty && <p className="small muted">请先保存连接设置。</p>}
+        {notice && <p role="status" className="small muted">{notice}</p>}
+        {error && <p role="alert" className="row text-xs text-destructive"><CircleAlert className="size-3.5 shrink-0" />{error}</p>}
+        {recovery}<div className="actions border-t pt-2">{controlButton}{refreshControl}</div>
+      </div>;
+  if (compact) return controlBody;
+  return <section id="chat-runtime" className="panel entity">
+    <div className="row"><span className="avatar" aria-hidden="true">▷</span><div className="grow"><h2 className="panel-title">聊天运行</h2><p className="muted small">已授权的 QQ 会话</p></div><StatusPill tone={statusTone}>{statusLabel}</StatusPill></div>
+    <div className="meta"><span>QQ 消息：{status ? status.protocolConnected ? '已连接' : '未连接' : '待确认'}</span><span>DSH：{status ? chatRuntimeEngineReadiness(status) : '待确认'}</span></div>
+    <div className={`strip ${uncertain || applicationState.blocked || resource.error ? 'warn' : ''}`} role="status">{!status ? loading ? '正在读取聊天运行状态。' : '暂时无法确认聊天运行状态，请刷新读取。' : active ? '正在更新聊天运行状态，请等待原操作。' : dirty ? '连接草稿尚未保存；请保存后再启动聊天。' : uncertain || applicationState.blocked ? '启停结果未确认，先核对停止与排空状态。' : status?.configurationChanged ? '设置已更新，重启聊天后生效。' : running ? status.chatReady ? '正在处理白名单内消息；停止会保留聊天历史和发送记录。' : '聊天正在运行，当前接收条件需要处理。' : status.state === 'error' ? '聊天运行需要处理，请查看详情。' : '聊天已停止；可检查条件后明确启动。'}</div>
+    <div className="actions">
+      <SettingsWindow title={running ? '停止聊天' : '启动与检查聊天'} label={running ? '停止聊天' : '启动聊天'} description="检查真实运行状态后执行；停止保留历史，启动沿当前配置继续。">{controlBody}</SettingsWindow>
+      {refreshControl}
+      <ReadOnlyDetails title="聊天运行详情" description="运行条件、当前诊断与原操作证据。"><div className="stack">{checks}<TechnicalDetails fields={[{ label: '运行状态', value: statusLabel }, { label: '最近错误', value: status?.lastError ? chatRuntimeLastError(status.lastError) : '无' }, { label: '应用阶段', value: applicationState.phase ? chatApplicationPhaseLabels[applicationState.phase] : '无' }, { label: '操作编号', value: applicationState.operationId }, { label: '配置更新', value: status?.configurationChanged ?? '未知' }]} />{recovery}{connectionPanel}</div></ReadOnlyDetails>
+    </div>
+    {notice && <p role="status" className="small muted">{notice}</p>}
+    {error && <p role="alert" className="text-xs leading-5 text-destructive">{error}</p>}
+    {observationError && <p role="status" className="small muted">暂时无法读取应用操作，后台阶段不会重复执行，请刷新状态。</p>}
+    {status?.lastError && <p role="alert" className="text-xs text-destructive">{chatRuntimeLastError(status.lastError)}</p>}
+    {(uncertain || applicationState.blocked) && recovery}
+  </section>;
 }

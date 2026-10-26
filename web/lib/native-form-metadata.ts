@@ -8,10 +8,8 @@ function form<Fields extends Record<string, string>>(page: PageId, id: string, t
 
 export const nativeFormMetadata = {
   bootstrap: form('features', 'native-bootstrap-summary', '可信扩展装配摘要', {}),
-  output: form('features', 'package-configuration-chat-output', '回复方式', {}),
+  output: form('overview', 'package-configuration-chat-output', '回复方式', {}),
   forwardAuthorization: form('features', 'forward-authorization', '合并转发权限', { conversations: '允许合并转发的会话' }),
-  appearance: form('persona', 'native-appearance', '角色参考图', { selection: '参考素材与版本', name: '参考图名称', description: '参考图说明', file: '参考图片文件' }),
-  assistantDeployment: form('model', 'assistant-deployment', '独立助手目标应用', {}),
   workRecords: form('model', 'native-work-records', '独立工作记录', { conversation: '工作所属会话筛选' }),
   memory: form('features', 'native-memory', '记忆与偏好', {
     scope: '记忆作用范围', conversation: '记忆来源会话', user: '记忆用户账号', kind: '记忆类型', content: '记忆正文', tags: '记忆标签',
@@ -63,8 +61,8 @@ export const nativeFormMetadata = {
   dsh: form('adapters', 'adapter-dshAgent', 'DSH 聊天引擎', {
     enabled: '启用此连接', endpoint: '服务地址', credential: '引擎访问凭据',
   }),
-  triggers: form('features', 'chat-input', '唤醒与续聊', { enabled: '启用聊天参与', nicknames: '呼叫昵称', mention: '@机器人时参与', reply: '引用机器人时参与', continuation: '同人续聊期限', group: '参与群聊', private: '参与私聊', include: '仅参与这些会话', exclude: '排除这些会话' }),
-  deployment: form('adapters', 'dsh-deployment', '应用聊天设置到 DSH', {
+  triggers: form('persona', 'persona-wake', '唤醒与续聊', { nicknames: '呼叫昵称', reply: '引用机器人时唤醒', continuation: '同人续聊时长（秒）' }),
+  deployment: form('model', 'dsh-deployment', '应用聊天设置', {
     profile: 'DSH 配置文件', credentials: 'DSH 凭据文件', context: '模型上下文容量', output: '模型最大输出',
     reasoning: '模型支持推理档位', layers: '基础配置文件（可选）', namespace: '生成配置名前缀',
     off: 'off 接口值', low: 'low 接口值', medium: 'medium 接口值', high: 'high 接口值', max: 'max 接口值',
@@ -73,12 +71,6 @@ export const nativeFormMetadata = {
   pricing: form('usage', 'usage-pricing-editor', usageSectionLabels.pricingEditor, {
     provider: '模型提供方', model: '模型', currency: '币种（三位代码）',
     ...Object.fromEntries(usagePriceComponents.map(component => [component.key, component.label])),
-  }),
-  budget: form('security', 'settings-budget', '网关发送额度', {
-    enabled: '启用网关发送额度', uses: '网关每次授权最多发送', ttl: '网关授权有效时间',
-  }),
-  constraints: form('security', 'settings-constraints', '网关请求与容量', {
-    timeout: '出站网关请求期限', pending: '并发请求上限', body: '单次请求体上限', records: '持久记录上限',
   }),
   listener: form('security', 'settings-listener', '管理端监听', { host: '监听地址', port: '监听端口' }),
 } as const;
@@ -92,12 +84,11 @@ export const nativeFormHints: Readonly<Partial<Record<NativeFormId, string>>> = 
   capabilities: '这是可选的 DSH 工具接入设置，不是普通工具调用或独立工作委派的授权开关。',
   onebot: '请先读取连接配置；收消息与上报的依赖字段需开启对应开关后可用。',
   deployment: '请先启用并保存 DSH 连接，再读取应用设置；档位接口值需启用推理档位。',
-  budget: '请先读取运行设置；次数与有效时间需开启发送预算后可用。',
   pricing: '请先读取账本单价；字段需先添加计价规则，选择对象需提供方目录可用。',
 };
 
 export function nativeFormSearchTargets() {
-  return (Object.keys(nativeFormMetadata) as NativeFormId[]).flatMap(key => {
+  return (Object.keys(nativeFormMetadata) as NativeFormId[]).filter(key => !['authorization', 'toolPermissions', 'forwardAuthorization', 'memory', 'reminders'].includes(key)).flatMap(key => {
     const metadata = nativeFormMetadata[key];
     const location = { page: metadata.page, sectionId: metadata.id, sectionTitle: metadata.title,
       fallbackSectionId: key === 'deployment' ? nativeFormMetadata.dsh.id : undefined,

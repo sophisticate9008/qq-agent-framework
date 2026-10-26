@@ -1,3 +1,4 @@
+import { HelpTip, ActionTip } from './help-tip.tsx';
 import { validateDshModelSettings } from '../../src/contracts/dsh-model-settings.ts';
 import { CHAT_PLAN_REASONING_EFFORTS as efforts } from '../../src/contracts/chat-plans.ts';
 import { useChatApplication } from '../lib/use-chat-application.ts';
@@ -12,12 +13,15 @@ import { Check, Eye, RefreshCw, Upload } from 'lucide-react';
 import { ApiError, asRecord, errorMessage, type ApiClient } from '../lib/api.ts';
 import { chatRuntimeReason, parseChatRuntimeStatus } from '../lib/chat-runtime.ts';
 import { applyAndStartChat, chatApplicationCanReconcile, chatApplicationPhaseLabels, chatApplicationPrimaryAction, chatApplicationStore, reconcileChatApplication, type ChatApplicationPrimaryAction } from '../lib/chat-application.ts';
-import { Field, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
+import { Field, SaveBar, Section, ToggleField } from './management.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 import { Textarea } from './ui/textarea.tsx';
+import { SettingsWindow } from './settings-window.tsx';
 import { DshRestartControl } from './dsh-restart-control.tsx';
 import { useDshRestart } from '../lib/use-dsh-restart.ts';
+import { parsePlanCatalog } from '../lib/chat-plans.ts';
+import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
 
 type Effort = typeof efforts[number];
 
@@ -110,19 +114,23 @@ function payload(form: DeploymentForm): { readonly deployment?: Record<string, u
   } };
 }
 
-export function DshDeploymentManager({ api, connected, setDirty, running = false, configurationDirty = false, configurationRevision = '', configurationDocument = 'plans', compact = false, navigate,
-  prepareConfiguration, configurationUpdateBlocked = false, updateRef, onUpdateAvailable, onUpdateActionChange }: {
-  readonly api: ApiClient; readonly connected: boolean; readonly running?: boolean; readonly compact?: boolean; readonly navigate?: PageProps['navigate'];
+export function DshDeploymentManager({ api, connected, setDirty, running = false, configurationDirty = false, configurationRevision = '', configurationDocument = 'plans', compact = false, minimal = false, navigate,
+  prepareConfiguration, configurationUpdateBlocked = false, updateRef, onUpdateAvailable, onUpdateActionChange, selectedPersonaId, configurationActive = true }: {
+  readonly api: ApiClient; readonly connected: boolean; readonly running?: boolean; readonly compact?: boolean; readonly minimal?: boolean; readonly navigate?: PageProps['navigate'];
   readonly configurationDirty?: boolean; readonly configurationRevision?: string; readonly configurationDocument?: 'plans' | 'personas'; setDirty(value: boolean, scope?: string): void;
   readonly prepareConfiguration?: (signal: AbortSignal) => Promise<PreparedChatConfiguration | null>;
   readonly configurationUpdateBlocked?: boolean;
   readonly updateRef?: Ref<DshDeploymentHandle>;
   readonly onUpdateAvailable?: (available: boolean) => void;
   readonly onUpdateActionChange?: (action: ChatApplicationPrimaryAction) => void;
+  readonly selectedPersonaId?: string;
+  readonly configurationActive?: boolean;
 }) {
   const { application, state: applicationState, observationError, initialLoading: applicationLoading, refresh: refreshApplication } = useChatApplication(api, connected);
   const restart = useDshRestart(api, connected);
   const runtimeResource = useReadResource(api, '/api/chat/runtime', connected, parseChatRuntimeStatus, { intervalMs: 5_000, pollWhen: () => !application.getSnapshot().busy });
+  const planResource = useReadResource(api, '/api/chat/plans', connected && selectedPersonaId !== undefined, parsePlanCatalog, { intervalMs: 10_000 });
+  const personaSelected = selectedPersonaId === undefined || planResource.snapshot?.plans.find(plan => plan.id === planResource.snapshot?.activePlanId)?.personaId === selectedPersonaId;
   const [saved, setSaved] = useState<DeploymentSnapshot | null>(null);
   const [form, setForm] = useState<DeploymentForm | null>(null);
   const [localBusy, setBusy] = useState(false);
@@ -132,6 +140,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   const blocked = localBlocked || applicationState.blocked;
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [pendingReload, setPendingReload] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [supportedEfforts, setSupportedEfforts] = useState<readonly Effort[] | null>(null);
@@ -316,7 +325,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
     if (state.kind === 'manual' && state.blocked && state.manualSource === 'deployment') { await restoreManualOperations(); return; }
     if (application.getSnapshot().kind === 'application' && application.getSnapshot().busy && !request.current) { refreshApplication(); return; }
     if (chatApplicationCanReconcile(application.getSnapshot())) { await reconcileApplication(); return; }
-    if (!saved || !form || !currentDocument() || applicationLoading || (prepareConfiguration ? configurationUpdateBlocked : connection.current.configurationDirty) || busy || blocked || frozen.current.has(api) || dirty || request.current) return;
+    if (!personaSelected || !saved || !form || !currentDocument() || applicationLoading || (prepareConfiguration ? configurationUpdateBlocked : connection.current.configurationDirty) || busy || blocked || frozen.current.has(api) || dirty || request.current) return;
     if (application.getSnapshot().busy) return;
     const controller = new AbortController();
     const generation = epoch.current;
@@ -337,6 +346,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       }
       const result = await applyAndStartChat({ api, signal: controller.signal, isCurrent: current,
         expectedDeploymentRevision: saved.revision, configurationRevision: ownUpdate.prepared?.revision ?? configurationRevision, configurationDocument,
+        ...(selectedPersonaId === undefined ? {} : { selectedPersonaId }),
         onPhase: phase => { if (current()) setNotice(chatApplicationPhaseLabels[phase]); },
       });
       if (!current()) return;
@@ -369,7 +379,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
     && applicationState.operation.reasons.includes('pending_reload');
   const primaryAction = chatApplicationPrimaryAction(applicationState, { connected, requestActive: request.current !== null,
     updateReady: !applicationLoading && !observationError && !busy && saved !== null && form !== null && currentDocument() && !blocked && !dirty
-      && !(prepareConfiguration ? configurationUpdateBlocked : configurationDirty) });
+      && personaSelected && !(prepareConfiguration ? configurationUpdateBlocked : configurationDirty) });
   const updateAvailable = primaryAction === 'update' || primaryAction === 'observe' || primaryAction === 'reconcile' || primaryAction === 'restore';
   useImperativeHandle(updateRef, () => ({ updateChat: autoApply }));
   useEffect(() => { onUpdateAvailable?.(updateAvailable); }, [onUpdateAvailable, updateAvailable]);
@@ -441,49 +451,57 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   }
 
   if (!connected) return null;
-  return <Section id={nativeFormMetadata.deployment.id} title={nativeFormMetadata.deployment.title} description="应用已保存且已启用的聊天方案及其关联人设；其他草稿或未关联人设不会被选择或应用。" scrollable
-    actions={<Button variant="outline" size="sm" onClick={() => { refreshApplication(); runtimeResource.refresh(); if (!request.current && !dirty && connection.current.api === api && connection.current.connected) setReload(value => value + 1); }}><RefreshCw className="size-3.5" />刷新状态</Button>}
-    footer={<p className="text-xs leading-6 text-muted-foreground" role="status">{notice || (blocked ? '上次操作结果未确认，应用已冻结；请先核对，不会重复应用。' : dirty ? '手动更改尚未保存；保存本身不会修改 DSH。' : '应用已保存设置并启动／更新聊天，保留上下文；不重启 DSH 进程。')}</p>}>
-    <div className="mb-3 flex flex-wrap items-center gap-2 text-xs" role="status"><StatusPill tone={blocked ? 'warning' : runtimeResource.snapshot?.chatReady ? 'success' : 'neutral'}>{waitingForReload ? '等待 DSH 加载核对' : blocked ? '应用结果待核对' : busy ? '正在应用' : applicationState.operation?.state === 'blocked' ? '应用检查未通过' : runtimeResource.error ? '运行状态待确认' : runtimeResource.snapshot?.chatReady && !runtimeResource.snapshot.configurationChanged ? '当前启用方案运行中' : '已保存待应用'}</StatusPill>{applicationState.busy && applicationState.phase && <span>{chatApplicationPhaseLabels[applicationState.phase]}</span>}</div>
-    {observationError && <p role="status" className="mb-3 text-xs text-muted-foreground">暂时无法更新持久应用记录；已保留上次阶段，不会重复提交。</p>}
-    <DshRestartControl api={api} connected={connected} />
-    {applicationState.kind === 'application' && applicationState.operationId && (canReconcile || applicationState.busy || observationError || !applicationState.operation) && <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border p-3 text-xs" data-application-recovery>
-      <Button size="sm" variant="outline" onClick={refreshApplication}>读取更新状态</Button>
-      {canReconcile && <Button size="sm" variant="outline" disabled={request.current !== null || applicationState.reconciling} onClick={() => void reconcileApplication()}>核对并继续更新</Button>}
-      {applicationState.busy && <span>原更新仍在处理，可读取进度；不会重复应用。</span>}
-      {canReconcile && <span>核对原更新；当前其他草稿保留。</span>}
+  const statusLabel = waitingForReload || pendingReload ? '等待加载' : blocked ? '需要核对' : busy ? '正在应用'
+    : applicationState.operation?.state === 'blocked' ? '应用未完成' : configurationDirty ? '未保存' : !configurationActive ? '待应用' : runtimeResource.error ? '状态未更新'
+      : runtimeResource.snapshot?.chatReady && !runtimeResource.snapshot.configurationChanged ? '已生效' : '待应用';
+  const actionLabel = primaryAction === 'restore' ? '恢复操作' : primaryAction === 'observe' ? '查看进度'
+    : primaryAction === 'reconcile' ? '核对并继续' : busy ? '正在应用…' : '应用';
+  const advanced = <SettingsWindow title="高级应用设置" label="高级设置" open={advancedOpen} onOpenChange={setAdvancedOpen} description="手动指定部署位置与模型能力，适用于远程或自定义接入。关闭窗口保留草稿。">
+    {error && <p className="mb-2 text-sm text-destructive" role="alert">{error}</p>}
+    {form ? <div className="grid gap-2">
+      <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
+        <Field label={nativeFormMetadata.deployment.fields.profile} layout="stacked" tip="DSH 服务器上的 cordis.patch.yml 绝对路径。"><Input value={form.profilePath} disabled={busy || blocked} onChange={event => update({ profilePath: event.target.value })} placeholder="/srv/dsh/profiles/chat/cordis.patch.yml" /></Field>
+        <Field label={nativeFormMetadata.deployment.fields.credentials} layout="stacked" tip="服务器上 .credentials.yaml 的绝对路径；只保存路径，不显示密钥内容。"><Input value={form.credentialsPath} disabled={busy || blocked} onChange={event => update({ credentialsPath: event.target.value })} placeholder="/srv/dsh/.credentials.yaml" /></Field>
+        <Field label={nativeFormMetadata.deployment.fields.context} tip="模型实际支持的总容量；群聊、私聊设置不能超过它。"><Input type="number" min={1} max={16_777_216} value={form.contextWindow} disabled={busy || blocked} onChange={event => update({ contextWindow: event.target.value })} /></Field>
+        <Field label={nativeFormMetadata.deployment.fields.output} tip="实际支持的最大输出 Token 数，小于群聊、私聊上下文。"><Input type="number" min={1} max={16_777_215} value={form.maxTokens} disabled={busy || blocked} onChange={event => update({ maxTokens: event.target.value })} /></Field>
+      </div>
+      <ToggleField label={nativeFormMetadata.deployment.fields.reasoning} tip="关闭时只允许方案选择关闭推理；开启后按提供方文档填写对应值。" checked={form.reasoning} disabled={busy || blocked} onChange={reasoning => update({ reasoning })} />
+      {form.reasoning && <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2">{efforts.map(effort => <Field key={effort} label={nativeFormMetadata.deployment.fields[effort]} tip={effort === 'off' ? '留空表示不传推理参数。' : '不支持此档位则留空。'}><Input value={form.mapping[effort]} maxLength={128} disabled={busy || blocked} onChange={event => update({ mapping: { ...form.mapping, [effort]: event.target.value } })} /></Field>)}</div>}
+      <div className="grid gap-2 border-t pt-2">
+        <Field label={nativeFormMetadata.deployment.fields.layers} layout="stacked" tip="有继承配置时按加载顺序每行填写一个绝对路径；不包括上方目标文件。"><Textarea className="h-20 min-h-20 resize-y font-mono text-sm" value={form.layerPaths} disabled={busy || blocked} onChange={event => update({ layerPaths: event.target.value })} /></Field>
+        <Field label={nativeFormMetadata.deployment.fields.namespace} tip="避免与其他 DSH 配置重名；不改变聊天人设。"><Input value={form.namespace} disabled={busy || blocked} onChange={event => update({ namespace: event.target.value })} /></Field>
+      </div>
+      {pendingReload && <p className="rounded bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-400" role="status">设置已写入，等待 DSH 加载。可在本页重启 DSH，维护完成后恢复聊天。</p>}
+      {preview && <div className="grid gap-2 rounded bg-muted/50 px-2 py-1.5 text-xs">{preview.reasons.length > 0 && <ul>{[...new Set(preview.reasons.map(reason => chatRuntimeReason(reason).text))].map(reason => <li key={reason}>{reason}</li>)}</ul>}{preview.ready && <><div className="flex flex-wrap items-center gap-2"><span className="mr-auto">应用会备份并写入当前聊天设置，会话保留。</span><Button disabled={busy || blocked || dirty || configurationDirty || running} onClick={() => void perform('apply')}><Upload className="size-3" />应用聊天设置</Button></div>{running && <p className="text-muted-foreground">请先停止聊天，再应用引擎配置。</p>}</>}</div>}
+      <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t bg-popover py-2">
+        <Button size="sm" variant="outline" disabled={busy || blocked || dirty || configurationDirty} onClick={() => void perform('prepare')}><Eye className="size-3" />预览变更</Button>
+        <Button size="sm" variant="outline" disabled={busy || dirty || configurationDirty} onClick={() => void perform('reconcile')}><Check className="size-3" />检查是否生效</Button>
+        <HelpTip label="应用检查">核对配置、凭据引用及文件来源。实际密钥、模型可用性和余额以真实消息的使用结果为准。</HelpTip>
+        <SaveBar dirty={dirty} saving={busy} disabled={blocked || configurationDirty} onSave={() => void perform('save')} onReset={saved && !blocked ? () => { if (!currentDocument() || busy || request.current || frozen.current.has(api)) return; setForm(saved.form); setPreview(null); } : undefined} label="保存应用设置" message={dirty ? '保存手动设置后再预览应用。' : '手动设置已保存。'} />
+      </div>
+    </div> : <div className="flex items-center gap-2 text-xs text-muted-foreground"><span>尚未读取高级设置。</span><Button variant="outline" size="sm" disabled={busy || request.current !== null} onClick={() => setReload(value => value + 1)}>重新读取</Button></div>}
+  </SettingsWindow>;
+  const controls = <div id={compact ? nativeFormMetadata.deployment.id : undefined} className={compact ? "contents text-xs" : "grid gap-2 text-xs"} data-application-controls>
+    <div className={minimal ? "contents" : "flex flex-wrap items-center gap-2"}>
+      {minimal && <span role="status" className="order-first mr-auto text-muted-foreground">{statusLabel}</span>}
+      <ActionTip content={prepareConfiguration ? '保存并启用当前方案，保留聊天历史。' : '应用已保存的人设，保留聊天历史。'}><Button id={prepareConfiguration ? 'native-plan-update' : undefined} disabled={!updateAvailable} onClick={() => void autoApply()}>{busy && <RefreshCw className="size-3.5 animate-spin" />}{minimal && actionLabel === '应用' ? '应用方案' : actionLabel}</Button></ActionTip>{!minimal && <HelpTip label="应用">{prepareConfiguration ? '保存并启用当前方案；通常无需重启 DSH。' : '先保存人设，再应用到当前聊天；通常无需重启 DSH。'}</HelpTip>}
+      {!minimal && <span role="status" className="text-muted-foreground">{personaSelected ? statusLabel : planResource.error ? '无法确认当前使用的人设' : '当前方案未使用此人设'}</span>}
+      {!minimal && <ReadOnlyDetails title="应用详情" description="查看配置生效状态与操作记录。">
+        <p className="mb-3">{prepareConfiguration ? '保存并启用当前方案。' : '应用已保存的人设与聊天设置。'}应用期间可能短暂停止聊天，会话历史保留；通常无需重启 DSH。</p>
+        <TechnicalDetails fields={[{ label: '状态', value: statusLabel }, { label: '操作编号', value: applicationState.operationId },
+          { label: '处理阶段', value: applicationState.phase ? chatApplicationPhaseLabels[applicationState.phase] : '无' },
+          { label: '处理说明', value: notice || '无' }, { label: '原因', value: applicationState.operation?.reasons ?? [] }]} />
+      </ReadOnlyDetails>}
+      {!minimal && configurationDocument === 'plans' && advanced}
+      {(observationError || runtimeResource.error || !form) && <Button variant="ghost" size="sm" onClick={() => { refreshApplication(); runtimeResource.refresh(); planResource.refresh(); if (!request.current && !dirty) setReload(value => value + 1); }}>刷新状态</Button>}
+    </div>
+    {configurationDirty && !prepareConfiguration && <p className="text-muted-foreground">请先保存人设。</p>}
+    {error && <p className="text-destructive" role="alert">{error}</p>}
+    {observationError && <p role="status">暂时无法读取应用进度，稍后刷新。</p>}
+    {(waitingForReload || pendingReload || restart.pending) && <div className="flex flex-wrap items-center gap-2">
+      <span>配置尚未加载，可重启 DSH 后继续应用。</span><DshRestartControl api={api} connected={connected} compact />
     </div>}
-    {applicationState.kind === 'manual' && applicationState.manualSource === 'deployment' && applicationState.blocked && <div className="mb-3 grid gap-2 rounded-lg border p-3 text-xs" data-manual-deployment-recovery>
-      <p>先前管理请求没有确认结果。恢复操作会读取实际加载证据，不重复应用，保留当前草稿。</p>
-      <Button size="sm" variant="outline" className="justify-self-start" disabled={request.current !== null || applicationState.busy || applicationState.reconciling} onClick={() => void restoreManualOperations()}>恢复操作</Button>
-    </div>}
-    {applicationState.kind === 'application' && applicationState.operationId && <details className="mb-3 rounded-lg border p-3 text-xs leading-6"><summary className="cursor-pointer">应用操作详情</summary><p className="mt-2 break-all">操作标识：{applicationState.operationId}</p><p>状态：{applicationState.operation?.state === 'completed' ? '已完成' : applicationState.operation?.state === 'blocked' ? '检查未通过' : applicationState.operation?.state === 'unknown' ? '结果待核对' : applicationState.operation?.state === 'running' ? '后台处理中' : '请求结果待核对'}</p>{applicationState.operation?.reasons.map(reason => <p key={reason}>{chatRuntimeReason(reason).text}</p>)}<div className="mt-2 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={refreshApplication}>读取同一应用操作</Button>{canReconcile && <Button size="sm" variant="outline" disabled={applicationState.busy || applicationState.reconciling} onClick={() => void reconcileApplication()}>{applicationState.reconciling ? '正在核对…' : '核对并继续更新'}</Button>}</div></details>}
-    {error && <p className="mb-4 text-xs leading-6 text-destructive" role="alert">{error}</p>}
-    {!form ? <p role="status" className="text-xs text-muted-foreground">{busy ? '正在读取应用设置' : '暂时无法读取应用设置，请重试。'}</p> : <div className="grid gap-5">
-      <div className="grid gap-3 rounded-lg border bg-accent/20 p-4"><p className="text-sm font-medium">{prepareConfiguration ? '一次更新聊天：保存当前方案、选择启用并应用。' : '保存后，一次应用并启动／更新聊天。'}</p><p className="text-xs leading-6 text-muted-foreground">自动识别并应用已启用方案及关联人设；必要时先停止聊天，核对加载和会话衔接后再启动，保留已有上下文。</p>
-        <span role="group" aria-label="应用并启动／更新聊天" data-page-field className="justify-self-start"><Button disabled={!updateAvailable} onClick={() => void autoApply()}><Upload className="size-3.5" />{primaryAction === 'restore' ? '恢复操作' : primaryAction === 'observe' ? '读取更新状态' : primaryAction === 'reconcile' ? '核对并继续更新' : busy ? '正在处理…' : prepareConfiguration ? '更新聊天' : '应用并启动／更新聊天'}</Button></span>
-        <p className="text-xs leading-6 text-muted-foreground">{prepareConfiguration ? '仅保存当前方案；其他表单草稿保留。' : '不自动保存草稿。'}更新聊天不清除会话，也不重启 DSH；重启需单独点击“重启 DSH”。检查未通过或结果未知时停止，不自动重试。</p>
-        {configurationDirty && !prepareConfiguration && <p className="text-xs text-muted-foreground">请先保存或撤销当前人设、方案更改，并核对保存结果；应用只读取已保存配置。</p>}{dirty && <p className="text-xs text-muted-foreground">请先保存或撤销手动更改，避免覆盖草稿。</p>}</div>
-      {supportedEfforts !== null && <p className="text-xs leading-6 text-muted-foreground" role="status">已识别模型支持的推理档位：{supportedEfforts.length > 0 ? supportedEfforts.map(effort => ({ off: '关闭', low: '低（low）', medium: '中（medium）', high: '高（high）', max: '最高（max）' })[effort]).join('、') : '暂未提供'}。不会自动修改聊天方案的档位。</p>}
-      {blocked && <p className="text-xs leading-6 text-amber-700 dark:text-amber-400" role="status">{waitingForReload ? '设置已写入，等待 DSH 加载。核对后继续同一次更新，不重复应用。' : '上次操作结果尚未确认，已冻结新的应用请求；重新读取只核对设置，不会解除保护或重放请求。'}</p>}
-      {applicationState.kind === 'manual' && applicationState.manualSource === 'deployment' && blocked && <Button variant="outline" className="justify-self-start" disabled={busy || request.current !== null || !currentDocument() || !application.canAcknowledgeManual(manualReview, 'deployment')} onClick={() => {
-        if (busy || request.current || !currentDocument() || !application.acknowledgeManual(manualReview, 'deployment')) return;
-        setManualReview(null); setBlocked(false); setPreview(null); setError(''); setNotice('已确认核对当前保存设置。可以明确发起新的管理操作；上次请求不会重放。');
-      }}>我已核对，允许新的管理操作</Button>}
-      {compact && navigate && <Button variant="outline" className="justify-self-start" onClick={() => navigate('adapters', { title: nativeFormMetadata.deployment.title, sectionId: nativeFormMetadata.deployment.id, kind: 'section' })}>查看完整应用设置与恢复状态</Button>}
-      {!compact && <details className="min-w-0 rounded-lg border px-4 py-3"><summary className="cursor-pointer text-xs font-medium">手动部署/远程 DSH（高级）</summary><div className="mt-4 grid gap-5">
-      <p className="text-xs leading-5 text-muted-foreground">检查会核对配置、凭据引用及文件来源，不验证引擎内的实际密钥值、模型可用性或余额；使用结果以实际消息为准。</p>
-      <div className="grid gap-4 sm:grid-cols-2"><Field label={nativeFormMetadata.deployment.fields.profile} description="DSH 服务器上的 cordis.patch.yml 绝对路径。"><Input value={form.profilePath} disabled={busy || blocked} onChange={event => update({ profilePath: event.target.value })} placeholder="/srv/dsh/profiles/chat/cordis.patch.yml" /></Field><Field label={nativeFormMetadata.deployment.fields.credentials} description="服务器上 .credentials.yaml 的绝对路径；只保存路径，不显示密钥内容。"><Input value={form.credentialsPath} disabled={busy || blocked} onChange={event => update({ credentialsPath: event.target.value })} placeholder="/srv/dsh/.credentials.yaml" /></Field></div>
-      <div className="grid gap-4 sm:grid-cols-2"><Field label={nativeFormMetadata.deployment.fields.context} description="填写模型实际支持的总容量；群聊、私聊设置不能超过它。"><Input type="number" min={1} max={16_777_216} value={form.contextWindow} disabled={busy || blocked} onChange={event => update({ contextWindow: event.target.value })} /></Field><Field label={nativeFormMetadata.deployment.fields.output} description="填写实际支持的最大输出 Token 数，小于群聊、私聊上下文。"><Input type="number" min={1} max={16_777_215} value={form.maxTokens} disabled={busy || blocked} onChange={event => update({ maxTokens: event.target.value })} /></Field></div>
-      <ToggleField label={nativeFormMetadata.deployment.fields.reasoning} description="关闭时只允许方案选择关闭推理；开启后按提供方文档填写对应值，不自动猜测。" checked={form.reasoning} disabled={busy || blocked} onChange={reasoning => update({ reasoning })} />
-      {form.reasoning && <div className="grid gap-3 sm:grid-cols-2">{efforts.map(effort => <Field key={effort} label={nativeFormMetadata.deployment.fields[effort]} description={effort === 'off' ? '留空表示不传推理参数。' : '不支持此档位则留空。'}><Input value={form.mapping[effort]} maxLength={128} disabled={busy || blocked} onChange={event => update({ mapping: { ...form.mapping, [effort]: event.target.value } })} /></Field>)}</div>}
-      <details><summary className="cursor-pointer text-xs text-muted-foreground">高级：基础配置与命名前缀</summary><div className="mt-4 grid gap-4"><Field label={nativeFormMetadata.deployment.fields.layers} description="有继承配置时按加载顺序每行填写一个绝对路径；不包括上方目标文件。"><Textarea className="h-28 resize-none font-mono text-xs" value={form.layerPaths} disabled={busy || blocked} onChange={event => update({ layerPaths: event.target.value })} /></Field><Field label={nativeFormMetadata.deployment.fields.namespace} description="避免与其他 DSH 配置重名；不改变聊天人设。"><Input value={form.namespace} disabled={busy || blocked} onChange={event => update({ namespace: event.target.value })} /></Field></div></details>
-      <SaveBar dirty={dirty} saving={busy} disabled={blocked || configurationDirty} onSave={() => void perform('save')} onReset={saved && !blocked ? () => { if (!currentDocument() || busy || request.current || frozen.current.has(api)) return; setForm(saved.form); setPreview(null); } : undefined} label="保存应用设置" message={dirty ? '保存手动应用设置，不会写入 DSH。' : '手动设置已保存。'} />
-      <div className="flex flex-wrap gap-2 border-t pt-4"><Button variant="outline" disabled={busy || blocked || dirty || configurationDirty} onClick={() => void perform('prepare')}><Eye className="size-3.5" />预览变更</Button></div>
-      <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy || dirty || configurationDirty} onClick={() => void perform('reconcile')}><Check className="size-3.5" />检查是否生效</Button></div>
-      {pendingReload && <p className="text-xs leading-6 text-amber-700 dark:text-amber-400" role="status">设置已写入，等待 DSH 加载。可在本页明确点击“重启 DSH”；维护流程会暂停聊天并在完成后恢复，不重复应用设置。</p>}
-      {preview && <div className="grid gap-3 rounded-lg border p-3 text-xs leading-6">{preview.reasons.length > 0 && <ul>{[...new Set(preview.reasons.map(reason => chatRuntimeReason(reason).text))].map(reason => <li key={reason}>{reason}</li>)}</ul>}{preview.ready && <><p>点击应用将备份并写入当前聊天设置；不会重置会话或重启 DSH。</p>{running && <p className="text-muted-foreground">请先停止聊天，再应用引擎配置。</p>}<Button disabled={busy || blocked || dirty || configurationDirty || running} onClick={() => void perform('apply')}><Upload className="size-3.5" />应用聊天设置</Button></>}</div>}
-      </div></details>}
-    </div>}
-  </Section>;
+  </div>;
+  if (compact) return controls;
+  return <Section id={nativeFormMetadata.deployment.id} title="聊天设置" scrollable>{controls}</Section>;
 }

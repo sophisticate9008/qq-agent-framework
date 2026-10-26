@@ -6,9 +6,11 @@ import { RefreshCw } from 'lucide-react';
 import { ApiError, errorMessage, type ApiClient } from '../lib/api.ts';
 import { assistantAvailabilityMessage, parseAssistantConfiguration, parseAssistantProviders, parseChatAssistant, sameAssistantConfiguration,
   type AssistantProvider, type ChatAssistantConfiguration, type ChatAssistantSnapshot } from '../lib/chat-assistant.ts';
-import { Field, SaveBar, Section, StatusPill } from './management.tsx';
+import { Field, Section, StatusPill } from './management.tsx';
 import { Button } from './ui/button.tsx';
-import { AssistantDeploymentManager } from './assistant-deployment-manager.tsx';
+import { SettingsWindow } from './settings-window.tsx';
+import { HelpTip } from './help-tip.tsx';
+import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
 import { modelReasoningEffortLabel, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
 
 interface AssistantCapabilities {
@@ -156,7 +158,8 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
   async function save(): Promise<void> {
     const owner = owned();
     if (!owner?.snapshot || !owner.draft || request.current || owner.loading || owner.saving || owner.blocked || recovery.blocked
-      || sameAssistantConfiguration(owner.snapshot.configuration, owner.draft)) return;
+      || sameAssistantConfiguration(owner.snapshot.configuration, owner.draft)
+        && (owner.draft.mode !== 'chat-assistant' || owner.snapshot.executionAvailable)) return;
     const configuration = parseAssistantConfiguration(owner.draft);
     if (!configuration || configuration.mode === 'chat-assistant' && !owner.providers.some(provider => provider.enabled
       && provider.id === configuration.provider && provider.models.some(model => model.id === configuration.model))) {
@@ -189,7 +192,7 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
       if (!snapshot || !sameAssistantConfiguration(snapshot.configuration, configuration)) throw new ApiError('assistant_save_unknown', 504);
       recovery.complete(operationToken);
       uncertain.current.delete(api);
-      const next = { ...pending, snapshot, draft: snapshot.configuration, saving: false, message: `助手设置已保存；${assistantAvailabilityMessage(snapshot)}。` };
+      const next = { ...pending, snapshot, draft: snapshot.configuration, saving: false, message: snapshot.configuration.mode === 'chat-only' ? '已保存' : snapshot.executionAvailable ? '助手已启用' : '设置已保存，助手尚未启用成功。' };
       live.current = next; setView(next);
     } catch (failure) {
       const failureState = recovery.fail(operationToken, failure);
@@ -214,23 +217,34 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
   const providers = current?.providers ?? [];
   const provider = providers.find(item => item.id === draft?.provider);
   const locked = !current?.snapshot || current.loading || current.saving || current.blocked || recovery.blocked;
-  const selectClass = 'h-9 w-full min-w-0 rounded-md border bg-background px-3 text-sm';
+  const selectClass = 'h-[27px] w-full min-w-0 rounded border border-input bg-background px-2 text-sm';
   const supportedEfforts = currentCapabilities?.value?.state === 'available' ? currentCapabilities.value.reasoningEfforts : [];
   const effortSupported = draft?.reasoningEffort != null && supportedEfforts.includes(draft.reasoningEffort);
-  return <><Section id="chat-assistant" title="聊天模式" scrollable description="普通聊天与独立助手分开配置。"
-    actions={<Button size="sm" variant="outline" disabled={!current || current.loading || current.saving} onClick={() => refresh.current()}><RefreshCw className="size-3.5" />重新读取助手设置</Button>}
-    footer={<SaveBar dirty={dirty} saving={current?.saving ?? false} disabled={locked} label="保存助手设置" onSave={() => void save()} message={current?.message || undefined} />}>
-    <div className="grid gap-4 text-xs leading-6">
-      <div><StatusPill tone={current?.snapshot?.state === 'available' ? 'success' : 'neutral'}>{current?.snapshot ? assistantAvailabilityMessage(current.snapshot) : '助手执行状态待确认'}</StatusPill></div>
+  const saveControls = <div className="flex flex-wrap items-center gap-2 text-xs">
+      {dirty && <span className="text-muted-foreground">未保存</span>}
+      <Button disabled={locked || !dirty && (draft?.mode !== 'chat-assistant' || current?.snapshot?.executionAvailable === true)} onClick={() => void save()}>
+        {current?.saving ? '正在应用…' : draft?.mode === 'chat-assistant' ? dirty ? '保存并启用' : '启用助手' : '保存'}
+      </Button>
+      <HelpTip label="启用助手">保存后自动加载所选助手模型；需要重启本机 DSH 时会自动处理，并恢复聊天。</HelpTip>
+      {current?.message && <span role="status" className="text-muted-foreground">{current.message}</span>}
+    </div>;
+  const stateControls = <><Button size="sm" variant="outline" disabled={!current || current.loading || current.saving} onClick={() => refresh.current()}><RefreshCw className="size-3" />重新读取</Button>
+      {current?.snapshot?.configuration.mode === 'chat-assistant' && <ReadOnlyDetails title="助手状态" description="所选模型与加载状态。"><TechnicalDetails fields={[
+        { label: '模型', value: `${current.snapshot.configuration.provider} / ${current.snapshot.configuration.model}` },
+        { label: '状态码', value: current.snapshot.missingReasons }, { label: '配置版本', value: current.snapshot.revision },
+        { label: '支持的思考等级', value: supportedEfforts.map(modelReasoningEffortLabel).join('、') || '尚未确认' },
+      ]} /></ReadOnlyDetails>}</>;
+  return <Section id="chat-assistant" title="后台助手" actions={<StatusPill tone={current?.snapshot?.executionAvailable ? 'success' : 'neutral'}>{current?.snapshot ? assistantAvailabilityMessage(current.snapshot) : '正在读取'}</StatusPill>}>
+    <div className="grid gap-2 text-sm">
       {current?.error && <p role="alert" className="text-destructive">{current.error}</p>}
       {current?.providerError && <p role="status" className="text-muted-foreground">{current.providerError}</p>}
-      {!draft ? <p role="status">{current?.loading ? '正在读取助手设置…' : '暂时无法读取助手设置，请重新读取。'}</p> : <>
-        <Field label="聊天模式"><select aria-label="聊天模式" className={selectClass} value={draft.mode} disabled={locked} onChange={event => {
+      {!draft && <Button className="justify-self-start" size="sm" variant="outline" disabled={!current || current.loading || current.saving} onClick={() => refresh.current()}>重新读取助手设置</Button>}
+      {!draft ? <p role="status">{current?.loading ? '正在读取助手设置…' : '暂时无法读取助手设置，请重新读取。'}</p> : <div className="formgrid">
+        <Field label="聊天模式" tip="仅聊天保留普通聊天；聊天＋助手允许在 QQ 中委派后台工作。"><select aria-label="聊天模式" className={selectClass} value={draft.mode} disabled={locked} onChange={event => {
           if (event.target.value === 'chat-only' || event.target.value === 'chat-assistant') update({ mode: event.target.value });
         }}><option value="chat-only">仅聊天</option><option value="chat-assistant">聊天＋助手</option></select></Field>
-        <p className="text-muted-foreground">{draft.mode === 'chat-only' ? '普通聊天中的已接入 MCP 与技能仍可使用；助手目标会保留。' : current?.snapshot?.state === 'available' ? '执行目标单独保存；请在所属 QQ 会话发起实际工作。' : '保存执行目标；助手执行的缺失条件以当前状态为准。'}</p>
-        {draft.mode === 'chat-assistant' && <div className="grid gap-4 sm:grid-cols-2">
-          <div className="sm:col-span-2"><Field label="助手昵称" description="可选，例如 gpt姐姐。昵称与执行模型分开保存。"><input aria-label="助手昵称" className={selectClass} value={draft.nickname} maxLength={48} placeholder="例如：gpt姐姐" disabled={locked} onChange={event => update({ nickname: event.target.value })} /></Field></div>
+        {draft.mode === 'chat-assistant' && <>
+          <Field label="助手昵称" tip="昵称可选，与执行模型分开保存。"><input aria-label="助手昵称" className={selectClass} value={draft.nickname} maxLength={48} placeholder="例如：gpt姐姐" disabled={locked} onChange={event => update({ nickname: event.target.value })} /></Field>
           <Field label="执行提供方"><select aria-label="执行提供方" className={selectClass} value={draft.provider ?? ''} disabled={locked || providers.length === 0} onChange={event => {
             const selected = providers.find(item => item.enabled && item.id === event.target.value);
             if (selected) update({ provider: selected.id, model: null });
@@ -238,8 +252,11 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
           <Field label="执行模型"><select aria-label="执行模型" className={selectClass} value={draft.model ?? ''} disabled={locked || !provider?.enabled} onChange={event => {
             if (provider?.enabled && provider.models.some(model => model.id === event.target.value)) update({ model: event.target.value });
           }}><option value="" disabled>选择执行模型</option>{draft.model && !provider?.models.some(model => model.id === draft.model) && <option value={draft.model} disabled>已保存的模型（暂不可用）</option>}{provider?.models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</select></Field>
-          <div className="sm:col-span-2"><Field label="助手思考等级" description="只列出执行模型支持的等级，与聊天模型分开保存。">
-            <div className="flex gap-2"><select aria-label="助手思考等级" className={selectClass}
+
+        </>}
+      </div>}
+      {draft && <><div className="strip">{draft.mode === 'chat-assistant' ? '独立处理由主人在 QQ 中委派的工作，问题和结果回到所属会话。' : '仅聊天模式保留助手的模型选择，暂停接收新的后台工作。'}</div><div className="row"><SettingsWindow title="助手设置与启用" description="助手模型和思考等级独立保存；应用后核对实际可用性。" disabled={!draft}><div className="stack">{draft.mode === 'chat-assistant' && <>          <div className="sm:col-span-2"><Field label="助手思考等级" layout="stacked" tip="只列出执行模型支持的等级，与聊天模型分开保存。">
+            <div className="flex max-w-lg gap-2"><select aria-label="助手思考等级" className={selectClass}
               value={draft.reasoningEffort === null ? '' : effortSupported ? draft.reasoningEffort : 'unconfirmed'}
               disabled={locked || !provider?.enabled || !draft.model || currentCapabilities?.loading === true}
               onChange={event => {
@@ -251,15 +268,10 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
               {draft.reasoningEffort !== null && !effortSupported && <option value="unconfirmed" disabled>原有等级待核对</option>}
               {supportedEfforts.map(effort => <option key={effort} value={effort}>{modelReasoningEffortLabel(effort)}</option>)}
             </select><Button size="sm" variant="outline" disabled={locked || !draft.model || !provider?.enabled || currentCapabilities?.loading === true} onClick={() => setCapabilitiesReload(value => value + 1)}>刷新等级</Button></div>
-            <p className="text-muted-foreground" role="status">{!draft.provider || !draft.model ? '先选择执行提供方和模型。'
-              : currentCapabilities?.loading ? '正在读取模型支持的等级…'
-              : currentCapabilities?.value?.state === 'available' ? `支持：${supportedEfforts.map(modelReasoningEffortLabel).join('、')}。`
-              : '暂未确认支持的等级，可使用模型默认或刷新重试。'}</p>
+            {(!draft.provider || !draft.model || currentCapabilities?.loading || currentCapabilities?.value?.state !== 'available') && <p className="text-xs text-muted-foreground" role="status">{!draft.provider || !draft.model ? '先选择执行提供方和模型。' : currentCapabilities?.loading ? '正在读取思考等级…' : '支持等级待确认，可用模型默认或刷新。'}</p>}
             {draft.reasoningEffort !== null && !effortSupported && <p className="text-muted-foreground">原值“{modelReasoningEffortLabel(draft.reasoningEffort)}”已保留，不会自动改档。</p>}
-          </Field></div>
-        </div>}
-      </>}
-      {current?.blocked && <div className="grid gap-2 rounded-lg border p-3"><p>重新读取只核对状态，不会再次保存，草稿仍保留。</p><Button size="sm" variant="outline" disabled={!current.reviewed || current.loading || current.saving} onClick={() => {
+          </Field></div></>}{saveControls}</div></SettingsWindow>{stateControls}<span className="push small muted">{dirty ? '未保存草稿' : current?.message || '设置已载入'}</span></div></>}
+      {current?.blocked && <div className="flex flex-wrap items-center gap-2 rounded bg-amber-500/10 px-2 py-1.5 text-xs"><p>重新读取只核对状态，不会再次保存，草稿仍保留。</p><Button size="sm" variant="outline" disabled={!current.reviewed || current.loading || current.saving} onClick={() => {
         const owner = owned();
         if (!owner?.blocked || !owner.reviewed || request.current || owner.loading || owner.saving) return;
         if (recovery.block && !recovery.release()) return;
@@ -268,6 +280,5 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
         live.current = next; setView(next);
       }}>我已核对，允许新的保存</Button></div>}
     </div>
-  </Section><AssistantDeploymentManager api={api} connected={connected} assistantRevision={current?.snapshot?.revision ?? null}
-    dirty={dirty || current?.saving === true || current?.blocked === true} enabled={current?.snapshot?.configuration.mode === 'chat-assistant'} onChanged={() => refresh.current()} /></>;
+  </Section>;
 }

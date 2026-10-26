@@ -17,6 +17,7 @@ import type { NativeModelProvider } from './model-providers.ts'
 import { composeChatCapabilityPreset } from './chat-capabilities.ts'
 import type { ChatCapabilityComposition, ChatCapabilityDeclaration } from './chat-capabilities.ts'
 import type { NativeDeploymentPresetBinding as DshPresetBinding } from '../contracts/native-deployment.ts'
+import { isChatSessionDefinition } from '../contracts/chat-session.ts'
 
 export const DSH_DEPLOYMENT_SCHEMA = '0.2.1-rc.2' as const
 
@@ -44,6 +45,8 @@ export interface DshDeploymentInput {
   readonly namespace?: string
   readonly capabilityDeclaration?: ChatCapabilityDeclaration
   readonly conversationKinds?: readonly ('group' | 'private')[]
+  /** Previously verified managed bindings in this target. Exact identities authorize updating those preset rows. */
+  readonly preservedPresetBindings?: readonly DshPresetBinding[]
 }
 
 export interface DshSelectablePreset {
@@ -144,9 +147,19 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
     const settings = input.modelSettings === undefined ? undefined : validateDshModelSettings(input.modelSettings)
     const namespace = input.namespace ?? 'qqaf'
     const conversationKinds = input.conversationKinds ?? ['group', 'private'] as const
+    const preservedPresetBindings = input.preservedPresetBindings ?? []
     if (!Array.isArray(conversationKinds) || conversationKinds.length < 1 || conversationKinds.length > 2
       || new Set(conversationKinds).size !== conversationKinds.length
       || conversationKinds.some(kind => kind !== 'group' && kind !== 'private')) missingReasons.push('invalid_conversation_kinds')
+    if (!Array.isArray(preservedPresetBindings) || preservedPresetBindings.length > 2
+      || preservedPresetBindings.some(binding => !record(binding) || typeof binding.agentPreset !== 'string'
+        || !validId(binding.agentPreset) || !['group', 'private'].includes(String(binding.conversationKind))
+        || !isChatSessionDefinition(binding.definition)
+        || typeof binding.externalProvider !== 'string' || !validId(binding.externalProvider))
+      || new Set(preservedPresetBindings.map(binding => binding.conversationKind)).size !== preservedPresetBindings.length
+      || new Set(preservedPresetBindings.map(binding => binding.agentPreset)).size !== preservedPresetBindings.length) {
+      missingReasons.push('invalid_preserved_preset_bindings')
+    }
     target = input.target === undefined ? undefined : validateDshDeploymentSnapshot(input.target)
     if (definition.capabilitySelection) {
       if (!input.capabilityDeclaration) missingReasons.push('capability_source_declaration_required')
@@ -189,11 +202,20 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
       const nextProviders: JsonObject = { ...existingProviders }
       const presets: DshDeploymentPreset[] = []
       const insertions: JsonObject[] = []
+      const replacements: JsonObject[] = []
       const credentials: Array<{ ref: string; value: string }> = []
       const nextBindings: DshPresetBinding[] = []
       for (const conversationKind of conversationKinds as readonly ('group' | 'private')[]) {
         const externalProvider = `${namespace}-${digest}-${conversationKind}`
-        const agentPreset = externalProvider
+        const preservedBinding = preservedPresetBindings.find(binding => binding.conversationKind === conversationKind)
+        const preservedRows = preservedBinding === undefined ? []
+          : target.presets.filter(candidate => candidate.config.id === preservedBinding.agentPreset)
+        if (preservedBinding !== undefined && preservedRows.length !== 1) {
+          missingReasons.push('preserved_preset_target_conflict')
+          continue
+        }
+        const preservedPreset = preservedRows[0]
+        const agentPreset = preservedBinding?.agentPreset ?? externalProvider
         const credentialRef = `${namespace.toUpperCase()}_${digest.toUpperCase()}_${conversationKind.toUpperCase()}_KEY`
         const contextWindow = definition.contextLimits[conversationKind]
         const route: JsonObject = {
@@ -207,7 +229,7 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
         }
         nextProviders[externalProvider] = route
         const basePreset: DshDeploymentPreset = {
-          entryId: `${namespace}-preset-${digest}-${conversationKind}`,
+          entryId: preservedPreset?.entryId ?? `${namespace}-preset-${digest}-${conversationKind}`,
           config: {
             id: agentPreset, name: `Native chat (${conversationKind})`,
             plugins: [
@@ -223,7 +245,11 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
         }
         const preset = input.capabilityDeclaration ? composeChatCapabilityPreset(basePreset, input.capabilityDeclaration) : basePreset
         const existing = target.presets.filter(candidate => candidate.entryId === preset.entryId || candidate.config.id === agentPreset)
-        if (existing.length > 0 && (existing.length !== 1 || !isDeepStrictEqual(existing[0], preset))) missingReasons.push('preset_conflict')
+        if (preservedPreset !== undefined) {
+          if (existing.length !== 1 || existing[0]?.entryId !== preservedPreset.entryId
+            || existing[0]?.config.id !== agentPreset) missingReasons.push('preserved_preset_target_conflict')
+          else if (!isDeepStrictEqual(preservedPreset, preset)) replacements.push({ id: preset.entryId, config: preset.config })
+        } else if (existing.length > 0 && (existing.length !== 1 || !isDeepStrictEqual(existing[0], preset))) missingReasons.push('preset_conflict')
         else if (existing.length === 0) insertions.push({ id: preset.entryId, name: '@deepseek-ai/dsh-agent-preset', config: preset.config })
         presets.push(preset)
         credentials.push({ ref: credentialRef, value: provider.apiKey })
@@ -238,7 +264,7 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
             profilePath: target.profilePath, credentialsPath: target.credentialsPath, providerUpdates, presets })).digest('hex'),
           externalToolAuthorizationVerified: false })
       }
-      const patch: JsonObject[] = [{ id: target.providerEntryId, config: nextConfig }]
+      const patch: JsonObject[] = [{ id: target.providerEntryId, config: nextConfig }, ...replacements]
       if (insertions.length > 0) patch.push({ insert: insertions })
       proposal = snapshot({
         profilePath: target.profilePath, expectedRevision: target.revision,
@@ -257,7 +283,7 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
       'Explicit schema-aware host deployment callback required; no automatic filesystem discovery, writes, reload or restart.',
       'Host must CAS the profile and credentials together, retain a private backup, merge effective rows, reload and read back live state without creating sessions.',
       'Context windows configure separate routes and automatic pressure compaction, not an exact per-message hard token ceiling.',
-      'Generated presets preserve the observed model input formats and compaction settings; explicit tool declarations require owner composition approval and runtime tool authorization. Existing sessions are not updated.',
+      'Generated presets preserve the observed model input formats and compaction settings; explicit tool declarations require owner composition approval and runtime tool authorization. Preserved preset identities take effect for existing sessions after the host reloads their composition.',
       'The selected API protocol is passed to DSH; requests are executed by DSH. Model capacities and reasoning wire mappings require explicit model metadata or operator settings.',
       'Read-only credential metadata proves managed-file provenance, not loaded plaintext value identity; credentialValueIdentityVerified is always false.',
     ], sourceRefs: DSH_DEPLOYMENT_EVIDENCE,

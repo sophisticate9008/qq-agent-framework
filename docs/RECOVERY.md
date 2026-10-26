@@ -24,7 +24,7 @@
 
 配置编辑使用各文档 revision CAS。HTTP 409 不证明保存成功，应重新读取确切领域；busy、冲突与结果未知分别处理。网页断线或账号切换保留原 API 身份下的未决写入证据；旧响应不能写入新账号草稿。
 
-应用入口是 `POST /api/chat/application`，请求包含客户端生成的 UUID v4 `operationId`、当前八份 `revisions` 和明确的 `deploy`。服务端先保存 journal，再协调 `stop → prepare → apply → migrate → start`，每个阶段记录 pending/in-flight/confirmed。查询原操作：
+应用入口是 `POST /api/chat/application`，请求包含客户端生成的 UUID v4 `operationId`、当前八份 `revisions` 和明确的 `deploy`。服务端先保存 journal，再协调 `stop → prepare → apply → start`，每个阶段记录 pending/in-flight/confirmed。查询原操作：
 
 ```text
 GET /api/chat/application?id=<原 operationId>
@@ -34,7 +34,7 @@ GET /api/chat/application?id=<原 operationId>
 
 正常应用遇到 `pending_reload` 时，默认额外等待最多 60 秒，只读核对 DSH 实际加载结果，仍受整次操作 180 秒期限和运行 lifetime 限制。核验通过后原链继续；已确认写入但等待结束仍未加载时，记录 blocked/pending_reload。写入本身仍不确定时保留 unknown，不能把它当作普通加载延迟。
 
-`POST /api/chat/application/reconcile` 的 body 为 `{ "operationId": "<原 UUID>" }`，界面入口为“核对并继续更新”。对于原 apply 阶段的 unknown，或 blocked/pending_reload，它核对原配置 revision、DSH 实际预设和完整来源证据；满足条件后，保存同一操作的 running 状态并在后台继续 migrate/start，立即返回供页面查询。不会再次 stop、prepare 或 apply，也不创建另一份操作。
+`POST /api/chat/application/reconcile` 的 body 为 `{ "operationId": "<原 UUID>" }`，界面入口为“核对并继续更新”。对于原 apply 阶段的 unknown，或 blocked/pending_reload，它核对原配置 revision、DSH 实际预设和完整来源证据；满足条件后，保存同一操作的 running 状态并在后台继续 start，立即返回供页面查询。不会再次 stop、prepare 或 apply，也不创建另一份操作。
 
 停止阶段未知且当前已证实安全停止时，核对可以把原操作记为 blocked 并要求新的明确更新，即使当前配置版本已经变化。原 operationId、请求版本和阶段证据保持不变；它不续跑旧请求，也不执行新的应用。准备阶段未知仅在其他依赖版本未变化、至多 deployment 版本变化时采用这一路径；apply 或 migrate 跨版本未知不能据此解除。
 
@@ -62,11 +62,11 @@ GET /api/chat/application?id=<原 operationId>
 
 ## 会话迁移、重置与执行核对
 
-应用中的会话衔接预览单独记为 `migrate/pending`。预览条件不满足时记录 blocked 和实际原因，不将此前已确认的配置应用改记为 unknown。
+日常方案与人设更新复用已记录的 DSH 预设及原 sessionId，不调用会话迁移。应用仅更新受管预设、重新加载本机 DSH，并在原会话下一次提交前选择当前模型；不复制、遍历或删除会话历史。配置元数据与最新配置记录原子保存，保持会话 generation、授权锚点及同一人设资源 scope。
 
 会话衔接按实际执行占用检查：旧执行虽然保留 unknown，但已收到模型终态、解除隔离且取消与通知均无未决动作时，不再阻止衔接。已结束分发的 `AGENT_UNKNOWN` 入站回执保留原样，不作为持续占用；其他未知入站仍阻止衔接。执行、发送、回复和任务仍分别检查，DSH 预览及提交继续核对源会话与队列空闲、历史游标和内容摘要。此判断不补发旧消息，也不将旧回执改成成功。
 
-历史会话不因配置目录保存自动换 ID。兼容基线记录原定义与身份，用于说明冲突及可恢复值；敏感内容、容量上限或旧基线缺失时，会明确显示无法提供原值，不能凭当前配置捏造历史基线。
+历史会话不因配置编辑换 ID。当前配置记录用于定位已托管预设与原 DSH 地址；提示词、模型和容量差异不再作为历史不兼容条件。DSH 地址变更、存储异常或未结束的显式迁移仍单独处理。最新记录单独保存，历史快照最多 64 条，历史额度不阻止正常更新。
 
 **`GET /api/chat/sessions/migration` 是准备操作。** 它读取外部 DSH 的迁移预览证据，并持久保存带 migrationId/revision 的 prepared 计划，不是纯历史查询。计划提交仍需显式 `POST /api/chat/sessions/migrate`，携带预览所得计划与 revision。迁移中断后使用原计划核对，不重做 child fork 或换 operationId 掩盖已有结果。
 

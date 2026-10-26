@@ -36,6 +36,7 @@ export function createNativeAccountRuntimeBundle(options: {
   const bootstrap = options.bootstrap ? Object.freeze({ ...options.bootstrap }) : undefined
   const repository = new NativeConfigurationRepository(directory)
   const deploymentPort = checkedNativeDeploymentRuntime(options.deploymentRuntime ?? createNativeDshDeploymentRuntime({
+    sessionDirectory: directory,
     resolveCapabilityApproval: createNativeCapabilityApprovalResolver(directory)
   }))
   const namespace = (kind: 'chat' | 'work', configured = '') => (kind === 'chat' ? 'qa' : 'qw') + createHash('sha256')

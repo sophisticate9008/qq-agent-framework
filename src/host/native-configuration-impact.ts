@@ -110,9 +110,9 @@ export function analyzeNativeConfigurationImpact(previous: NativeChatConfigurati
     const changedDependencies = (Object.keys(before) as NativeConfigurationDependency[])
       .filter(key => fingerprint(before[key]) !== fingerprint(after[key]))
     const changedRevisions = NATIVE_CONFIGURATION_REVISION_KEYS.filter(key => previous.revisions[key] !== next.revisions[key])
-    const sessionMigrationRequired = changedDependencies.includes('definition')
-    const restart = changedDependencies.some(key => !['definition', 'access'].includes(key))
-    const action = restart ? 'restart' : sessionMigrationRequired ? 'migrate' : 'none'
+    const sessionMigrationRequired = false
+    const restart = changedDependencies.some(key => key !== 'access')
+    const action = restart ? 'restart' : 'none'
     const beforeAllowed = new Set(before.access.allow.filter(scope => !before.access.deny.includes(scope)))
     const afterAllowed = new Set(after.access.allow.filter(scope => !after.access.deny.includes(scope)))
     const withdrawn = new Set([...beforeAllowed].filter(scope => !afterAllowed.has(scope)))

@@ -19,6 +19,8 @@ import { createDshJsonRpcPort } from '../adapters/dsh-jsonrpc.ts'
 import type { DshPresetBinding } from '../adapters/dsh-jsonrpc.ts'
 import { createDshProfileFilePort, DshProfileFileError as ProfileError } from '../adapters/dsh-profile-files.ts'
 import { readStaticDshProfile, staticDshProfileValues } from '../adapters/dsh-static-profile.ts'
+import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
+import { hasActiveNativeSessions, readNativeConfigurationBaseline } from './native-chat-compatibility.ts'
 
 const parse = readStaticDshProfile
 const values = staticDshProfileValues
@@ -34,6 +36,8 @@ interface PreparedProfile {
   readonly read: DshProfileInspection
   readonly preparation: DshDeploymentPreparation
   readonly capabilityApprovalRequest: ChatCapabilityApprovalRequest | null
+  readonly requiresSessionReload: boolean
+  readonly sessionConfigurationFingerprint: string
 }
 export interface DshProfileDeploymentOptions {
   readonly verificationTimeoutMs?: number
@@ -41,9 +45,53 @@ export interface DshProfileDeploymentOptions {
   readonly resolveCapabilityApproval?: ResolveChatCapabilityApproval
   readonly files?: DshProfileFilePort
   readonly conversationKinds?: readonly ('group' | 'private')[]
+  /** Framework session storage whose verified baseline authorizes preserving managed chat preset identities. */
+  readonly sessionDirectory?: string
+  readonly reloadSessions?: (configuration: NativeChatConfiguration, signal: AbortSignal) => Promise<void>
 }
 function configurationIdentity(configuration: NativeChatConfiguration): string {
   return digest(configuration)
+}
+
+function preservedPresetBindings(configuration: NativeChatConfiguration, directory: string | undefined): {
+  readonly bindings: readonly DshPresetBinding[]
+  readonly activeSessions: boolean
+} | undefined {
+  if (directory === undefined) return undefined
+  const baseline = readNativeConfigurationBaseline(directory)
+  let activeSessions: boolean
+  try {
+    const store = openReadonlySqliteStore(join(directory, 'native-chat.sqlite'))
+    try { activeSessions = store.withSnapshot(() => hasActiveNativeSessions(store)) }
+    finally { store.close() }
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'STORE_NOT_FOUND') activeSessions = false
+    else fail('preserved_preset_session_storage_unavailable')
+  }
+  if (baseline.state === 'unavailable' || baseline.state === 'invalid') fail('preserved_preset_baseline_unavailable')
+  const original = baseline.values
+  if (baseline.state !== 'available' || !original) {
+    if (activeSessions) fail('preserved_preset_baseline_required')
+    return { bindings: [], activeSessions: false }
+  }
+  if (original.endpoint !== configuration.adapters.dshAgent.endpoint) {
+    if (activeSessions) fail('preserved_preset_endpoint_conflict')
+    return { bindings: [], activeSessions: false }
+  }
+  if (original.bindings.length === 0) {
+    if (activeSessions) fail('preserved_preset_baseline_required')
+    return { bindings: [], activeSessions: false }
+  }
+  if (original.bindings.some(binding => binding.definitionFingerprint !== digest(original.definition))) {
+    fail('preserved_preset_definition_conflict')
+  }
+  if (original.bindings.some(binding => binding.conversationKind === null || binding.externalProvider === null)) {
+    if (activeSessions) fail('preserved_preset_legacy_binding_unsupported')
+    return { bindings: [], activeSessions: false }
+  }
+  return { activeSessions, bindings: original.bindings.map(binding => ({ agentPreset: binding.agentPreset, definition: original.definition,
+    ...(binding.conversationKind === null ? {} : { conversationKind: binding.conversationKind }),
+    ...(binding.externalProvider === null ? {} : { externalProvider: binding.externalProvider }) })) }
 }
 
 async function prepareProfile(configuration: NativeChatConfiguration, signal: AbortSignal, files: DshProfileFilePort, options: DshProfileDeploymentOptions): Promise<PreparedProfile> {
@@ -54,6 +102,7 @@ async function prepareProfile(configuration: NativeChatConfiguration, signal: Ab
   if (!plan || !persona) fail('active_chat_plan_required')
   const read = await files.read(target)
   const definition = buildChatSessionDefinition(plan, persona)
+  const preservedBindings = preservedPresetBindings(configuration, options.sessionDirectory)
   let capabilityDeclaration: ChatCapabilityDeclaration | undefined
   if (definition.capabilitySelection) {
     if (!configuration.adapters.dshAgent.enabled) fail('dsh_agent_not_enabled')
@@ -69,13 +118,23 @@ async function prepareProfile(configuration: NativeChatConfiguration, signal: Ab
     definition, providers: configuration.providers, target: read.snapshot,
     modelSettings: configuration.deployment.modelSettings ?? undefined, namespace: configuration.deployment.namespace,
     ...(options.conversationKinds === undefined ? {} : { conversationKinds: options.conversationKinds }),
+    ...(preservedBindings === undefined ? {} : { preservedPresetBindings: preservedBindings.bindings }),
     ...(capabilityDeclaration ? { capabilityDeclaration } : {}),
   })
-  const composition = preparation.preview()?.capabilityComposition
+  const preview = preparation.preview()
+  const composition = preview?.capabilityComposition
   const capabilityApprovalRequest = composition ? validateChatCapabilityApprovalRequest({ schema: 1, source: composition.source,
     compositionRevision: composition.revision, target: { profilePath: target.profilePath, credentialsPath: target.credentialsPath,
       layerPaths: target.layerPaths ?? [], schemaVersion: target.schemaVersion } }) : null
-  return { identity: configurationIdentity(configuration), read, preparation, capabilityApprovalRequest }
+  const configurationChanged = preservedBindings?.bindings.some(binding => !isDeepStrictEqual(binding.definition, definition)) === true
+  const artifactChanged = preview !== null && (Object.entries(preview.providerUpdates).some(([id, expected]) =>
+    !isDeepStrictEqual(object(read.snapshot.providerConfig.providers)?.[id], expected))
+    || preview.presets.some(expected => !read.snapshot.presets.some(actual => isDeepStrictEqual(actual, expected))))
+  return { identity: configurationIdentity(configuration), read, preparation, capabilityApprovalRequest,
+    sessionConfigurationFingerprint: digest({ endpoint: configuration.adapters.dshAgent.endpoint, target,
+      definition, providerUpdates: preview?.providerUpdates ?? null, presets: preview?.presets ?? null }),
+    requiresSessionReload: preservedBindings?.activeSessions === true && preservedBindings.bindings.length > 0
+      && (configurationChanged || artifactChanged) }
 }
 
 function subset(actual: JsonValue | undefined, expected: JsonValue): boolean {
@@ -168,9 +227,14 @@ export function createNativeDshDeploymentRuntime(options: DshProfileDeploymentOp
   const pollMs = options.pollIntervalMs ?? 250
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000
     || !Number.isSafeInteger(pollMs) || pollMs < 1 || pollMs > 5_000
+    || options.sessionDirectory !== undefined && (typeof options.sessionDirectory !== 'string'
+      || !isAbsolute(options.sessionDirectory) || options.sessionDirectory.length > 4_096 || options.sessionDirectory.includes('\0'))
+    || options.reloadSessions !== undefined && typeof options.reloadSessions !== 'function'
     || options.resolveCapabilityApproval !== undefined && typeof options.resolveCapabilityApproval !== 'function') throw new TypeError('Invalid DSH deployment options')
   let staged: PreparedProfile | undefined
   let applying = false
+  let reloadedSessionConfiguration: string | undefined
+  let pendingSessionReload: { readonly fingerprint: string; readonly reason: string } | undefined
   const requireApproval = async (configuration: NativeChatConfiguration, prepared: PreparedProfile, signal: AbortSignal): Promise<void> => {
     const request = prepared.capabilityApprovalRequest
     if (!request || nativeAuthorizationMode(configuration.authorization) === 'whitelist') return
@@ -186,6 +250,10 @@ export function createNativeDshDeploymentRuntime(options: DshProfileDeploymentOp
     try {
       const prepared = await prepareProfile(configuration, signal, files, options)
       if (!prepared.preparation.summary.ready) return { schema: 1, missingReasons: prepared.preparation.summary.missingReasons, presetBindings: [] }
+      if (pendingSessionReload?.fingerprint === prepared.sessionConfigurationFingerprint) fail(pendingSessionReload.reason)
+      if (prepared.requiresSessionReload && reloadedSessionConfiguration !== prepared.sessionConfigurationFingerprint) {
+        fail('session_configuration_reload_required')
+      }
       await requireApproval(configuration, prepared, signal)
       const readback = await liveSnapshot(configuration, prepared, signal, files)
       if (prepared.capabilityApprovalRequest) {
@@ -240,11 +308,19 @@ export function createNativeDshDeploymentRuntime(options: DshProfileDeploymentOp
           } catch (error) { return { schema: 1, state: 'blocked', missingReasons: [reason(error)] } }
         }
         let writeFailure: string | undefined
+        const requiresSessionReload = prepared.requiresSessionReload
+          || pendingSessionReload?.fingerprint === prepared.sessionConfigurationFingerprint
+        const markWritten = (id: string) => {
+          backupId = id
+          if (requiresSessionReload) pendingSessionReload = { fingerprint: prepared.sessionConfigurationFingerprint,
+            reason: 'session_configuration_reload_required' }
+        }
         await prepared.preparation.apply(async proposal => {
           try {
-            backupId = await files.write(prepared.read.target, proposal, signal, id => { backupId = id })
+            const writtenBackupId = await files.write(prepared.read.target, proposal, signal, markWritten)
+            markWritten(writtenBackupId)
             const readback = await files.read(prepared.read.target)
-            return { status: 'committed', backupId, readback: readback.snapshot }
+            return { status: 'committed', backupId: writtenBackupId, readback: readback.snapshot }
           } catch (error) {
             writeFailure = reason(error)
             return { status: 'conflict' }
@@ -253,6 +329,20 @@ export function createNativeDshDeploymentRuntime(options: DshProfileDeploymentOp
         if (writeFailure) return { schema: 1, state: writeFailure === 'deployment_revision_conflict' ? 'conflict' : 'unknown',
           ...(backupId ? { backupId } : {}), missingReasons: [writeFailure] }
         if (!backupId) return { schema: 1, state: 'blocked', missingReasons: prepared.preparation.summary.missingReasons }
+        if (requiresSessionReload) {
+          if (!options.reloadSessions) return { schema: 1, state: 'pending_reload', backupId,
+            missingReasons: ['session_configuration_reload_required'] }
+          try {
+            await options.reloadSessions(configuration, signal)
+            signal.throwIfAborted()
+            reloadedSessionConfiguration = prepared.sessionConfigurationFingerprint
+            pendingSessionReload = undefined
+          } catch {
+            pendingSessionReload = { fingerprint: prepared.sessionConfigurationFingerprint,
+              reason: 'session_configuration_reload_unknown' }
+            return { schema: 1, state: 'unknown', backupId, missingReasons: ['session_configuration_reload_unknown'] }
+          }
+        }
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
         do {
           const result = await reconcile(configuration, deadline)

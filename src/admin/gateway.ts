@@ -530,6 +530,13 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
   }) : undefined;
   const directory = join(dirname(configuration.tokenFile), 'runtime');
   const deploymentRuntime = checkedNativeDeploymentRuntime(options.deploymentRuntime ?? createNativeDshDeploymentRuntime({
+    sessionDirectory: directory,
+    async reloadSessions(current, signal) {
+      assert(nativeRuntimeIsQuiescent(await chatRuntime.status()), 'DSH_RESTART_NOT_QUIESCENT', 'Chat resources have not drained.');
+      await assertDshExclusive(current, signal, true);
+      await localDsh.restart(current, signal);
+      await localDsh.verify(current, signal);
+    },
     resolveCapabilityApproval: createNativeCapabilityApprovalResolver(directory)
   }));
   let chatRuntime: NativeChatRuntime;
@@ -573,12 +580,13 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
   const adapterRuntime = chatRuntime.adapterRuntime;
   const localDsh = createLocalDshMaintenance(configuration.serviceManager);
   const lifecycle = createNativeRuntimeApplicationPorts({ directory, runtime: chatRuntime, deploymentRuntime });
-  async function assertDshExclusive(current: Awaited<ReturnType<NativeConfigurationRepository['read']>>, signal: AbortSignal) {
+  async function assertDshExclusive(current: Awaited<ReturnType<NativeConfigurationRepository['read']>>, signal: AbortSignal, applying = false) {
     const application = nativeApplicationService(chatRuntime);
     const operation = await application?.read();
     const awaitingApply = operation?.phase === 'apply' && (operation.state === 'unknown'
       || operation.state === 'blocked' && operation.reasons.includes('pending_reload'));
-    assert(!operation || !nativeApplicationRequiresReconciliation(operation) || awaitingApply,
+    assert(!operation || !nativeApplicationRequiresReconciliation(operation) || awaitingApply
+      || applying && operation.state === 'running' && operation.phase === 'apply',
       'DSH_RESTART_APPLICATION_BUSY', 'An application phase still requires reconciliation.');
     for (const [accountDirectory, bundle] of accountBundles) {
       signal.throwIfAborted();

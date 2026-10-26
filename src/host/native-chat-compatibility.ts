@@ -8,13 +8,15 @@ import { validateAdapterEndpoint } from './adapter-configuration.ts'
 import { buildChatSessionDefinition, validateChatPlan, validateChatPersona, type ChatPersona, type ChatSessionDefinition } from './chat-plans.ts'
 import { digest, json, object } from './data.ts'
 import { createNativePersonaIdentity } from './native-persona-identity.ts'
-import type { DurableStore } from './types.ts'
+import { inspectNativeChatConfigurationState, nativeConfigurationFingerprint, prepareNativeChatConfigurationState,
+  type NativeChatConfigurationState } from './native-chat-configuration-state.ts'
+import type { DurableCasMutation, DurableStore } from './types.ts'
 import { readSessionMetadata } from './sessions.ts'
-import { listMigrationPlans } from './native-session-migration-state.ts'
 
 export const NATIVE_CONFIGURATION_BASELINE_NAMESPACE = 'native-chat.configuration-baselines'
 const MAX_BASELINE_BYTES = 524_288
 const MAX_BASELINES = 64
+const CURRENT_BASELINE_KEY = 'current'
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const validHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const identifier = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value)
@@ -117,20 +119,29 @@ function baselineAnchor(store: Pick<DurableStore, 'read'>) {
   const definition = store.read('native-chat.meta', 'session-definition')
   const personaIdentity = store.read('native-chat.meta', 'persona-identity')
   if (!definition || !personaIdentity) return null
-  const identity = object(definition.value).identity
+  const metadata = object(definition.value)
+  const identity = metadata.configurationFingerprint ?? metadata.identity
   const persona = object(personaIdentity.value)
   if (!validHash(identity) || !validHash(persona.contentVersion) || !validHash(persona.scopeVersion)) return null
   return { identity, personaVersion: persona.contentVersion, personaScopeVersion: persona.scopeVersion,
     key: hash([identity, persona.contentVersion, persona.scopeVersion]) }
 }
 
+function historicalBaselineCount(store: Pick<DurableStore, 'list'>): number {
+  return store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, { limit: MAX_BASELINES + 1 })
+    .filter(record => record.key !== CURRENT_BASELINE_KEY).length
+}
+
 function storedBaseline(store: Pick<DurableStore, 'read' | 'list'>): NativeConfigurationBaseline {
   try {
     const anchor = baselineAnchor(store)
     if (!anchor) return baselineState('missing')
-    const record = store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, anchor.key)
-    if (!record) return baselineState('missing', store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE,
-      { limit: MAX_BASELINES }).length >= MAX_BASELINES ? 'record-limit' : 'not-recorded')
+    const current = store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, CURRENT_BASELINE_KEY)
+    const currentValue = current ? object(current.value) : null
+    const record = currentValue?.identity === anchor.identity && currentValue.personaVersion === anchor.personaVersion
+      && currentValue.personaScopeVersion === anchor.personaScopeVersion ? current
+      : store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, anchor.key)
+    if (!record) return baselineState('missing', historicalBaselineCount(store) >= MAX_BASELINES ? 'record-limit' : 'not-recorded')
     const value = object(record.value)
     if (value.schema !== 1 || value.identity !== anchor.identity || value.personaVersion !== anchor.personaVersion
       || value.personaScopeVersion !== anchor.personaScopeVersion) return baselineState('invalid')
@@ -193,23 +204,52 @@ export function hasActiveNativeSessions(store: Pick<DurableStore, 'list'>): bool
 
 export function captureNativeConfigurationBaseline(store: DurableStore, candidate: NativeConfigurationCandidate,
   credentials: readonly string[]): boolean {
-  const values = projectedValues(candidate)
-  const serialized = JSON.stringify(values)
-  const identity = hash({ definition: candidate.definition, endpoint: candidate.endpoint, bindings: candidate.bindings })
-  const personaVersion = createNativePersonaIdentity(values.persona).version
+  const identity = nativeConfigurationFingerprint(candidate)
+  const personaVersion = candidate.persona ? createNativePersonaIdentity(candidate.persona).version : null
   const anchor = baselineAnchor(store)
   if (!anchor || anchor.identity !== identity || anchor.personaVersion !== personaVersion) {
     throw new TypeError('Baseline requires verified native identities')
   }
-  if (store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, anchor.key)) return storedBaseline(store).state === 'available'
-  if (store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, { limit: MAX_BASELINES }).length >= MAX_BASELINES) return false
+  const prepared = prepareBaseline(store, candidate, credentials, anchor)
+  if (!store.compareAndSetBatch) throw new FrameworkError('NATIVE_CHAT_CONFIGURATION_STATE_CAS_UNAVAILABLE', 'Atomic configuration persistence is unavailable.')
+  store.compareAndSetBatch(prepared.mutations)
+  return prepared.available
+}
+
+function prepareBaseline(store: Pick<DurableStore, 'read' | 'list'>, candidate: NativeConfigurationCandidate,
+  credentials: readonly string[], anchor: { identity: string; personaVersion: string; personaScopeVersion: string; key: string }):
+  { mutations: readonly DurableCasMutation[]; available: boolean } {
+  const values = projectedValues(candidate)
+  const serialized = JSON.stringify(values)
   const withheld = Buffer.byteLength(serialized) > MAX_BASELINE_BYTES ? 'value-too-large'
     : credentials.some(secret => secret !== '' && containsSecret(values, secret)) ? 'sensitive-content' : null
-  store.write(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, anchor.key, { schema: 1, identity, personaVersion,
+  const value = { schema: 1, identity: anchor.identity, personaVersion: anchor.personaVersion,
     personaScopeVersion: anchor.personaScopeVersion,
-    ...(withheld ? { withheld } : { capturedAt: Date.now(), values: json(values), checksum: digest(values) }) }, { expectedRevision: null })
-  if (withheld) return false
-  return true
+    ...(withheld ? { withheld } : { capturedAt: Date.now(), values: json(values), checksum: digest(values) }) }
+  const current = store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, CURRENT_BASELINE_KEY)
+  const mutations: DurableCasMutation[] = [{ kind: 'write', namespace: NATIVE_CONFIGURATION_BASELINE_NAMESPACE,
+    key: CURRENT_BASELINE_KEY, expectedRevision: current?.revision ?? null, value: json(value) }]
+  if (!store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, anchor.key) && historicalBaselineCount(store) < MAX_BASELINES) {
+    mutations.push({ kind: 'write', namespace: NATIVE_CONFIGURATION_BASELINE_NAMESPACE,
+      key: anchor.key, expectedRevision: null, value: json(value) })
+  }
+  return { mutations, available: withheld === null }
+}
+
+/** Call under the runtime lease after DSH configuration verification. Metadata and
+ * the current baseline share one CAS, so interruption cannot strand a new anchor.
+ * The latest baseline remains writable when the 64 historical snapshots are full. */
+export function synchronizeNativeChatConfiguration(store: DurableStore, candidate: NativeConfigurationCandidate,
+  credentials: readonly string[]): NativeChatConfigurationState {
+  const prepared = prepareNativeChatConfigurationState(store, candidate, storedBaseline(store))
+  const identity = prepared.state.configurationFingerprint
+  const personaVersion = prepared.state.personaMetadata.contentVersion
+  const personaScopeVersion = prepared.state.personaMetadata.scopeVersion
+  const baseline = prepareBaseline(store, candidate, credentials, { identity, personaVersion, personaScopeVersion,
+    key: hash([identity, personaVersion, personaScopeVersion]) })
+  if (!store.compareAndSetBatch) throw new FrameworkError('NATIVE_CHAT_CONFIGURATION_STATE_CAS_UNAVAILABLE', 'Atomic configuration persistence is unavailable.')
+  store.compareAndSetBatch([...prepared.mutations, ...baseline.mutations])
+  return prepared.state
 }
 
 export function inspectNativeConfigurationCompatibility(directory: string, candidate: NativeConfigurationCandidate): NativeConfigurationCompatibility {
@@ -224,25 +264,17 @@ export function inspectNativeConfigurationCompatibility(directory: string, candi
   try {
     return withReadonly(directory, store => {
       const hasSessions = hasActiveNativeSessions(store)
-      const prior = store.read('native-chat.meta', 'session-definition')
-      const priorPersona = store.read('native-chat.meta', 'persona-identity')
       const baseline = storedBaseline(store)
       if (!candidate.definition || !candidate.persona) return result('blocked', hasSessions, ['current_configuration_unavailable'], [], baseline)
-      const identity = prior ? object(prior.value) : null
-      const persona = priorPersona ? object(priorPersona.value) : null
-      if (hasSessions && (!identity || !validHash(identity.identity)) || persona && (persona.schema !== 1
-        || !validHash(persona.contentVersion) || !validHash(persona.scopeVersion))) {
-        return result('unavailable', hasSessions, ['persisted_configuration_unavailable'], [], baseline)
-      }
-      const currentIdentity = hash({ definition: candidate.definition, endpoint: candidate.endpoint, bindings: candidate.bindings })
+      const current = projectedValues(candidate)
       const reasons: string[] = []
-      if (listMigrationPlans(store).some(plan => ['committing', 'unknown', 'partial'].includes(plan.state))) {
-        reasons.push('session_migration_reconciliation_required')
-      }
-      if (hasSessions && identity?.identity !== currentIdentity) reasons.push('persisted_session_configuration_conflict')
-      if (persona && (persona.nativeId !== candidate.persona.id || persona.contentVersion !== createNativePersonaIdentity(candidate.persona).version)
-        || !persona && identity && identity.identity !== currentIdentity && (hasSessions || store.list('outbox', { limit: 1 }).length > 0)) {
-        reasons.push('persisted_persona_identity_conflict')
+      try { inspectNativeChatConfigurationState(store, candidate, baseline) }
+      catch (error) {
+        if (!(error instanceof FrameworkError)) throw error
+        if (error.code === 'NATIVE_SESSION_MIGRATION_RECONCILIATION_REQUIRED') reasons.push('session_migration_reconciliation_required')
+        else if (error.code === 'NATIVE_CHAT_SESSION_ENDPOINT_CONFLICT') reasons.push('persisted_session_endpoint_conflict')
+        else if (error.code === 'NATIVE_CHAT_SESSION_ENDPOINT_UNVERIFIED') reasons.push('persisted_session_endpoint_unverified')
+        else return result('unavailable', hasSessions, ['persisted_configuration_unavailable'], [], baseline)
       }
       const differences: string[] = []
       if (baseline.values) {
@@ -258,7 +290,7 @@ export function inspectNativeConfigurationCompatibility(directory: string, candi
           if (original.persona[field] !== candidate.persona[field]) differences.push(`persona.${field}`)
         }
         if (original.endpoint !== candidate.endpoint) differences.push('endpoint')
-        if (!isDeepStrictEqual(original.bindings, projectedValues(candidate).bindings)) differences.push('bindings')
+        if (!isDeepStrictEqual(original.bindings, current.bindings)) differences.push('bindings')
       }
       return result(reasons.length > 0 ? 'blocked' : hasSessions ? 'compatible' : 'no-history', hasSessions, reasons, differences, baseline)
     })

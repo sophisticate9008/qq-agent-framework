@@ -361,7 +361,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       setSupportedEfforts(settings.reasoningEfforts === false ? ['off'] : efforts.filter(effort => Object.hasOwn(mapping, effort)));
       if (!current()) return;
       if (result.state === 'running') { setPreview(null); setPendingReload(false); setNotice('已应用已保存设置并启动／更新聊天，原有上下文保留。'); }
-      else { setNotice('检查未通过，已停止后续操作；请核对提示。'); setError(result.reasons.map(reason => chatRuntimeReason(reason).text).join(' ') || '当前条件尚不允许继续。'); }
+      else { setNotice('检查未通过，已停止后续操作；请核对提示。'); setError([...new Set(result.reasons.map(reason => chatRuntimeReason(reason).text))].join(' ') || '当前条件尚不允许继续。'); }
     } catch (failure) {
       if (current()) {
         setBlocked(application.getSnapshot().blocked); setPreview(null);

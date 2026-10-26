@@ -66,6 +66,33 @@ function rejected(code: string): DshPortResult<never> {
   return { ok: false, error: { code } }
 }
 
+/** Select configuration for the next request on the existing session. No prompt or fork. */
+export async function updateDshSessionModel(options: {
+  readonly sessionId: string
+  readonly definition: ChatSessionDefinition
+  readonly externalProvider: string
+  readonly signal: AbortSignal
+  readonly rpc: (method: 'session/modelCatalog' | 'session/selectModel', input: JsonObject | undefined,
+    signal: AbortSignal) => Promise<DshPortResult<JsonValue>>
+}): Promise<void> {
+  const { sessionId, definition, externalProvider: provider, signal, rpc } = options
+  const model = definition.model.name
+  let reasoningEffort: string | undefined = definition.model.reasoningEffort
+  if (reasoningEffort === 'off') {
+    const catalog = await rpc('session/modelCatalog', undefined, signal)
+    if (!catalog.ok) throw failure('DSH_MODEL_CAPABILITIES_UNVERIFIED')
+    const selection = resolveDshOffSelection(catalog.value, provider, model)
+    if (selection === 'unverified') throw failure('DSH_MODEL_CAPABILITIES_UNVERIFIED')
+    if (selection === 'unsupported') throw failure('DSH_REASONING_UNSUPPORTED')
+    if (selection === 'omit') reasoningEffort = undefined
+  }
+  const result = await rpc('session/selectModel', { sessionId, provider, model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }, signal)
+  if (!result.ok || !record(result.value) || !record(result.value.selected)
+    || result.value.selected.provider !== provider || result.value.selected.model !== model
+    || result.value.selected.reasoningEffort !== reasoningEffort) throw failure('DSH_MODEL_UPDATE_UNCONFIRMED')
+}
+
 export function createDshSessionCreator(options: {
   readonly configuredDefinition: ChatSessionDefinition | ((request: DshCreateSessionRequest) => ChatSessionDefinition) | undefined
   readonly bindings: readonly Pick<NativeDeploymentPresetBinding, 'agentPreset' | 'definition' | 'externalProvider' | 'conversationKind'>[]

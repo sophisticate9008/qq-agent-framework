@@ -185,6 +185,10 @@ export function createNativeApplicationCoordinator(options: {
         const applied = await step('apply', phaseSignal => options.ports.apply(currentRevisions, prepared.prepared.targetRevision!, phaseSignal));
         if (applied.state === 'blocked' || applied.state === 'conflict') { await blocked(applied.missingReasons); return; }
         if (applied.state === 'pending_reload') {
+          if (applied.missingReasons.some(reason => reason !== 'pending_reload')) {
+            await update(id, { state: 'blocked', reasons: reasons(applied.missingReasons) });
+            return;
+          }
           await update(id, { reasons: ['pending_reload'] });
           if (!await waitForDeployment()) {
             const uncertain = applied.missingReasons.some(reason => reason !== 'pending_reload');
@@ -203,26 +207,12 @@ export function createNativeApplicationCoordinator(options: {
         }
         status = await check();
       }
+      // Updating the managed preset keeps the original DSH session and history.
+      // Remaining compatibility failures describe storage/endpoint/unfinished work,
+      // and must not implicitly fork sessions to work around them.
       if (status.configurationCompatibility.state === 'blocked') {
-        // Earlier effects are confirmed. Preview cannot submit a session fork;
-        // a failed preflight must not turn a completed deployment into unknown.
-        sideEffectStarted = false;
-        lastPhase = 'migrate';
-        await update(id, { phase: 'migrate', phaseState: 'pending' });
-        const preview = await withDeadline({ signal, timeoutMs: 30_000, code: 'APPLICATION_MIGRATION_PREVIEW_UNAVAILABLE',
-          run: phaseSignal => options.ports.previewMigration(currentRevisions, phaseSignal) });
-        if (preview.state === 'blocked') { await blocked(preview.missingReasons); return; }
-        assert(preview.state === 'available' && preview.migrationId !== null && preview.revision !== null
-          && same(preview.revisions, currentRevisions) && preview.missingReasons.length === 0 && preview.bindings.length > 0,
-        'APPLICATION_MIGRATION_UNCONFIRMED', 'Migration cannot be confirmed without a valid preview.');
-        await check();
-        const migrated = await step('migrate', phaseSignal => options.ports.migrate({ revisions: currentRevisions, confirm: true,
-          migrationId: preview.migrationId!, revision: preview.revision! }, phaseSignal));
-        assert(migrated.state === 'completed' && migrated.migrationId === preview.migrationId && migrated.revision === preview.revision
-          && same(migrated.revisions, currentRevisions) && migrated.bindings.length === preview.bindings.length
-          && migrated.bindings.every(binding => binding.state === 'bound' && binding.childSessionId !== null)
-          && migrated.missingReasons.length === 0, 'APPLICATION_MIGRATION_UNCONFIRMED', 'Migration has not fully completed.');
-        status = await check();
+        await blocked(status.missingReasons.filter(reason => reason !== 'runtime_not_started'));
+        return;
       }
       if (!status.canStart) { await blocked(status.missingReasons.filter(reason => reason !== 'runtime_not_started')); return; }
       const started = await step('start', phaseSignal => options.ports.start(currentRevisions, phaseSignal));
@@ -248,6 +238,8 @@ export function createNativeApplicationCoordinator(options: {
         const record = prior.value.records.find(item => item.snapshot.id === id);
         assert(record, 'APPLICATION_NOT_FOUND', 'The application was not found.');
         const current = project(record);
+        if (current.reasons.some(reason => reason === 'session_configuration_reload_required'
+          || reason === 'session_configuration_reload_unknown')) return current;
         const awaitingDeployment = current.phase === 'apply' && (current.state === 'unknown'
           || current.state === 'blocked' && current.reasons.includes('pending_reload'));
         if (current.state !== 'unknown' && !awaitingDeployment) return current;

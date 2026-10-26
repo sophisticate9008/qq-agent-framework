@@ -117,9 +117,11 @@ DSH 原有工具清单单独核验。检查时只排除当前框架 lease 实际
 
 SDK 图片和文件结果通过受控附件分页读取、注册为框架资源后投递；读取有单页及总量上限。后端缺少 subagent、continuation 或持久查询能力时会明确不可用。当前 SDK 目标不支持请求 `fullAccess: true`，返回权限不支持，不自动提升执行权限。
 
-## 会话迁移与未知执行恢复
+## 原会话配置更新与执行恢复
 
-模型、推理档位和容量改变可通过受控 `forkPreview` / `forkWithPreset` 迁移到新 session/generation。目标必须来自已验证的 provider/model/preset 和实际 `contextWindow`、`maxTokens`、`headroomTokens` 元数据。迁移验证 lineage、上下文检查点与新会话读回，保留源会话；创建 child 成功本身不算迁移完成。
+日常配置更新复用原受管预设 ID；有持久会话时重新加载本机 DSH，让原会话恢复时挂载最新提示词及容量设置。模型与思考强度通过 `session/selectModel` 在原会话下一次提交前设置，每次运行对同一会话只配置一次。框架不扫描历史媒体、不调用 fork、不改变 sessionId 或 generation。实际模型能力仍从 DSH 元数据核对。
+
+`forkPreview` / `forkWithPreset` 仅保留给显式历史迁移及未知执行恢复，不作为日常配置应用步骤。
 
 迁移要求原执行、收件队列、子工作和外部副作用均满足静止条件。能力范围、工具/插件结构和其他不支持的配置变化仍可能阻止迁移。未知状态不通过清空上下文解决；旧 session ID 保留归属，不能换个会话复用。丢失 fork 回包时，只读检查原请求，不创建第二个 fork。
 

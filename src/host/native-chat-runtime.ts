@@ -48,11 +48,10 @@ import { digest, json, object } from './data.ts'
 import { createNativeExecutionController } from './native-execution.ts'
 import { createNativeExecutionClaims } from './native-execution-claims.ts'
 import { createNativeExecutionPolicyActions } from './native-execution-actions.ts'
-import { createNativePersonaIdentity } from './native-persona-identity.ts'
 import { createNativeBootstrapMount, type LoadedNativeBootstrap, type NativeBootstrapMount } from './native-bootstrap.ts'
 import { readNativeHistory, type NativeHistoryReader } from './native-history.ts'
-import { captureNativeConfigurationBaseline, hasActiveNativeSessions, inspectNativeConfigurationCompatibility,
-  nativeSessionMigrationEligibility, readNativeConfigurationBaseline } from './native-chat-compatibility.ts'
+import { captureNativeConfigurationBaseline, inspectNativeConfigurationCompatibility,
+  nativeSessionMigrationEligibility, readNativeConfigurationBaseline, synchronizeNativeChatConfiguration } from './native-chat-compatibility.ts'
 import { createNativeMessageSources } from './native-message-sources.ts'
 import { nativeAuthorizationFallback, nativeAuthorizationMode, nativeChatGrantAvailable, nativeChatGrantId, nativeWhitelistCapabilities } from './native-access.ts'
 import { createNativeActivity } from './native-activity.ts'
@@ -62,7 +61,7 @@ import { readDshToolCatalog } from '../adapters/dsh-tool-catalog.ts'
 import { createDshAuthenticationOptions } from '../adapters/dsh-authentication.ts'
 import { commitNativeSessionMigration, previewNativeSessionMigration,
   type NativeSessionMigrationCommit, type NativeSessionMigrationResult } from './native-session-migration.ts'
-import { listMigrationPlans, readMigrationAuthorizationIdentity } from './native-session-migration-state.ts'
+import { readMigrationAuthorizationIdentity } from './native-session-migration-state.ts'
 import { createLifecycleHooks, type LifecycleCheckpoint, type LifecycleHookDefinition } from './lifecycle-hooks.ts'
 import { createControlCommands, type ControlCommandDefinition } from './control-commands.ts'
 import { createDurableTransport } from './outbox.ts'
@@ -768,20 +767,13 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         store ??= createSqliteStore({ filename })
         bindAccountStore(store, accountScope)
         usage ??= createNativeUsage({ store })
-        const identity = fingerprint({ definition, endpoint: configuration.adapters.dshAgent.endpoint,
-          bindings: selected.deployment.presetBindings })
-        const prior = store.read('native-chat.meta', 'session-definition')
-        if (listMigrationPlans(store).some(plan => ['committing', 'unknown', 'partial'].includes(plan.state))) {
-          failure('NATIVE_SESSION_MIGRATION_RECONCILIATION_REQUIRED')
-        }
-        if (prior && (typeof prior.value !== 'object' || prior.value === null || Array.isArray(prior.value)
-          || prior.value.identity !== identity) && hasActiveNativeSessions(store)) {
-          failure('NATIVE_CHAT_SESSION_CONFIGURATION_CONFLICT')
-        }
-        if (!prior || typeof prior.value !== 'object' || prior.value === null || Array.isArray(prior.value)
-          || prior.value.identity !== identity) {
-          store.write('native-chat.meta', 'session-definition', { identity }, { expectedRevision: prior?.revision ?? null })
-        }
+        const persona = configuration.personas.find(value => value.id === definition.personaId)!
+        const configurationState = synchronizeNativeChatConfiguration(store, {
+          definition, persona, endpoint: configuration.adapters.dshAgent.endpoint, bindings: selected.deployment.presetBindings,
+        }, [...configuration.providers.map(provider => provider.apiKey),
+          configuration.adapters.onebotHttp.secret, configuration.adapters.onebotWs.secret,
+          configuration.adapters.dshAgent.auth, configuration.adapters.onebotWebhook.hmac])
+        const { identity, contentIdentity, personaMetadata } = configurationState
         active = configuration
         activePresetBindings = snapshot(selected.deployment.presetBindings)
         deployedProviders = new Map(selected.deployment.presetBindings.map(binding =>
@@ -805,19 +797,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             usageFaults++; lastUsageError = safeCode(error); activity.record('usage_error')
           } } })
         const context = createContextStore()
-        const persona = configuration.personas.find(value => value.id === definition.personaId)!
-        const contentIdentity = createNativePersonaIdentity(persona)
-        const priorPersona = store.read('native-chat.meta', 'persona-identity')
-        const hasLegacyData = !priorPersona && prior && (store.list('host.sessions', { limit: 1 }).length > 0
-          || store.list('outbox', { limit: 1 }).length > 0)
-        if (hasLegacyData && object(prior.value).identity !== identity) failure('NATIVE_CHAT_PERSONA_VERSION_MIGRATION_REQUIRED')
-        const personaMetadata = priorPersona ? object(priorPersona.value) : { schema: 1, nativeId: persona.id,
-          contentVersion: contentIdentity.version, scopeVersion: hasLegacyData ? fingerprint(definition) : contentIdentity.version,
-          source: hasLegacyData ? 'preserved-v15-definition-version' : 'persona-content-v1' }
-        if (personaMetadata.schema !== 1 || personaMetadata.nativeId !== persona.id || personaMetadata.contentVersion !== contentIdentity.version
-          || typeof personaMetadata.scopeVersion !== 'string' || !/^[a-f0-9]{64}$/.test(personaMetadata.scopeVersion)) failure('NATIVE_CHAT_PERSONA_IDENTITY_CONFLICT')
-        const outgoingPersona = Object.freeze({ id: contentIdentity.contextId, version: personaMetadata.scopeVersion })
-        if (!priorPersona) store.write('native-chat.meta', 'persona-identity', json(personaMetadata), { expectedRevision: null })
+        const outgoingPersona = configurationState.personaScope
         const personaReference = context.registerPersona({ ...contentIdentity.persona, version: personaMetadata.scopeVersion })
         messageSources = createNativeMessageSources({ accountScope, owner: configuration.access.owner, signal: controller.signal,
           validateExecution(execution, source) {

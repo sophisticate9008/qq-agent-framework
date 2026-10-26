@@ -5,7 +5,7 @@ import { createDshInteractionChannel } from './dsh-interactions.ts'
 import { snapshot } from '../core/values.ts'
 import type { JsonObject, JsonValue } from '../core/types.ts'
 import type { ChatSessionDefinition } from '../host/chat-plans.ts'
-import { createDshSessionCreator, normalizeDshSessionDefinition } from './dsh-model-selection.ts'
+import { createDshSessionCreator, normalizeDshSessionDefinition, updateDshSessionModel } from './dsh-model-selection.ts'
 import { validateAdapterEndpoint } from '../host/adapter-configuration.ts'
 import { DshAdapterError } from './dsh.ts'
 import type { DshClientPort, DshCreateSessionRequest, DshFollowEvent, DshFollowRequest, DshInteractionConnectionRequest, DshInteractionEvent, DshInteractionPort, DshInteractionResponseRequest, DshPortResult } from './dsh.ts'
@@ -31,6 +31,7 @@ export interface DshJsonRpcOptions {
 }
 
 export interface DshJsonRpcPort extends DshClientPort, DshInteractionPort {
+  configureSession?(request: { readonly sessionId: string; readonly conversationId: string; readonly signal: AbortSignal }): Promise<void>
   readModelCatalog(signal: AbortSignal): Promise<JsonValue>
   readonly bridgePlugin?: DshBridgePluginPort
   readonly sessionMigration?: DshSessionMigrationPort
@@ -146,6 +147,15 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
   })
   return Object.freeze({
     bridgePlugin,
+    async configureSession(request: { readonly sessionId: string; readonly conversationId: string; readonly signal: AbortSignal }) {
+      if (!identifier(request.sessionId)) throw failure('DSH_INVALID_SESSION')
+      const kind = request.conversationId.startsWith('group:') ? 'group' : 'private'
+      const matches = bindings.filter(binding => binding.conversationKind === undefined || binding.conversationKind === kind)
+      if (matches.length !== 1) throw failure('DSH_INSTRUCTIONS_UNSUPPORTED')
+      const binding = matches[0]!
+      await updateDshSessionModel({ sessionId: request.sessionId, definition: binding.definition,
+        externalProvider: binding.externalProvider ?? binding.definition.model.provider, signal: request.signal, rpc })
+    },
     sessionMigration,
     frameworkTools,
     work,

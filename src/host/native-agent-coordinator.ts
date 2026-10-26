@@ -51,6 +51,7 @@ export function createNativeAgentCoordinator(options: {
   const runtime = options.resources
   const { sourceAgent, dsh, store, controller, definition, configuration, identity, presetBindings,
     activity, bindingForSession, checkpoint, guard } = options
+  const configuredSessions = new Set<string>()
   function observeExecution(record: Parameters<typeof mapNativeExecutionObservation>[0]) {
     try { const event = mapNativeExecutionObservation(record); if (event) activity.observe(event) } catch {}
   }
@@ -98,6 +99,11 @@ export function createNativeAgentCoordinator(options: {
               content: json(request.content) }, request.signal)
             await guard(binding.conversationId, request.signal, false, 'submit')
             if (!runtime.executions || !runtime.claims || !runtime.configuration || runtime.pluginEpoch === null) failure('NATIVE_CHAT_EXECUTION_UNAVAILABLE')
+            if (!configuredSessions.has(request.sessionId) && dsh.configureSession) {
+              if (runtime.executions.active().some(execution => execution.binding.sessionId === request.sessionId)) failure('NATIVE_CHAT_BUSY')
+              await dsh.configureSession({ sessionId: request.sessionId, conversationId: binding.conversationId, signal: request.signal })
+              configuredSessions.add(request.sessionId)
+            }
             const delegatesTools = await inspectToolScope(request, binding)
             await runtime.frameworkTools?.project(binding, request.signal)
             const baseline = await runtime.claims.baseline(request.sessionId, request.signal)

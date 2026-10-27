@@ -1,4 +1,5 @@
 export type { ExtensionMetadata } from '../contracts/extension-metadata.ts';
+export type { ReloadableExtensionStatus, ReloadableExtensionResult, ReloadableExtensionRegistry } from '../contracts/reloadable-extensions.ts';
 export type * from '../contracts/data.ts';
 export type * from '../contracts/qzone.ts';
 export type * from '../contracts/messages.ts';

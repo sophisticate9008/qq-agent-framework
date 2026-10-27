@@ -4,6 +4,9 @@ export { defineNativeBootstrap, createNativeBootstrapMount } from '../host/nativ
 export type { NativeBootstrapDefinition, NativeBootstrapContext, NativeBootstrapExtension,
   NativeBootstrapHost, LoadedNativeBootstrap } from '../host/native-bootstrap.ts';
 export { createNativePackages } from '../host/native-packages.ts';
+export { createReloadableExtension, createReloadableExtensionRegistry } from '../host/reloadable-extensions.ts';
+export type { ReloadableExtension, ReloadableExtensionCandidate } from '../host/reloadable-extensions.ts';
+export { createExtensionModuleLoader } from '../host/extension-module-loader.ts';
 export type { NativePackageInputProvider } from '../host/native-package-bindings.ts';
 export type { NativePackageDefinition, NativePackageContext } from '../host/native-packages.ts';
 export { createPackageConfigurationRegistry } from '../host/package-configuration.ts';

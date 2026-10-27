@@ -1,5 +1,6 @@
 import { readAdminActivity } from './simulation-activity.ts'
 import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
+import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
 import { isNativeEventCursor, isNativeEventFilter } from '../contracts/native-events.ts'
 import type { NativeExecutionRecoveryView } from '../contracts/native-execution-recovery.ts'
 import type { NativeExecutionRecoveryPlan } from '../host/native-execution-recovery.ts'
@@ -848,6 +849,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   if (options.assistantTarget) routes.push(...createNativeAssistantDeploymentRoutes({ target: options.assistantTarget,
     runExclusive: run => nativeControl(directory, run) }))
   routes.push(...createNativeInteractionRoutes(options.interactions ?? (() => undefined)))
+  routes.push(...createNativeExtensionReloadRoutes(chatRuntime))
   routes.push(...createNativeToolInventoryRoutes(options.toolInventory ?? (chatRuntime ? signal => chatRuntime.toolInventory(signal) : undefined)))
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))

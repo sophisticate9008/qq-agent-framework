@@ -60,6 +60,7 @@ import { createNativeExecutionController } from './native-execution.ts'
 import { createNativeExecutionClaims } from './native-execution-claims.ts'
 import { createNativeExecutionPolicyActions } from './native-execution-actions.ts'
 import { createNativeBootstrapMount, type LoadedNativeBootstrap, type NativeBootstrapMount } from './native-bootstrap.ts'
+import { createReloadableExtensionRegistry } from './reloadable-extensions.ts'
 import { readNativeHistory, type NativeHistoryReader } from './native-history.ts'
 import { captureNativeConfigurationBaseline, inspectNativeConfigurationCompatibility,
   nativeSessionMigrationEligibility, readNativeConfigurationBaseline, synchronizeNativeChatConfiguration } from './native-chat-compatibility.ts'
@@ -202,6 +203,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     try { assertAccountStore(reader, accountScope) } finally { reader.close() }
   }
   let state: RuntimeState = 'stopped'
+  const extensions = createReloadableExtensionRegistry()
   const packageConfigurationRegistry = options.packageConfigurationRegistry ?? createNativePackageConfigurationRegistry({ directory: options.directory,
     contributions: options.bootstrap?.packageConfigurations })
   let markdown: ReturnType<typeof createNativeMarkdownService> | undefined
@@ -903,7 +905,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           } })
         bootstrapMount = options.bootstrap ? await createNativeBootstrapMount({ bootstrap: options.bootstrap,
           context: { directory: options.directory, store, context, persona: personaReference, signal: controller.signal,
-            messageSources: messageSources.reader } }) : undefined
+            messageSources: messageSources.reader, extensions } }) : undefined
         if (lifecycleHooks !== managerHooks) lifecycleHooks.close()
         lifecycleHooks = createLifecycleHooks([...managerDefinitions, ...(bootstrapMount?.lifecycleHooks ?? [])])
         await checkpoint('runtime.starting', { state: 'starting', planId: definition.planId }, controller.signal)
@@ -1583,6 +1585,11 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   }
 
   const runtime = Object.freeze({ status, start, stop, adapterRuntime, applyAccessChange, reconcileExecution, recoverExecution, diagnostics, mediaDiagnostics,
+    extensionStatus() { return extensions.list() },
+    reloadExtension(id: string, expectedRevision: string, signal: AbortSignal) {
+      if (state !== 'running' || !lifetime || lifetime.signal.aborted || closed) failure('EXTENSION_RUNTIME_UNAVAILABLE')
+      return extensions.reload(id, expectedRevision, AbortSignal.any([signal, lifetime.signal]))
+    },
     retentionStatus() { const value = store?.retentionStatus() ?? { enabled: true, retentionDays: 7, state: 'pending', lastRunAt: null, removed: 0, totalRecords: null, maxRecords: null, reason: null }; return operationRetention.status() ? { ...value, state: 'attention', reason: operationRetention.status() } : value },
     applicationSignal() { return controlLifetime.signal },
     isClosed() { return closed },

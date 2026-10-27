@@ -12,6 +12,8 @@
 | `qqagent stop` | 按逆序停止受管服务，包括两套协议端中仍在运行的实例 |
 | `qqagent status` | 查看进程与端口状态 |
 | `qqagent doctor` | 核对服务健康检查及可选的 QQ 登录状态；不发送消息或模型请求 |
+| `qqagent extensions` 或 `qqagent extensions list` | 查看已登记插件的版本、活动调用、排空及错误状态 |
+| `qqagent extensions reload <插件标识>` | 读取当前指纹后提交 CAS 代码重载，旧任务使用原实例继续完成 |
 | `qqagent logs [组件] [-f]` | 最近 100 行日志，默认组件为 `framework-admin` |
 | `qqagent console` | 显示当前配置中的控制台地址 |
 | `qqagent protocol` | 显示当前协议选择 |
@@ -19,6 +21,12 @@
 | `qqagent protocol snowluma` | 切换到 SnowLuma，保留另一套安装及配置 |
 
 未安装系统命令时，在项目根目录使用 `./ops/qqagent` 或 `npm run ops -- status`。这些命令与前台 `npm start` 分工不同：前台 CLI 启动框架；运维入口管理配置中整组后台服务。
+
+插件维护固定读取本项目 `runtime/live/framework-admin.json`，复用其中的管理地址和私有令牌文件；令牌只在内存中用于 HTTP 鉴权，不放入命令参数或输出。`extensions` 不需要另外填写地址、令牌或源码路径。重载只针对运行宿主中由 bootstrap 主动登记的插件；未接入管理器的旧插件不会自动获得重载能力。
+
+重载命令先查询当前 64 位内容指纹，再提交带期望指纹的请求。版本冲突、已有重载或旧实例仍在排空时明确失败。命令不自动重试写操作；连接中断或超时后运行 `qqagent extensions` 查询真实状态，再决定下一步。返回 `changed: false` 表示内容版本相同，`draining: true` 表示旧实例的任务或清理仍未结束。清理失败保留错误码，阻止继续堆积实例。
+
+每个固定模块入口在同一宿主进程中最多保留 64 个源码代次，运行实例最多保留一代旧实例排空；模块上限达到后可按需重启 `framework-admin`。普通实现更新保持同一工具协议，工具 schema、名称、依赖或注册结构变化需要完整应用。生图配置的 `generationAccess: owner | whitelist` 在执行权限检查时热读，配置即时更新不消耗源码代次。重载机制的开发约定见 [扩展开发](EXTENDING.md)。
 
 ## 私有服务清单
 

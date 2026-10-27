@@ -365,7 +365,7 @@ async function supervise(config: Configuration, id: string): Promise<void> {
 }
 
 function help(): void {
-  console.log(`qqagent [start|stop|restart|status|doctor|logs|console|protocol|describe|help] [组件]
+  console.log(`qqagent [start|stop|restart|status|doctor|logs|console|protocol|extensions|describe|help] [组件]
 
 不带参数：启动框架、当前协议端与已启用的辅助服务。
 start [组件]       启动并等待就绪，接管已有 screen 会话
@@ -376,6 +376,8 @@ doctor [组件]      只读检查服务就绪状态
 logs [组件] [-f]   查看最近 100 行日志；默认 framework-admin
 console [组件]     显示配置中的控制台地址
 protocol [napcat|snowluma]  查看或切换协议端并保存选择
+extensions [list] 查看已登记插件的版本、调用与排空状态
+extensions reload <插件标识>  核对当前版本后重载指定插件
 describe --json    输出框架部署的只读标识
 help              显示帮助`);
 }
@@ -395,6 +397,12 @@ async function main(): Promise<void> {
   const action = argumentsList[0] ?? 'start';
   const rest = argumentsList.slice(1);
   if (['help', '--help', '-h'].includes(action)) { help(); return; }
+  if (action === 'extensions') {
+    const { ExtensionManagementError, manageExtensions } = await import('./extension-management.ts');
+    try { await manageExtensions(root, rest); }
+    catch (error) { if (error instanceof ExtensionManagementError) fail(error.message); throw error; }
+    return;
+  }
   if (!['start', 'stop', 'restart', 'status', 'doctor', 'logs', 'console', 'protocol', 'describe', 'run'].includes(action)) fail('未知命令，请运行 qqagent help。');
   if (action === 'describe' ? rest.length !== 1 || rest[0] !== '--json'
     : action === 'logs' ? rest.filter(value => value !== '-f').length > 1 || rest.filter(value => value === '-f').length > 1

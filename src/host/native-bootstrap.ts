@@ -13,6 +13,7 @@ import { validatePackageConfigurationContribution, type PackageConfigurationCont
 import type { NativePackageContentIdentity } from '../contracts/native-package-content.ts';
 import { digest } from './data.ts';
 import { composeAgentInputPreparation } from './input-preparation.ts';
+import type { createReloadableExtensionRegistry } from './reloadable-extensions.ts';
 
 export type NativeBootstrapHost = ReturnType<typeof createBridgeHost>;
 export interface NativeBootstrapManifest {
@@ -21,6 +22,8 @@ export interface NativeBootstrapManifest {
   readonly apiVersion: 1;
 }
 export interface NativeBootstrapContext {
+  /** Registered, independently replaceable implementations owned by this runtime. */
+  readonly extensions?: ReturnType<typeof createReloadableExtensionRegistry>;
   readonly directory: string;
   readonly store: BridgeHostOptions['store'];
   readonly context: BridgeHostOptions['context'];

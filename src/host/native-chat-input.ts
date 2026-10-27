@@ -58,6 +58,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   readonly maxHistoryCharacters?: number;
   readonly participation?: NativeParticipationReason;
   readonly unsentReplyMessageIds?: readonly string[];
+  readonly sentWhileQueued?: readonly HistoryMessage[];
   readonly quotedMessages?: readonly HistoryMessage[];
   readonly unread?: { readonly ids: readonly string[]; readonly readThrough: number; readonly through: number; readonly partial: boolean };
   readonly memory?: NativeMemoryContext;
@@ -70,6 +71,16 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   const original = normalizeContent(event.data.content);
   const images = options.attachImages ? [...new Set(original.filter(part => part.type === 'image').map(part => part.assetId))].slice(0, 4) : [];
   const text = contentText(original, new Set(images));
+  const participation = options.participation ?? (event.data.directed === true ? 'direct' : 'ambient');
+  const currentTime = history.find(message => message.id === event.id)?.receivedAt;
+  const recentWindow = currentTime === undefined ? [] : history.filter(message => message.receivedAt <= currentTime
+    && message.receivedAt > currentTime - 120_000);
+  const groupParticipation = event.conversationId.startsWith('group:') ? {
+    mode: participation === 'direct' || participation === 'reply' ? 'addressed' : 'observe-and-select',
+    sentMessagesInTwoMinutes: recentWindow.filter(message => message.actor === 'assistant').length,
+    receivedMessagesInTwoMinutes: recentWindow.filter(message => message.actor !== 'assistant' && message.actor !== 'system').length,
+    speakersInTwoMinutes: new Set(recentWindow.filter(message => message.actor !== 'assistant' && message.actor !== 'system').map(message => message.actor)).size
+  } : undefined;
   const recent: { id: string; actor: string; text: string; truncated: boolean; unread: boolean }[] = [];
   let size = 0;
   let historyTruncated = options.partial;
@@ -92,10 +103,14 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
       text: full.slice(0, 300), truncated: full.length > 300 };
   });
   const envelope = (currentTruncated: boolean) => JSON.stringify({ schema: 1, conversationId: event.conversationId, messageId: event.id,
+    ...(options.sentWhileQueued?.length ? { replyTiming: {
+      sentAfterCurrentMessage: options.sentWhileQueued.slice(-4).map(message => ({ id: message.id, text: contentText(message.content).slice(0, 200) })),
+      note: '当前消息先到达，以上回复随后才发送。模型处理顺序不等于群聊发言顺序，不能把当前消息当成对这些回复的反馈。'
+    } } : {}),
     ...(options.unsentReplyMessageIds?.length ? { replyDelivery: { unsentFor: options.unsentReplyMessageIds,
       note: '这些旧消息的模型回复尚未发送，因为你收到同一人的后续补充。结合最新要求重新组织回复，不把此前模型输出当作用户已收到的答复；已执行的工具动作仍有效，不重复执行。' } } : {}),
     senderId: event.userId ?? null, senderIsConfiguredOwner: options.owner !== null && event.userId === options.owner,
-    participation: options.participation ?? (event.data.directed === true ? 'direct' : 'ambient'),
+    participation, ...(groupParticipation ? { groupParticipation } : {}),
     unread: options.unread ? { readThrough: options.unread.readThrough, through: options.unread.through,
       count: options.unread.ids.length, included: recent.filter(item => item.unread).length + (options.unread.ids.includes(event.id) ? 1 : 0),
       partial: options.unread.partial || historyTruncated } : null,

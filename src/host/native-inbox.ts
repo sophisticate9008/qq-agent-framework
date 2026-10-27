@@ -77,14 +77,18 @@ export function createNativeInbox(options: {
   readonly store: DurableStore;
   readonly clock?: () => number;
   readonly coalesceMs?: number;
+  readonly groupContinuationCoalesceMs?: number;
   readonly readiness: (conversationId: string) => 'ready' | 'busy' | 'blocked';
   readonly deliver: (entries: readonly NativeInboxEntry[]) => Promise<{ readonly status: 'accepted' | 'rejected' | 'unknown'; readonly errorCode?: string | null }>;
   readonly onFault?: (code: string) => void;
 }) {
   const now = options.clock ?? Date.now;
   const coalesceMs = options.coalesceMs ?? 0;
+  const groupContinuationCoalesceMs = options.groupContinuationCoalesceMs ?? 0;
   assert(Number.isSafeInteger(coalesceMs) && coalesceMs >= 0 && coalesceMs <= 500,
     'INVALID_INBOX_OPTIONS', 'The input coalescing window must be bounded.');
+  assert(Number.isSafeInteger(groupContinuationCoalesceMs) && groupContinuationCoalesceMs >= 0 && groupContinuationCoalesceMs <= 1500,
+    'INVALID_INBOX_OPTIONS', 'The group observation window must be bounded.');
   const running = new Map<string, Promise<void>>();
   let stopped = false;
   const read = (id: string) => options.store.read(namespace, digest(id));
@@ -131,11 +135,18 @@ export function createNativeInbox(options: {
     const ready = options.readiness(conversationId);
     if (ready === 'busy') return;
     if (ready === 'blocked') return; // Recheck on the next tick; never freeze unrelated future input.
-    // Merge consecutive messages from one person; never promote somebody else's text to their identity.
+    // Ordinary group chatter is one observation batch. Explicit calls remain boundaries;
+    // the last actual message alone supplies the execution identity, not the whole batch.
     const first = queue.entries[0]!;
-    const end = queue.entries.findIndex(entry => entry.message.userId !== first.message.userId);
-    const batch = queue.entries.slice(0, end === -1 ? queue.entries.length : end);
-    if (now() < Math.min(first.admittedAt + 500, batch.at(-1)!.admittedAt + coalesceMs)) return;
+    const groupObservation = groupContinuationCoalesceMs > 0 && conversationId.startsWith('group:') && first.trigger === 'continuation';
+    const end = groupObservation
+      ? queue.entries.findIndex(entry => entry.trigger !== 'continuation')
+      : queue.entries.findIndex(entry => entry.message.userId !== first.message.userId);
+    const batch = queue.entries.slice(0, end === -1 ? queue.entries.length : groupObservation ? end + 1 : end);
+    const includesExplicitCall = groupObservation && end !== -1;
+    const quietMs = groupObservation && !includesExplicitCall ? groupContinuationCoalesceMs : coalesceMs;
+    if (now() < Math.min(first.admittedAt + (groupObservation && !includesExplicitCall ? 1500 : 500),
+      batch.at(-1)!.admittedAt + quietMs)) return;
     write(record, { ...queue, phase: 'dispatching', dispatchingIds: batch.map(entry => entry.message.id), errorCode: null });
     let result: { readonly status: 'accepted' | 'rejected' | 'unknown'; readonly errorCode?: string | null };
     try { result = await options.deliver(snapshot(batch)); }

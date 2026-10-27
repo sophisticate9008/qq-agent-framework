@@ -28,6 +28,31 @@ function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+/** Bind an already-open runtime store to its private on-disk identity without
+ * opening another SQLite connection. Each observation still checks sidecars. */
+export function createPrivateSqlitePathGuard(filename: string): () => void {
+  assert(isAbsolute(filename) && filename === resolve(filename) && !filename.includes('\0'),
+    'STORE_READONLY_UNSAFE', 'History requires a canonical absolute filename.');
+  const directory = dirname(filename);
+  const directoryMetadata = privateMetadata(directory, true);
+  const fileMetadata = privateMetadata(filename);
+  const validate = () => {
+    assert(realpathSync(directory) === directory && sameFile(directoryMetadata, privateMetadata(directory, true))
+      && sameFile(fileMetadata, privateMetadata(filename)),
+    'STORE_READONLY_UNSAFE', 'History storage identity changed.');
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      try { privateMetadata(filename + suffix); }
+      catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
+    }
+  };
+  const check = () => {
+    try { validate(); }
+    catch (error) { if (error instanceof FrameworkError) throw error; fail(); }
+  };
+  check();
+  return check;
+}
+
 function storeReference(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 1_024 && !/[\x00-\x1f\x7f]/.test(value);
 }

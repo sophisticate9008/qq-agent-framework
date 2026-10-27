@@ -76,7 +76,9 @@ export function createNativeAgentCoordinator(options: {
       messageId: pending?.requestId ?? null, state: decision?.state ?? 'silent', reason: decision?.reason ?? 'no-explicit-send' },
     { expectedRevision: null, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 })
     options.onReplySuppressed?.(execution.requestId)
-    activity.record(decision?.state === 'invalid' ? 'reply_decision_invalid' : 'reply_suppressed', binding.conversationId)
+    // Final text is private regardless of legacy control syntax. A malformed
+    // silence reason is diagnostic data, not a failed QQ send or user warning.
+    activity.record('reply_suppressed', binding.conversationId)
   }
         const inspectToolScope = async (request: Parameters<AgentAdapter['submit']>[0], binding: NonNullable<ReturnType<typeof bindingForSession>>) => {
           if (!definition.capabilitySelection) return false

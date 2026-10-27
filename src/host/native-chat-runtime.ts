@@ -4,7 +4,7 @@ import { startNativeOperationRetention } from './native-operation-retention.ts'
 import { unbindNativeSession, assertNativeSessionIdle } from './native-session-actions.ts'
 import type { NativeSessionResetTarget } from './native-session-management.ts'
 import { createNativeUsageProjection } from './native-usage-projection.ts'
-import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
+import { createPrivateSqlitePathGuard, openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
 import type { AccountScope } from '../contracts/account-scope.ts'
 import { normalizeAccountScope } from '../core/account-scope.ts'
 import { assertAccountStore, bindAccountStore } from '../storage/account-scope.ts'
@@ -190,6 +190,12 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     return readNativeHistory(options.directory, read, accountScope)
   }
   function verifyPersistedAccount() {
+    if (store) {
+      if (!storePathGuard) failure('NATIVE_CHAT_STORAGE_INVALID')
+      storePathGuard()
+      assertAccountStore(store, accountScope)
+      return
+    }
     let reader: ReturnType<typeof openReadonlySqliteStore>
     try { reader = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite')) }
     catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return; throw error }
@@ -225,6 +231,12 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let inbox: ReturnType<typeof createNativeInbox> | undefined
   let host: BridgeHost | undefined
   let store: SqliteStore | undefined
+  let storePathGuard: (() => void) | undefined
+  const existingStore = () => {
+    verifyPersistedAccount()
+    if (!store) failure('NATIVE_CHAT_STORAGE_INVALID')
+    return store
+  }
   let usage: ReturnType<typeof createNativeUsage> | undefined
   let usageFaults = 0
   let lastUsageError: string | null = null
@@ -440,8 +452,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     const migrationCandidate = {
       definition: current.definition, persona: current.configuration.personas.find(value => value.id === current.definition?.personaId) ?? null,
       endpoint: current.configuration.adapters.dshAgent.endpoint, bindings: current.deployment.presetBindings }
-    const configurationCompatibility = inspectNativeConfigurationCompatibility(options.directory, migrationCandidate)
-    const migrationReasons = [...nativeSessionMigrationEligibility(readNativeConfigurationBaseline(options.directory), migrationCandidate, true)]
+    const configurationCompatibility = inspectNativeConfigurationCompatibility(options.directory, migrationCandidate, store ? existingStore : undefined)
+    const migrationReasons = [...nativeSessionMigrationEligibility(readNativeConfigurationBaseline(options.directory, store ? existingStore : undefined), migrationCandidate, true)]
     if (nativeAuthorizationMode(current.configuration.authorization) !== 'whitelist') migrationReasons.push('migration_counted_mode_unsupported')
     const protocol = observeConnection()
     const socketConnected = protocol.state === 'connected' && protocol.selfId !== null
@@ -717,7 +729,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         }
         await acquireLease()
         ownsLease = true
+        storePathGuard ??= createPrivateSqlitePathGuard(filename)
         store ??= createSqliteStore({ filename })
+        storePathGuard()
         bindAccountStore(store, accountScope)
         migrationDsh = createDshJsonRpcPort({ endpoint: configuration.adapters.dshAgent.endpoint,
           ...createDshAuthenticationOptions(configuration.adapters.dshAgent), sessionDefinition: definition,
@@ -809,7 +823,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         if (database && (!database.isFile() || database.isSymbolicLink() || database.nlink !== 1
           || (database.mode & 0o777) !== 0o600)) failure('NATIVE_CHAT_STORAGE_INVALID')
         if (!database && (await nativeAuthorizationFallback(options.directory)).source === 'missing-with-history') failure('NATIVE_CHAT_STORAGE_INVALID')
+        if (database) storePathGuard ??= createPrivateSqlitePathGuard(filename)
         store ??= createSqliteStore({ filename })
+        storePathGuard ??= createPrivateSqlitePathGuard(filename)
+        storePathGuard()
         bindAccountStore(store, accountScope)
         usage ??= createNativeUsage({ store })
         const persona = configuration.personas.find(value => value.id === definition.personaId)!
@@ -1651,7 +1668,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       try {
         if (closed) failure('NATIVE_CHAT_CLOSED')
         verifyPersistedAccount()
-        return readNativeConfigurationBaseline(options.directory)
+        return readNativeConfigurationBaseline(options.directory, store ? existingStore : undefined)
       } catch {
         return { schema: 1 as const, state: 'unavailable' as const, capturedAt: null, values: null,
           unavailableReason: 'storage-unavailable' as const }
@@ -1827,7 +1844,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           } else heldStore?.close()
         }, () => {
           // Unsettled run callbacks retain their store and recovery evidence.
-          if (runDrained) { store?.close(); store = undefined }
+          if (runDrained) { store?.close(); store = undefined; storePathGuard = undefined }
         }])
         if (errors.length) throw errors[0]
       })

@@ -4,7 +4,7 @@ import { awaitCondition } from './fixtures/await-condition.ts'
 import { handleDshControlFrame } from './fixtures/dsh-wire.ts'
 import assert from 'node:assert/strict'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -41,6 +41,36 @@ const persona = { id: 'native', name: 'Native', identity: 'A test-only identity.
 const plan = { id: 'daily', name: 'Daily', description: '', instructions: 'Test behavior.',
   personaId: 'native', provider: 'provider', model: 'model', reasoningEffort: 'off' as const,
   contextLimits: { group: 100_000, private: 120_000 } }
+
+test('native live readiness reuses its writer and still rejects private path or inode changes', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.start()
+  const prepare = DatabaseSync.prototype.prepare
+  const mock = context.mock.method(DatabaseSync.prototype, 'prepare', function(this: DatabaseSync, sql: string) {
+    if (sql === 'PRAGMA table_list') throw new Error('Synthetic readonly connection unavailable')
+    return prepare.call(this, sql)
+  })
+  assert.equal((await fake.runtime().status()).chatReady, true)
+  assert.equal(fake.runtime().configurationBaseline().state, 'available')
+  const filename = join(fake.directory, 'native-chat.sqlite')
+  await chmod(filename, 0o644)
+  try { assert.equal((await fake.runtime().status()).chatReady, false) }
+  finally { await chmod(filename, 0o600) }
+  const retained = filename + '.retained'
+  await rename(filename, retained)
+  await writeFile(filename, '', { mode: 0o600 })
+  try {
+    const status = await fake.runtime().status()
+    assert.equal(status.chatReady, false)
+    assert(status.missingReasons.includes('persisted_configuration_unavailable'))
+  } finally {
+    await rm(filename)
+    await rename(retained, filename)
+    mock.mock.restore()
+  }
+  assert.equal((await fake.runtime().status()).chatReady, true)
+})
 
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
   await awaitCondition(predicate, { message: 'Local native pipeline condition did not settle', timeoutMs: 1_500, intervalMs: 5 })
@@ -2412,7 +2442,7 @@ test('dense group input keeps different senders separate and does not discard an
   await until(() => fake.sends.length === 2)
 })
 
-for (const noFinal of [false, true]) test(`explicit reply contract: ${noFinal ? 'completed without final' : 'ordinary model final'} stays silent and settles its watchdog`, async context => {
+for (const finalKind of ['none', 'text', 'invalid-silent']) test(`explicit reply contract: ${finalKind} final stays silent and settles its watchdog`, async context => {
   const fake = await fixture(context)
   await fake.configure()
   await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 1000, cancelOnTimeout: false } })
@@ -2420,12 +2450,18 @@ for (const noFinal of [false, true]) test(`explicit reply contract: ${noFinal ? 
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
   const host = fake.runtime().host()!
   assert.equal(host.replies.get('private:123')?.status, 'waiting')
-  if (noFinal) fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  if (finalKind === 'none') fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  else if (finalKind === 'invalid-silent') {
+    fake.agentEvent('assistant/message', { turn: 1, message: { id: 'legacy-silent', role: 'assistant', content: [{ type: 'text',
+      text: JSON.stringify({ schema: 'qaf.reply/1', action: 'silent', reason: '用户要求不用回复' }) }] } })
+    fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
   else fake.rawFinal(1)
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null && host.replies.get('private:123')?.status === 'suppressed')
   assert.equal(fake.sends.length, 0)
   assert.equal(host.history.snapshot('private:123', { afterSequence: 0 }).messages.filter(message => message.actor === 'assistant').length, 0)
   assert(fake.runtime().activity().items.some(item => item.summary === '本轮观察结束，未发言。'))
+  assert(!fake.runtime().activity().items.some(item => item.level === 'warning'))
   const reader = createSqliteStore({ filename: join(fake.directory, 'native-chat.sqlite'), requireExisting: true })
   try {
     assert.equal(reader.list('native-chat.reply-decisions', { limit: 10 }).length, 1)

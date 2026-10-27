@@ -157,13 +157,15 @@ function storedBaseline(store: Pick<DurableStore, 'read' | 'list'>): NativeConfi
   }
 }
 
-function withReadonly<Result>(directory: string, read: (store: DurableStore) => Result): Result {
+function withReadonly<Result>(directory: string, read: (store: DurableStore) => Result,
+  existingStore?: () => DurableStore): Result {
+  if (existingStore) return read(existingStore())
   const store = openReadonlySqliteStore(join(directory, 'native-chat.sqlite'))
   try { return store.withSnapshot(() => read(store)) } finally { store.close() }
 }
 
-export function readNativeConfigurationBaseline(directory: string): NativeConfigurationBaseline {
-  try { return withReadonly(directory, storedBaseline) }
+export function readNativeConfigurationBaseline(directory: string, existingStore?: () => DurableStore): NativeConfigurationBaseline {
+  try { return withReadonly(directory, storedBaseline, existingStore) }
   catch (error) { return baselineState(error instanceof Error && 'code' in error && error.code === 'STORE_NOT_FOUND' ? 'missing' : 'unavailable') }
 }
 
@@ -252,7 +254,8 @@ export function synchronizeNativeChatConfiguration(store: DurableStore, candidat
   return prepared.state
 }
 
-export function inspectNativeConfigurationCompatibility(directory: string, candidate: NativeConfigurationCandidate): NativeConfigurationCompatibility {
+export function inspectNativeConfigurationCompatibility(directory: string, candidate: NativeConfigurationCandidate,
+  existingStore?: () => DurableStore): NativeConfigurationCompatibility {
   const result = (state: NativeConfigurationCompatibility['state'], hasPersistedSessions: boolean | null, reasons: readonly string[],
     differences: readonly string[], baseline = baselineState('missing')): NativeConfigurationCompatibility => snapshot({ schema: 1,
     state, hasPersistedSessions, reasons, differences,
@@ -293,7 +296,7 @@ export function inspectNativeConfigurationCompatibility(directory: string, candi
         if (!isDeepStrictEqual(original.bindings, current.bindings)) differences.push('bindings')
       }
       return result(reasons.length > 0 ? 'blocked' : hasSessions ? 'compatible' : 'no-history', hasSessions, reasons, differences, baseline)
-    })
+    }, existingStore)
   } catch (error) {
     return error instanceof Error && 'code' in error && error.code === 'STORE_NOT_FOUND'
       ? result('no-history', false, [], []) : result('unavailable', null, ['persisted_configuration_unavailable'], [])

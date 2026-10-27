@@ -221,7 +221,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   function explicitResult(result: AgentMessageDelivery, cached: boolean): AgentMessageDelivery {
     const explanation = result.errorCode === 'AGENT_MESSAGE_SUPPRESSED'
       ? '本轮已被新消息替代，内容未发送。请结束本轮，等待新的会话快照；不要改写后重发旧回复。'
-      : result.status === 'sent' ? '已送达。请直接结束本轮，不重复发送；确有不同的必要内容时才继续发送。'
+      : result.status === 'sent' ? '已送达，本轮发言结束；不要重复发送或追加收尾确认。'
         : result.status === 'unknown' ? '发送结果未确认，可能已经送达。不要重复或改写后重发这份内容；请结束本轮等待后续消息。'
           : '未发送。请根据错误原因停止本次发送，不重复提交同一内容。';
     return snapshot({ ...result, cached, reused: cached, explanation });

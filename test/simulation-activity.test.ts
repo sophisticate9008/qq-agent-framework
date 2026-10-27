@@ -38,7 +38,7 @@ test('simulation activity follows the account fixed pointer independently of cwd
   const confirmed = simulation.items.find(item => item.nativeSummary === '协议已确认发送回复。')!
   assert.equal(confirmed.content, '模拟回复')
   assert.match(confirmed.summary, /本地捕获.*未向真实 QQ 发送/)
-  for (const summary of ['回复发送结果未确认，未自动重复发送。', '协议未接受回复发送。']) {
+  for (const summary of ['回复发送结果未确认，未自动重复发送。', '回复未能发送。']) {
     const item = simulation.items.find(entry => entry.nativeSummary === summary)!
     assert.equal(item.summary, summary)
     assert.equal(item.level, 'warning')

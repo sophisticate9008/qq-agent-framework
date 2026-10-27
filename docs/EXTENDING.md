@@ -429,3 +429,8 @@ try {
 ```
 
 原生 gateway 的 OneBot factory 还核验实际 WS/HTTP selfId 与 accountScope.accountId 一致。同步 factory 返回 thenable 时立即拒绝为非法工厂，不等待永不 settle 的 Promise，也不声称能回收它偷偷创建的资源；close 有界、每个 runtime 只调用一次，超时保留 unknown。账号接管、HTTP dispatch 与重启意图见 [RECOVERY.md](RECOVERY.md)；真实默认 gateway 验收见 [native-account-gateway.test.ts](../test/native-account-gateway.test.ts)。
+
+
+### OneBot 扩展媒体解析
+
+启动扩展的 `onebot.resolveAsset` 接收 `OneBotAssetResolutionRequest`。其中 `persona` 是包含版本的完整键 `id@version`，应与 `personaKey({ persona: scope.persona })` 比较；不要与裸 `scope.persona.id` 比较，也不要去掉版本后放行。还须核验原会话、session、generation、资源归属和当前权限。图片解析完成后再提交协议端；解析被拒绝也会产生未发送回执，不能仅凭 `rejected` 判定是协议服务拒绝。

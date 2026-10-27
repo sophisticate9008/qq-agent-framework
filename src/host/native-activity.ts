@@ -50,7 +50,7 @@ const descriptions = {
   unknown: ['warning', 'processed', '消息处理结果未确认，未自动重复提交。'],
   send_confirmed: ['info', 'sent', '协议已确认发送回复。'],
   send_unknown: ['warning', 'sent', '回复发送结果未确认，未自动重复发送。'],
-  send_rejected: ['warning', 'sent', '协议未接受回复发送。'],
+  send_rejected: ['warning', 'sent', '回复未能发送。'],
   send_failed: ['error', 'error', '回复发送失败，请核对原生聊天状态。'],
   error: ['error', 'error', '原生聊天操作异常，请核对运行状态。'],
   usage_error: ['warning', 'error', '本次用量记录不可用。'],

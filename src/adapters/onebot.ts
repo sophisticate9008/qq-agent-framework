@@ -22,6 +22,7 @@ export interface OneBotAssetResolutionRequest {
   type: 'image' | 'audio' | 'file'
   name?: string
   conversationId: string
+  /** Versioned persona key (`id@version`), not a bare persona id. */
   persona?: string
   sessionId?: string
   generation?: number

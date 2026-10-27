@@ -1364,7 +1364,7 @@ for (const delivery of ['confirmed', 'rejected', 'unknown'] as const) test(`cont
   assert.equal(received.length, 1); assert.equal(received[0]!.content, '/control-fixture')
   assert.equal(sent.length, 1)
   assert.equal(sent[0]!.summary, delivery === 'confirmed' ? '协议已确认发送回复。'
-    : delivery === 'rejected' ? '协议未接受回复发送。' : '回复发送结果未确认，未自动重复发送。')
+    : delivery === 'rejected' ? '回复未能发送。' : '回复发送结果未确认，未自动重复发送。')
   assert.equal(sent[0]!.content, delivery === 'confirmed' ? text : null)
   assert.equal(sent[0]!.level, delivery === 'confirmed' ? 'info' : 'warning')
   assert(activity.indexOf(sent[0]!) < activity.indexOf(received[0]!), 'Actual receipt follows the received command in time')

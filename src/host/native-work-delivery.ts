@@ -10,6 +10,7 @@ export function createNativeWorkDelivery(options: {
   readonly host: ReturnType<typeof createBridgeHost>; readonly store: DurableStore; readonly persona: PersonaScope;
   readonly guard: (conversationId: string, signal: AbortSignal) => Promise<void>;
   readonly owner: () => string | null;
+  readonly present?: (result: Readonly<NativeWorkResultDelivery>, signal: AbortSignal) => Promise<DeliveryReceipt>;
 }) {
   return async (result: Readonly<NativeWorkResultDelivery>, signal: AbortSignal): Promise<DeliveryReceipt> => {
     const record = options.store.read('native-work.executions', result.id);
@@ -18,12 +19,16 @@ export function createNativeWorkDelivery(options: {
       && persisted.ownerId === options.owner() && persisted.parentSessionId === result.parentSessionId
       && persisted.conversationId === result.conversationId && persisted.generation === result.generation,
     'NATIVE_WORK_DELIVERY_INVALID', 'Only a persisted result for the current delegation can be delivered.');
+    await options.guard(result.conversationId, signal);
+    const presented = options.present ? await options.present(result, signal) : undefined;
     const parts: MessageContent[][] = [];
     for (const content of result.output) {
       if (content.type === 'text') {
+        if (options.present) continue;
         for (let offset = 0; offset < content.text.length; offset += 3500) parts.push([{ type: 'text', text: content.text.slice(offset, offset + 3500) }]);
       } else parts.push([content]);
     }
+    if (!parts.length && presented) return presented;
     if (!parts.length) parts.push([{ type: 'text', text: result.stopReason === 'completed' ? '工作已结束，没有返回可展示的内容。' : '工作已停止，没有返回可展示的内容。' }]);
     assert(parts.length <= 80, 'NATIVE_WORK_OUTPUT_LIMIT', 'The result exceeds the bounded delivery limit.');
     const id = `work-delivery:${digest(result.deliveryId)}`;
@@ -48,7 +53,7 @@ export function createNativeWorkDelivery(options: {
           deliveryId: result.deliveryId, workId: result.id, index, total: parts.length, receipt: last }), { expectedRevision: null });
         if (last.status !== 'confirmed') return last;
       }
-      return last;
+      return presented && presented.status !== 'confirmed' ? presented : last;
     } finally { options.host.policy.revoke(id); }
   };
 }

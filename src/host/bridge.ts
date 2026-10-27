@@ -9,7 +9,7 @@ import { createContextStore } from '../core/context.ts';
 import { createEngine } from '../core/engine.ts';
 import type { EngineOptions } from '../core/engine.ts';
 import { FrameworkError, assert, errorCode, reference, snapshot, identifier } from '../core/values.ts';
-import type { Clock, FeatureExecution, FrameworkEvent, JsonObject, MessageContent, TransportAdapter } from '../core/types.ts';
+import type { Clock, DeliveryReceipt, FeatureExecution, FrameworkEvent, JsonObject, MessageContent, TransportAdapter } from '../core/types.ts';
 import { createPersistentPolicy } from '../storage/policy.ts';
 import { createPersistentFeatureState } from '../storage/state.ts';
 import { createSessionRegistry } from './sessions.ts';
@@ -64,6 +64,7 @@ export interface BridgeHostOptions {
   selectAgentMessage?(event: AgentEvent, binding: SessionBinding): readonly MessageContent[] | null;
   splitAgentMessage?(content: readonly MessageContent[], event: FrameworkEvent): readonly (readonly MessageContent[])[];
   onFault?(code: string): void;
+  onAgentDelivery?(requestId: string, receipt: DeliveryReceipt): void;
 }
 export interface InboundReceipt { status: 'accepted' | 'rejected' | 'unknown'; eventId: string; errorCode?: string }
 const inboxNamespace = 'host.inbox';
@@ -91,7 +92,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   taskTickMs = 250, maxConcurrentSends = 1, eventTimeoutMs = 30000, timeouts: timeoutInput,
   replyTimeoutMs = 30000, replyTimeoutNotice = '请求已提交，但尚未收到回复。结果尚未确认，未自动重复提交。',
   selectAgentMessage, splitAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
-  agentInputPreparation, agentMessagePreparation, followPool, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
+  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
   const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
   bindAccountStore(store, accountScope);
   assert(typeof authorizeIncoming === 'function' && Number.isSafeInteger(taskTickMs) && taskTickMs >= 10 && taskTickMs <= 60000,
@@ -219,23 +220,31 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         }
       });
       services.on('agent.message', async (execution, event) => {
-        const prepared = prepareAgentMessage ? await prepareAgentMessage(Object.freeze({ context: execution.context,
-          signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), event) : event.data.content;
-        if (prepared === null) return;
-        const content = normalizeContent(prepared);
-        const selected = splitAgentMessage ? splitAgentMessage(content, snapshot(event)) : [content];
-        assert(Array.isArray(selected) && selected.length > 0 && selected.length <= 4,
-          'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
-        const messages = selected.map(message => normalizeContent(message));
-        for (const [index, message] of messages.entries()) {
-          const result = await execution.send(message);
-          assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
-            'The transport did not confirm delivery.');
-          if (isConfirmedMessageReceipt(result)) history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content: message, receivedAt: clock() });
-          if (index === 0) {
-            const binding = sessions.get(event.conversationId);
-            if (binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation) replies.responded(binding);
+        const requestId = object(event.data.agentData ?? {}).nativeRequestId;
+        let receipt: DeliveryReceipt = { status: 'unknown' };
+        try {
+          const prepared = prepareAgentMessage ? await prepareAgentMessage(Object.freeze({ context: execution.context,
+            signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), event) : event.data.content;
+          if (prepared === null) return;
+          const content = normalizeContent(prepared);
+          const selected = splitAgentMessage ? splitAgentMessage(content, snapshot(event)) : [content];
+          assert(Array.isArray(selected) && selected.length > 0 && selected.length <= 4,
+            'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
+          const messages = selected.map(message => normalizeContent(message));
+          for (const [index, message] of messages.entries()) {
+            receipt = { status: 'unknown' };
+            const result = await execution.send(message);
+            receipt = result;
+            assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
+              'The transport did not confirm delivery.');
+            if (isConfirmedMessageReceipt(result)) history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content: message, receivedAt: clock() });
+            if (index === 0) {
+              const binding = sessions.get(event.conversationId);
+              if (binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation) replies.responded(binding);
+            }
           }
+        } finally {
+          if (typeof requestId === 'string') onAgentDelivery?.(requestId, receipt);
         }
       });
       services.on('agent.reply-timeout', async (execution, event) => {
@@ -486,6 +495,31 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
 
   return Object.freeze({
     accountScope, engine, policy, sessions, outbox, tasks, history, replies,
+    /** A host observation in an existing conversation; never a QQ sender or a new owner instruction. */
+    async notifyAgent(request: { readonly binding: SessionBinding; readonly id: string;
+      readonly content: readonly MessageContent[]; readonly signal: AbortSignal }) {
+      const { binding, id } = request;
+      assert(reference(id), 'INVALID_NOTIFICATION', 'A stable notification identity is required.');
+      const signal = AbortSignal.any([controller.signal, request.signal]);
+      const content = normalizeContent(request.content);
+      await admitFollow(binding.conversationId, signal, async () => {
+        assert(digest(sessions.get(binding.conversationId)) === digest(binding), 'SESSION_STALE', 'The original notification parent changed.');
+        await ensureFollow(binding, signal);
+      });
+      try {
+        signal.throwIfAborted();
+        assert(digest(sessions.get(binding.conversationId)) === digest(binding), 'SESSION_STALE', 'The original notification parent changed.');
+        const reservation = policy.reserve({ ...(accountScope ? { accountScope } : {}), featureId: 'agent-relay',
+          conversationId: binding.conversationId, capability: 'agent.submit' });
+        policy.begin(reservation);
+        history.append(binding.conversationId, { id, actor: 'system', content, receivedAt: clock() });
+        replies.watch(binding, id);
+        const result = await agent.submit({ sessionId: binding.sessionId,
+          requestId: digest([binding.conversationId, id, 'prompt']), content, signal });
+        if (result.status === 'rejected') replies.suppress(binding, id);
+        return result;
+      } finally { releaseFollowUser(binding.conversationId); }
+    },
     storageStats(options?: DurableStoreStatsOptions) { return store.stats?.(options) ?? null; },
     async dispatchEvent(input: FrameworkEvent, options: { signal?: AbortSignal } = {}): Promise<InboundReceipt> {
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');

@@ -12,6 +12,7 @@ import { validateNativeWorkConfiguration, type NativeWorkConfiguration } from '.
 import type { DurableStore, StoredRecord } from './types.ts'
 import type { NativeEventInput } from '../contracts/native-events.ts'
 import { mapNativeWorkObservation } from './native-event-mapping.ts'
+import { isDshWorkProgress, type DshWorkProgress } from '../contracts/dsh-work.ts'
 
 export interface NativeWorkActivation {
   readonly childId: string
@@ -36,8 +37,9 @@ export interface NativeWorkBackend {
     readonly source: Readonly<NativeMessageSource>
     readonly configuration: Readonly<NativeWorkConfiguration>
     readonly signal: AbortSignal
+    readonly onProgress?: (progress: readonly DshWorkProgress[]) => void
   }): Promise<NativeWorkActivation>
-  inspect?(request: NativeWorkBackendAddress): Promise<{ readonly state: 'starting' | 'running' | 'completed' | 'unknown'; readonly result: NativeWorkBackendResult | null }>
+  inspect?(request: NativeWorkBackendAddress): Promise<{ readonly state: 'starting' | 'running' | 'completed' | 'unknown'; readonly result: NativeWorkBackendResult | null; readonly progress?: readonly DshWorkProgress[] }>
   followup?(request: NativeWorkBackendAddress & { readonly requestId: string; readonly text: string; readonly delivery: 'queue' | 'steer' }): Promise<{ readonly messageId: string }>
   interrupt?(request: NativeWorkBackendAddress): Promise<void>
 }
@@ -65,6 +67,7 @@ export interface NativeWorkExecutorOptions {
   readonly onFault?: (code: string) => void
   readonly onObservation?: (event: NativeEventInput) => void
   readonly onResult?: (result: Readonly<NativeWorkResultDelivery>, signal: AbortSignal) => Promise<DeliveryReceipt>
+  readonly onProgress?: (view: Readonly<NativeWorkView>) => void
   readonly isCurrentParent?: (binding: { readonly conversationId: string; readonly sessionId: string; readonly generation: number }) => boolean
   readonly maxRecoveryRecords?: number
   readonly registerChild?: (binding: { readonly childId: string; readonly parentSessionId: string; readonly conversationId: string;
@@ -104,8 +107,9 @@ function projection(record: StoredRecord): Readonly<NativeWorkView> {
     && (value.lastError === null || value.lastError === undefined || typeof value.lastError === 'string' && /^[A-Z][A-Z_]{1,63}$/.test(value.lastError)),
   'INVALID_NATIVE_WORK_RECORD', 'The work binding or deadline is invalid.')
   const delivery = value.delivery ?? 'unavailable'
+  assert(value.progress === undefined || isDshWorkProgress(value.progress), 'INVALID_NATIVE_WORK_RECORD', 'Invalid work progress.')
   assert(deliveries.some(state => state === delivery), 'INVALID_NATIVE_WORK_RECORD', 'The work delivery state is invalid.')
-  return snapshot({ id: record.key, childId: String(value.childId), parentSessionId: value.parentSessionId,
+  return snapshot({ ...(value.progress === undefined ? {} : { progress: value.progress as readonly DshWorkProgress[] }), id: record.key, childId: String(value.childId), parentSessionId: value.parentSessionId,
     conversationId: value.conversationId, generation: Number(value.generation), createdAt: Number(value.createdAt), deadlineAt: Number(value.deadlineAt),
     status: value.status as NativeWorkView['status'], result: value.result == null ? null : validatedResult(value.result),
     lateResult: value.lateResult == null ? null : validatedResult(value.lateResult), delivery: delivery as NativeWorkView['delivery'],
@@ -230,6 +234,14 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
     return options.isCurrentParent?.({ conversationId: view.conversationId, sessionId: view.parentSessionId, generation: view.generation }) === true
   }
 
+  function progress(entry: PendingWork, items: readonly DshWorkProgress[]): void {
+    if (closed || entry.controller.signal.aborted || !isDshWorkProgress(items)) return
+    const view = projection(entry.record)
+    if (!['starting', 'running'].includes(view.status) || !currentParent(view) || digest(view.progress ?? []) === digest(items)) return
+    update(entry, { progress: json(items) })
+    options.onProgress?.(projection(entry.record))
+  }
+
   async function settle(entry: PendingWork, input: NativeWorkBackendResult): Promise<void> {
     const result = validatedResult(input)
     const value = object(entry.record.value)
@@ -254,7 +266,7 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
     const deliveryId = `work-result:${resultId}`
     try {
       const receipt = normalizeDeliveryReceipt(await withDeadline({ signal: AbortSignal.any([lifetime.signal, entry.controller.signal]),
-        timeoutMs: Math.max(1, Math.min(30000, view.deadlineAt - Date.now())), code: 'NATIVE_WORK_DELIVERY_UNKNOWN',
+        timeoutMs: Math.max(1, Math.min(120000, view.deadlineAt - Date.now())), code: 'NATIVE_WORK_DELIVERY_UNKNOWN',
         run: signal => options.onResult!({ ...result, id: view.id, resultId, deliveryId, childId: view.childId,
           parentSessionId: view.parentSessionId, conversationId: view.conversationId, generation: view.generation }, signal) }))
       update(entry, { delivery: receipt.status, deliveryId,
@@ -362,6 +374,7 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
                   assert(observed.result, 'INVALID_NATIVE_WORK_RESULT', 'Completed work needs a captured result.')
                   await settle(entry, observed.result); return
                 }
+                if (observed.progress) progress(entry, observed.progress)
                 await new Promise<void>(resolve => {
                   const timer = setTimeout(done, 100)
                   function done() { clearTimeout(timer); activeSignal.removeEventListener('abort', done); resolve() }
@@ -467,7 +480,7 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
               registerChild(entry)
               startAttempted = true
               const activation = await backend.start({ id, childId, parentSessionId, generation: scope.generation, ...input,
-                source, configuration, signal: executionSignal })
+                source, configuration, signal: executionSignal, onProgress: items => progress(entry, items) })
               entry.activation = activation
               assert(activation.childId === childId && typeof activation.dispose === 'function'
                 && activation.result instanceof Promise, 'INVALID_NATIVE_WORK_ACTIVATION', 'The backend returned a different activation.')

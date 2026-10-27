@@ -12,6 +12,28 @@ export interface DshWorkMediaReference {
 }
 export type DshWorkOutput = Readonly<TextContent> | DshWorkMediaReference
 
+export interface DshWorkProgress {
+  readonly id: string
+  readonly at: number
+  readonly text: string
+}
+
+export function isDshWorkProgress(value: unknown): value is readonly DshWorkProgress[] {
+  if (!Array.isArray(value) || value.length > 8) return false
+  let length = 0
+  const ids = new Set<string>()
+  return value.every(input => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+    const row = input as Record<string, unknown>
+    if (Object.keys(row).sort().join(',') !== 'at,id,text'
+      || typeof row.id !== 'string' || !/^assistant\/message:seq:\d{1,16}$/.test(row.id) || ids.has(row.id)
+      || typeof row.at !== 'number' || !Number.isSafeInteger(row.at) || row.at < 0
+      || typeof row.text !== 'string' || !row.text.trim()) return false
+    ids.add(row.id); length += row.text.length
+    return length <= 8000
+  })
+}
+
 export interface DshWorkAddress {
   readonly issuerEpoch: string
   readonly id: string
@@ -61,6 +83,7 @@ export interface DshWorkSnapshot extends DshWorkAddress {
   readonly schema: 1
   readonly fullAccess?: boolean
   readonly usage?: readonly DshWorkUsageStep[]
+  readonly progress?: readonly DshWorkProgress[]
   readonly state: 'starting' | 'running' | 'completed' | 'unknown'
   readonly result: { readonly stopReason: string; readonly output: readonly DshWorkOutput[] } | null
   readonly error: string | null

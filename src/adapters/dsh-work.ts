@@ -1,4 +1,4 @@
-import { isDshWorkOutput, isDshWorkUsage } from '../contracts/dsh-work.ts'
+import { isDshWorkOutput, isDshWorkProgress, isDshWorkUsage } from '../contracts/dsh-work.ts'
 import type { DshWorkMediaReference, DshWorkAddress, DshWorkSnapshot, DshWorkStart, DshWorkTarget } from '../contracts/dsh-work.ts'
 import { DshAdapterError } from './dsh.ts'
 import { isRecord, reference, snapshot } from '../core/values.ts'
@@ -22,6 +22,7 @@ export function createDshWorkPort(invoke: (method: DshWorkMethod, request: unkno
       ['issuerEpoch', 'id', 'parentSessionId', 'childId', 'generation'].includes(key) && value[key] !== expected)
       || !['starting', 'running', 'completed', 'unknown'].includes(String(value.state))
       || value.usage !== undefined && !isDshWorkUsage(value.usage)
+      || value.progress !== undefined && !isDshWorkProgress(value.progress)
       || value.fullAccess !== undefined && typeof value.fullAccess !== 'boolean'
       || 'fullAccess' in address && address.fullAccess === true && ['running', 'completed'].includes(String(value.state)) && value.fullAccess !== true
       || value.error !== null && (typeof value.error !== 'string' || !/^[A-Z][A-Z_]{1,63}$/.test(value.error))

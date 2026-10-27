@@ -48,6 +48,26 @@ test('real work backend reserves one fixed child, polls result without replaying
 
 const fixtureForTest = fixture
 
+test('rapid progress snapshots retain earlier pending text and final results do not replay progress', async () => {
+  const data = fixtureForTest()
+  const first = { id: 'assistant/message:seq:1', at: 1, text: 'Read the source files.' }
+  const second = { id: 'assistant/message:seq:2', at: 2, text: 'Computed the totals.' }
+  const observations: string[][] = []
+  const start = data.port.start
+  data.port.start = async (value, signal) => ({ ...await start(value, signal), progress: [first] })
+  let inspected = 0
+  data.port.inspect = async value => {
+    inspected++
+    return { ...value, schema: 1, state: inspected < 3 ? 'running' : 'completed', progress: [first, second],
+      result: inspected < 3 ? null : { stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }, error: null }
+  }
+  const activation = await data.backend.start({ ...request, onProgress: items => observations.push(items.map(item => item.text)) })
+  await activation.result
+  assert.deepEqual(observations, [[first.text], [first.text, second.text]])
+  assert.equal(data.starts(), 1)
+  await activation.dispose()
+})
+
 test('missing parent and unknown remote outcome fail without creating replacement work', async () => {
   const fixture = fixtureForTest()
   fixture.generation(null)

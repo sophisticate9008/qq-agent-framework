@@ -1,4 +1,5 @@
 import type { MessageContent } from './messages.ts'
+import { isDshWorkProgress, type DshWorkProgress } from './dsh-work.ts'
 
 export interface NativeWorkBackendResult {
   readonly stopReason: string
@@ -16,6 +17,7 @@ export interface NativeWorkResultDelivery extends NativeWorkBackendResult {
 }
 
 export interface NativeWorkView {
+  readonly progress?: readonly DshWorkProgress[]
   readonly id: string
   readonly childId: string
   readonly parentSessionId: string
@@ -87,7 +89,9 @@ export function parseNativeWorkBackendResult(input: unknown): NativeWorkBackendR
 /** Accept only public execution evidence, never task prompts, credentials or authority. */
 export function parseNativeWorkView(input: unknown): NativeWorkView | null {
   if (!record(input) || !exact(input, ['id', 'childId', 'parentSessionId', 'conversationId', 'generation', 'createdAt', 'deadlineAt',
-    'status', 'result', 'lateResult', 'delivery', 'lastError', 'resultId', 'deliveryId', 'deliveryMessageId', 'deliveryError', 'deliveryFileId'])
+    'status', 'result', 'lateResult', 'delivery', 'lastError', 'resultId', 'deliveryId', 'deliveryMessageId', 'deliveryError', 'deliveryFileId',
+    ...(Object.hasOwn(input, 'progress') ? ['progress'] : [])])
+    || Object.hasOwn(input, 'progress') && !isDshWorkProgress(input.progress)
     || !ref(input.id) || !ref(input.childId) || !ref(input.parentSessionId) || !ref(input.conversationId)
     || typeof input.generation !== 'number' || !Number.isSafeInteger(input.generation) || input.generation <= 0
     || typeof input.createdAt !== 'number' || !Number.isSafeInteger(input.createdAt) || input.createdAt < 0
@@ -100,7 +104,7 @@ export function parseNativeWorkView(input: unknown): NativeWorkView | null {
   const result = input.result === null ? null : parseNativeWorkBackendResult(input.result)
   const lateResult = input.lateResult === null ? null : parseNativeWorkBackendResult(input.lateResult)
   if (input.result !== null && result === null || input.lateResult !== null && lateResult === null) return null
-  return { id: input.id, childId: input.childId, parentSessionId: input.parentSessionId, conversationId: input.conversationId,
+  return { ...(input.progress === undefined ? {} : { progress: input.progress as readonly DshWorkProgress[] }), id: input.id, childId: input.childId, parentSessionId: input.parentSessionId, conversationId: input.conversationId,
     generation: input.generation, createdAt: input.createdAt, deadlineAt: input.deadlineAt,
     status: input.status as NativeWorkView['status'], result, lateResult, delivery: input.delivery as NativeWorkView['delivery'],
     lastError: input.lastError as string | null, resultId: input.resultId as string | null, deliveryId: input.deliveryId as string | null,

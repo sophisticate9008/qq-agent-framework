@@ -26,20 +26,22 @@ test('busy input persists and merges same-person corrections without merging ide
   } finally { await inbox.stop(); store.close(); }
 });
 
-test('unknown execution and interrupted process isolate pending input without automatic replay', async () => {
+test('unconfirmed execution pauses pending input without permanently blocking subsequent messages', async () => {
   const store = createSqliteStore({ filename: ':memory:' });
   let calls = 0;
   const inbox = createNativeInbox({ store, clock: () => 20, readiness: () => 'blocked',
     async deliver() { calls++; return { status: 'accepted' }; } });
   inbox.enqueue(entry('1')); await inbox.tick();
-  assert.equal(inbox.list()[0]?.phase, 'blocked');
-  assert.throws(() => inbox.enqueue(entry('2')), { code: 'NATIVE_INBOX_BLOCKED' });
+  assert.equal(inbox.list()[0]?.phase, 'pending');
+  inbox.enqueue(entry('2'));
+  await inbox.tick(); assert.equal(calls, 0);
   await inbox.stop();
   const recovered = createNativeInbox({ store, clock: () => 20, readiness: () => 'ready',
     async deliver() { calls++; return { status: 'accepted' }; } });
   try {
-    recovered.recover(); await recovered.tick(); assert.equal(calls, 0);
-    assert.equal(recovered.list()[0]?.errorCode, 'NATIVE_INBOX_INTERRUPTED');
+    recovered.recover(); await recovered.tick(); assert.equal(calls, 1);
+    assert.equal(recovered.list()[0]?.errorCode, null);
+    assert.deepEqual(recovered.list()[0]?.receipts.map(receipt => receipt.id), ['1', '2']);
   } finally { await recovered.stop(); store.close(); }
 });
 

@@ -37,6 +37,7 @@ export interface NativeInboundResources {
   readonly interactionMessages: ReturnType<typeof createNativeInteractionMessages> | undefined
   readonly quotedContext: ReturnType<typeof createNativeQuotedContext> | undefined
   readonly inputPackage: NativeChatInputPackageService | undefined
+  readonly feedbackBusy?: (conversationId: string) => boolean
 }
 function failure(code: string): never { throw new FrameworkError(code, 'Inbound admission could not complete safely.') }
 function allowed(configuration: NativeChatConfiguration, conversationId: string): boolean {
@@ -179,7 +180,7 @@ export function createNativeInboundController(options: {
       const incoming = { ...message, content, directed: participation !== 'ambient' }
       participationReasons.set(digest([message.conversationId, message.id, 'prompt']), participation)
       const execution = runtime.executions?.forConversation(message.conversationId)
-      if (incoming.directed && (execution || runtime.inbox?.hasPending(message.conversationId) || runtime.inbox?.contains(message.conversationId, message.id))) {
+      if (incoming.directed && (execution || runtime.feedbackBusy?.(message.conversationId) || runtime.inbox?.hasPending(message.conversationId) || runtime.inbox?.contains(message.conversationId, message.id))) {
         try {
           await guard(message.conversationId, context.signal, false, 'admission')
           if (!runtime.inbox || runtime.lifetime !== generation || generation!.signal.aborted) failure('NATIVE_CHAT_STOPPED')

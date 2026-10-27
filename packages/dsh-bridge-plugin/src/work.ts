@@ -4,6 +4,7 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { normalizeWorkOutput, validWorkOutput, type WorkMediaReference, type WorkOutput } from './work-output.js'
 import { readWorkUsage, type WorkUsageStep } from './work-usage.js'
+import { readWorkProgress, type WorkProgress } from './work-progress.js'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { validIdentifier } from './receipts.js'
 import { workFingerprint, type WorkJournal, type WorkJournalRecord } from './work-journal.js'
@@ -37,6 +38,8 @@ interface Entry {
   readonly pendingFollowups: Set<string>
   readonly attachments: WorkMediaReference[]
   usage?: readonly WorkUsageStep[]
+  progress?: readonly WorkProgress[]
+  recovered?: boolean
   permissionVerified?: boolean
   readonly controller: AbortController
   timer?: ReturnType<typeof setTimeout>
@@ -80,7 +83,7 @@ export function createWorkChannel(options: {
     return { schema: 1, fingerprint: entry.fingerprint,
       address: { id: request.id, parentSessionId: request.parentSessionId, childId: request.childId, generation: request.generation },
       target: { ...(request.fullAccess === undefined ? {} : { fullAccess: request.fullAccess }), modelProvider: request.modelProvider, model: request.model, agentPreset: request.agentPreset, timeoutMs: request.timeoutMs, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }) },
-      state: entry.state, result: entry.result, error: entry.error, permissionVerified: entry.permissionVerified === true, usage: entry.usage ?? [],
+      state: entry.state, result: entry.result, error: entry.error, permissionVerified: entry.permissionVerified === true, usage: entry.usage ?? [], progress: entry.progress ?? [],
       acceptedMessageId: entry.acceptedMessageId, followupRequestId: entry.followupRequestId }
   }
   function persist(entry: Entry): Promise<void> {
@@ -99,7 +102,7 @@ export function createWorkChannel(options: {
       const saved = await options.journal.read(address.id)
       if (saved) {
         const request: WorkStart = { ...saved.address, ...saved.target, issuerEpoch: options.issuerEpoch, task: '', context: '' }
-        entry = { request, usage: saved.usage ?? [], permissionVerified: saved.permissionVerified === true, fingerprint: saved.fingerprint, persistence: Promise.resolve(), acceptedMessageId: saved.acceptedMessageId,
+        entry = { request, usage: saved.usage ?? [], progress: saved.progress ?? [], recovered: true, permissionVerified: saved.permissionVerified === true, fingerprint: saved.fingerprint, persistence: Promise.resolve(), acceptedMessageId: saved.acceptedMessageId,
           followupRequestId: saved.followupRequestId, pendingFollowups: new Set(), attachments: [], controller: new AbortController(), result: saved.result,
           state: saved.state === 'completed' ? 'completed' : 'unknown', error: saved.state === 'completed' ? saved.error : 'WORK_RECOVERY_REQUIRED' }
         // A recovered record is evidence only. It never launches or replays a child.
@@ -113,24 +116,28 @@ export function createWorkChannel(options: {
   }
   function view(entry: Entry) {
     return { schema: 1 as const, issuerEpoch: options.issuerEpoch, id: entry.request.id, parentSessionId: entry.request.parentSessionId,
-      childId: entry.request.childId, generation: entry.request.generation, fullAccess: entry.request.fullAccess === true && entry.permissionVerified === true, usage: entry.usage ?? [], state: entry.state, result: entry.result, error: entry.error }
+      childId: entry.request.childId, generation: entry.request.generation, fullAccess: entry.request.fullAccess === true && entry.permissionVerified === true, usage: entry.usage ?? [], progress: entry.progress ?? [], state: entry.state, result: entry.result, error: entry.error }
   }
-  function captureUsage(entry: Entry, child = options.getAgent(entry.request.childId)): void {
-    if (child?.id !== entry.request.childId || child.session.id !== entry.request.childId || child.session.header.origin !== 'subagent'
+  function captureEvidence(entry: Entry, child = options.getAgent(entry.request.childId)): void {
+    if (entry.recovered || child?.id !== entry.request.childId || child.session.id !== entry.request.childId || child.session.header.origin !== 'subagent'
       || child.session.header.parentSession !== entry.request.parentSessionId || typeof child.session.snapshotEvents !== 'function') return
-    const next = readWorkUsage(child.session.snapshotEvents())
-    if (JSON.stringify(next) !== JSON.stringify(entry.usage ?? [])) { entry.usage = next; void persist(entry).catch(() => {}) }
+    const events = child.session.snapshotEvents()
+    const usage = readWorkUsage(events)
+    const progress = readWorkProgress(events)
+    if (JSON.stringify(usage) !== JSON.stringify(entry.usage ?? []) || JSON.stringify(progress) !== JSON.stringify(entry.progress ?? [])) {
+      entry.usage = usage; entry.progress = progress; void persist(entry).catch(() => {})
+    }
   }
   function isolate(entry: Entry, error: string): void {
     if (entry.state === 'completed') return
-    captureUsage(entry)
+    captureEvidence(entry)
     entry.state = 'unknown'; entry.error = error; entry.controller.abort()
     void persist(entry).catch(() => {})
     void entry.activation?.dispose().catch(() => { entry.error = 'WORK_STOP_UNKNOWN'; void persist(entry).catch(() => {}) })
   }
   function completed(entry: Entry, stopReason: string, output: readonly ContentBlock[]): void {
     if (entry.pendingFollowups.size > 0) return
-    captureUsage(entry)
+    captureEvidence(entry)
     try {
       const normalized = [...normalizeWorkOutput(output)]
       for (const asset of entry.attachments) if (!normalized.some(block => block.type === 'media-reference'
@@ -145,7 +152,7 @@ export function createWorkChannel(options: {
   return Object.freeze({
     /** The SDK detaches its registry entry before subagent/end; the paired disposal carries the exact child. */
     recordDisposedChild(agent: Agent): void {
-      for (const entry of entries.values()) if (entry.request.childId === agent.session.id) captureUsage(entry, agent)
+      for (const entry of entries.values()) if (entry.request.childId === agent.session.id) captureEvidence(entry, agent)
     },
     /** Called by the SDK's serial creation barrier, before the first child turn. */
     admitCreatedChild(agent: Agent): void {
@@ -238,7 +245,7 @@ export function createWorkChannel(options: {
     },
     async inspect(address: WorkAddress) {
       const entry = await locate(address)
-      if (entry) { captureUsage(entry); await entry.persistence }
+      if (entry) { captureEvidence(entry); await entry.persistence }
       return entry ? view(entry) : { schema: 1 as const, issuerEpoch: options.issuerEpoch, id: address.id,
         parentSessionId: address.parentSessionId, childId: address.childId, generation: address.generation,
         state: 'unknown' as const, result: null, error: 'WORK_RECORD_UNAVAILABLE' }
@@ -267,6 +274,8 @@ export function createWorkChannel(options: {
       const runtime = options.runtime()
       if (!runtime || entry.state === 'unknown') throw new TypeError('Work continuation is unavailable')
       await entry.persistence
+      // Explicit continuation resumes live observation; journal inspection alone never does.
+      entry.recovered = false
       const terminal = entry.state === 'completed'
       if (terminal) {
         clearTimeout(entry.timer)

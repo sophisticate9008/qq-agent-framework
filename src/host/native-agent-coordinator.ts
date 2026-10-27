@@ -45,6 +45,8 @@ export function createNativeAgentCoordinator(options: {
   readonly bindingForSession: (sessionId: string) => SessionBinding | undefined
   readonly admittedAt: (requestId: string) => number | undefined
   readonly recordUsage: (event: AgentEvent) => void
+  readonly onReplySuppressed?: (requestId: string) => void
+  readonly onReplyFailed?: (requestId: string, known: boolean) => void
   readonly checkpoint: (point: LifecycleCheckpoint, data: JsonObject, signal: AbortSignal) => Promise<void>
   readonly guard: (conversationId: string, signal: AbortSignal, recheck?: boolean, phase?: NativeGuardPhase) => Promise<void>
 }): AgentAdapter {
@@ -52,6 +54,7 @@ export function createNativeAgentCoordinator(options: {
   const { sourceAgent, dsh, store, controller, definition, configuration, identity, presetBindings,
     activity, bindingForSession, checkpoint, guard } = options
   const configuredSessions = new Set<string>()
+  const observedMessages = new Set<string>()
   function observeExecution(record: Parameters<typeof mapNativeExecutionObservation>[0]) {
     try { const event = mapNativeExecutionObservation(record); if (event) activity.observe(event) } catch {}
   }
@@ -151,6 +154,7 @@ export function createNativeAgentCoordinator(options: {
             const waiting = runtime.executions.forConversation(binding.conversationId)
             if (event.data?.terminal === true) {
               if (waiting) observeExecution(runtime.executions.lost(waiting.id))
+              if (waiting) options.onReplyFailed?.(waiting.requestId, false)
               activity.record('follow_lost', binding.conversationId)
               await request.onEvent(event)
               return
@@ -162,6 +166,7 @@ export function createNativeAgentCoordinator(options: {
               const scope = { conversationId: binding.conversationId, sessionId: event.sessionId, generation: binding.generation }
               const execution = runtime.executions.forTurn(scope, String(turn))
               if (!execution) return
+              event = { ...event, data: { ...event.data, nativeRequestId: execution.requestId } }
               const reason = event.data?.reason
               const aborted = reason !== null && typeof reason === 'object' && !Array.isArray(reason) && reason.kind === 'aborted'
                 && reason.reason !== null && typeof reason.reason === 'object' && !Array.isArray(reason.reason) && reason.reason.kind === 'user'
@@ -171,6 +176,8 @@ export function createNativeAgentCoordinator(options: {
               observeExecution(observed.execution)
               if (event.type === 'message' && observed.decision !== 'deliver') return
               if (event.type === 'message') {
+                if (observedMessages.size >= 512) observedMessages.delete(observedMessages.values().next().value!)
+                observedMessages.add(execution.requestId)
                 const decision = parseNativeReplyDecision(event.content ?? [])
                 if (decision) {
                   const source = runtime.host?.history.snapshot(binding.conversationId, { afterSequence: 0, limit: 100 }).messages.find(item =>
@@ -181,12 +188,20 @@ export function createNativeAgentCoordinator(options: {
                     conversationId: binding.conversationId, sessionId: binding.sessionId, generation: binding.generation,
                     messageId: source.id, state: decision.state, reason: decision.reason }, { expectedRevision: null })
                   runtime.host.replies.suppress(binding, source.id)
+                  options.onReplySuppressed?.(execution.requestId)
                   activity.record(decision.state === 'silent' ? 'reply_suppressed' : 'reply_decision_invalid', binding.conversationId)
                   return
                 }
               }
-              if (event.type === 'failed') activity.record(aborted ? 'agent_cancelled' : 'agent_failed', binding.conversationId,
-                undefined, {}, typeof event.data?.code === 'string' ? event.data.code : undefined)
+              if (event.type === 'failed') {
+                options.onReplyFailed?.(execution.requestId, true)
+                activity.record(aborted ? 'agent_cancelled' : 'agent_failed', binding.conversationId,
+                  undefined, {}, typeof event.data?.code === 'string' ? event.data.code : undefined)
+              }
+              if (event.type === 'completed') {
+                if (!observedMessages.has(execution.requestId)) options.onReplyFailed?.(execution.requestId, true)
+                observedMessages.delete(execution.requestId)
+              }
             } else if (event.type === 'message') return
             await request.onEvent(event)
               } })

@@ -20,6 +20,7 @@ import { readChatInputConfiguration } from './chat-input-configuration.ts'
 import { createNativeExecutionReconciliation } from './native-execution-reconciliation.ts'
 import { drainNativeRun, type NativeRunningRunResources } from './native-run-resources.ts'
 import { createNativeAgentCoordinator } from './native-agent-coordinator.ts'
+import { createNativeWorkFeedback } from './native-work-feedback.ts'
 import { createFfmpegVideoObserver } from '../adapters/ffmpeg-video.ts'
 import { validateNativeMediaConfiguration } from '../contracts/native-media-configuration.ts'
 import { createNativeOutputService, createNativeOutputPackage } from './native-output.ts'
@@ -247,6 +248,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let bootstrapMount: NativeBootstrapMount | undefined
   let bootstrapUnknown = false
   let messageSources: ReturnType<typeof createNativeMessageSources> | undefined
+  let workFeedback: ReturnType<typeof createNativeWorkFeedback> | undefined
   const managerDefinitions = [...(options.lifecycleHooks ?? []), ...(options.bootstrap?.lifecycleHooks ?? [])]
   const controlDefinitions = [...(options.controlCommands ?? []), ...(options.bootstrap?.controlCommands ?? [])]
   const managerHooks = createLifecycleHooks(managerDefinitions)
@@ -367,7 +369,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     get lifetime() { return lifetime }, get configuration() { return active }, get media() { return media },
     get executions() { return executions }, get inbox() { return inbox }, get messageSources() { return messageSources },
     get interactionMessages() { return interactionMessages }, get quotedContext() { return quotedContext },
-    get inputPackage() { return inputPackage }
+    get inputPackage() { return inputPackage }, feedbackBusy: conversationId => workFeedback?.busy(conversationId) ?? false
   }, accountScope, expectedSelfId, activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode })
   const connection = createOneBotConnectionManager({ ...inbound.handlers, ...(accountScope ? { accountId: accountScope.accountId } : {}) })
   let lastObservedConnection = ''
@@ -635,7 +637,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
 
   async function cleanup() {
     frozenRecoveryConversations.clear()
-    const resources = { lifetime, host, dsh, work, claims, executions, bootstrap: bootstrapMount,
+    const resources = { lifetime, host, dsh, work, workFeedback, claims, executions, bootstrap: bootstrapMount,
       tools: frameworkTools, packages, inbox, quotedContext, reminders, memory,
       releaseInteractions, closeInteractions: stopInteractions, claimTimer,
       clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
@@ -643,6 +645,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     stopInteractions = undefined
     interactionMessages = undefined
     messageSources = undefined
+    workFeedback = undefined
     media = undefined
     stickers = undefined
     inputPackage = undefined
@@ -838,6 +841,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         } })
         const agent = createNativeAgentCoordinator({ sourceAgent, dsh, store, controller, definition, configuration, identity,
           presetBindings: selected.deployment.presetBindings, activity, bindingForSession, admittedAt: inbound.admittedAt, checkpoint, guard,
+          onReplySuppressed: requestId => workFeedback?.suppressed(requestId),
+          onReplyFailed: (requestId, known) => workFeedback?.delivered(requestId, { status: known ? 'rejected' : 'unknown' }),
           resources: { get lifetime() { return lifetime }, get configuration() { return active }, get host() { return host },
             get executions() { return executions }, get claims() { return claims }, get frameworkTools() { return frameworkTools },
             get messageSources() { return messageSources }, get pluginEpoch() { return pluginEpoch } },
@@ -938,6 +943,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         }]))
         host = createBridgeHost({ store, accountScope, agent, context, persona: personaReference,
           ...bootstrapMount?.bridgeOptions,
+          onAgentDelivery: (requestId, receipt) => workFeedback?.delivered(requestId, receipt),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
           effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects,
             'native.stickers.list': { execute(request) {
@@ -1001,7 +1007,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           authorizeIncoming: async (message: InboundMessage, signal: AbortSignal) => {
             try {
               await guard(message.conversationId, signal, false, 'admission')
-              return !message.isSelf && (!message.directed || executions?.forConversation(message.conversationId) === null)
+              return !message.isSelf && (!message.directed || executions?.forConversation(message.conversationId) === null && !workFeedback?.busy(message.conversationId))
             } catch { return false }
           }, taskTickMs: 25, replyTimeoutNotice: null, replyRecovery: 'record-only',
           replyTimeoutMs: configuration.execution.turnTimeoutMs, eventTimeoutMs: configuration.execution.turnTimeoutMs,
@@ -1159,7 +1165,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               return lifetime === controller && !controller.signal.aborted && current?.sessionId === binding.sessionId
                 && current.generation === binding.generation
             },
+            onProgress: view => workFeedback?.progress(view),
             onResult: createNativeWorkDelivery({ host: workHost, store, persona: outgoingPersona,
+              present: (result, signal) => workFeedback ? workFeedback.result(result, signal) : Promise.resolve({ status: 'rejected' }),
               owner: () => active?.access.owner ?? null,
               guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') }),
             onFault(code) { lastError = code; activity.record('error') } })
@@ -1236,6 +1244,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         inbox = createNativeInbox({ store: store!,
           readiness(conversationId) {
             if (state !== 'running' || controller.signal.aborted || !host || !executions) return 'blocked'
+            if (workFeedback?.busy(conversationId)) return 'busy'
             const execution = executions.forConversation(conversationId)
             if (execution) {
               const uncertain = execution.deadlineReached || execution.status === 'unknown'
@@ -1276,8 +1285,15 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           onFault: executionFault,
         })
         inbox.recover()
+        workFeedback = createNativeWorkFeedback({ host, store, signal: controller.signal,
+          currentOwner: () => active?.access.owner ?? null,
+          guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery'),
+          ready: conversationId => state === 'running' && !inbound.isProcessing(conversationId)
+            && executions?.forConversation(conversationId) === null && !inbox?.hasPending(conversationId)
+            && host?.replies.get(conversationId)?.status !== 'waiting',
+          onFault: code => { lastError = code; activity.record('error', null, undefined, {}, code) } })
         const runningResources: NativeRunningRunResources = { lifetime: controller, host, dsh, work, claims, executions,
-          bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, releaseInteractions,
+          workFeedback, bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, releaseInteractions,
           closeInteractions: stopInteractions, claimTimer, clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
         runningResources.lifetime.signal.throwIfAborted()
         state = 'running'

@@ -64,12 +64,20 @@ export function createDshNativeWorkBackend(options: {
       const initial = await options.port.start({ ...address, ...target, fullAccess: request.configuration.fullAccess, task: request.task, context: request.context,
         timeoutMs: request.configuration.timeoutMs }, request.signal)
       const lifetime = new AbortController()
+      const observedProgress = new Set<string>()
       const result = withDeadline({ signal: lifetime.signal, timeoutMs: request.configuration.timeoutMs, code: 'WORK_RESULT_UNKNOWN', run: async signal => {
         let current = initial
         for (;;) {
           if (current.usage?.length) options.recordUsage?.({ address, steps: current.usage, ...(request.configuration.provider ? { provider: request.configuration.provider } : {}) })
           assert(current.state !== 'unknown', 'WORK_RESULT_UNKNOWN', 'The remote work result is uncertain and cannot be replayed.')
           if (current.state === 'completed' && current.result) return mapResult(current.result, address, signal)
+          const progress = current.progress?.filter(item => !observedProgress.has(item.id)) ?? []
+          if (progress.length) {
+            for (const item of progress) observedProgress.add(item.id)
+            while (observedProgress.size > 256) observedProgress.delete(observedProgress.values().next().value!)
+            // Keep the bounded snapshot intact while downstream coalesces rapid updates.
+            request.onProgress?.(current.progress ?? [])
+          }
           await new Promise<void>((resolve, reject) => {
             const abort = () => { clearTimeout(timer); reject(signal.reason) }
             const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve() }, interval)
@@ -93,7 +101,8 @@ export function createDshNativeWorkBackend(options: {
     async inspect(request) {
       const value = await options.port.inspect(address(request), request.signal)
       if (value.usage?.length) options.recordUsage?.({ address: address(request), steps: value.usage })
-      return { state: value.state, result: value.result ? await mapResult(value.result, address(request), request.signal) : null }
+      return { state: value.state, ...(value.progress === undefined ? {} : { progress: value.progress }),
+        result: value.result ? await mapResult(value.result, address(request), request.signal) : null }
     },
     followup(request) {
       return options.port.followup({ ...address(request), requestId: request.requestId, text: request.text, delivery: request.delivery }, request.signal)

@@ -177,6 +177,10 @@
   .grid3 { grid-template-columns:repeat(3,minmax(0,1fr)); }
   .grid3>.entity { height:100%; }
   .split { grid-template-columns:minmax(0,1.45fr) minmax(0,1fr); }
+  .overview-activity-layout { align-items:stretch; }
+  .recent-activity { display:flex; flex-direction:column; }
+  /* Keep log contents out of grid sizing; the adjacent settings determine the height. */
+  .recent-activity>.panel-body { position:relative; flex:1; min-height:260px; padding:0; }
   .masterdetail { grid-template-columns:190px minmax(0,1fr); }
   .row { display:flex; align-items:center; gap:7px; flex-wrap:wrap; min-width:0; }
   .between { justify-content:space-between; }

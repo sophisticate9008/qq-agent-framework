@@ -75,9 +75,9 @@ export function RecentActivity({ api, connected, onViewAll }: { readonly onViewA
   const stateText = source === 'simulation' && current ? current.simulation?.state === 'available' ? '模拟已更新' : current.simulation?.state === 'unavailable' ? '模拟读取失败' : '暂无模拟' : nativeStateText;
   const items = current?.items ?? [];
 
-  return <Section id="recent-activity" title="最近活动" scrollable className="self-start [&>.panel-body]:max-h-[260px] [&>.panel-body]:p-0"
+  return <Section id="recent-activity" title="最近活动" className="recent-activity"
     actions={<div className="flex flex-wrap items-center gap-1"><div role="group" aria-label="活动来源" className="flex items-center gap-0.5">{([{ id: 'all', label: '全部' }, { id: 'qq', label: 'QQ' }, { id: 'simulation', label: '模拟' }] as const).map(option => <Button key={option.id} variant={source === option.id ? 'secondary' : 'ghost'} size="xs" aria-pressed={source === option.id} onClick={() => setSource(option.id)}>{option.label}</Button>)}</div><span role="status" className="text-xs text-muted-foreground" title={`${current ? activityStateLabel(current.state) : stateText}；QQ活动保留当前进程最近100条；模拟显示7天内最近模拟的本地快照。`}>{stateText}</span><Button variant="outline" size="sm" aria-label="刷新活动" disabled={!connected || loading} onClick={() => refresh.current()}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button>{onViewAll && <Button size="xs" variant="link" onClick={onViewAll}>全部记录</Button>}</div>}>
-    <div data-recent-activity-scroll className="max-h-[260px] min-h-0 overflow-auto overscroll-contain bg-muted/20 font-mono text-xs leading-[18px] text-foreground">
+    <div data-recent-activity-scroll className="absolute inset-0 overflow-auto overscroll-contain rounded-b-[7px] bg-muted/20 font-mono text-xs leading-[18px] text-foreground">
       {!connected ? <p role="status" className="text-muted-foreground">连接工作台后可查看原生聊天活动。</p> : <>
         {error && <p role="alert" className="text-destructive">暂时无法读取最近活动。{error}{current ? ' 以下为上次读取的活动。' : ' 不会将不可用显示为零活动。'}</p>}
         {current?.simulation?.state === 'unavailable' && <p role="alert" className="px-2 text-amber-700 dark:text-amber-400">模拟活动读取失败；QQ 活动独立显示。</p>}

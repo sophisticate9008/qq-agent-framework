@@ -1,4 +1,4 @@
-import { isDshWorkOutput } from '../contracts/dsh-work.ts'
+import { isDshWorkOutput, isDshWorkUsage } from '../contracts/dsh-work.ts'
 import type { DshWorkMediaReference, DshWorkAddress, DshWorkSnapshot, DshWorkStart, DshWorkTarget } from '../contracts/dsh-work.ts'
 import { DshAdapterError } from './dsh.ts'
 import { isRecord, reference, snapshot } from '../core/values.ts'
@@ -21,18 +21,22 @@ export function createDshWorkPort(invoke: (method: DshWorkMethod, request: unkno
     if (!isRecord(value) || value.schema !== 1 || Object.entries(address).some(([key, expected]) =>
       ['issuerEpoch', 'id', 'parentSessionId', 'childId', 'generation'].includes(key) && value[key] !== expected)
       || !['starting', 'running', 'completed', 'unknown'].includes(String(value.state))
+      || value.usage !== undefined && !isDshWorkUsage(value.usage)
+      || value.fullAccess !== undefined && typeof value.fullAccess !== 'boolean'
+      || 'fullAccess' in address && address.fullAccess === true && ['running', 'completed'].includes(String(value.state)) && value.fullAccess !== true
       || value.error !== null && (typeof value.error !== 'string' || !/^[A-Z][A-Z_]{1,63}$/.test(value.error))
       || value.result !== null && (!isRecord(value.result) || !reference(value.result.stopReason)
         || !Array.isArray(value.result.output) || value.result.output.length > 256
         || value.result.output.some(block => !isDshWorkOutput(block)))
-      || value.state === 'completed' && value.result === null || Buffer.byteLength(JSON.stringify(value)) > 262144) return invalid()
+      || value.state === 'completed' && value.result === null || Buffer.byteLength(JSON.stringify(value)) > 524288) return invalid()
     return value as unknown as DshWorkSnapshot
   }
   return Object.freeze<DshWorkPort>({
     async verify(request, signal) {
       const value = await invoke('bridgePlugin/verifyWork', request, signal)
       if (!isRecord(value) || value.schema !== 1 || value.issuerEpoch !== request.issuerEpoch || typeof value.available !== 'boolean'
-        || value.provider !== 'spawn' || value.continuable !== true || value.externalToolAuthorizationVerified !== false) return invalid()
+        || value.provider !== 'spawn' || value.continuable !== true || value.externalToolAuthorizationVerified !== false
+        || request.fullAccess === true && value.available === true && value.childFullAccessSupported !== true) return invalid()
       return value.available
     },
     start: (request, signal) => read('bridgePlugin/startWork', request, signal),

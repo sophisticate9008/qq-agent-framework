@@ -14,6 +14,7 @@ import type { DshBridgePluginPort } from './dsh-tool-scope.ts'
 import { createDshSessionMigrationPort, type DshSessionMigrationPort } from './dsh-session-migration.ts'
 import { createDshFrameworkToolPort, type DshFrameworkToolPort, type DshFrameworkToolMethod } from './dsh-framework-tools.ts'
 import { createDshWorkPort, type DshWorkPort, type DshWorkMethod } from './dsh-work.ts'
+import { prepareDshPromptContent, type DshPromptImageResolver } from './dsh-prompt-content.ts'
 
 export type { NativeDeploymentPresetBinding as DshPresetBinding } from '../contracts/native-deployment.ts'
 import type { NativeDeploymentPresetBinding as DshPresetBinding } from '../contracts/native-deployment.ts'
@@ -28,10 +29,12 @@ export interface DshJsonRpcOptions {
   readonly followIdleTimeoutMs?: number
   readonly maxPendingEvents?: number
   readonly maxFollows?: number
+  readonly resolvePromptImage?: DshPromptImageResolver
 }
 
 export interface DshJsonRpcPort extends DshClientPort, DshInteractionPort {
   configureSession?(request: { readonly sessionId: string; readonly conversationId: string; readonly signal: AbortSignal }): Promise<void>
+  inspectSessionStorage?(sessionId: string, signal: AbortSignal): Promise<{ sessionId: string; exists: boolean; root?: string; filename?: string }>
   readModelCatalog(signal: AbortSignal): Promise<JsonValue>
   readonly bridgePlugin?: DshBridgePluginPort
   readonly sessionMigration?: DshSessionMigrationPort
@@ -54,7 +57,8 @@ export interface DshDeploymentInspection {
 export const DSH_JSONRPC_CAPABILITIES = Object.freeze({
   directSystemInstructions: false,
   agentPreset: true,
-  textPromptOnly: true,
+  textPromptOnly: false,
+  imagePrompt: true,
   automaticReconnect: false,
   interactionAnswers: true,
 })
@@ -92,6 +96,7 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
   const base = new URL(endpoint.endsWith('/') ? endpoint : `${endpoint}/`)
   const auth = options.auth ?? ''
   const authenticationProvider = options.authenticationProvider
+  if (options.resolvePromptImage !== undefined && typeof options.resolvePromptImage !== 'function') throw failure('DSH_INVALID_OPTIONS')
   if (typeof auth !== 'string' || auth !== '' && !/^[\x21-\x7e]{1,4096}$/.test(auth)
     || authenticationProvider !== undefined && typeof authenticationProvider !== 'function'
     || auth === '' && authenticationProvider === undefined || auth !== '' && authenticationProvider !== undefined) throw failure('DSH_INVALID_OPTIONS')
@@ -156,6 +161,14 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
       await updateDshSessionModel({ sessionId: request.sessionId, definition: binding.definition,
         externalProvider: binding.externalProvider ?? binding.definition.model.provider, signal: request.signal, rpc })
     },
+    async inspectSessionStorage(sessionId: string, signal: AbortSignal) {
+      if (!identifier(sessionId)) throw failure('DSH_INVALID_SESSION')
+      const result = await rpc('bridgePlugin/inspectSessionStorage', { sessionId }, signal)
+      if (!result.ok || !record(result.value) || result.value.sessionId !== sessionId || typeof result.value.exists !== 'boolean') throw failure('DSH_SESSION_STORAGE_UNAVAILABLE')
+      const value = result.value
+      if (value.exists && (typeof value.root !== 'string' || typeof value.filename !== 'string')) throw failure('DSH_SESSION_STORAGE_UNAVAILABLE')
+      return { sessionId, exists: value.exists as boolean, ...(typeof value.root === 'string' && typeof value.filename === 'string' ? { root: value.root, filename: value.filename } : {}) }
+    },
     sessionMigration,
     frameworkTools,
     work,
@@ -198,13 +211,12 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
     },
     createSession: createDshSessionCreator({ configuredDefinition, bindings, rpc }),
     async prompt(request) {
-      if (!identifier(request.sessionId) || !identifier(request.requestId) || request.mode !== 'queue'
-        || request.content.length === 0 || request.content.length > 8
-        || request.content.some(part => part.type !== 'text' || part.text.length > 8_000)
-        || !request.content.some(part => part.type === 'text' && part.text.trim().length > 0)) {
+      if (!identifier(request.sessionId) || !identifier(request.requestId) || request.mode !== 'queue') {
         return rejected('DSH_PROMPT_UNSUPPORTED')
       }
-      const result = await rpc('session/prompt', { sessionId: request.sessionId, requestId: request.requestId, mode: 'queue', content: request.content.map(part => ({ type: 'text', text: part.type === 'text' ? part.text : '' })) }, request.signal)
+      const content = await prepareDshPromptContent(request, options.resolvePromptImage)
+      if (content === null) return rejected('DSH_PROMPT_UNSUPPORTED')
+      const result = await rpc('session/prompt', { sessionId: request.sessionId, requestId: request.requestId, mode: 'queue', content }, request.signal)
       if (result.ok && (!record(result.value) || result.value.accepted !== true)) throw failure('DSH_INVALID_RESPONSE')
       return result
     },

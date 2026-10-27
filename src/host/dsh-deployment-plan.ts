@@ -1,3 +1,4 @@
+import { NATIVE_CHAT_PROTOCOL_INSTRUCTIONS } from './native-chat-protocol.ts'
 import { chatCompactionHeadroom } from '../contracts/chat-capacity.ts'
 import { validateDshModelSettings, type DshDeploymentModelSettings } from '../contracts/dsh-model-settings.ts'
 export { validateDshModelSettings } from '../contracts/dsh-model-settings.ts'
@@ -38,6 +39,10 @@ export const DSH_DEPLOYMENT_VERIFICATION = Object.freeze({
 
 
 export interface DshDeploymentInput {
+  /** Host-selected protocol text; independent work does not inherit QQ chat instructions. */
+  readonly protocolInstructions?: string
+  /** Trusted host-owned tools scoped to the generated preset; never inherited by other agents. */
+  readonly presetPlugins?: readonly JsonObject[]
   readonly definition: ChatSessionDefinition
   readonly providers: readonly NativeModelProvider[]
   readonly target?: DshDeploymentSnapshot
@@ -145,6 +150,13 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
     const providers = validateModelProviders(input.providers)
     const provider = providers.find(candidate => candidate.id === definition.model.provider)
     const settings = input.modelSettings === undefined ? undefined : validateDshModelSettings(input.modelSettings)
+    const presetPlugins = snapshot(input.presetPlugins ?? [])
+    if (!Array.isArray(presetPlugins) || presetPlugins.length > 32 || presetPlugins.some(plugin =>
+      !record(plugin) || typeof plugin.id !== 'string' || !validId(plugin.id) || ['persona', 'compaction', 'compaction-basic'].includes(plugin.id)
+      || typeof plugin.name !== 'string' || !/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(plugin.name)
+      || Object.keys(plugin).some(key => !['id', 'name', 'config', 'disabled'].includes(key))
+      || plugin.disabled !== undefined && typeof plugin.disabled !== 'boolean')
+      || new Set(presetPlugins.map(plugin => plugin.id)).size !== presetPlugins.length) missingReasons.push('invalid_preset_plugins')
     const namespace = input.namespace ?? 'qqaf'
     const conversationKinds = input.conversationKinds ?? ['group', 'private'] as const
     const preservedPresetBindings = input.preservedPresetBindings ?? []
@@ -191,7 +203,8 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
       } else if (efforts === false ? definition.model.reasoningEffort !== 'off'
         : !Object.hasOwn(efforts, definition.model.reasoningEffort)) missingReasons.push('reasoning_effort_not_offered')
     }
-    const prompt = [definition.persona.identity, definition.persona.style, definition.instructions].join('\n\n')
+    const prompt = [definition.persona.identity, definition.persona.style, definition.instructions,
+      ...(input.protocolInstructions === '' ? [] : [input.protocolInstructions ?? NATIVE_CHAT_PROTOCOL_INSTRUCTIONS])].join('\n\n')
     if (/\{\{[\s\S]*?\}\}/.test(prompt)) missingReasons.push('literal_prompt_template_unsupported')
     if (missingReasons.length === 0 && target && provider && settings && definition.contextLimits) {
       const credentialVersion = createHmac('sha256', provider.apiKey).update(`qqaf-dsh:${provider.id}`).digest('hex')
@@ -234,6 +247,7 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
             id: agentPreset, name: `Native chat (${conversationKind})`,
             plugins: [
               { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: prompt, complete: true, includeRuntimeContext: false } },
+              ...presetPlugins,
               { id: 'compaction', name: 'cordis:group', group: true, isolate: { compaction: true }, config: [
                 { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: {
                   auto: true, headroomTokens: chatCompactionHeadroom(contextWindow, settings.maxTokens), maxTokens: settings.maxTokens,

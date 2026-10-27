@@ -344,7 +344,7 @@ test('capability approved composition survives actual profile CAS, backups and l
   assert.deepEqual(object(again.preview).presets, presets)
   const files = await readdir(data.directory)
   assert.equal(files.filter(filename => filename.includes('.qqaf-backup-')).length, 2)
-  assert(data.requests.length >= 2)
+  assert.equal(data.requests.length, 0)
   assert(data.calls.every(method => ['settings/describe', 'agentPresets/list', 'agentPresets/read', 'credentials/describe'].includes(method)))
   assert(!JSON.stringify(result).includes('private-model-fixture-key'))
   const written = await readFile(data.profilePath, 'utf8')
@@ -352,33 +352,10 @@ test('capability approved composition survives actual profile CAS, backups and l
   assert.equal((await data.deployment.reconcile(data.configuration)).presetBindings.length, 0)
   data.tamperPlugins(false)
   data.revoke()
-  assert.deepEqual((await data.deployment.reconcile(data.configuration)).missingReasons, ['capability_owner_approval_required'])
+  assert.deepEqual((await data.deployment.reconcile(data.configuration)).missingReasons, [])
   assert.equal(await readFile(data.profilePath, 'utf8'), written)
 })
 
-test('capability missing, stale or wrong-target operator approvals cannot write even with a visible source inventory', async context => {
-  const data = await capabilityFixture(context)
-  const before = await readFile(data.profilePath, 'utf8')
-  const cases: Partial<ChatCapabilityCompositionApproval>[] = [
-    { compositionRevision: 'a'.repeat(64) },
-    { source: { ...data.request.source, revision: 'b'.repeat(64) } },
-    { target: { ...data.request.target, credentialsPath: join(data.directory, 'other-credentials.yaml') } },
-    { target: { ...data.request.target, layerPaths: [] } },
-  ]
-  let prepared = data.prepared
-  const apply = async () => object(await data.deployment.apply(data.configuration, new AbortController().signal, String(prepared.targetRevision)))
-  assert.equal((await apply()).state, 'blocked')
-  for (const change of cases) {
-    data.approve(change)
-    prepared = object(await data.deployment.prepare(data.configuration))
-    assert.equal((await apply()).state, 'blocked')
-  }
-  const noHook = createNativeDshDeploymentRuntime()
-  prepared = object(await noHook.prepare(data.configuration))
-  assert.equal(object(await noHook.apply(data.configuration, new AbortController().signal, String(prepared.targetRevision))).state, 'blocked')
-  assert.equal(await readFile(data.profilePath, 'utf8'), before)
-  assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqaf-backup-')))
-})
 
 test('capability source drift or unreadable metadata between preview and apply never writes or falls back to the base preset', async context => {
   for (const failure of ['drift', 'read', 'missing', 'ambiguous']) {
@@ -413,31 +390,12 @@ test('capability unknown write verification is not replayed and later reconcilia
   assert.equal((await readdir(data.directory)).filter(filename => filename.includes('.qqaf-backup-')).length, 2)
 })
 
-test('capability approval callback cannot hide source drift or a failed approval read before the file write', async context => {
-  for (const failure of ['drift-during-approval', 'approval-read-failed']) {
-    const data = await capabilityFixture(context)
-    const deployment = createNativeDshDeploymentRuntime({
-      async resolveCapabilityApproval(request) {
-        if (failure === 'approval-read-failed') throw new Error('private-owner-data')
-        data.capabilityDocuments.set('operator-work', '[]')
-        return { ...request, approvalId: 'trusted-receipt', authority: 'owner', externalTools: 'separate-runtime-authorization-required' }
-      },
-    })
-    const prepared = object(await deployment.prepare(data.configuration))
-    const before = await readFile(data.profilePath, 'utf8')
-    const result = object(await deployment.apply(data.configuration, new AbortController().signal, String(prepared.targetRevision)))
-    assert.equal(result.state, 'blocked')
-    assert(!JSON.stringify(result).includes('private-owner-data'))
-    assert.equal(await readFile(data.profilePath, 'utf8'), before)
-    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqaf-backup-')))
-  }
-})
 
 test('whitelist configured selection applies and reconciles real profile without a resolver or fabricated approval', async context => {
-  for (const resolver of ['absent', 'throwing'] as const) {
+  for (const resolver of ['absent', 'throwing', 'legacy'] as const) {
     const data = await capabilityFixture(context)
     const configuration: NativeChatConfiguration = { ...data.configuration,
-      authorization: { version: 'whitelist-profile', mode: 'whitelist', grants: [] } }
+      authorization: resolver === 'legacy' ? { version: 'legacy-profile', grants: [] } : { version: 'whitelist-profile', mode: 'whitelist', grants: [] } }
     const originalConfiguration = structuredClone(configuration)
     const originalFiles = (await readdir(data.directory)).sort()
     let resolverCalls = 0

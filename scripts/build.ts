@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const root = new URL('../', import.meta.url);
@@ -11,6 +11,7 @@ if (!argumentsList.includes('--web')) {
   rmSync(new URL('dist/', root), { recursive: true, force: true });
   execFileSync(process.execPath, [fileURLToPath(new URL('node_modules/typescript/bin/tsc', root))],
     { cwd: fileURLToPath(root), stdio: 'inherit' });
+  cpSync(new URL('assets/fonts/', root), new URL('dist/assets/fonts/', root), { recursive: true });
 }
 execFileSync(process.execPath, [fileURLToPath(new URL('node_modules/typescript/bin/tsc', root)), '-p', 'tsconfig.web.json'],
   { cwd: fileURLToPath(root), stdio: 'inherit' });

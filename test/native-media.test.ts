@@ -52,13 +52,15 @@ test('revoked access and expired registration cannot be inspected or silently re
 test('media content reading uses registered protocol references, genuine image bytes, bounded UTF8 text and an explicit audio transcriber', async () => {
   const store = createSqliteStore({ filename: ':memory:' });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=', 'base64');
-  let mode: 'image' | 'file' | 'binary' | 'large' = 'image';
+  let mode: 'image' | 'file' | 'binary' | 'invalid-image' = 'image';
   let reads = 0;
   let transcriptions = 0;
   let allowed = true;
-  const contentReader = { async read(request: { source: { file?: string; id?: string } }) {
-    reads++; assert.equal('url' in request.source, false);
-    return { status: 'confirmed' as const, data: mode === 'image' ? png : mode === 'large' ? Buffer.alloc(500000)
+  const contentReader = { async read(request: { source: { file?: string; id?: string; url?: string } }) {
+    reads++;
+    if (request.source.file === 'opaque-image-id') assert.equal(request.source.url, 'http://127.0.0.1/never-directly-read');
+    else assert.equal(request.source.url, undefined);
+    return { status: 'confirmed' as const, data: mode === 'image' ? png : mode === 'invalid-image' ? Buffer.alloc(500000)
       : mode === 'binary' ? Buffer.from([0, 255, 1]) : Buffer.from('准确的UTF8文件正文'), mediaType: mode === 'image' ? 'image/png' : 'text/plain' };
   } };
   const registry = createNativeMediaRegistry({ store, accountId: '999', contentReader, authorize: async () => { assert(allowed); } });
@@ -79,8 +81,8 @@ test('media content reading uses registered protocol references, genuine image b
       schema: 'qq-agent-framework.media-read/1', contentRead: true, kind: 'text', sourceKind: 'file', text: '准确的UTF8文件正文' });
     mode = 'binary';
     assert.equal((await registry.read.execute({ input: { assetId: fileId }, scope, signal }) as { contentRead: boolean }).contentRead, false);
-    mode = 'large';
-    assert.equal((await registry.read.execute({ input: { assetId: imageId }, scope, signal }) as { reason: string }).reason, 'image_too_large');
+    mode = 'invalid-image';
+    assert.equal((await registry.read.execute({ input: { assetId: imageId }, scope, signal }) as { reason: string }).reason, 'unsupported_image_format');
     const audioId = await registry.register({ ...asset, kind: 'audio', source: { file: 'opaque-audio-id' } }, signal);
     const before = reads;
     assert.equal((await registry.read.execute({ input: { assetId: audioId }, scope, signal }) as { contentRead: boolean }).contentRead, false);

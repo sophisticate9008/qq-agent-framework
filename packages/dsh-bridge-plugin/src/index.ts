@@ -1,3 +1,4 @@
+import { inspectRegisteredToolInventory } from './tool-inventory.js'
 import { inspectSdkExecution } from './execution-evidence.js'
 import { DSH_EXECUTION_EVIDENCE_PROTOCOL, type DshExecutionEvidenceRequest } from './execution-evidence-protocol.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
@@ -6,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-api-gateway'
 import type {} from '@deepseek-ai/dsh-tools'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { BRIDGE_PLUGIN_PROTOCOL, RECEIPT_LIMITS, createClaimReceiptJournal, type ClaimReceiptQuery } from './receipts.js'
@@ -18,6 +20,7 @@ import { prepareSdkMigration } from './migration-runtime.js'
 import { createFrameworkToolChannel, type FrameworkToolInstall, type FrameworkToolCompletion } from './framework-tools.js'
 import { createWorkJournal } from './work-journal.js'
 import { createWorkChannel, type WorkAddress, type WorkStart, type WorkTarget } from './work.js'
+import { installWorkAttachmentTool } from './work-attachments.js'
 
 export default class BridgePlugin extends TypertRemoteService {
   static inject = ['agents', 'agentPresets', 'tools', 'typertGateway']
@@ -31,10 +34,31 @@ export default class BridgePlugin extends TypertRemoteService {
     super(ctx, 'bridgePlugin')
     this.frameworkTools = createFrameworkToolChannel({ issuerEpoch: this.journal.issuerEpoch,
       getAgent: id => ctx.agents.get(SessionId(id)) })
-    this.work = createWorkChannel({ readAsset: async (asset, signal) => {
+    function fullAccessService(agent?: Agent) {
+      // This optional SDK service is deliberately not a plugin-wide default.
+      const service: unknown = (agent?.ctx ?? ctx).get('permissionPresets')
+      if (!service || typeof service !== 'object' || !('resolve' in service) || typeof service.resolve !== 'function'
+        || !('set' in service) || typeof service.set !== 'function' || !('current' in service) || typeof service.current !== 'function')
+        throw new TypeError('The SDK child permission service is unavailable')
+      const spec: unknown = service.resolve('danger-full-access')
+      if (!spec || typeof spec !== 'object' || !('sandbox' in spec) || spec.sandbox !== 'danger-full-access'
+        || !('approval' in spec) || spec.approval !== 'never') throw new TypeError('The SDK full-access preset is not the required permission scope')
+      const set = service.set.bind(service)
+      const current = service.current.bind(service)
+      return { set, current }
+    }
+    this.work = createWorkChannel({
+      fullAccessAvailable: () => { try { fullAccessService(); return true } catch { return false } },
+      applyFullAccess: agent => {
+        const service = fullAccessService(agent)
+        service.set(agent.session, 'danger-full-access')
+        if (service.current(agent.session) !== 'danger-full-access') throw new TypeError('The SDK child permission scope was not applied')
+      }, readAsset: async (asset, signal) => {
       const attachments = ctx.get('attachments')
       if (!attachments) throw new TypeError('SDK attachment storage is unavailable')
-      if (asset.kind === 'image') {
+      // GIF work images are stored byte-for-byte using the SDK file store; readImage
+      // addresses the separate normalized raster store and would lose the original animation.
+      if (asset.kind === 'image' && asset.mediaType !== 'image/gif') {
         if (!asset.mediaType || !asset.width || !asset.height) throw new TypeError('SDK image metadata is unavailable')
         return (await attachments.readImage({ attachmentId: AttachmentId(asset.attachmentId), bytes: asset.bytes,
           mediaType: asset.mediaType, width: asset.width, height: asset.height, ...(asset.name ? { name: asset.name } : {}) }, signal)).data
@@ -47,10 +71,35 @@ export default class BridgePlugin extends TypertRemoteService {
         if (total > asset.bytes || total > 8 * 1024 * 1024) throw new TypeError('SDK file exceeds its registered size')
         chunks.push(Buffer.from(chunk))
       }
-      return Buffer.concat(chunks)
+      const data = Buffer.concat(chunks)
+      if (asset.kind === 'image') {
+        if (asset.mediaType !== 'image/gif' || data.length !== asset.bytes || data.length < 13
+          || !['GIF87a', 'GIF89a'].includes(data.toString('ascii', 0, 6))
+          || data.readUInt16LE(6) !== asset.width || data.readUInt16LE(8) !== asset.height)
+          throw new TypeError('Stored work GIF metadata changed')
+      }
+      return data
     }, journal: createWorkJournal(join(resolveDshHome(), 'storages', 'qaf-work')), issuerEpoch: this.journal.issuerEpoch, getAgent: id => ctx.agents.get(SessionId(id)),
       runtime: () => ctx.get('subagents'), hasPreset: async id => (await ctx.agentPresets.list()).some(preset => preset.id === id),
       continuationAvailable: () => ctx.get('sessionPersistence') !== undefined && ctx.get('sessionQuery') !== undefined })
+    const attachmentTools = new Map<string, () => void>()
+    ctx.on('agent/created', ({ agent }): undefined => {
+      this.work.admitCreatedChild(agent)
+      if (!this.work.hasAttachmentLease(agent.session.id) || attachmentTools.has(agent.session.id)) return undefined
+      attachmentTools.set(agent.session.id, installWorkAttachmentTool(agent, {
+        assertLease: () => {
+          if (!this.work.hasAttachmentLease(agent.session.id) || ctx.agents.get(agent.id) !== agent)
+            throw new TypeError('The work attachment lease is unavailable')
+        },
+        commit: asset => this.work.registerAttachment(agent.session.id, asset),
+      }))
+      return undefined
+    })
+    ctx.on('agent/disposed', ({ agent }) => {
+      this.work.recordDisposedChild(agent)
+      attachmentTools.get(agent.session.id)?.(); attachmentTools.delete(agent.session.id)
+    })
+    ctx.effect(() => () => { for (const dispose of attachmentTools.values()) dispose(); attachmentTools.clear() })
     ctx.on('subagent/start', event => this.work.recordStart(event.id))
     ctx.on('subagent/end', event => this.work.recordEnd(event))
     ctx.effect(() => () => this.work.close())
@@ -90,12 +139,37 @@ export default class BridgePlugin extends TypertRemoteService {
       migrationProtocol: MIGRATION_PROTOCOL, migrationApiVersion: 2,
       frameworkToolProtocol: 'qq-agent-framework.tools/1',
       workProtocol: 'qq-agent-framework.work/1', executionEvidenceProtocol: DSH_EXECUTION_EVIDENCE_PROTOCOL,
-      methods: ['bridgePlugin/describe', 'bridgePlugin/inspectScope', 'bridgePlugin/claimReceipts',
+      methods: ['bridgePlugin/inspectToolInventory', 'bridgePlugin/describe', 'bridgePlugin/inspectScope', 'bridgePlugin/claimReceipts',
         'bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration',
         'bridgePlugin/installFrameworkTools', 'bridgePlugin/withdrawFrameworkTools',
         'bridgePlugin/pollFrameworkTools', 'bridgePlugin/completeFrameworkTool', 'bridgePlugin/inspectFrameworkTools',
-        'bridgePlugin/verifyWork', 'bridgePlugin/startWork', 'bridgePlugin/inspectWork', 'bridgePlugin/followupWork', 'bridgePlugin/interruptWork', 'bridgePlugin/readWorkAsset', 'bridgePlugin/inspectExecution'],
+        'bridgePlugin/verifyWork', 'bridgePlugin/startWork', 'bridgePlugin/inspectWork', 'bridgePlugin/followupWork', 'bridgePlugin/interruptWork', 'bridgePlugin/readWorkAsset', 'bridgePlugin/inspectExecution', 'bridgePlugin/inspectSessionStorage'],
       claimMeaning: 'inbox-claimed-not-completed', durableReceipts: false, externalToolAuthorizationVerified: false }
+  }
+
+  @Remote('inspectToolInventory')
+  inspectToolInventory() {
+    this.assertOperator()
+    return { protocol: BRIDGE_PLUGIN_PROTOCOL, issuerEpoch: this.journal.issuerEpoch, ...inspectRegisteredToolInventory(this.ctx) }
+  }
+
+  @Remote('inspectSessionStorage')
+  async inspectSessionStorage(request: { sessionId: string }) {
+    const invocation = this.assertOperator()
+    if (!request || Object.keys(request).length !== 1 || typeof request.sessionId !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(request.sessionId)) throw new TypeError('Invalid session identity')
+    const persistence = this.ctx.get('sessionPersistence')
+    if (!persistence) throw new TypeError('Session persistence is unavailable')
+    const stored = await persistence.stat(SessionId(request.sessionId), { signal: invocation.signal })
+    if (!stored) return { sessionId: request.sessionId, exists: false }
+    // Backend-specific location is used only by trusted, offline local maintenance.
+    const backend: unknown = persistence
+    if (!backend || typeof backend !== 'object' || !('locate' in backend) || typeof backend.locate !== 'function'
+      || !('root' in backend) || typeof backend.root !== 'string') throw new TypeError('Session storage cannot be maintained locally')
+    const location: unknown = backend.locate(stored.header)
+    if (!location || typeof location !== 'object' || !('kind' in location) || location.kind !== 'jsonl'
+      || !('path' in location) || typeof location.path !== 'string') throw new TypeError('Unsupported session storage')
+    return { sessionId: request.sessionId, exists: true, root: backend.root, filename: location.path }
   }
 
   @Remote('inspectExecution')

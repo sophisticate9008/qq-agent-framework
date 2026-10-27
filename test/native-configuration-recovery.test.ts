@@ -75,7 +75,7 @@ test('default existing-session precheck blocks incompatible configuration and a 
   assert.equal(fixture.controls.creates, 1)
   const grants = rows(fixture).filter(row => row.namespace === 'policy.grants').map(row => object(JSON.parse(String(row.value))))
   const privateGrant = grants.find(grant => grant.conversationId === 'private:123')!
-  assert.equal(object(privateGrant.maxUses)['agent.submit'], 20)
+  assert.equal(object(privateGrant.maxUses)['agent.submit'], null)
   assert.equal(object(privateGrant.used)['agent.submit'], 2)
   assert.equal(object(privateGrant.used)['messaging.send'], 2)
   assert(fixture.calls.length > wireBefore)
@@ -112,6 +112,6 @@ test('default persona name change before any session remains blocked and manuall
   assert.equal(fixture.controls.creates, 1)
   const grant = rows(fixture).filter(row => row.namespace === 'policy.grants')
     .map(row => object(JSON.parse(String(row.value)))).find(value => value.conversationId === 'private:123')!
-  assert.equal(object(grant.maxUses)['agent.submit'], 20)
+  assert.equal(object(grant.maxUses)['agent.submit'], null)
   assert.equal(object(grant.used)['agent.submit'], 1)
 })

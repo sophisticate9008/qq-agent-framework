@@ -21,6 +21,7 @@ interface AccessState {
   readonly allow: readonly string[];
   readonly deny: readonly string[];
   readonly owner: string | null;
+  readonly application: 'live' | 'saved' | 'reload-required' | 'sync-failed' | null;
 }
 
 interface AccessForm {
@@ -43,8 +44,10 @@ function parseAccess(value: unknown): AccessState | null {
   const deny = stringList(record.deny);
   if (typeof record.revision !== 'string' || !allow || !deny
     || record.owner !== null && (typeof record.owner !== 'string' || !/^[1-9][0-9]{0,19}$/.test(record.owner))
+    || record.application !== undefined && (typeof record.application !== 'string' || !['live', 'saved', 'reload-required', 'sync-failed'].includes(record.application))
     || allow.some(entry => deny.includes(entry))) return null;
-  return { revision: record.revision, allow, deny, owner: record.owner as string | null };
+  return { revision: record.revision, allow, deny, owner: record.owner as string | null,
+    application: record.application === undefined ? null : record.application as AccessState['application'] };
 }
 
 function toForm(access: AccessState): AccessForm {
@@ -65,8 +68,14 @@ function saveState(error: unknown): SaveState {
   return catalogFailureState(error);
 }
 
-function saveMessage(state: SaveState, dirty: boolean): string {
-  if (state === 'saved') return '聊天名单已保存。';
+function saveMessage(state: SaveState, dirty: boolean, application: AccessState['application']): string {
+  if (state === 'saved' || state === 'idle' && !dirty && application !== null) {
+    if (application === 'live') return '聊天名单已保存并立即生效。';
+    if (application === 'saved') return '聊天名单已保存；聊天启动时将使用这份名单。';
+    if (application === 'reload-required') return '聊天名单已保存，仍有设置等待应用；请核对聊天运行状态。';
+    if (application === 'sync-failed') return '名单已保存，但运行同步失败，请重新保存同步。';
+    return '聊天名单已保存；运行中的生效状态尚未确认。';
+  }
   if (state === 'busy') return '另一项保存正在进行，请稍后重新载入后再提交；不会自动重试。';
   if (state === 'conflict') return '名单已在其他窗口更新，请重新载入。';
   if (state === 'unknown') return '无法确认保存结果，请重新载入核对；不会自动重试。';
@@ -96,6 +105,7 @@ export function AccessPage(props: PageProps & { readonly embedded?: boolean }) {
   const connection = useRef({ api, connected });
   connection.current = { api, connected };
   const dirty = access !== null && form !== null && !sameAccess(access, form);
+  const canResynchronize = access?.application === 'sync-failed' && !dirty;
   const blocked = recovery.blocked || result === 'busy' || result === 'conflict' || result === 'unknown';
 
   const view = useRef({ api, access, form, dirty });
@@ -181,7 +191,7 @@ export function AccessPage(props: PageProps & { readonly embedded?: boolean }) {
   }
 
   async function save(): Promise<void> {
-    if (!access || !form || !dirty || saving || blocked || writeController.current) return;
+    if (!access || !form || !dirty && !canResynchronize || saving || blocked || writeController.current) return;
     const allow = parseAccessLists(form.allow, access.allow);
     const deny = parseAccessLists(form.deny, access.deny);
     if (!allow.values || !deny.values) {
@@ -235,8 +245,12 @@ export function AccessPage(props: PageProps & { readonly embedded?: boolean }) {
 
   const reloadButton = <Button variant="ghost" size="sm" onClick={() => setReloadVersion(version => version + 1)} disabled={loading || saving || dirty && !blocked}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重新读取</Button>;
   const recoveryPanel = <NativeCatalogRecovery recovery={recovery} reading={loading || saving} onRead={() => setReloadVersion(value => value + 1)} onReleased={() => { setResult('idle'); setWriteError(''); }} />;
-  const saveControls = <div className="actions border-t pt-2"><SaveBar dirty={dirty} saving={saving} disabled={blocked || loading} message={saveMessage(result, dirty)} onSave={() => void save()} onReset={blocked ? undefined : reset} label="保存名单" /></div>;
-  const feedback = <>{recoveryPanel}{validationError && <p className="text-xs text-destructive" role="alert">{validationError}</p>}{writeError && <p className="text-xs text-destructive" role="alert">{writeError}</p>}{saveControls}</>;
+  const saveFeedback = saveMessage(result, dirty, access?.application ?? null);
+  const applicationWarning = !dirty && (result === 'saved' || result === 'idle')
+    && (access?.application === 'reload-required' || access?.application === 'sync-failed')
+    ? <p className="strip warn" role="status">{saveFeedback}</p> : null;
+  const saveControls = <div className="actions border-t pt-2"><SaveBar dirty={dirty || canResynchronize} saving={saving} disabled={blocked || loading} message={saveFeedback} onSave={() => void save()} onReset={blocked || !dirty ? undefined : reset} label={canResynchronize ? '重新保存同步' : '保存名单'} /></div>;
+  const feedback = <>{recoveryPanel}{applicationWarning}{validationError && <p className="text-xs text-destructive" role="alert">{validationError}</p>}{writeError && <p className="text-xs text-destructive" role="alert">{writeError}</p>}{saveControls}</>;
   const disabled = saving || blocked || loading;
   const groups = access?.allow.filter(value => value.startsWith('group:')).map(value => value.slice(6)) ?? [];
   const privateChats = access?.allow.filter(value => value.startsWith('private:')).map(value => value.slice(8)) ?? [];
@@ -256,12 +270,12 @@ export function AccessPage(props: PageProps & { readonly embedded?: boolean }) {
         <ReadOnlyDetails title="访问规则说明" label="规则说明"><div className="stack"><p>主人由真实 QQ 用户号确定，管理页面登录身份不会授予 QQ 主人权限。</p><p>同一份白名单允许接收与回复；群会话与私聊分别授权，白名单内工具直接开放，敏感操作核验实际主人。</p><p>群聊 @ 与白名单内私聊固定唤醒，额外昵称和引用唤醒在人设中配置。</p><p>拒绝项与白名单不能重叠；主人账号本身不会隐式扩大会话准入范围。</p></div></ReadOnlyDetails>
       </>}>
       {loading && !access ? <div className="empty" role="status"><LoaderCircle className="size-4 animate-spin" />正在读取访问名单</div> : !access || !form ? <div className="stack"><p className="small text-destructive" role="alert">{loadError || '暂时无法读取访问授权。'}</p>{reloadButton}</div> : <div className="stack">
-        <div className="row"><span className="muted">主人账号</span><strong>{access.owner ?? '尚未指定'}</strong>{dirty && <StatusPill tone="warning">草稿未保存</StatusPill>}</div>
+        <div className="row"><span className="muted">已保存主人账号</span><strong>{access.owner ?? '尚未指定'}</strong>{dirty && <StatusPill tone="warning">草稿未保存</StatusPill>}</div>
         <div className="row"><strong>群聊</strong><span className="muted small">{groups.length} 项</span>{groups.slice(0, 5).map(value => <span className="chip" key={value}>群号 {value}</span>)}{groups.length > 5 && <span className="muted small">另 {groups.length - 5} 项</span>}</div>
         <div className="row"><strong>私聊</strong><span className="muted small">{privateChats.length} 项</span>{privateChats.slice(0, 5).map(value => <span className="chip" key={value}>用户号 {value}</span>)}{privateChats.length > 5 && <span className="muted small">另 {privateChats.length - 5} 项</span>}</div>
-        <div className={`strip ${access.allow.length ? '' : 'warn'}`}>{access.allow.length ? '同一份白名单允许接收和回复；敏感操作核验实际主人。' : '当前白名单为空，不会接收或回复群聊、私聊消息。'}</div>
-        {recoveryPanel}{loadError && <p role="alert" className="text-xs text-destructive">读取失败，保留当前快照与草稿：{loadError}</p>}{writeError && <p role="alert" className="text-xs text-destructive">{writeError}</p>}
-        <div className="row small muted"><span className="grow" role="status">{saveMessage(result, dirty)}</span>{reloadButton}</div>
+        <div className={`strip ${access.allow.length ? '' : 'warn'}`}>{access.allow.length ? '同一份白名单允许接收和回复；敏感操作核验实际主人。' : '已保存的白名单为空。'}</div>
+        {recoveryPanel}{applicationWarning}{loadError && <p role="alert" className="text-xs text-destructive">读取失败，保留当前快照与草稿：{loadError}</p>}{writeError && <p role="alert" className="text-xs text-destructive">{writeError}</p>}
+        <div className="row small muted"><span className="grow" role="status">{saveFeedback}</span>{reloadButton}</div>
       </div>}
     </Section>
   </div>;

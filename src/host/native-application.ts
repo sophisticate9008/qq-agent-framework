@@ -41,6 +41,7 @@ export interface NativeApplicationRecord {
 export interface NativeApplicationJournal {
   readonly schema: 1;
   readonly records: readonly NativeApplicationRecord[];
+  readonly retired?: readonly string[];
 }
 export interface NativeApplicationStorage {
   read(): Promise<{ readonly revision: string; readonly value: NativeApplicationJournal }>;
@@ -63,7 +64,10 @@ export function validateNativeApplicationJournal(value: unknown): NativeApplicat
     ids.add(state.id);
     return { request, snapshot: state, instanceId: item.instanceId };
   });
-  return snapshot({ schema: 1, records });
+  const retired = data.retired ?? [];
+  assert(Array.isArray(retired) && retired.length <= 8192 && retired.every(id => typeof id === 'string' && /^[0-9a-f-]{36}$/.test(id))
+    && new Set(retired).size === retired.length && retired.every(id => !ids.has(id)), 'INVALID_APPLICATION_JOURNAL', 'Invalid retired operation identities.');
+  return snapshot({ schema: 1, records, retired: retired as string[] });
 }
 
 const same = (left: Readonly<Record<string, string>>, right: Readonly<Record<string, string>>) =>
@@ -104,7 +108,7 @@ export function createNativeApplicationCoordinator(options: {
     const next = { ...record.snapshot, ...change, updatedAt: now() };
     assert(parseNativeApplicationSnapshot(next), 'INVALID_APPLICATION_STATE', 'Invalid application phase transition.');
     try {
-      await options.storage.write(prior.revision, { schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
+      await options.storage.write(prior.revision, { ...prior.value, schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
         ? { ...record, snapshot: next } : item) });
     } catch (error) {
       inMemoryUnknown = { ...next, state: 'unknown', reasons: ['application_journal_write_unknown'] };
@@ -254,7 +258,7 @@ export function createNativeApplicationCoordinator(options: {
         if (safelyStopped && (stoppedIntent || preparedIntent)) {
           const settled: NativeApplicationSnapshot = { ...current, state: 'blocked', updatedAt: now(), reasons: [preparedIntent
             ? 'application_preparation_saved_new_intent_required' : 'application_stopped_verified_new_intent_required'] };
-          await options.storage.write(prior.revision, { schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
+          await options.storage.write(prior.revision, { ...prior.value, schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
             ? { ...item, instanceId, snapshot: settled } : item) });
           inMemoryUnknown = undefined;
           return snapshot(settled);
@@ -265,7 +269,7 @@ export function createNativeApplicationCoordinator(options: {
             code: 'APPLICATION_STATUS_UNAVAILABLE', run: () => options.ports.status() });
           if (checked.state !== 'stopped' || !same(checked.revisions, current.revisions)) return current;
           const continuing: NativeApplicationSnapshot = { ...current, state: 'running', phaseState: 'confirmed', reasons: [], updatedAt: now() };
-          await options.storage.write(prior.revision, { schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
+          await options.storage.write(prior.revision, { ...prior.value, schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
             ? { ...item, instanceId, snapshot: continuing } : item) });
           inMemoryUnknown = undefined;
           active = run(record.request, { revisions: current.revisions }).finally(() => { active = undefined; });
@@ -278,7 +282,7 @@ export function createNativeApplicationCoordinator(options: {
           verified = { ...current, state: 'blocked', reasons: ['application_stopped_verified_new_intent_required'], updatedAt: now() };
         }
         if (!verified) return current;
-        await options.storage.write(prior.revision, { schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
+        await options.storage.write(prior.revision, { ...prior.value, schema: 1, records: prior.value.records.map(item => item.snapshot.id === id
           ? { ...item, instanceId, snapshot: verified! } : item) });
         inMemoryUnknown = undefined;
         return snapshot(verified);
@@ -302,6 +306,7 @@ export function createNativeApplicationCoordinator(options: {
           assert(digest(existing.request) === digest(request), 'APPLICATION_ID_CONFLICT', 'An operation ID cannot change intent.');
           return project(existing);
         }
+        assert(!prior.value.retired?.includes(request.operationId), 'APPLICATION_OPERATION_RETIRED', 'This completed operation cannot be submitted again.');
         assert(!active && !prior.value.records.some(record => nativeApplicationRequiresReconciliation(project(record))),
           'APPLICATION_RECONCILIATION_REQUIRED', 'An existing application requires reconciliation.');
         assert(prior.value.records.length < 1024, 'APPLICATION_HISTORY_FULL', 'Application journal capacity is full.');
@@ -311,7 +316,7 @@ export function createNativeApplicationCoordinator(options: {
         const at = now();
         const state: NativeApplicationSnapshot = { schema: 1, id: request.operationId, state: 'running', phase: null,
           phaseState: 'pending', revisions: request.revisions, createdAt: at, updatedAt: at, reasons: [] };
-        await options.storage.write(prior.revision, { schema: 1, records: [...prior.value.records, { request, instanceId, snapshot: state }] });
+        await options.storage.write(prior.revision, { ...prior.value, schema: 1, records: [...prior.value.records, { request, instanceId, snapshot: state }] });
         active = run(request).finally(() => { active = undefined; });
         return snapshot(state);
       } finally { starting = false; }

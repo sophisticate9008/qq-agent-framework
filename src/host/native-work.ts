@@ -56,6 +56,11 @@ export interface NativeWorkExecutorOptions {
   readonly loadConfiguration: () => Promise<NativeWorkConfiguration>
   readonly authorize: (scope: Readonly<EffectScope>, signal: AbortSignal) => Promise<void>
   readonly backend?: NativeWorkBackend
+  readonly prepareAdmission?: (signal: AbortSignal) => Promise<{
+    readonly configuration: Readonly<NativeWorkConfiguration>
+    readonly backend: NativeWorkBackend
+    assertCurrent(signal: AbortSignal): Promise<void>
+  }>
   readonly maxPending?: number
   readonly onFault?: (code: string) => void
   readonly onObservation?: (event: NativeEventInput) => void
@@ -397,10 +402,12 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
       const source = await options.messageSources.requireOwner(scope, signal)
       await withDeadline({ signal, timeoutMs: 5_000, code: 'NATIVE_WORK_AUTHORIZATION_UNAVAILABLE',
         run: currentSignal => options.authorize(scope, currentSignal) })
-      const configuration = validateNativeWorkConfiguration(await withDeadline({ signal, timeoutMs: 5_000,
+      const prepared = options.prepareAdmission ? await withDeadline({ signal, timeoutMs: 30_000,
+        code: 'NATIVE_WORK_CONFIGURATION_UNAVAILABLE', run: currentSignal => options.prepareAdmission!(currentSignal) }) : undefined
+      const configuration = validateNativeWorkConfiguration(prepared?.configuration ?? await withDeadline({ signal, timeoutMs: 5_000,
         code: 'NATIVE_WORK_CONFIGURATION_UNAVAILABLE', run: () => options.loadConfiguration() }))
       assert(configuration.enabled, 'NATIVE_WORK_DISABLED', 'Independent work is disabled.')
-      const backend = options.backend
+      const backend = prepared?.backend ?? options.backend
       assert(backend, 'NATIVE_WORK_BACKEND_UNAVAILABLE', 'No verified DSH subagent backend is connected.')
       const parentSessionId = scope.sessionId
       const id = digest({ scope, sourceMessageId: source.sourceMessageId, ownerId: source.userId })
@@ -434,6 +441,16 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
       pending.set(id, entry)
       entry.timer = setTimeout(() => isolate(entry, 'NATIVE_WORK_TIMEOUT_UNKNOWN'), configuration.timeoutMs)
       let publication: Promise<NativeWorkActivation> | undefined
+      let startAttempted = false
+      const recordStartFailure = (error: unknown) => {
+        const code = errorCode(error, 'NATIVE_WORK_START_UNKNOWN')
+        if (startAttempted) isolate(entry, code)
+        else {
+          entry.controller.abort()
+          releaseChild(entry)
+          update(entry, { status: 'failed', lastError: code })
+        }
+      }
       try {
         await withDeadline({ signal, timeoutMs: Math.max(1, Math.min(configuration.timeoutMs, source.expiresAt - Date.now())),
           code: 'NATIVE_WORK_START_UNKNOWN', run: currentSignal => {
@@ -441,10 +458,14 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
               const executionSignal = AbortSignal.any([currentSignal, entry.controller.signal])
               await options.messageSources.requireOwner(scope, executionSignal)
               await options.authorize(scope, executionSignal)
-              const current = validateNativeWorkConfiguration(await options.loadConfiguration())
-              assert(digest(current) === digest(configuration), 'NATIVE_WORK_CONFIGURATION_CHANGED', 'Work configuration changed.')
+              if (prepared) await prepared.assertCurrent(executionSignal)
+              else {
+                const current = validateNativeWorkConfiguration(await options.loadConfiguration())
+                assert(digest(current) === digest(configuration), 'NATIVE_WORK_CONFIGURATION_CHANGED', 'Work configuration changed.')
+              }
               executionSignal.throwIfAborted()
               registerChild(entry)
+              startAttempted = true
               const activation = await backend.start({ id, childId, parentSessionId, generation: scope.generation, ...input,
                 source, configuration, signal: executionSignal })
               entry.activation = activation
@@ -458,7 +479,7 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
             entry.operation = publication.then(async activation => {
               await settle(entry, await activation.result)
             }).catch(error => {
-              isolate(entry, errorCode(error, 'NATIVE_WORK_UNKNOWN'))
+              recordStartFailure(error)
               fault(error)
             }).finally(async () => {
               clearTimeout(entry.timer)
@@ -470,7 +491,7 @@ export function createNativeWorkExecutor(options: NativeWorkExecutorOptions) {
             return publication
           } })
       } catch (error) {
-        isolate(entry, errorCode(error, 'NATIVE_WORK_START_UNKNOWN'))
+        recordStartFailure(error)
         if (!publication) { clearTimeout(entry.timer); pending.delete(id) }
         throw error
       }

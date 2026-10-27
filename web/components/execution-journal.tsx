@@ -45,6 +45,7 @@ export function ExecutionJournal({ api, connected, embedded = false }: { readonl
   const [manageOpen, setManageOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
+  const [onlyIssues, setOnlyIssues] = useState(false);
   const deferredFilter = useDeferredValue(filter);
   const [loading, setLoading] = useState(false);
   const [moreLoading, setMoreLoading] = useState(false);
@@ -130,7 +131,7 @@ export function ExecutionJournal({ api, connected, embedded = false }: { readonl
       setPage(merged.page);
       setSelectedId(previous => previous ?? merged.page.items[0]?.id ?? null);
       if (merged.changed) setNotice(`分页期间有 ${merged.changed} 条已读记录发生变化，已保留较新状态；各页不是同一时刻的快照。`);
-      if (parsed.next !== null && (parsed.next <= after || seenCursors.current.has(parsed.next))) {
+      if (parsed.next !== null && (parsed.next === after || seenCursors.current.has(parsed.next))) {
         setPagingBlocked(true);
         setNotice('后续位置未前进，已停止继续加载。当前列表不是完整日志，请重新读取核对。');
       }
@@ -176,18 +177,20 @@ export function ExecutionJournal({ api, connected, embedded = false }: { readonl
   const available = connected && loadedApi.current === api ? page : null;
   const filtered = useMemo(() => {
     const query = deferredFilter.trim().toLocaleLowerCase();
-    const items = available?.items ?? [];
+    const items = [...(available?.items ?? [])]
+      .filter(item => !onlyIssues || executionPresentation(item).tone === 'warning')
+      .sort((a, b) => b.admittedAt - a.admittedAt || b.id.localeCompare(a.id));
     if (!query) return items;
     return items.filter(item => [executionConversationLabel(item.binding.conversationId), executionPresentation(item).label,
       executionContinuationLabel(item), executionCancelLabel(item.cancelStatus), executionNoticeLabel(item.noticeStatus),
       item.id, item.binding.conversationId, item.binding.sessionId, item.requestId, item.turn?.id ?? '']
       .some(text => text.toLocaleLowerCase().includes(query)));
-  }, [available, deferredFilter]);
+  }, [available, deferredFilter, onlyIssues]);
   const selected = available?.items.find(item => item.id === selectedId) ?? null;
   const selectionUnconfirmed = available !== null && selectedId !== null && selected === null;
   const selectedState = selected ? executionPresentation(selected) : null;
 
-  const journalActions = <><HelpTip label="执行记录保留">已结束记录默认保留 7 天，容量紧张时优先回收较旧记录。未完成记录继续保留。点击会话可查看完整处理结果。</HelpTip><Button size="sm" variant="outline" disabled={!connected || loading || moreLoading} onClick={reloadJournal}><RefreshCw className="size-3.5" />重新读取日志</Button>{(loading || moreLoading) && <Button size="sm" variant="ghost" onClick={cancelRead}>取消读取</Button>}</>;
+  const journalActions = <><HelpTip label="执行记录保留">已结束记录默认保留 7 天，容量紧张时优先回收较旧记录。未完成记录继续保留。列表按开始时间倒序排列，处理完成与消息送达分别记录；点击详情查看。</HelpTip><Button size="sm" variant="outline" disabled={!connected || loading || moreLoading} onClick={reloadJournal}><RefreshCw className="size-3.5" />刷新</Button>{(loading || moreLoading) && <Button size="sm" variant="ghost" onClick={cancelRead}>取消读取</Button>}</>;
 
   return <Section id={nativeFormMetadata.journal.id} title={nativeFormMetadata.journal.title} className={embedded ? 'rounded-none border-0 shadow-none [&>.panel-header]:hidden' : undefined} 
     actions={embedded ? undefined : journalActions}>
@@ -199,34 +202,33 @@ export function ExecutionJournal({ api, connected, embedded = false }: { readonl
         {error && <p role="alert" className="text-xs leading-5 text-destructive">{error}{available ? ' 当前保留的记录尚未重新确认。' : ''}</p>}
         {notice && <p role="status" className="text-xs leading-5 text-muted-foreground">{notice}</p>}
         {available && <>
-          <div className="flex flex-wrap items-end justify-between gap-3"><Field label={nativeFormMetadata.journal.fields.filter} className="max-w-64"><Input id="execution-journal-filter" placeholder="会话、状态或已知技术标识" maxLength={160} value={filter} onChange={event => setFilter(event.target.value)} /></Field><span className="text-xs text-muted-foreground">已读取 {available.items.length} 条 · 当前匹配 {filtered.length} 条</span>{embedded && <div className="ml-auto flex flex-wrap items-center gap-2">{journalActions}</div>}</div>
+          <div className="flex flex-wrap items-end justify-between gap-3"><Field label={nativeFormMetadata.journal.fields.filter} className="max-w-64"><Input id="execution-journal-filter" placeholder="搜索会话或状态" maxLength={160} value={filter} onChange={event => setFilter(event.target.value)} /></Field><Button size="sm" variant={onlyIssues ? 'secondary' : 'outline'} aria-pressed={onlyIssues} onClick={() => setOnlyIssues(value => !value)}>仅看异常</Button><span className="text-xs text-muted-foreground">{filtered.length} / {available.items.length} 条 · 最新在前</span>{embedded && <div className="ml-auto flex flex-wrap items-center gap-2">{journalActions}</div>}</div>
           {available.partial && <p role="status" className="text-xs text-status-warning">服务仅提供部分记录；缺失状态保持未知，不以成功或空日志代替。</p>}
           <div className={embedded ? 'max-h-96 overflow-auto overscroll-contain' : 'max-h-96 overflow-auto overscroll-contain rounded-lg border'} data-execution-journal-scroll role="region" tabIndex={0} aria-label="执行记录列表" aria-busy={loading || moreLoading}>
-            <table className="w-full min-w-[36rem] text-left text-[11px]" aria-rowcount={filtered.length + 1}>
-              <thead className={embedded ? 'sr-only' : 'sticky top-0 z-10 bg-muted'}><tr className="border-b text-muted-foreground"><th scope="col" className="px-2 py-1 font-medium">时间</th><th scope="col" className="px-2 py-1 font-medium">状态</th><th scope="col" className="px-2 py-1 font-medium">所属会话</th><th scope="col" className="px-2 py-1 font-medium">处理摘要</th><th scope="col" className="px-2 py-1 font-medium">操作</th></tr></thead>
-              <VirtualTableBody items={filtered} getItemKey={executionKey} estimateSize={22} columns={5}>{(item, index) => {
+            <table className="w-full min-w-[28rem] text-left text-[11px]" aria-rowcount={filtered.length + 1}>
+              <thead className="sticky top-0 z-10 bg-muted"><tr className="border-b text-muted-foreground"><th scope="col" className="px-2 py-1 font-medium">开始时间</th><th scope="col" className="px-2 py-1 font-medium">状态</th><th scope="col" className="px-2 py-1 font-medium">所属会话</th><th scope="col" className="px-2 py-1 font-medium">操作</th></tr></thead>
+              <VirtualTableBody items={filtered} getItemKey={executionKey} estimateSize={22} columns={4}>{(item, index) => {
                 const state = executionPresentation(item);
-                return <tr data-execution-row={index} className={item.id === selectedId ? 'bg-accent/50' : 'odd:bg-muted/15 even:bg-muted/45 hover:bg-accent/30 focus-within:bg-accent/30'}>
-                  <td className="whitespace-nowrap px-2 py-px leading-[18px]"><time dateTime={new Date(item.admittedAt).toISOString()} title={timeLabel(item.admittedAt)}>{new Date(item.admittedAt).toLocaleTimeString('zh-CN', { hour12: false })}</time></td>
+                return <tr data-execution-row={index} className={detailsOpen && item.id === selectedId ? 'bg-accent/50' : 'odd:bg-muted/15 even:bg-muted/45 hover:bg-accent/30 focus-within:bg-accent/30'}>
+                  <td className="whitespace-nowrap px-2 py-px leading-[18px]"><time dateTime={new Date(item.admittedAt).toISOString()} title={timeLabel(item.admittedAt)}>{new Date(item.admittedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</time></td>
                   <td className="px-2 py-px leading-[18px]"><span className={`whitespace-nowrap ${state.tone === 'warning' ? 'text-status-warning' : state.tone === 'success' ? 'text-status-success' : 'text-muted-foreground'}`}>{state.label}</span></td>
                   <td className="whitespace-nowrap px-2 py-px leading-[18px]">{executionConversationLabel(item.binding.conversationId)}</td>
-                  <td className="max-w-80 px-2 py-px leading-[18px]"><span className="block truncate" title={`${state.explanation} ${executionContinuationLabel(item)}`}>{state.explanation}</span></td>
                   <td className="px-2 py-px leading-[18px]"><Button size="xs" variant="ghost" className="h-[18px] min-h-0 px-1 py-0 text-xs text-primary" aria-label={`查看执行记录 ${index + 1}`} aria-pressed={item.id === selectedId} onClick={() => { setSelectedId(item.id); setCopyStatus(''); setDetailsOpen(true); }}>详情</Button></td>
                 </tr>;
               }}</VirtualTableBody>
             </table>
-            {filtered.length === 0 && <p className="p-5 text-xs text-muted-foreground">{available.items.length ? '已读取的记录中没有匹配项。' : '本批次没有执行记录，不代表没有其他执行或历史。'}{available.next ? '仍可继续加载后续记录。' : ''}</p>}
+            {filtered.length === 0 && <p className="p-5 text-xs text-muted-foreground">{available.items.length ? '已读取的记录中没有匹配项。' : '暂无处理记录。'}{available.next ? '仍可继续加载后续记录。' : ''}</p>}
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">{available.next ? '尚有未读取的后续位置。' : '本次分页暂未提供后续位置；不代表任务均已结束。'}</p>{available.next && <Button size="sm" variant="outline" disabled={loading || moreLoading || pagingBlocked} onClick={() => void loadMore()}>继续加载执行记录</Button>}</div>
-          {selectionUnconfirmed && <p role="status" className="text-xs leading-5 text-muted-foreground" data-execution-selection-unconfirmed>所选执行尚未在本次已读取批次中确认；未加载不代表记录不存在。可继续加载或主动选择另一条记录，不会把旧状态当成新结果。</p>}
-          <DetailsWindow open={detailsOpen && selected !== null} onOpenChange={setDetailsOpen} title="处理记录详情" description="查看这轮处理、超时与发送结果。">{selected && selectedState && <div className="p-1" data-execution-detail>
-            <div className="flex flex-wrap items-center gap-2"><h3 className="text-xs font-medium">{executionConversationLabel(selected.binding.conversationId)} · 所选执行</h3><StatusPill tone={selectedState.tone}>{selectedState.label}</StatusPill></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">{available.next ? '还有更早记录' : available.partial ? '已加载服务提供的部分记录' : '已加载全部记录'}</p>{available.next && <Button size="sm" variant="outline" disabled={loading || moreLoading || pagingBlocked} onClick={() => void loadMore()}>加载更早记录</Button>}</div>
+          {detailsOpen && selectionUnconfirmed && <p role="status" className="text-xs leading-5 text-muted-foreground" data-execution-selection-unconfirmed>这条记录不在当前列表中，请加载更早记录或重新选择。</p>}
+          <DetailsWindow open={detailsOpen && selected !== null} onOpenChange={setDetailsOpen} title="处理记录详情" description="本轮处理状态与时间。">{selected && selectedState && <div className="p-1" data-execution-detail>
+            <div className="flex flex-wrap items-center gap-2"><h3 className="text-xs font-medium">{executionConversationLabel(selected.binding.conversationId)}</h3><StatusPill tone={selectedState.tone}>{selectedState.label}</StatusPill></div>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">{selectedState.explanation}</p>
-            <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-muted-foreground">该会话后续</dt><dd className="mt-1">{executionContinuationLabel(selected)}。{selected.isolated ? '其他会话可独立处理，不会自动换会话或清空上下文。' : '这不代表已有其他调用授权。'}</dd></div>
-              <div><dt className="text-muted-foreground">本次总期限</dt><dd className="mt-1">{timeLabel(selected.deadlineAt)}（进度不会续期）</dd></div>
-              <div><dt className="text-muted-foreground">协作停止</dt><dd className="mt-1">{executionCancelLabel(selected.cancelStatus)}</dd></div>
+            <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-muted-foreground">开始时间</dt><dd className="mt-1">{timeLabel(selected.admittedAt)}</dd></div><div><dt className="text-muted-foreground">后续处理</dt><dd className="mt-1">{executionContinuationLabel(selected)}</dd></div>
+              <div><dt className="text-muted-foreground">处理期限</dt><dd className="mt-1">{timeLabel(selected.deadlineAt)}</dd></div>
+              <div><dt className="text-muted-foreground">停止请求</dt><dd className="mt-1">{executionCancelLabel(selected.cancelStatus)}</dd></div>
               <div><dt className="text-muted-foreground">超时提醒</dt><dd className="mt-1">{executionNoticeLabel(selected.noticeStatus)}</dd></div>
-              <div><dt className="text-muted-foreground">已观察进度事件</dt><dd className="mt-1">{selected.progressEvents} 次（不是重试次数）</dd></div>
+              <div><dt className="text-muted-foreground">处理进度</dt><dd className="mt-1">{selected.progressEvents} 次</dd></div>
               <div><dt className="text-muted-foreground">会话代次</dt><dd className="mt-1">第 {selected.binding.generation} 代，仅归属本次绑定</dd></div></dl>
             {executionLateLabel(selected) && <p className="mt-3 text-xs leading-5 text-muted-foreground">{executionLateLabel(selected)}</p>}
             {selected.lastError && <p className="mt-3 text-xs text-muted-foreground">此记录包含异常标记；不会直接展示上游错误原文或据此重试。</p>}

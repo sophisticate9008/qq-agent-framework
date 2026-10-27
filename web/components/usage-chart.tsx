@@ -5,6 +5,7 @@ import { Bar, BarChart, CartesianGrid, Cell, Tooltip, XAxis, YAxis } from 'recha
 import { formatActivityCost, formatUsageCount, sumUsageCounts } from '../lib/activity.ts';
 import { usageBucketValue, type AggregateUsageTier, type UsageChartMetric, type UsageSeries, type UsageSeriesBucket } from '../lib/usage-details.ts';
 import { DetailsWindow } from './read-only-details.tsx';
+import { UsageConversation } from './usage-conversation.ts';
 import { ChartContainer, ChartTooltipContent } from './ui/chart.tsx';
 
 const tierLabels: Readonly<Record<AggregateUsageTier, string>> = {
@@ -81,7 +82,7 @@ export function UsageChart({ series, metric, selectedIndex, detailedCounts = fal
         if (index !== null) onSelect(index);
       }}><option value="" disabled>选择时间</option>{series.buckets.map((bucket, index) => <option key={bucket.t} value={index}>{formatBucketTime(bucket.t, series.bucketMs)} · {tierLabels[bucket.tier]}</option>)}</select></label>
     </div>
-    <DetailsWindow open={selectedBucket !== null} onOpenChange={open => { if (!open) onSelect(null); }} title="时段明细" description="查看所选时间桶中的实际用量与计价类型。">{selectedBucket && <div className="p-1" data-usage-bucket-details={selectedIndex ?? ''}><div className="grid gap-2"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-sm">{formatBucketTime(selectedBucket.t, series.bucketMs)}</strong><span className="text-xs text-muted-foreground">{tierLabels[selectedBucket.tier]} · {formatActivityCost(selectedBucket.cost, series.currency, series.symbol)}</span></div><BucketCounts bucket={selectedBucket} detailedCounts={detailedCounts} />{selectedBucket.keys.length > 0 && <p className="break-words text-[11px] text-muted-foreground">涉及会话：{selectedBucket.keys.join('、')}</p>}</div></div>}</DetailsWindow>
+    <DetailsWindow open={selectedBucket !== null} onOpenChange={open => { if (!open) onSelect(null); }} title="时段明细" description="查看所选时间桶中的实际用量与计价类型。">{selectedBucket && <div className="p-1" data-usage-bucket-details={selectedIndex ?? ''}><div className="grid gap-2"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-sm">{formatBucketTime(selectedBucket.t, series.bucketMs)}</strong><span className="text-xs text-muted-foreground">{tierLabels[selectedBucket.tier]} · {formatActivityCost(selectedBucket.cost, series.currency, series.symbol)}</span></div><BucketCounts bucket={selectedBucket} detailedCounts={detailedCounts} />{selectedBucket.keys.length > 0 && <p className="break-words text-[11px] text-muted-foreground">涉及会话：{selectedBucket.keys.map(key => <span key={key} className="mr-3 inline-flex"><UsageConversation conversationKey={key} showRun /></span>)}</p>}</div></div>}</DetailsWindow>
     <p className="text-[11px] leading-5 text-muted-foreground">悬浮查看，点击柱形打开时段明细；计价类型以记录为准。</p>
   </div>;
 }

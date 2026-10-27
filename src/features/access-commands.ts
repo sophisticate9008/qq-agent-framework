@@ -34,7 +34,7 @@ const replies = Object.freeze({
   denied: '该会话在拒绝名单中，本次未修改。',
   limit: '白名单已达到上限，本次未修改。',
   unknown: '本次白名单操作结果未能确认，请先查看状态，勿重复提交。',
-  reloadRequired: '白名单已保存，当前聊天需重新加载后生效。',
+  reloadRequired: '白名单已保存，但运行同步未完成；可再次发送同一条命令同步。',
 })
 
 export const ACCESS_COMMAND_REPLIES: readonly string[] = Object.freeze(Object.values(replies))

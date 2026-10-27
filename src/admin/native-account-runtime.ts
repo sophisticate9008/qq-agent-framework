@@ -13,7 +13,7 @@ import { ACCESS_COMMAND_REPLIES, createAccessCommandHandler, parseAccessCommand 
 import type { NativeAccountRuntime, NativeAccounts } from '../host/native-accounts.ts'
 import { NativeConfigurationRepository, createNativeAccessPersistence, prepareNativeChatAuthorization, readNativeChatConfiguration } from './native-configuration-repository.ts'
 import { createNativeCapabilityApprovalResolver, createNativeCapabilityManagement } from './native-capabilities.ts'
-import { applyNativeAccessRuntime, createNativeRuntimeApplicationPorts, createNativeRuntimeRoutes, restoreNativeChatRunningIntent } from './runtime.ts'
+import { applyNativeAccessRuntime, createNativeRuntimeApplicationPorts, createNativeRuntimeRoutes, restoreNativeChatRunningIntent, recoverNativeChatConnection } from './runtime.ts'
 import { AdminRequestError, type AdminRoute } from './server.ts'
 import { nativeRuntimeIsQuiescent } from '../contracts/native-runtime-quiescence.ts'
 import { NATIVE_DSH_RESTART_PATH } from '../contracts/native-dsh-restart.ts'
@@ -21,6 +21,7 @@ import { NATIVE_DSH_RESTART_PATH } from '../contracts/native-dsh-restart.ts'
 export interface NativeAccountRuntimeBundle extends NativeAccountRuntime {
   readonly routes: readonly AdminRoute[]
   restore(signal: AbortSignal): ReturnType<typeof restoreNativeChatRunningIntent>
+  recoverConnection(signal: AbortSignal): Promise<void>
   quiescent(): Promise<boolean>
 }
 /** Full default assembly is reused per account, with every private configuration and journal rooted in its directory. */
@@ -49,16 +50,25 @@ export function createNativeAccountRuntimeBundle(options: {
     reconcile: configuration => deploymentPort.reconcile(scopedConfiguration(configuration))
   })
   const packageConfigurationRegistry = createNativePackageConfigurationRegistry({ directory, contributions: options.bootstrap?.packageConfigurations })
-  const assistantTarget = createNativeAssistantTarget({ directory, deploymentNamespace: namespace('work'), loadConfiguration: () => readNativeChatConfiguration(directory), loadAssistant: () => repository.readAssistant(),
-    async authorizeApply(signal) {
-      signal.throwIfAborted()
-      assert((await runtime.status()).canApplyDeployment, 'ASSISTANT_DEPLOYMENT_REQUIRES_STOPPED', 'Stop this account before applying its assistant target.')
-    } })
+  const assistantTarget = createNativeAssistantTarget({ directory, deploymentNamespace: namespace('work'), loadConfiguration: () => readNativeChatConfiguration(directory), loadAssistant: () => repository.readAssistant() })
   const accessService = createAccessService({ ...createNativeAccessPersistence(directory),
     publish: (saved, previous, signal) => applyNativeAccessRuntime(directory, runtime, previous.revision, saved.revision, signal).then(() => undefined) })
   const accessCommand = createAccessCommandHandler({ readAccess: signal => accessService.read(signal), change: (request, signal) => accessService.change(request, signal) })
   const runtime = createNativeChatRuntime({ directory, accountScope: options.accountScope, expectedSelfId: options.expectedSelfId,
     packageConfigurationRegistry, bootstrap, resolveWorkTarget: signal => assistantTarget.resolve(signal),
+    prepareWorkTarget: signal => assistantTarget.prepareWork(signal),
+    async readWorkIdentity(signal) {
+      signal.throwIfAborted()
+      const { value } = await repository.readAssistant()
+      signal.throwIfAborted()
+      return value.mode === 'chat-assistant' ? { nickname: value.nickname, model: value.model } : null
+    },
+    async readWorkEnabled(signal) {
+      signal.throwIfAborted()
+      const document = await repository.readAssistant()
+      signal.throwIfAborted()
+      return document.value.mode === 'chat-assistant'
+    },
     controlCommands: [{ id: 'access-management', replyTexts: ACCESS_COMMAND_REPLIES, matches: message => parseAccessCommand(message) !== null,
       handle: context => accessCommand(context.message, context.reply, context.signal) }],
     prepareAuthorization: () => prepareNativeChatAuthorization(directory), loadConfiguration: () => readNativeChatConfiguration(directory),
@@ -75,6 +85,7 @@ export function createNativeAccountRuntimeBundle(options: {
   return Object.freeze({ routes,
     async quiescent() { return nativeRuntimeIsQuiescent(await runtime.status()) },
     restore: (signal: AbortSignal) => restoreNativeChatRunningIntent(directory, runtime, signal),
+    recoverConnection: (signal: AbortSignal) => recoverNativeChatConnection(directory, runtime, signal),
     state() { const state = runtime.activity().state; return state === 'error' ? 'unknown' : state },
     async start(signal: AbortSignal, revisions?: Readonly<Record<string, string>>) { await application.start(revisions ?? (await repository.read()).revisions, signal) },
     async stop(signal: AbortSignal) { signal.throwIfAborted(); await application.stop(false) },

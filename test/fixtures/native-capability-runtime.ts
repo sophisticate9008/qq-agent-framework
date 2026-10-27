@@ -332,7 +332,7 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
     const message = [...(conversation === 'group' ? [{ type: 'at', data: { qq: '999' } }] : []),
       { type: 'text', data: { text: `Synthetic inbound ${messageId}` } }]
     for (const socket of onebots) socket.send(JSON.stringify({ post_type: 'message', self_id: 999, message_type: conversation,
-      ...(conversation === 'group' ? { group_id: 456 } : {}), user_id: 123, message_id: messageId, time: 1000 + messageId, message }))
+      ...(conversation === 'group' ? { group_id: 456 } : {}), user_id: 123, message_id: messageId, time: Math.floor(Date.now() / 1000), message }))
   }
   function event(type: string, data: Value, stream = streams.at(-1)) {
     assert(stream)

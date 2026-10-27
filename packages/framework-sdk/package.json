@@ -8,6 +8,7 @@
   "files": ["dist", "LICENSE"],
   "dependencies": { "@types/node": "24.19.2" },
   "exports": {
+    "./adapters": { "types": "./dist/sdk/adapters.d.ts", "import": "./dist/sdk/adapters.js" },
     ".": { "types": "./dist/sdk/index.d.ts", "import": "./dist/sdk/index.js" },
     "./core": { "types": "./dist/sdk/core.d.ts", "import": "./dist/sdk/core.js" },
     "./host": { "types": "./dist/sdk/host.d.ts", "import": "./dist/sdk/host.js" },

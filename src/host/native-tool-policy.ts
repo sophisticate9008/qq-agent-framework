@@ -1,67 +1,49 @@
-import type { NativeToolPermissionRuntime } from '../contracts/native-tool-permissions.ts';
-import { assert, FrameworkError } from '../core/values.ts';
-import type { createBridgeHost } from './bridge.ts';
-import { createNativeToolPermissionsRepository } from './native-tool-permissions.ts';
+import type { NativeToolPermissionRuntime } from '../contracts/native-tool-permissions.ts'
+import type { NativeChatAccess } from '../contracts/native-access.ts'
+import type { createBridgeHost } from './bridge.ts'
+import { digest } from './data.ts'
 
-const prefix = 'native-framework-tool:';
-/** Configuration grants are immutable identities; synchronization never refills or reactivates a policy grant. */
+const prefix = 'native-framework-whitelist:'
+/** Project the current whitelist through policy; tool handlers enforce sensitive owner operations. */
 export function createNativeToolPolicy(options: {
-  readonly directory: string;
-  readonly currentHost: () => ReturnType<typeof createBridgeHost> | undefined;
-  readonly available: () => boolean;
-  readonly signal: () => AbortSignal | undefined;
+  readonly directory: string
+  readonly currentHost: () => ReturnType<typeof createBridgeHost> | undefined
+  readonly available: () => boolean
+  readonly signal: () => AbortSignal | undefined
+  readonly access: () => NativeChatAccess | undefined
+  readonly capabilities: () => readonly string[]
 }) {
-  const repository = createNativeToolPermissionsRepository(options.directory);
-  let appliedRevision: string | null = null;
-  let appliedHost: ReturnType<typeof createBridgeHost> | undefined;
-  let failed = false;
-  let operation: Promise<void> = Promise.resolve();
+  let operation: Promise<void> = Promise.resolve()
   async function synchronize(signal: AbortSignal) {
-    signal.throwIfAborted();
-    const host = options.currentHost();
-    const generation = options.signal();
-    if (!host || !generation || generation.aborted || !options.available()) return;
-    const document = await repository.read();
-    signal.throwIfAborted();
-    if (options.currentHost() !== host || options.signal() !== generation || generation.aborted || !options.available())
-      throw new FrameworkError('TOOL_POLICY_GENERATION_CHANGED', 'Tool policy belongs to a different runtime generation.');
-    const previous = host.policy.describe().grants;
-    const expected = new Map(document.configuration.grants.map(grant => [prefix + grant.id, grant]));
+    signal.throwIfAborted()
+    const host = options.currentHost()
+    const access = options.access()
+    if (!host || !access || options.signal()?.aborted !== false || !options.available()) return
+    const capabilities = [...new Set(options.capabilities())].sort()
+    const allowed = access.allow.filter(scope => !access.deny.includes(scope))
+    const previous = host.policy.describe().grants
+    const matches = (grant: typeof previous[number]) => grant.id.startsWith(prefix)
+      && allowed.includes(grant.conversationId) && grant.capabilities.length === capabilities.length
+      && capabilities.every(capability => grant.capabilities.includes(capability) && grant.maxUses[capability] === null)
     for (const grant of previous) {
-      if (!grant.id.startsWith(prefix)) continue;
-      const configured = expected.get(grant.id);
-      if (!configured || configured.revokedAt !== null || configured.expiresAt !== null && configured.expiresAt <= Date.now()) {
-        if (grant.active) host.policy.revoke(grant.id);
-        continue;
-      }
-      assert(grant.featureId === 'framework-tools' && grant.conversationId === configured.conversationId
-        && grant.expiresAt === configured.expiresAt && grant.capabilities.length === configured.capabilities.length
-        && grant.capabilities.every(capability => configured.capabilities.some(item => item === capability)
-          && grant.maxUses[capability] === configured.maxUses[capability as keyof typeof configured.maxUses]),
-      'TOOL_POLICY_IDENTITY_CONFLICT', 'An existing grant cannot change target, capability, expiry or budget.');
+      if (grant.active && (grant.id.startsWith('native-framework-tool:') || grant.id.startsWith(prefix) && !matches(grant))) host.policy.revoke(grant.id)
     }
-    const known = new Set(previous.map(grant => grant.id));
-    for (const [id, grant] of expected) {
-      if (known.has(id) || grant.revokedAt !== null || grant.expiresAt !== null && grant.expiresAt <= Date.now()) continue;
-      host.policy.grant({ ...(host.accountScope ? { accountScope: host.accountScope } : {}), id, featureId: 'framework-tools', conversationId: grant.conversationId,
-        capabilities: [...grant.capabilities], maxUses: grant.maxUses, expiresAt: grant.expiresAt });
+    if (capabilities.length === 0) return
+    for (const conversationId of allowed) {
+      if (previous.some(grant => grant.active && grant.conversationId === conversationId && matches(grant))) continue
+      const id = prefix + digest([conversationId, capabilities, previous.filter(grant => grant.id.startsWith(prefix)).map(grant => grant.id).sort()])
+      host.policy.grant({ ...(host.accountScope ? { accountScope: host.accountScope } : {}), id, featureId: 'framework-tools', conversationId,
+        capabilities, maxUses: Object.fromEntries(capabilities.map(capability => [capability, null])), expiresAt: null })
     }
-    appliedRevision = document.revision;
-    appliedHost = host;
   }
   return Object.freeze({
     sync(signal: AbortSignal): Promise<void> {
-      const current = operation.catch(() => undefined).then(() => synchronize(signal));
-      operation = current.then(() => { failed = false; }, error => { failed = true; throw error; });
-      void operation.catch(() => undefined);
-      return operation;
+      operation = operation.catch(() => undefined).then(() => synchronize(signal))
+      void operation.catch(() => undefined)
+      return operation
     },
-    status(revision: string): NativeToolPermissionRuntime {
-      if (!options.available() || !options.currentHost() || options.signal()?.aborted !== false)
-        return { state: 'not-running', appliedRevision: null };
-      const current = appliedHost === options.currentHost() ? appliedRevision : null;
-      return { state: failed ? 'unknown' : current === revision ? 'applied' : 'pending', appliedRevision: current };
-    },
-    async drain() { await operation.catch(() => undefined); }
-  });
+    // Legacy grant documents are retained for inspection and no longer applied.
+    status(_revision: string): NativeToolPermissionRuntime { return { state: 'not-running', appliedRevision: null } },
+    async drain() { await operation.catch(() => undefined) }
+  })
 }

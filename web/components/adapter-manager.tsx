@@ -7,7 +7,7 @@ import { nativeFormMetadata } from '../lib/native-form-metadata.ts';
 import { presentOneBotConnection, type OneBotConnectionSnapshot } from '../lib/onebot-connection-presentation.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CircleAlert, LoaderCircle, Plug, RefreshCw, Unplug } from 'lucide-react';
-import { asRecord, errorMessage } from '../lib/api.ts';
+import { ApiError, asRecord, errorMessage } from '../lib/api.ts';
 import type { PageProps } from '../lib/types.ts';
 import { AdapterCredentialField, AdapterEndpointField, AdapterNumberField, unchangedCredential, type CredentialDraft } from './adapter-connection-fields.tsx';
 import { ConnectPrompt, EmptyState, Field, PageHeading, SaveBar, Section, StatusPill, ToggleField } from './management.tsx';
@@ -103,10 +103,13 @@ function parseSnapshot(value: unknown): AdapterSnapshot | null {
       || value.lastError !== null && typeof value.lastError !== 'string'
       || typeof value.received !== 'number' || !Number.isSafeInteger(value.received) || value.received < 0
       || typeof value.dropped !== 'number' || !Number.isSafeInteger(value.dropped) || value.dropped < 0
-      || typeof value.chatReady !== 'boolean') return null;
+      || typeof value.chatReady !== 'boolean'
+      || [value.accountOnline, value.accountGood].some(item => item !== undefined && item !== null && typeof item !== 'boolean')) return null;
     connection = { state: value.state as NonNullable<AdapterSnapshot['connection']>['state'],
       selfId: value.selfId as string | null, lastError: value.lastError as string | null,
-      received: value.received, dropped: value.dropped, chatReady: value.chatReady };
+      received: value.received, dropped: value.dropped, chatReady: value.chatReady,
+      accountOnline: typeof value.accountOnline === 'boolean' ? value.accountOnline : null,
+      accountGood: typeof value.accountGood === 'boolean' ? value.accountGood : null };
   }
   if (typeof webhook.enabled !== 'boolean' || typeof webhook.host !== 'string'
     || typeof webhook.port !== 'number' || !Number.isSafeInteger(webhook.port)
@@ -444,7 +447,7 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate, co
   }
 
   async function controlConnection(action: 'connect' | 'disconnect'): Promise<void> {
-    if (!snapshot || disabled || dirty || chatRunning || !snapshot.status.applyAvailable || saveController.current) return;
+    if (!snapshot || disabled || dirty || action === 'disconnect' && chatRunning || !snapshot.status.applyAvailable || saveController.current) return;
     const controller = new AbortController();
     const generation = epoch.current;
     saveController.current = controller;
@@ -464,7 +467,13 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate, co
       setDraft(toDraft(next));
     } catch (error) {
       recovery.fail(operationToken, error);
-      if (current()) setConnectionError(`未能确认连接操作结果：${errorMessage(error)}。请先重新读取协议状态，按具体诊断核对；不会自动重复连接操作。`);
+      if (current()) {
+        const code = error instanceof ApiError ? error.code : '';
+        setConnectionError(code === 'adapter_runtime_busy' ? '聊天正在启动或停止，请稍后重试。'
+          : code === 'adapter_connected_chat_restore_failed' ? 'QQ 连接已恢复，但聊天未能启动。请查看首页的聊天状态。'
+            : code === 'chat_revision_conflict' ? '连接设置已变化，请重新读取并应用已保存的设置。'
+              : `连接未恢复：${errorMessage(error)}。请确认 NapCat 或 SnowLuma 已登录，协议服务已启动。`);
+      }
     } finally {
       if (current()) { saveController.current = null; setControlling(false); }
     }
@@ -529,6 +538,7 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate, co
     { label: '接收消息', value: snapshot.connection?.received ?? '未知' }, { label: '丢弃消息', value: snapshot.connection?.dropped ?? '未知' },
     { label: 'WebSocket', value: snapshot.websocket.enabled ? snapshot.websocket.endpoint : '未启用' },
     { label: 'HTTP 发送', value: snapshot.outbound.onebotHttp.enabled ? snapshot.outbound.onebotHttp.endpoint : '未启用' },
+    ...(snapshot.connection?.lastError ? [{ label: '最近异常记录（历史）', value: snapshot.connection.lastError }] : []),
     ...(protocol?.diagnostic ? [{ label: '最近诊断', value: protocol.diagnostic.title }, { label: '诊断说明', value: protocol.diagnostic.message }, ...(protocol.diagnostic.code ? [{ label: '诊断码', value: protocol.diagnostic.code }] : [])] : []),
   ]} /></ReadOnlyDetails>;
 
@@ -563,8 +573,8 @@ export function AdapterManager({ api, connected, connect, setDirty, navigate, co
         <div className={`strip ${protocol?.diagnostic?.tone === 'error' ? 'bad' : protocol?.diagnostic?.tone === 'warning' ? 'warn' : ''}`} role="status" data-protocol-diagnostic={protocol?.diagnostic?.category}>{protocol?.diagnostic && protocol.diagnostic.tone !== 'neutral' ? protocol.diagnostic.message : `接收 ${snapshot.connection?.received ?? '未知'} 条 · 丢弃 ${snapshot.connection?.dropped ?? '未知'} 条。协议连接与聊天启停分别管理。`}</div>
         <div className="actions">
           <SettingsWindow title="QQ 消息收发" label="编辑连接" description="HTTP 发送与 WebSocket 接收分别配置；关闭保留常规草稿。" onOpenChange={open => { if (!open) setDraft(current => current ? clearCredentials(current) : current); }}>{qqEditor}</SettingsWindow>
-          <SettingsWindow title="QQ 连接维护" label="连接维护" description="先保存连接设置并停止聊天，再重新连接或断开 WebSocket。"><div className="stack"><div className="row">{protocol && <StatusPill tone={protocol.statusTone}>{protocol.statusLabel}</StatusPill>}<span className="muted">{snapshot.connection?.selfId ? `账号 ${snapshot.connection.selfId}` : '机器人账号尚未识别'}</span></div><p className="small muted">管理服务启动时，以及聊天停止状态下保存参数后，会自动连接已启用的 WebSocket。手动断开保持到下次保存、服务重启或启动聊天。</p>
-            <div className="actions"><Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接' : '重试连接'}</Button><Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开连接</Button></div>{connectionError && <p role="alert" className="text-xs text-destructive">{connectionError}</p>}{operationRecovery}
+          <SettingsWindow title="QQ 连接维护" label="连接维护" description="重新连接 QQ；原本已启用的聊天会一并恢复。"><div className="stack"><div className="row">{protocol && <StatusPill tone={protocol.statusTone}>{protocol.statusLabel}</StatusPill>}<span className="muted">{snapshot.connection?.selfId ? `账号 ${snapshot.connection.selfId}` : '机器人账号尚未识别'}</span></div><p className="small muted">协议端临时离线会自动重连。手动重新连接保留会话；主动停止聊天后不会自动启动。断开连接前请先停止聊天。</p>
+            <div className="actions"><Button variant="outline" disabled={disabled || dirty || !snapshot.status.applyAvailable || !snapshot.websocket.enabled} onClick={() => void controlConnection('connect')}><Plug className="size-3.5" />{controlling ? '正在处理' : snapshot.connection?.state === 'connected' ? '重新连接' : '重试连接'}</Button><Button variant="outline" disabled={disabled || dirty || chatRunning || !snapshot.status.applyAvailable || !snapshot.connection || snapshot.connection.state === 'disconnected'} onClick={() => void controlConnection('disconnect')}><Unplug className="size-3.5" />断开连接</Button></div>{connectionError && <p role="alert" className="text-xs text-destructive">{connectionError}</p>}{operationRecovery}
           </div></SettingsWindow>{qqDetails}
         </div>
       </section>

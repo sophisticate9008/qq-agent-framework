@@ -3,6 +3,7 @@ import { resetNativeSessionContext, validNativeSessionResetTarget, type NativeSe
 import { AdminRequestError, type AdminRoute } from './server.ts'
 
 export function createNativeSessionManagementRoutes(options: {
+  readonly unbind?: (target: import('../host/native-session-management.ts').NativeSessionResetTarget) => unknown
   readonly directory: string
   readonly state: () => NativeSessionManagementState | Promise<NativeSessionManagementState>
   readonly runExclusive?: <Result>(operation: () => Promise<Result>) => Promise<Result>
@@ -18,7 +19,7 @@ export function createNativeSessionManagementRoutes(options: {
       pending = true
       try {
         const target = { key: body.key, sessionId: body.sessionId, generation: body.generation, bindingRevision: body.bindingRevision }
-        const run = () => resetNativeSessionContext({ directory: options.directory, state: options.state, target, signal })
+        const run = async () => await options.state() === 'running' && options.unbind ? options.unbind(target) : resetNativeSessionContext({ directory: options.directory, state: options.state, target, signal })
         return options.runExclusive ? await options.runExclusive(run) : await run()
       } catch (error) {
         if (error instanceof AdminRequestError) throw error

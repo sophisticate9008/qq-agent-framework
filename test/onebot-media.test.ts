@@ -39,12 +39,17 @@ test('protocol media reader uses fixed actions and bounded bytes from an explici
   assert(actionsSeen[3]!.endsWith('/get_group_file_url'))
   assert(actionsSeen[4]!.endsWith('/get_private_file_url'))
   assert(received.every(entry=>entry.authorization===undefined))
-  path='/redirect';assert.equal((await reader.read({kind:'image',source:{file:'opaque-file'},signal})).status,'unknown')
+  const beforeDirect = actionsSeen.length
+  for (const kind of ['image', 'audio', 'file'] as const) {
+    assert.equal((await reader.read({kind,source:{url:`${origin}/body`,file:'stale-pointer',id:'stale-id'},signal})).status,'confirmed')
+  }
+  assert.equal(actionsSeen.length,beforeDirect,'Registered URLs bypass protocol cache lookups for forwarded and collected media.')
+  path='/redirect';assert.deepEqual(await reader.read({kind:'image',source:{file:'opaque-file'},signal}),{status:'rejected',code:'ONEBOT_MEDIA_HTTP_REJECTED'})
   assert(!received.some(entry=>entry.path==='/secret'))
-  path='/large';assert.equal((await reader.read({kind:'image',source:{file:'opaque-file'},signal})).status,'unknown')
+  path='/large';assert.deepEqual(await reader.read({kind:'image',source:{file:'opaque-file'},signal}),{status:'rejected',code:'ONEBOT_MEDIA_TOO_LARGE'})
   const before=received.length
   path='/body'
-  assert.equal((await createOneBotMediaReader({actions}).read({kind:'image',source:{file:'opaque-file'},signal})).status,'unknown')
+  assert.deepEqual(await createOneBotMediaReader({actions}).read({kind:'image',source:{file:'opaque-file'},signal}),{status:'rejected',code:'ONEBOT_MEDIA_ORIGIN_REJECTED'})
   assert.equal(received.length,before,'A protocol-returned private URL is not implicit network permission.')
 })
 

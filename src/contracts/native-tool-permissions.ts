@@ -1,24 +1,9 @@
+import { NATIVE_TOOL_CAPABILITY_CATALOG, isNativeToolCapability, type NativeToolCapability } from './native-tool-capabilities.ts'
+// Compatibility exports for existing consumers; capability definitions live independently of grants.
+export { NATIVE_TOOL_CAPABILITY_CATALOG, isNativeToolCapability, type NativeToolCapability } from './native-tool-capabilities.ts'
 import { NATIVE_REVISION_PATTERN } from './native-revisions.ts'
 
 export const NATIVE_TOOL_PERMISSIONS_PATH = '/api/chat/tool-permissions'
-export const NATIVE_TOOL_CAPABILITY_CATALOG = Object.freeze([
-  { capability: 'native.role.read', tool: 'qaf_role_reference', name: '读取当前人设绑定的角色参考图' },
-  { capability: 'native.media.inspect', tool: 'qaf_media_inspect', name: '查看媒体状态' },
-  { capability: 'native.media.read', tool: 'qaf_media_read', name: '读取当前会话媒体' },
-  { capability: 'reminders.list', tool: 'qaf_reminder_list', name: '查看当前会话提醒' },
-  { capability: 'reminders.create', tool: 'qaf_reminder_create', name: '创建当前会话提醒' },
-  { capability: 'reminders.update', tool: 'qaf_reminder_update', name: '更正当前会话提醒' },
-  { capability: 'reminders.set-enabled', tool: 'qaf_reminder_set_enabled', name: '启停当前会话提醒' },
-  { capability: 'reminders.cancel', tool: 'qaf_reminder_cancel', name: '取消当前会话提醒' },
-  { capability: 'memory.query', tool: 'qaf_memory_query', name: '查询当前会话记忆' },
-  { capability: 'memory.propose', tool: 'qaf_memory_propose', name: '提出当前会话记忆建议' },
-  { capability: 'native.work.start', tool: 'qaf_work_start', name: '接受主人独立工作委派' },
-  { capability: 'native.work.status', tool: 'qaf_work_status', name: '查看当前会话工作状态' },
-  { capability: 'native.work.followup', tool: 'qaf_work_followup', name: '按主人要求追加或调整工作' },
-  { capability: 'native.work.interrupt', tool: 'qaf_work_interrupt', name: '按主人要求停止工作' },
-  { capability: 'native.work.reconcile', tool: 'qaf_work_reconcile', name: '按主人要求核对未知工作' }
-] as const)
-export type NativeToolCapability = typeof NATIVE_TOOL_CAPABILITY_CATALOG[number]['capability']
 export const NATIVE_TOOL_PERMISSION_LIMIT = 1_024
 export const NATIVE_TOOL_PERMISSION_MAX_USES = 1_000_000
 
@@ -53,9 +38,6 @@ function exact(value: Record<string, unknown>, keys: readonly string[]): boolean
 function timestamp(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 8_640_000_000_000_000 }
 export function isNativeToolPermissionId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)
-}
-export function isNativeToolCapability(value: unknown): value is NativeToolCapability {
-  return NATIVE_TOOL_CAPABILITY_CATALOG.some(item => item.capability === value)
 }
 export function parseNativeToolPermissionInput(value: unknown): NativeToolPermissionInput | null {
   if (!record(value) || !exact(value, ['id', 'conversationId', 'capabilities', 'maxUses', 'expiresAt'])

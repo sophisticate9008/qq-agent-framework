@@ -1,3 +1,4 @@
+import { validExtensionMetadata } from '../../src/contracts/extension-metadata.ts';
 import { isRecord } from './api.ts';
 import type { NativePackageSnapshot } from '../../src/contracts/native-packages.ts';
 
@@ -19,10 +20,13 @@ export function parseNativeToolRuntimeStatus(value: unknown): NativeToolRuntimeS
   if (!isRecord(value) || !Array.isArray(value.packages) || value.packages.length > 128) return null;
   const packages: NativePackageSnapshot[] = [];
   for (const item of value.packages) {
-    if (!isRecord(item) || item.schema !== 1 || !text(item.id) || !text(item.version)
+    if (!isRecord(item) || !validExtensionMetadata(item) || item.schema !== 1 || !text(item.id) || !text(item.version)
       || !['registered', 'starting', 'running', 'blocked', 'failed', 'stopping', 'stopped', 'unknown'].includes(String(item.state))
       || item.phase !== null && !['prepare', 'migrate', 'install', 'recover', 'start', 'drain', 'dispose'].includes(String(item.phase))
       || !code(item.reason) || !Array.isArray(item.resources) || item.resources.length > 1_024) return null;
+    if (item.dependencies !== undefined && (!Array.isArray(item.dependencies) || item.dependencies.length > 128
+      || !item.dependencies.every(id => typeof id === 'string' && /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(id) && id.length <= 100 && id !== item.id)
+      || new Set(item.dependencies).size !== item.dependencies.length)) return null;
     const resources: NativePackageSnapshot['resources'][number][] = [];
     for (const resource of item.resources) {
       if (!isRecord(resource) || !text(resource.id) || !['task', 'timer', 'subscription', 'service', 'contribution', 'other'].includes(String(resource.kind))
@@ -30,7 +34,11 @@ export function parseNativeToolRuntimeStatus(value: unknown): NativeToolRuntimeS
       resources.push({ id: resource.id, kind: resource.kind as NativePackageSnapshot['resources'][number]['kind'], state: resource.state as NativePackageSnapshot['resources'][number]['state'] });
     }
     packages.push({ schema: 1, id: item.id, version: item.version, state: item.state as NativePackageSnapshot['state'],
-      phase: item.phase as NativePackageSnapshot['phase'], reason: item.reason, resources });
+      phase: item.phase as NativePackageSnapshot['phase'], reason: item.reason, resources,
+      ...(typeof item.displayName === 'string' ? { displayName: item.displayName } : {}),
+      ...(typeof item.description === 'string' ? { description: item.description } : {}),
+      ...(Array.isArray(item.toolNames) ? { toolNames: item.toolNames as string[] } : {}),
+      ...(Array.isArray(item.dependencies) ? { dependencies: item.dependencies as string[] } : {}) });
   }
   if (new Set(packages.map(item => item.id)).size !== packages.length) return null;
   if (value.frameworkTools === null) return { packages, frameworkTools: null };

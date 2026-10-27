@@ -1,3 +1,5 @@
+import { readAdminActivity } from './simulation-activity.ts'
+import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
 import { isNativeEventCursor, isNativeEventFilter } from '../contracts/native-events.ts'
 import type { NativeExecutionRecoveryView } from '../contracts/native-execution-recovery.ts'
 import type { NativeExecutionRecoveryPlan } from '../host/native-execution-recovery.ts'
@@ -27,19 +29,15 @@ import { isNativeChatRuntime, type NativeChatRuntime } from '../host/native-chat
 import type { NativeUsageQuery } from '../host/native-usage.ts'
 import { createNativeUsageProjection } from '../host/native-usage-projection.ts'
 import type { NativeHistoryReader, NativeUsageReader } from '../host/native-history.ts'
-import { FrameworkError, reference } from '../core/values.ts'
+import { FrameworkError, reference, errorCode } from '../core/values.ts'
 import { checkedNativeDeploymentRuntime } from '../host/native-deployment-runtime.ts'
 import { nativeAuthorizationProjection } from '../host/native-access.ts'
 import { createNativeInteractionRoutes } from './native-interactions.ts'
 import { createPackageConfigurationRoutes } from './package-configuration.ts'
 import { createNativeApplicationRoutes } from './native-application.ts'
-import { createNativeReminderRoutes } from './native-reminders.ts'
 import { createNativeAssistantDeploymentRoutes } from './native-assistant-target.ts'
-import type { NativeAssistantTarget } from '../host/native-assistant-target.ts'
+import { applySavedAssistantTarget, type NativeAssistantTarget } from '../host/native-assistant-target.ts'
 import { createNativeToolPermissionRoutes } from './native-tool-permissions.ts'
-import { createNativeMemoryRoutes } from './native-memory.ts'
-import { createNativeAppearanceRoutes } from './native-appearance.ts'
-import { createNativeUsageMaintenanceRoutes } from './native-usage-maintenance.ts'
 import { createNativeWorkRoutes } from './native-work.ts'
 import type { PackageConfigurationRegistry } from '../host/package-configuration.ts'
 import { readNativeRuntimeProjection, nativeRuntimeFeatureResponse } from '../host/native-runtime-projection.ts'
@@ -78,8 +76,10 @@ export interface NativeRuntimeRouteOptions {
   readonly chatRuntime?: NativeChatRuntime
   readonly deploymentRuntime?: NativeChatDeploymentRuntimeInput
   readonly interactions?: () => NativeInteractions | undefined
+  readonly toolInventory?: NativeToolInventoryReader
   readonly tools?: NativeToolsReader
   readonly assistantTarget?: NativeAssistantTarget
+  readonly reloadAssistantTarget?: (assistantRevision: string, signal: AbortSignal) => Promise<void>
   readonly packageConfigurationRegistry?: PackageConfigurationRegistry
 }
 
@@ -126,6 +126,8 @@ export async function applyNativeAccessRuntime(directory: string, runtime: Nativ
   await runtime.applyAccessChange(previousRevision, nextRevision, signal)
   const current = await runtime.status()
   if (current.state !== 'running' || !current.activeRevisions) return 'saved'
+  if (current.activeRevisions.access !== nextRevision) throw new FrameworkError('NATIVE_CHAT_REVISION_CONFLICT',
+    'The saved access revision has changed during live synchronization.')
   await recordNativeAccessApplication(directory, previousRevision, current.activeRevisions)
   return 'live'
 }
@@ -153,20 +155,24 @@ async function adapterConnectionStatus(port: AdapterRuntimePort | undefined, cha
   if (port?.connectionStatus === undefined) return undefined
   try {
     const status: unknown = await port.connectionStatus()
-    if (!isRecord(status) || !hasExactKeys(status, ['state', 'selfId', 'lastError', 'received', 'dropped', 'chatReady'])
+    if (!isRecord(status) || !hasExactKeys(status, ['state', 'selfId', 'lastError', 'received', 'dropped', 'chatReady',
+      ...(Object.hasOwn(status, 'accountOnline') ? ['accountOnline'] : []), ...(Object.hasOwn(status, 'accountGood') ? ['accountGood'] : [])])
+      || [status.accountOnline, status.accountGood].some(value => value !== undefined && value !== null && typeof value !== 'boolean')
       || !['disconnected', 'connecting', 'connected', 'reconnecting', 'error'].includes(String(status.state))
       || status.selfId !== null && (typeof status.selfId !== 'string' || !/^[1-9][0-9]{0,31}$/.test(status.selfId))
       || status.lastError !== null && typeof status.lastError !== 'string'
       || ![status.received, status.dropped].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
       || typeof status.chatReady !== 'boolean'
       || status.chatReady && (!isNativeChatRuntime(chatRuntime) || port !== chatRuntime.adapterRuntime
-        || status.state !== 'connected' || status.selfId === null)) requestError(503, 'adapter_runtime_status_unavailable')
+        || status.state !== 'connected' || status.selfId === null || status.accountOnline === false || status.accountGood === false)) requestError(503, 'adapter_runtime_status_unavailable')
     return Object.freeze({
       state: status.state as AdapterConnectionStatus['state'], selfId: status.selfId as string | null,
       lastError: status.lastError === null ? null
         : /^(?:onebot_ws_[a-z0-9_]{1,64}|adapter_runtime_(?:aborted|closed|busy))$/.test(String(status.lastError))
           ? String(status.lastError) : 'adapter_connection_error',
-      received: status.received as number, dropped: status.dropped as number, chatReady: status.chatReady
+      received: status.received as number, dropped: status.dropped as number, chatReady: status.chatReady,
+      accountOnline: typeof status.accountOnline === 'boolean' ? status.accountOnline : null,
+      accountGood: typeof status.accountGood === 'boolean' ? status.accountGood : null
     })
   } catch {
     requestError(503, 'adapter_runtime_status_unavailable')
@@ -202,7 +208,7 @@ async function controlAdapterRuntime<Value>(
   const timer = setTimeout(() => {
     controller.abort()
     rejectDeadline?.(new AdminRequestError(504, 'adapter_runtime_timeout'))
-  }, 5_000)
+  }, 12_000)
   const pending = (async () => {
     const release = await acquireDirectoryLock(directory)
     try {
@@ -210,6 +216,8 @@ async function controlAdapterRuntime<Value>(
       return await operation(controller.signal)
     } catch (error: unknown) {
       if (error instanceof AdminRequestError) throw error
+      if (isRecord(error) && error.code === 'NATIVE_CHAT_BUSY') requestError(409, 'adapter_runtime_busy')
+      if (isRecord(error) && error.code === 'NATIVE_CHAT_CONFIGURATION_CHANGED') requestError(409, 'chat_revision_conflict')
       requestError(503, 'adapter_connection_failed')
     } finally {
       await release()
@@ -333,11 +341,12 @@ function validAdapterRuntimePort(value: unknown): value is AdapterRuntimePort {
 
 export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): readonly AdminRoute[] {
   if (!isRecord(options) || !Object.hasOwn(options, 'directory')
-    || !Object.keys(options).every(key => ['directory', 'adapterRuntime', 'chatRuntime', 'deploymentRuntime', 'interactions', 'tools', 'assistantTarget', 'packageConfigurationRegistry'].includes(key))
+    || !Object.keys(options).every(key => ['directory', 'adapterRuntime', 'chatRuntime', 'deploymentRuntime', 'interactions', 'tools', 'toolInventory', 'assistantTarget', 'reloadAssistantTarget', 'packageConfigurationRegistry'].includes(key))
     || typeof options.directory !== 'string'
     || options.directory.length === 0 || options.directory.includes('\0') || !isAbsolute(options.directory)
     || options.chatRuntime !== undefined && !isNativeChatRuntime(options.chatRuntime)
     || options.interactions !== undefined && typeof options.interactions !== 'function'
+    || options.toolInventory !== undefined && typeof options.toolInventory !== 'function'
     || options.tools !== undefined && typeof options.tools !== 'function'
     || options.adapterRuntime !== undefined && !validAdapterRuntimePort(options.adapterRuntime)) {
     throw new TypeError('Native runtime routes require an absolute directory and an optional runtime status port.')
@@ -350,6 +359,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   const chatRuntime = options.chatRuntime
 
   async function assistantResponse(revision: string, configuration: ChatAssistantConfiguration, signal: AbortSignal) {
+    if (configuration.mode === 'chat-only') return { revision, configuration, executionAvailable: false, missingReasons: ['assistant_disabled'] }
     if (!options.assistantTarget) return chatAssistantConfigurationResponse(revision, configuration)
     const target = await options.assistantTarget.resolve(AbortSignal.any([signal, AbortSignal.timeout(5_000)]))
     const work = chatRuntime?.workStatus() ?? { available: false, missingReasons: ['assistant_runtime_not_connected'] }
@@ -408,8 +418,29 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         try { value = validateChatAssistantConfiguration(body.configuration) }
         catch { requestError(400, 'invalid_chat_assistant') }
         await ready()
-        const document = await repository.replaceAssistant(expected, value, signal, modelCapabilities)
-        return assistantResponse(document.revision, document.value, signal)
+        let applicationReasons: readonly string[] = []
+        const { document, deployment } = await nativeControl(directory, async () => {
+          const document = await repository.replaceAssistant(expected, value, signal, modelCapabilities)
+          let deployment = null
+          if (document.value.mode === 'chat-assistant' && options.assistantTarget) {
+            try { deployment = await applySavedAssistantTarget(options.assistantTarget, document.revision, signal) }
+            catch (error) { applicationReasons = [errorCode(error, 'assistant_activation_failed').toLowerCase()] }
+          }
+          return { document, deployment }
+        })
+        // Reload only a confirmed write waiting for DSH. The maintenance service preserves running intent and sessions.
+        if (deployment?.state === 'pending_reload' && deployment.missingReasons.length > 0
+          && deployment.missingReasons.every(reason => reason === 'pending_reload') && options.reloadAssistantTarget && options.assistantTarget) {
+          try {
+            await options.reloadAssistantTarget(document.revision, signal)
+          } catch (error) { applicationReasons = [errorCode(error, 'assistant_reload_unconfirmed').toLowerCase()] }
+        }
+        signal.throwIfAborted()
+        const latest = await repository.readAssistant()
+        if (latest.revision !== document.revision) requestError(409, 'assistant_configuration_conflict')
+        const response = await assistantResponse(document.revision, document.value, signal)
+        return applicationReasons.length === 0 ? response : { ...response, executionAvailable: false,
+          missingReasons: [...new Set([...applicationReasons, ...response.missingReasons])] }
       }
     },
     {
@@ -426,10 +457,12 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
     },
     {
       method: 'GET', pathname: '/api/chat/activity',
-      handle({ query }) {
-        requireEmptyQuery(query)
+      async handle({ query, signal }) {
+        if ([...query.keys()].some(key => key !== 'source') || query.getAll('source').length > 1) requestError(400, 'invalid_query')
+        const source = query.get('source') ?? 'all'
+        if (source !== 'all' && source !== 'qq' && source !== 'simulation') requestError(400, 'invalid_query')
         if (chatRuntime === undefined) requestError(503, 'runtime_not_connected')
-        return chatRuntime.activity()
+        return readAdminActivity(chatRuntime.activity(), source, signal, directory)
       }
     },
     {
@@ -515,13 +548,18 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         await ready()
         const request = parseAccessRequest(body)
         const document = await repository.replaceAccess(request.revision, request.value)
-        let application: 'live' | 'saved' | 'reload-required' = 'saved'
-        if (chatRuntime && document.revision !== request.revision) {
+        let application: 'live' | 'saved' | 'reload-required' | 'sync-failed' = 'saved'
+        if (chatRuntime) {
           try { application = await applyNativeAccessRuntime(directory, chatRuntime, request.revision, document.revision, signal) }
-          catch { application = 'reload-required' }
+          catch (error) { application = errorCode(error, 'ACCESS_SYNC_FAILED') === 'NATIVE_CHAT_ACCESS_RELOAD_REQUIRED'
+            ? 'reload-required' : 'sync-failed' }
         }
         return { ...accessResponse(document), application }
       }
+    },
+    {
+      method: 'GET', pathname: '/api/chat/maintenance',
+      handle({ query }) { requireEmptyQuery(query); return chatRuntime?.retentionStatus() ?? { enabled: false, state: 'pending' } }
     },
     {
       method: 'GET', pathname: '/api/chat/status',
@@ -567,7 +605,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
           try {
             const managed = readNativeSessionManagement({ directory, state: 'stopped', owner: access.value.owner,
               limit, ...(after === null ? {} : { after }) })
-            if (managed !== null) return managed
+            if (managed !== null) return { ...managed, deleteAvailable: false }
           } catch (error) {
             if (error instanceof AdminRequestError) throw error
             requestError(503, 'native_history_unavailable')
@@ -596,7 +634,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
               const offset = after === null ? 0 : imported.sessions.findIndex(session => session.key === after) + 1
               if (after !== null && offset === 0) requestError(400, 'invalid_query')
               const sessions = imported.sessions.slice(offset, offset + limit)
-              return { ...imported, sessions,
+              return { ...imported, sessions, deleteAvailable: false,
                 next: offset + sessions.length < imported.sessions.length ? sessions.at(-1)!.key : null }
             }
           }
@@ -623,7 +661,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
               bindingRevision: nativeSessionBindingRevision(entry), owner: entry.conversationId === `private:${owner}` }
           } catch { requestError(500, 'native_session_metadata_invalid') }
         })
-        return { ...page, sessions, revision: revision(Buffer.from(JSON.stringify({ sessions, items: page.items }))), resetAvailable: false,
+        return { ...page, sessions, revision: revision(Buffer.from(JSON.stringify({ sessions, items: page.items }))), deleteAvailable: false, resetAvailable: chatRuntime?.activity().state === 'running',
           ...(!host ? { native: true, historyReadOnly: true } : {}) }
       }
     },
@@ -691,9 +729,19 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
     },
     {
       method: 'POST', pathname: '/api/chat/usage/reset',
-      handle() {
-        if (chatRuntime) requestError(405, 'usage_reset_not_enabled')
-        requestError(503, 'runtime_not_connected')
+      handle({ query, body, signal }) {
+        requireEmptyQuery(query)
+        if (!chatRuntime) requestError(503, 'runtime_not_connected')
+        if (!isRecord(body) || !hasExactKeys(body, ['revision', 'confirm'])
+          || typeof body.revision !== 'string' || !/^[a-f0-9]{64}$/.test(body.revision)
+          || body.confirm !== '清空用量账本') requestError(400, 'invalid_usage_reset')
+        signal.throwIfAborted()
+        try { return chatRuntime.clearUsageLedger(body.revision) }
+        catch (error) {
+          if (error instanceof FrameworkError && error.code === 'USAGE_MAINTENANCE_CONFLICT') requestError(409, 'usage_revision_conflict')
+          if (error instanceof FrameworkError && error.code === 'NATIVE_USAGE_MAINTENANCE_BUSY') requestError(409, 'usage_maintenance_busy')
+          requestError(503, 'usage_reset_unknown')
+        }
       }
     },
     {
@@ -767,6 +815,12 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
           await adapterRuntime.connect?.(document.value.adapters, controlSignal)
           return document
         })
+        if (chatRuntime && chatRuntime.activity().state !== 'running' && (await repository.readRunningIntent()).value.desiredRunning) {
+          try {
+            const restored = await restoreNativeChatRunningIntent(directory, chatRuntime, signal)
+            if (restored.state === 'failed') requestError(503, 'adapter_connected_chat_restore_failed')
+          } catch { requestError(503, 'adapter_connected_chat_restore_failed') }
+        }
         return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime, chatRuntime))
       }
     },
@@ -777,9 +831,13 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         if (!isRecord(body) || !hasExactKeys(body, [])) requestError(400, 'invalid_adapter_configuration')
         if (adapterRuntime?.disconnect === undefined) requestError(503, 'adapter_runtime_unavailable')
         await ready()
-        const document = await controlAdapterRuntime(directory, signal, async controlSignal => {
-          if (controlSignal.aborted) requestError(499, 'request_aborted')
-          await adapterRuntime.disconnect?.()
+        const document = await nativeControl(directory, async () => {
+          if (signal.aborted) requestError(499, 'request_aborted')
+          if (chatRuntime && !['stopped', 'error'].includes(chatRuntime.activity().state)) requestError(409, 'adapter_runtime_busy')
+          // Explicit disconnection cancels background restoration as well.
+          if (chatRuntime) await repository.clearRunningIntent()
+          try { await adapterRuntime.disconnect?.() }
+          catch { requestError(503, 'adapter_connection_failed') }
           return repository.readAdapterDocument()
         })
         return adaptersResponse(document, await adapterRuntimeStatus(adapterRuntime), await adapterConnectionStatus(adapterRuntime, chatRuntime))
@@ -790,11 +848,12 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   if (options.assistantTarget) routes.push(...createNativeAssistantDeploymentRoutes({ target: options.assistantTarget,
     runExclusive: run => nativeControl(directory, run) }))
   routes.push(...createNativeInteractionRoutes(options.interactions ?? (() => undefined)))
+  routes.push(...createNativeToolInventoryRoutes(options.toolInventory ?? (chatRuntime ? signal => chatRuntime.toolInventory(signal) : undefined)))
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))
   if (chatRuntime !== undefined) {
     routes.push(...nativeChatControlRoutes(directory, chatRuntime, options.deploymentRuntime === undefined ? undefined : checkedNativeDeploymentRuntime(options.deploymentRuntime)))
-    routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state })
+    routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state, unbind: target => chatRuntime.unbindSession(target) })
       .map(route => ({ ...route, handle: (request: Parameters<AdminRoute['handle']>[0]) =>
         nativeControl(directory, async () => route.handle(request)) })))
     routes.push(...createNativeSessionMigrationRoutes({ runtime: chatRuntime,
@@ -804,11 +863,6 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
     handle() { requestError(503, 'runtime_not_connected') } })
   const documents = new Set(['plans', 'personas', 'model', 'providers', 'access', 'adapters', 'authorization', 'deployment', 'execution', 'usage/pricing']
     .map(name => `/api/chat/${name}`))
-  routes.push(...createNativeAppearanceRoutes({ directory }))
-  if (chatRuntime) routes.push(...createNativeUsageMaintenanceRoutes({
-    list: query => chatRuntime.listUsageMaintenance(query),
-    read: id => chatRuntime.readUsageMaintenance(id), export: (scope, source) => chatRuntime.exportUsage(scope, source),
-    mutate: (input, signal) => { signal.throwIfAborted(); return chatRuntime.maintainUsage(input) } }))
   return Object.freeze(routes.map(route => Object.freeze(route.method === 'POST' && documents.has(route.pathname)
     ? { ...route, maxRequestBytes: 128 * 1024 } : route)))
 }
@@ -932,6 +986,39 @@ export async function restoreNativeChatRunningIntent(directory: string, runtime:
   }
   signal.throwIfAborted()
   return nativeChatLifecycle(resolve(directory), runtime).restore(signal)
+}
+
+/** Low-frequency connection recovery. Never replays messages, applies drafts, or retries model work. */
+export async function recoverNativeChatConnection(directory: string, runtime: NativeChatRuntime, signal: AbortSignal): Promise<void> {
+  if (runtime.isClosed() || signal.aborted) return
+  const state = runtime.activity().state
+  if (!['running', 'stopped', 'error'].includes(state)) return
+  if (state === 'running' && (await runtime.adapterRuntime.status()).running) return
+  const repository = new NativeConfigurationRepository(directory)
+  const intent = await repository.readRunningIntent()
+  if (!intent.value.desiredRunning) return
+  const connection = await runtime.adapterRuntime.connectionStatus?.()
+  if (!connection || ['connecting', 'reconnecting'].includes(connection.state)) return
+  // Connected but QQ offline: retain the socket and wait for the account heartbeat.
+  if (state === 'running' && connection.state === 'connected') return
+  const transient = new Set(['onebot_ws_connection_failed', 'onebot_ws_connect_timeout', 'onebot_ws_closed',
+    'onebot_ws_pong_timeout', 'onebot_ws_aborted'])
+  if (connection.state === 'error' && !transient.has(connection.lastError ?? '')) return
+  // An error unrelated to the protocol needs its own recovery; do not repeatedly restart it.
+  if (state === 'error' && connection.state !== 'error') return
+  const maintenance = await createNativeDshRestartStorage(directory).read()
+  if (maintenance.value.records.some(record => ['running', 'unknown'].includes(record.operation.state))) return
+  if (connection.state !== 'connected') {
+    await controlAdapterRuntime(directory, signal, async controlSignal => {
+      const latest = await repository.readRunningIntent()
+      if (latest.revision !== intent.revision || !latest.value.desiredRunning) return
+      const document = await repository.readAdapterDocument()
+      if (!document.value.adapters.onebotWs.enabled) return
+      if (latest.value.revisions?.adapters !== document.revision) return
+      await runtime.adapterRuntime.connect?.(document.value.adapters, controlSignal)
+    })
+  }
+  if (runtime.activity().state !== 'running') await restoreNativeChatRunningIntent(directory, runtime, signal)
 }
 
 export function createNativeRuntimeApplicationPorts(options: {
@@ -1146,12 +1233,17 @@ function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
         return { native: true, item, manualCancelAvailable: false, ...(!controller ? { historyReadOnly: true } : {}) }
       }
       const limit = integerQuery(parsed, 'limit', 100, 1_000)
+      const order = parsed.get('order')
+      if (order !== null && (order !== 'recent' || parsed.getAll('order').length !== 1)) requestError(400, 'invalid_query')
+      parsed.delete('order')
       const after = parsed.get('after')
-      if (after !== null && (!REVISION_PATTERN.test(after) || parsed.getAll('after').length !== 1)) requestError(400, 'invalid_query')
+      if (after !== null && (!(order === 'recent' ? /^\d{1,16}:[a-f0-9]{64}$/ : REVISION_PATTERN).test(after)
+        || order === 'recent' && !Number.isSafeInteger(Number(after.split(':')[0]))
+        || parsed.getAll('after').length !== 1)) requestError(400, 'invalid_query')
       parsed.delete('after')
       requireEmptyQuery(parsed)
       const executions = runtime.executions()
-      const options = { limit, ...(after === null ? {} : { after }) }
+      const options = { limit, ...(after === null ? {} : { after }), ...(order === 'recent' ? { order: 'recent' as const } : {}) }
       const rows = executions ? executions.list(options) : historyRead(runtime, history => history.executions.list(options))
       return { native: true, items: rows.map(({ policy: _policy, ...row }) => row),
         next: rows.length === limit ? rows.at(-1)!.cursor : null, manualCancelAvailable: false,
@@ -1220,13 +1312,9 @@ function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
       })
     }
   })
-  routes.push(...createNativeReminderRoutes({ read: options => runtime.readReminders(options),
-    history: options => runtime.readReminderHistory(options), service: () => runtime.reminderService() }))
   routes.push(...createNativeToolPermissionRoutes({ directory,
     runtime: revision => runtime.toolPermissionStatus(revision), onChanged: revision => runtime.applyToolPermissions(revision) }))
   routes.push(...createNativeWorkRoutes({ read: id => runtime.readWork(id), list: query => runtime.listWork(query) }))
-  routes.push(...createNativeMemoryRoutes({ read: options => runtime.readMemory(options),
-    entry: id => runtime.readMemoryEntry(id), service: () => runtime.memoryService() }))
   routes.push(...createNativeApplicationRoutes({ directory, runtime, ports: {
     status: async () => { const status = await runtime.status(); return { ...status, quiescent: nativeRuntimeIsQuiescent(status) } },
     stop: async signal => { signal.throwIfAborted(); await application.stop(true); return runtime.status() },

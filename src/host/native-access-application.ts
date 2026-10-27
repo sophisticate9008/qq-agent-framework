@@ -54,6 +54,10 @@ export function restoredNativeAccessGrants(store: DurableStore, configuration: N
   identity: string, host?: NativeBootstrapHost): Readonly<Record<string, string>> | null {
   const saved = readMap(store)
   if (!saved || !samePolicy(saved, configuration, identity) || saved.owner !== configuration.access.owner) return null
+  if (host && Object.entries(saved.grants).some(([scope, id]) => {
+    const grant = host.policy.describe().grants.find(item => item.id === id);
+    return !grant || nativeWhitelistCapabilities(configuration, scope).some(capability => !grant.capabilities.includes(capability));
+  })) return null
   if (saved.access !== configuration.revisions.access) {
     assert(host, 'NATIVE_CHAT_ACCESS_RELOAD_REQUIRED', 'The saved access change requires policy reconciliation.')
     const previous: NativeChatConfiguration = { ...configuration,

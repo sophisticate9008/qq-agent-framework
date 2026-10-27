@@ -20,6 +20,10 @@ function usageTier(value: unknown): UsageTier {
   return value === 'flat' || value === 'peak' || value === 'off' ? value : invalid();
 }
 function aggregateTier(value: unknown): AggregateUsageTier { return value === 'mixed' ? value : usageTier(value); }
+function costRecovery(value: unknown): UsageTurn['costRecovery'] {
+  return value === null || value === undefined ? null
+    : value === 'price-snapshot' || value === 'historical-reference' ? value : invalid();
+}
 function bool(value: unknown): boolean { return typeof value === 'boolean' ? value : invalid(); }
 function time(value: unknown): number {
   const parsed = count(value);
@@ -181,7 +185,7 @@ export function parseNativeUsageConversation(value: unknown, expectedKey?: strin
       const startedAt = time(row.startedAt), endedAt = time(row.endedAt);
       if (startedAt > endedAt) invalid();
       return { sessionId: text(row.sessionId), key: text(row.key, 160), generation: count(row.generation), turn: counter(row.turn), turnId: text(row.turnId, 160), steps: count(row.steps), attempts: count(row.attempts),
-        startedAt, endedAt, model: row.model === null ? null : text(row.model, 160), provider: row.provider === null ? null : text(row.provider, 160), buckets: buckets(row.buckets), cost: quantity(row.cost), tier, coverage: coverageState(row.coverage), knownCosts: numericMap(row.knownCosts) };
+        startedAt, endedAt, model: row.model === null ? null : text(row.model, 160), provider: row.provider === null ? null : text(row.provider, 160), buckets: buckets(row.buckets), cost: quantity(row.cost), costRecovery: costRecovery(row.costRecovery), tier, coverage: coverageState(row.coverage), knownCosts: numericMap(row.knownCosts) };
     });
     const observed = turns.length > 0;
     return { native: true, partial: bool(source.partial), knownCosts: numericMap(source.knownCosts), key, generatedAt: time(source.generatedAt), currency: text(source.currency, 16), symbol: text(source.symbol, 16), sessionIds, sessionCount: sessionIds.length,
@@ -204,7 +208,7 @@ export function parseNativeUsageRecent(value: unknown): UsageRecent | null {
         knownCost = { amount, currency: text(cost.currency, 3), source: text(cost.source) };
       }
       return { id: text(record(rawItems[index]).cursor, 160), time: time(row.time), key: text(row.key, 160), sid: text(row.sid), turn: counter(row.turn), turnId: text(row.turnId, 160), step: counter(row.step), retry: counter(row.retry), model: text(row.model, 160),
-        tokens: counter(row.tokens), cacheMiss: counter(row.cacheMiss), cacheHit: counter(row.cacheHit), cacheWrite: counter(row.cacheWrite), output: counter(row.output), reasoning: counter(row.reasoning), cost: quantity(row.cost), knownCost,
+        tokens: counter(row.tokens), cacheMiss: counter(row.cacheMiss), cacheHit: counter(row.cacheHit), cacheWrite: counter(row.cacheWrite), output: counter(row.output), reasoning: counter(row.reasoning), cost: quantity(row.cost), knownCost, costRecovery: costRecovery(row.costRecovery),
         tier, estimated: bool(row.estimated), coverage: coverageState(row.coverage), pricingRevision: counter(row.pricingRevision) };
     });
     return { native: true, partial: bool(source.partial), symbol: text(source.symbol, 16), entries };

@@ -590,11 +590,21 @@ export function createNativeExecutionController(options: NativeExecutionOptions)
       assertRunning()
       for (const id of timers.keys()) expire(id)
     },
-    list({ limit = 100, after }: { readonly limit?: number; readonly after?: string } = {}) {
+    list({ limit = 100, after, order }: { readonly limit?: number; readonly after?: string; readonly order?: 'recent' } = {}) {
+      const recentCursor = after === undefined ? undefined : /^(\d{1,16}):([a-f0-9]{64})$/.exec(after)
       assert(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1_000
-        && (after === undefined || /^[a-f0-9]{64}$/.test(after)), 'EXECUTION_INVALID_QUERY', 'Execution queries must be bounded.')
-      return snapshot(store.list(executions, { limit, ...(after === undefined ? {} : { after }) }).map(record =>
-        ({ ...readExecution(record), revision: record.revision, cursor: record.key })))
+        && (order === undefined || order === 'recent')
+        && (after === undefined || (order === 'recent' ? recentCursor && Number.isSafeInteger(Number(recentCursor[1])) : /^[a-f0-9]{64}$/.test(after))),
+      'EXECUTION_INVALID_QUERY', 'Execution queries must be bounded.')
+      if (order === 'recent') assert(store.listByNumber, 'EXECUTION_ORDER_UNAVAILABLE', 'This store cannot read chronological execution pages.')
+      const rows = order === 'recent'
+        ? store.listByNumber!({ namespace: executions, field: 'admittedAt', limit,
+          ...(recentCursor ? { before: { value: Number(recentCursor[1]), key: recentCursor[2] } } : {}) })
+        : store.list(executions, { limit, ...(after === undefined ? {} : { after }) })
+      return snapshot(rows.map(record => {
+        const execution = readExecution(record)
+        return { ...execution, revision: record.revision, cursor: order === 'recent' ? `${execution.admittedAt}:${record.key}` : record.key }
+      }))
     },
     metrics() { return { started, stopped, faulted, deadlines: timers.size, pendingActions: pending.size, rawPending, maxPendingOperations } },
     stop() {

@@ -16,7 +16,7 @@ export interface NativeAssistantDeploymentSnapshot {
   readonly model: string | null
   readonly agentPreset: string | null
   readonly externalProvider: string | null
-  readonly fullAccess: false
+  readonly fullAccess: boolean
   readonly missingReasons: readonly string[]
 }
 export function parseNativeAssistantDeploymentSnapshot(input: unknown): NativeAssistantDeploymentSnapshot | null {
@@ -29,7 +29,7 @@ export function parseNativeAssistantDeploymentSnapshot(input: unknown): NativeAs
     || !['configurationRevision', 'targetRevision'].every(key => value[key] === null || typeof value[key] === 'string' && /^[a-f0-9]{64}$/.test(String(value[key])))
     || !['provider', 'model', 'agentPreset', 'externalProvider'].every(key => value[key] === null || typeof value[key] === 'string'
       && String(value[key]).length > 0 && String(value[key]).length <= 160 && !/[\u0000-\u001f\u007f]/.test(String(value[key])))
-    || value.fullAccess !== false || !Array.isArray(value.missingReasons) || value.missingReasons.length > 128
+    || typeof value.fullAccess !== 'boolean' || !Array.isArray(value.missingReasons) || value.missingReasons.length > 128
     || !value.missingReasons.every(reason => typeof reason === 'string' && /^[a-z][a-z0-9_]{0,127}$/.test(reason))
     || value.state === 'verified' && (value.agentPreset === null || value.externalProvider === null || value.missingReasons.length !== 0)) return null
   return Object.freeze({ ...value, missingReasons: Object.freeze([...value.missingReasons]) }) as unknown as NativeAssistantDeploymentSnapshot

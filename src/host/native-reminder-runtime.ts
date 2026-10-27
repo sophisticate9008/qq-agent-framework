@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { FrameworkError } from '../core/values.ts';
-import { createSqliteStore, type SqliteStore } from '../storage/sqlite.ts';
+import { createNativeDurableStore as createSqliteStore } from './native-retention.ts';
+type SqliteStore = ReturnType<typeof createSqliteStore>;
 import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts';
 import type { DurableStore } from '../contracts/ports.ts';
 import type { EffectRequest } from '../core/types.ts';

@@ -18,7 +18,7 @@ export function createNativeDshRestartRoutes(service: ReturnType<typeof createNa
     return service.read(id ?? undefined)
   } }, { method: 'POST', pathname: NATIVE_DSH_RESTART_PATH, async handle({ body, query, signal }) {
     const request = parseNativeDshRestartRequest(body)
-    if (query.size !== 0 || !request) throw new AdminRequestError(400, 'invalid_dsh_restart_request')
+    if (query.size !== 0 || !request || request.deleteSession) throw new AdminRequestError(400, 'invalid_dsh_restart_request')
     signal.throwIfAborted()
     try { return await service.create(request) } catch (failure) { return error(failure) }
   } }, { method: 'POST', pathname: `${NATIVE_DSH_RESTART_PATH}/reconcile`, async handle({ body, query, signal }) {

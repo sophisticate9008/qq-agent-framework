@@ -2,7 +2,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SubagentActivation, SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import { normalizeWorkOutput, type WorkMediaReference, type WorkOutput } from './work-output.js'
+import { normalizeWorkOutput, validWorkOutput, type WorkMediaReference, type WorkOutput } from './work-output.js'
+import { readWorkUsage, type WorkUsageStep } from './work-usage.js'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { validIdentifier } from './receipts.js'
 import { workFingerprint, type WorkJournal, type WorkJournalRecord } from './work-journal.js'
@@ -15,6 +16,7 @@ export interface WorkAddress {
   readonly generation: number
 }
 export interface WorkTarget {
+  readonly fullAccess?: boolean
   readonly parentSessionId: string
   readonly modelProvider: string
   readonly model: string
@@ -33,6 +35,9 @@ interface Entry {
   acceptedMessageId: string | null
   followupRequestId: string | null
   readonly pendingFollowups: Set<string>
+  readonly attachments: WorkMediaReference[]
+  usage?: readonly WorkUsageStep[]
+  permissionVerified?: boolean
   readonly controller: AbortController
   timer?: ReturnType<typeof setTimeout>
   activation?: SubagentActivation
@@ -48,6 +53,8 @@ export function createWorkChannel(options: {
   readonly runtime: () => SubagentRuntime | undefined
   readonly hasPreset: (id: string) => Promise<boolean>
   readonly continuationAvailable: () => boolean
+  readonly fullAccessAvailable?: () => boolean
+  readonly applyFullAccess?: (agent: Agent) => void
   readonly journal?: WorkJournal
   readonly readAsset?: (asset: WorkMediaReference, signal: AbortSignal) => Promise<Uint8Array>
 }) {
@@ -57,12 +64,13 @@ export function createWorkChannel(options: {
     if (closed || value !== options.issuerEpoch) throw new TypeError('Work channel epoch changed')
   }
   async function target(request: WorkTarget) {
+    if (request.fullAccess !== undefined && typeof request.fullAccess !== 'boolean') throw new TypeError('Invalid work permission')
     if (![request.parentSessionId, request.modelProvider, request.model, request.agentPreset].every(validIdentifier)
       || request.reasoningEffort !== undefined && !validIdentifier(request.reasoningEffort)) throw new TypeError('Invalid work target')
     const runtime = options.runtime()
     const parent = options.getAgent(request.parentSessionId)
     const provider = runtime?.getProvider('spawn')
-    const available = options.continuationAvailable() && parent?.session.id === request.parentSessionId && await options.hasPreset(request.agentPreset)
+    const available = (!request.fullAccess || options.fullAccessAvailable?.() === true && options.applyFullAccess !== undefined) && options.continuationAvailable() && parent?.session.id === request.parentSessionId && await options.hasPreset(request.agentPreset)
       && provider?.prepareContinuable !== undefined && provider.inheritsParentContext === false
       && provider.capabilities.agentOptions && provider.capabilities.agentPreset
     return { runtime, parent, available: available === true }
@@ -71,8 +79,8 @@ export function createWorkChannel(options: {
     const request = entry.request
     return { schema: 1, fingerprint: entry.fingerprint,
       address: { id: request.id, parentSessionId: request.parentSessionId, childId: request.childId, generation: request.generation },
-      target: { modelProvider: request.modelProvider, model: request.model, agentPreset: request.agentPreset, timeoutMs: request.timeoutMs, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }) },
-      state: entry.state, result: entry.result, error: entry.error,
+      target: { ...(request.fullAccess === undefined ? {} : { fullAccess: request.fullAccess }), modelProvider: request.modelProvider, model: request.model, agentPreset: request.agentPreset, timeoutMs: request.timeoutMs, ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }) },
+      state: entry.state, result: entry.result, error: entry.error, permissionVerified: entry.permissionVerified === true, usage: entry.usage ?? [],
       acceptedMessageId: entry.acceptedMessageId, followupRequestId: entry.followupRequestId }
   }
   function persist(entry: Entry): Promise<void> {
@@ -91,8 +99,8 @@ export function createWorkChannel(options: {
       const saved = await options.journal.read(address.id)
       if (saved) {
         const request: WorkStart = { ...saved.address, ...saved.target, issuerEpoch: options.issuerEpoch, task: '', context: '' }
-        entry = { request, fingerprint: saved.fingerprint, persistence: Promise.resolve(), acceptedMessageId: saved.acceptedMessageId,
-          followupRequestId: saved.followupRequestId, pendingFollowups: new Set(), controller: new AbortController(), result: saved.result,
+        entry = { request, usage: saved.usage ?? [], permissionVerified: saved.permissionVerified === true, fingerprint: saved.fingerprint, persistence: Promise.resolve(), acceptedMessageId: saved.acceptedMessageId,
+          followupRequestId: saved.followupRequestId, pendingFollowups: new Set(), attachments: [], controller: new AbortController(), result: saved.result,
           state: saved.state === 'completed' ? 'completed' : 'unknown', error: saved.state === 'completed' ? saved.error : 'WORK_RECOVERY_REQUIRED' }
         // A recovered record is evidence only. It never launches or replays a child.
         if (entries.size >= 64) throw new TypeError('Work retention capacity is occupied')
@@ -105,18 +113,29 @@ export function createWorkChannel(options: {
   }
   function view(entry: Entry) {
     return { schema: 1 as const, issuerEpoch: options.issuerEpoch, id: entry.request.id, parentSessionId: entry.request.parentSessionId,
-      childId: entry.request.childId, generation: entry.request.generation, state: entry.state, result: entry.result, error: entry.error }
+      childId: entry.request.childId, generation: entry.request.generation, fullAccess: entry.request.fullAccess === true && entry.permissionVerified === true, usage: entry.usage ?? [], state: entry.state, result: entry.result, error: entry.error }
+  }
+  function captureUsage(entry: Entry, child = options.getAgent(entry.request.childId)): void {
+    if (child?.id !== entry.request.childId || child.session.id !== entry.request.childId || child.session.header.origin !== 'subagent'
+      || child.session.header.parentSession !== entry.request.parentSessionId || typeof child.session.snapshotEvents !== 'function') return
+    const next = readWorkUsage(child.session.snapshotEvents())
+    if (JSON.stringify(next) !== JSON.stringify(entry.usage ?? [])) { entry.usage = next; void persist(entry).catch(() => {}) }
   }
   function isolate(entry: Entry, error: string): void {
     if (entry.state === 'completed') return
+    captureUsage(entry)
     entry.state = 'unknown'; entry.error = error; entry.controller.abort()
     void persist(entry).catch(() => {})
     void entry.activation?.dispose().catch(() => { entry.error = 'WORK_STOP_UNKNOWN'; void persist(entry).catch(() => {}) })
   }
   function completed(entry: Entry, stopReason: string, output: readonly ContentBlock[]): void {
     if (entry.pendingFollowups.size > 0) return
+    captureUsage(entry)
     try {
-      const normalized = normalizeWorkOutput(output)
+      const normalized = [...normalizeWorkOutput(output)]
+      for (const asset of entry.attachments) if (!normalized.some(block => block.type === 'media-reference'
+        && block.kind === asset.kind && block.attachmentId === asset.attachmentId)) normalized.push(asset)
+      if (normalized.length > 256 || Buffer.byteLength(JSON.stringify(normalized)) > 262144) throw new TypeError('Work output exceeds retention bounds')
       entry.result = { stopReason, output: normalized }
       if (entry.state !== 'unknown') entry.state = 'completed'
       clearTimeout(entry.timer); void persist(entry).catch(() => {})
@@ -124,11 +143,42 @@ export function createWorkChannel(options: {
   }
 
   return Object.freeze({
+    /** The SDK detaches its registry entry before subagent/end; the paired disposal carries the exact child. */
+    recordDisposedChild(agent: Agent): void {
+      for (const entry of entries.values()) if (entry.request.childId === agent.session.id) captureUsage(entry, agent)
+    },
+    /** Called by the SDK's serial creation barrier, before the first child turn. */
+    admitCreatedChild(agent: Agent): void {
+      const entry = [...entries.values()].find(value => value.request.childId === agent.session.id)
+      if (!entry || entry.request.fullAccess !== true) return
+      const request = entry.request
+      if (closed || !['starting', 'running'].includes(entry.state) || entry.controller.signal.aborted
+        || agent.id !== request.childId || options.getAgent(agent.id) !== agent
+        || agent.session.header.origin !== 'subagent' || agent.session.header.parentSession !== request.parentSessionId
+        || options.getAgent(request.parentSessionId)?.session.id !== request.parentSessionId
+        || agent.options.provider !== request.modelProvider || agent.options.model !== request.model
+        || !options.applyFullAccess) throw new TypeError('The owner-admitted work child identity changed')
+      options.applyFullAccess(agent)
+      entry.permissionVerified = true
+    },
+    hasAttachmentLease(childId: string): boolean {
+      return !closed && [...entries.values()].some(entry => entry.request.childId === childId
+        && (entry.state === 'starting' || entry.state === 'running') && !entry.controller.signal.aborted)
+    },
+    registerAttachment(childId: string, asset: WorkMediaReference): void {
+      const entry = [...entries.values()].find(value => value.request.childId === childId)
+      if (closed || !entry || !['starting', 'running'].includes(entry.state) || entry.controller.signal.aborted || !validWorkOutput(asset))
+        throw new TypeError('The work attachment lease is unavailable')
+      if (entry.attachments.some(value => value.kind === asset.kind && value.attachmentId === asset.attachmentId)) return
+      if (entry.attachments.length >= 3) throw new TypeError('A work result accepts at most three attachments')
+      entry.attachments.push(Object.freeze({ ...asset }))
+    },
     recordClaim(childId: string, requestId: string): void {
       for (const entry of entries.values()) if (entry.request.childId === childId) entry.pendingFollowups.delete(requestId)
     },
     recordStart(childId: string): void {
       for (const entry of entries.values()) if (entry.request.childId === childId && entry.state !== 'unknown') {
+        if (entry.state === 'completed') entry.attachments.length = 0
         entry.state = 'running'; entry.result = null; void persist(entry).catch(() => {})
       }
     },
@@ -138,7 +188,8 @@ export function createWorkChannel(options: {
     async verify(request: WorkTarget & { issuerEpoch: string }) {
       epoch(request.issuerEpoch)
       return { schema: 1 as const, issuerEpoch: options.issuerEpoch, available: (await target(request)).available,
-        provider: 'spawn', continuable: true, externalToolAuthorizationVerified: false }
+        provider: 'spawn', continuable: true, externalToolAuthorizationVerified: false,
+        childFullAccessSupported: options.fullAccessAvailable?.() === true }
     },
     async start(request: WorkStart, signal: AbortSignal) {
       epoch(request.issuerEpoch)
@@ -157,7 +208,7 @@ export function createWorkChannel(options: {
       }
       const controller = new AbortController()
       const entry: Entry = { request: Object.freeze({ ...request }), fingerprint: workFingerprint(request), persistence: Promise.resolve(),
-        acceptedMessageId: null, followupRequestId: null, pendingFollowups: new Set(), controller, state: 'starting', result: null, error: null,
+        acceptedMessageId: null, followupRequestId: null, pendingFollowups: new Set(), attachments: [], controller, state: 'starting', result: null, error: null,
         timer: setTimeout(() => isolate(entry, 'WORK_DEADLINE_UNKNOWN'), request.timeoutMs) }
       // Reserve before the first external action; an uncertain start is never retried.
       try { await options.journal?.reserve(durable(entry)) } catch (error) { clearTimeout(entry.timer); throw error }
@@ -172,7 +223,7 @@ export function createWorkChannel(options: {
             prompt: [{ type: 'text', text: request.task }, ...(request.context ? [{ type: 'text' as const, text: request.context }] : [])] } })
         entry.activation = activation
         entry.acceptedMessageId = activation.messageId ?? null
-        if (activation.childId !== request.childId || startupSignal.aborted) {
+        if (activation.childId !== request.childId || startupSignal.aborted || request.fullAccess === true && entry.permissionVerified !== true) {
           isolate(entry, 'WORK_START_UNKNOWN')
           return view(entry)
         }
@@ -187,7 +238,7 @@ export function createWorkChannel(options: {
     },
     async inspect(address: WorkAddress) {
       const entry = await locate(address)
-      if (entry) await entry.persistence
+      if (entry) { captureUsage(entry); await entry.persistence }
       return entry ? view(entry) : { schema: 1 as const, issuerEpoch: options.issuerEpoch, id: address.id,
         parentSessionId: address.parentSessionId, childId: address.childId, generation: address.generation,
         state: 'unknown' as const, result: null, error: 'WORK_RECORD_UNAVAILABLE' }
@@ -220,7 +271,7 @@ export function createWorkChannel(options: {
       if (terminal) {
         clearTimeout(entry.timer)
         entry.timer = setTimeout(() => isolate(entry, 'WORK_DEADLINE_UNKNOWN'), entry.request.timeoutMs)
-        entry.state = 'starting'; entry.result = null
+        entry.state = 'starting'; entry.result = null; entry.attachments.length = 0
       }
       entry.pendingFollowups.add(address.requestId)
       entry.followupRequestId = address.requestId

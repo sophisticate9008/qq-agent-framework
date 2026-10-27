@@ -10,6 +10,7 @@ export function normalizeContent(input: unknown): readonly MessageContent[] {
     const allowed = block.type === 'forward' ? ['type', 'nodes'] : block.type === 'text' ? ['type', 'text']
       : block.type === 'file' ? ['type', 'assetId', 'name']
       : block.type === 'mention' ? ['type', 'userId']
+      : block.type === 'face' ? ['type', 'id']
       : block.type === 'reply' ? ['type', 'messageId'] : ['type', 'assetId'];
     assert(Object.keys(block).every(key => allowed.includes(key)), 'INVALID_CONTENT', 'Unexpected message fields.');
     if (block.type === 'forward') {
@@ -28,6 +29,8 @@ export function normalizeContent(input: unknown): readonly MessageContent[] {
       assert(reference(block.assetId), 'INVALID_CONTENT', 'Media requires a registered asset reference.');
       if (block.type === 'file') assert(typeof block.name === 'string' && block.name.length > 0 && block.name.length <= 255
         && !/[\x00-\x1f\x7f/\\]/.test(block.name), 'INVALID_CONTENT', 'A bounded filename is required.');
+    } else if (block.type === 'face') {
+      assert(typeof block.id === 'string' && /^(0|[1-9]\d{0,4})$/.test(block.id), 'INVALID_CONTENT', 'A QQ face requires a numeric face identifier.');
     } else if (block.type === 'mention') {
       assert(reference(block.userId), 'INVALID_CONTENT', 'A mention requires a user reference.');
     } else {

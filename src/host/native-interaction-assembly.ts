@@ -1,6 +1,7 @@
 import type { DshJsonRpcPort } from '../adapters/dsh-jsonrpc.ts'
 import { FrameworkError } from '../core/values.ts'
 import type { createBridgeHost } from './bridge.ts'
+import { digest } from './data.ts'
 import { withDeadline } from './deadlines.ts'
 import type { SessionBinding } from './types.ts'
 import type { NativeInteractions } from './native-interactions.ts'
@@ -63,6 +64,14 @@ export function createNativeInteractionAssembly(options: {
       const before = new Set(options.interactions.snapshot().items.map(entry => entry.id))
       options.interactions.observe(event, options.epoch)
       const added = options.interactions.snapshot().items.find(entry => !before.has(entry.id) && entry.status === 'pending')
-      if (added) await messages.notify(added, options.signal)
+      if (added?.kind === 'approval') {
+        const child = runtime.work?.resolveChild(added.sessionId)
+        const execution = runtime.executions?.forConversation(added.conversationId)
+        const source = execution && runtime.host?.history.snapshot(added.conversationId, { afterSequence: 0, limit: 100 }).messages.find(message =>
+          digest([added.conversationId, message.id, 'prompt']) === execution.requestId)
+        // General external tools can affect the host. Only a real owner request may invoke them.
+        const ownerRequest = runtime.owner !== null && (child ? child.ownerId === runtime.owner : source?.actor === runtime.owner)
+        await options.interactions.respond({ id: added.id, revision: added.revision, action: ownerRequest ? 'approve' : 'deny' }, options.signal)
+      } else if (added) await messages.notify(added, options.signal)
     } }) })
 }

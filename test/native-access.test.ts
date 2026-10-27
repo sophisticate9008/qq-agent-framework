@@ -35,7 +35,7 @@ test('authorization mode preserves legacy shape/hash; whitelist is explicit and 
     assert.deepEqual(normalized, original)
     assert.equal(nativeAuthorizationSignature(normalized), nativeAuthorizationSignature(original))
     assert.equal(Object.hasOwn(normalized, 'mode'), false)
-    assert.equal(nativeAuthorizationMode(normalized), 'counted')
+    assert.equal(nativeAuthorizationMode(normalized), 'whitelist')
     assert.throws(() => validateNativeChatAuthorization({ ...original, mode: 'whitelist' }))
     assert.throws(() => validateNativeChatAuthorization({ ...original, grants: [{ ...grant, submitUses: null }] }))
   }

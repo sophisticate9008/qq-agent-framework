@@ -23,13 +23,15 @@ export interface OneBotWebSocketOptions {
   connectTimeoutMs?: number
   callbackTimeoutMs?: number
   maxPendingEvents?: number
-  maxReconnectAttempts?: number
+  maxReconnectAttempts?: number | null
   reconnectDelayMs?: number
   pingIntervalMs?: number
   pongTimeoutMs?: number
 }
 
 export interface OneBotWebSocketStatus {
+  accountOnline?: boolean | null
+  accountGood?: boolean | null
   state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error'
   selfId: string | null
   lastError: string | null
@@ -159,12 +161,12 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
   const connectTimeoutMs = bounded(options.connectTimeoutMs, 5000, 10, 300000)
   const callbackTimeoutMs = bounded(options.callbackTimeoutMs, 30000, 10, 300000)
   const maxPendingEvents = bounded(options.maxPendingEvents, 64, 1, 256)
-  const maxReconnectAttempts = bounded(options.maxReconnectAttempts, 8, 0, 8)
+  const maxReconnectAttempts = options.maxReconnectAttempts === null ? Infinity : bounded(options.maxReconnectAttempts, 8, 0, 8)
   const reconnectDelayMs = bounded(options.reconnectDelayMs, 250, 10, 30000)
   const pingIntervalMs = bounded(options.pingIntervalMs, 30000, 100, 300000)
   const pongTimeoutMs = bounded(options.pongTimeoutMs, 10000, 100, 300000)
   const snapshot: OneBotWebSocketStatus = {
-    state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0,
+    state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, accountOnline: null, accountGood: null,
   }
   let closed = false
   let generation = 0
@@ -244,6 +246,8 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
     attempt = undefined
     snapshot.state = state
     snapshot.selfId = null
+    snapshot.accountOnline = null
+    snapshot.accountGood = null
     snapshot.lastError = code
     settle(code)
     if (current) dispose(current, state === 'disconnected')
@@ -289,6 +293,8 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
     attempt = undefined
     generation += 1
     snapshot.selfId = null
+    snapshot.accountOnline = null
+    snapshot.accountGood = null
     snapshot.lastError = code
     dispose(current)
     if (terminal || !hasConnected || reconnectAttempts >= maxReconnectAttempts) {
@@ -297,7 +303,7 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
     }
     snapshot.state = 'reconnecting'
     void ready()
-    const delay = Math.min(30000, reconnectDelayMs * 2 ** reconnectAttempts)
+    const delay = Math.min(30000, reconnectDelayMs * 2 ** Math.min(reconnectAttempts, 16))
     reconnectAttempts += 1
     const expectedGeneration = generation
     reconnectTimer = setTimeout(() => {
@@ -359,9 +365,16 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
       snapshot.selfId = selfId
       snapshot.lastError = null
       hasConnected = true
+      reconnectAttempts = 0
       schedulePing(current)
       settle()
       return
+    }
+    // Account health is a transport observation and must not wait behind message callbacks.
+    if (current.authenticated && selfIdentifier(value.self_id) === snapshot.selfId
+      && value.post_type === 'meta_event' && value.meta_event_type === 'heartbeat' && object(value.status)) {
+      if (typeof value.status.online === 'boolean') snapshot.accountOnline = value.status.online
+      if (typeof value.status.good === 'boolean') snapshot.accountGood = value.status.good
     }
     const protocol = value.post_type !== 'message'
     if (protocol && (!onProtocolEvent || !['notice', 'request', 'meta_event'].includes(String(value.post_type)))) return
@@ -383,6 +396,8 @@ export function createOneBotWebSocketClient(options: OneBotWebSocketOptions): On
   }
 
   function open(): void {
+    snapshot.accountOnline = null
+    snapshot.accountGood = null
     const currentGeneration = ++generation
     let socket: WebSocket
     try {

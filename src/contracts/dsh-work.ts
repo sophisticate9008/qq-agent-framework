@@ -20,6 +20,8 @@ export interface DshWorkAddress {
   readonly generation: number
 }
 export interface DshWorkTarget {
+  /** Only the authenticated, owner-admitted child lease may request this scope. */
+  readonly fullAccess?: boolean
   readonly parentSessionId: string
   readonly modelProvider: string
   readonly model: string
@@ -31,8 +33,34 @@ export interface DshWorkStart extends DshWorkAddress, DshWorkTarget {
   readonly context: string
   readonly timeoutMs: number
 }
+export interface DshWorkUsageStep {
+  readonly eventId: string
+  readonly turn: string
+  readonly step: number
+  readonly at: number
+  readonly provider: string
+  readonly model: string
+  readonly status: 'completed' | 'failed'
+  readonly usage: Readonly<Partial<Record<'inputTokens' | 'outputTokens' | 'totalTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'reasoningTokens', number>>>
+}
+export function isDshWorkUsage(value: unknown): value is readonly DshWorkUsageStep[] {
+  if (!Array.isArray(value) || value.length > 256 || Buffer.byteLength(JSON.stringify(value)) > 131072) return false
+  const text = (input: unknown) => typeof input === 'string' && input.length > 0 && input.length <= 256 && !/[\x00-\x1f\x7f]/.test(input)
+  const count = (input: unknown) => typeof input === 'number' && Number.isSafeInteger(input) && input >= 0
+  return value.every(input => {
+    if (!input || typeof input !== 'object') return false
+    const row = input as Record<string, unknown>
+    if (Object.keys(row).sort().join(',') !== 'at,eventId,model,provider,status,step,turn,usage'
+      || ![row.eventId, row.turn, row.provider, row.model].every(text) || !count(row.step) || !count(row.at)
+      || !['completed', 'failed'].includes(String(row.status)) || !row.usage || typeof row.usage !== 'object' || Array.isArray(row.usage)) return false
+    return Object.entries(row.usage).every(([key, countValue]) => ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'].includes(key) && count(countValue))
+  })
+}
+
 export interface DshWorkSnapshot extends DshWorkAddress {
   readonly schema: 1
+  readonly fullAccess?: boolean
+  readonly usage?: readonly DshWorkUsageStep[]
   readonly state: 'starting' | 'running' | 'completed' | 'unknown'
   readonly result: { readonly stopReason: string; readonly output: readonly DshWorkOutput[] } | null
   readonly error: string | null

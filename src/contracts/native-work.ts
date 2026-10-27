@@ -69,6 +69,7 @@ function content(value: unknown, forward = true): value is MessageContent {
       && value.name.length > 0 && value.name.length <= 255 && !/[\x00-\x1f\x7f/\\]/.test(value.name)
     case 'mention': return exact(value, ['type', 'userId']) && ref(value.userId)
     case 'reply': return exact(value, ['type', 'messageId']) && ref(value.messageId)
+    case 'face': return exact(value, ['type', 'id']) && typeof value.id === 'string' && /^(0|[1-9]\d{0,4})$/.test(value.id)
     case 'forward': return forward && exact(value, ['type', 'nodes']) && Array.isArray(value.nodes)
       && value.nodes.length > 0 && value.nodes.length <= 32 && value.nodes.every(node => record(node)
         && exact(node, ['content']) && Array.isArray(node.content) && node.content.length > 0 && node.content.length <= 8

@@ -60,7 +60,7 @@ test('default factory materializes whitelist only on explicit start; non-owner n
     assert.equal(object(disk.authorization).mode, 'whitelist')
     const initial = grants(fixture)
     assert(initial.every(grant => object(grant.maxUses)['agent.submit'] === null && object(grant.maxUses)['messaging.send'] === null))
-    assert(initial.every(grant => Array.isArray(grant.capabilities) && !grant.capabilities.includes('agent.tools.delegate')))
+    assert(initial.every(grant => Array.isArray(grant.capabilities) && grant.capabilities.includes('agent.tools.delegate')))
     const privateSession = await round(fixture, 1)
     const groupSession = await round(fixture, 2, 'group')
     const inspected = fixture.trace.filter(row => row.kind === 'scope')
@@ -111,68 +111,27 @@ test('default whitelist denies outside and denied conversations without filterin
   assert.deepEqual(grants(fixture).filter(grant => grant.active).map(grant => grant.conversationId), ['private:777'])
 })
 
-test('explicit CAS migration from exhausted counted preserves raw backup, old budgets, session and unknown isolation without version rollback or replay',
-  { timeout: 90_000 }, async context => {
-    const fixture = await createNativeCapabilityRuntimeFixture(context, { evidenceRoot: process.env.NATIVE_ACCESS_EVIDENCE })
-    await fixture.login()
-    await fixture.configure(true)
-    const oldAuthorization = { version: 'legacy-exhausted', grants: ['private:123', 'group:456'].map(conversationId => ({
-      conversationId, submitUses: 1, sendUses: 1, toolDelegationUses: 1, expiresAt: null })) }
-    await fixture.save('authorization', oldAuthorization)
-    fixture.controls.schemas = toolSchemas()
-    await deploy(fixture, true)
-    const sessionId = await round(fixture, 1)
-    fixture.inbound(2)
-    await until(async () => object(object((await fixture.status()).ingress).lastReceipt).errorCode === 'BUDGET_EXHAUSTED', 'Legacy counted quota must remain exhausted')
-    assert.equal(prompts(fixture).length, 1)
-    await fixture.api('/api/chat/runtime/stop', {})
-    const oldGrants = grants(fixture)
-    const filename = join(fixture.directory, 'runtime/chat-authorization.json')
-    const original = await readFile(filename)
-    const auth = await fixture.api('/api/chat/authorization')
-    assert.equal(auth.mode, 'counted')
-    assert.equal(auth.modeSource, 'legacy-counted')
-    const body = { revision: auth.revision, version: 'whitelist-v2', mode: 'whitelist', grants: [] }
-    await fixture.api('/api/chat/authorization', body, 401, false)
-    await fixture.api('/api/chat/authorization', { ...body, version: oldAuthorization.version }, 409)
-    await fixture.api('/api/chat/authorization', { ...body, revision: '0'.repeat(64) }, 409)
-    const migrated = await fixture.api('/api/chat/authorization', body)
-    assert.equal(migrated.mode, 'whitelist')
-    assert.deepEqual(await readFile(join(fixture.directory, `runtime/chat-authorization-backups/${auth.revision}.json`)), original)
-    assert.deepEqual(grants(fixture), oldGrants)
-    await fixture.start()
-    for (const old of oldGrants) {
-      const retained = grants(fixture).find(grant => grant.id === old.id)!
-      assert.equal(retained.active, false)
-      assert.deepEqual(retained.used, old.used)
-      assert.deepEqual(retained.maxUses, old.maxUses)
-    }
-    assert.equal(await round(fixture, 3), sessionId)
-    await fixture.api('/api/chat/authorization', { revision: migrated.revision, mode: 'counted', ...oldAuthorization }, 409)
-    fixture.inbound(4)
-    await until(() => prompts(fixture).length === 3, 'Expected controlled accepted unanswered prompt')
-    await fixture.api('/api/chat/runtime/stop', {})
-    const stoppedJournal = await fixture.api('/api/chat/executions')
-    assert(Array.isArray(stoppedJournal.items))
-    const unknown = stoppedJournal.items.map(object).find(row => row.status === 'unknown')!
-    assert(unknown)
-    const stopped = grants(fixture)
-    await fixture.start()
-    assert.deepEqual(grants(fixture), stopped)
-    assert.equal(prompts(fixture).length, 3)
-    fixture.inbound(5)
-    await until(async () => object(object((await fixture.status()).ingress).lastReceipt).status === 'rejected', 'Unknown same session must remain isolated')
-    assert.equal(prompts(fixture).length, 3)
-    const journal = await fixture.api('/api/chat/executions')
-    assert(Array.isArray(journal.items) && journal.items.some(raw => object(raw).status === 'unknown' && object(raw).isolated === true))
-    const restored = journal.items.map(object).find(row => row.id === unknown.id)!
-    assert.deepEqual(restored.binding, unknown.binding)
-    assert.equal(restored.deadlineAt, unknown.deadlineAt)
-    assert.equal(fixture.controls.creates, 1)
-    console.log(JSON.stringify({ kind: 'counted-whitelist-migration', countedAuthorization: auth,
-      migrationRequest: body, migrated, sessionId, retainedOldGrants: oldGrants.length,
-      unknownRecord: unknown.id, prompts: prompts(fixture).length, creates: fixture.controls.creates }))
-  })
+test('legacy quota documents use whitelist access while retaining sessions, history and unknown isolation', { timeout: 60_000 }, async context => {
+  const fixture = await createNativeCapabilityRuntimeFixture(context)
+  await fixture.login(); await fixture.configure(true)
+  await fixture.save('authorization', { version: 'legacy-zero', grants: [{ conversationId: 'private:123', submitUses: 0, sendUses: 0, expiresAt: null }] })
+  fixture.controls.schemas = toolSchemas()
+  const original = await readFile(join(fixture.directory, 'runtime/chat-authorization.json'))
+  await deploy(fixture, true)
+  const sessionId = await round(fixture, 1)
+  assert.equal(await round(fixture, 2), sessionId)
+  assert.deepEqual(await readFile(join(fixture.directory, 'runtime/chat-authorization.json')), original)
+  fixture.inbound(3)
+  await until(() => prompts(fixture).length === 3, 'Expected pending prompt')
+  await fixture.api('/api/chat/runtime/stop', {})
+  const before = grants(fixture)
+  await fixture.start()
+  assert.deepEqual(grants(fixture), before)
+  fixture.inbound(4)
+  await until(async () => object(object((await fixture.status()).ingress).lastReceipt).status === 'rejected', 'Unknown execution must remain isolated')
+  assert.equal(prompts(fixture).length, 3)
+  assert.equal(fixture.controls.creates, 1)
+})
 
 for (const cancelOnTimeout of [true, false]) test(`default whitelist timeout cancel is scoped and single-attempt only when saved cancelOnTimeout=${cancelOnTimeout}`,
   { timeout: 45_000 }, async context => {

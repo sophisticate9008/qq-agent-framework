@@ -1,7 +1,11 @@
+import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts';
+import { resetNativeSessionContext } from '../host/native-session-management.ts';
+import { createSqliteStore } from '../storage/sqlite.ts';
+import { digest } from '../host/data.ts';
 import { createNativeAccounts } from '../host/native-accounts.ts';
 import { createNativeAccountRoutes } from './native-accounts.ts';
 import { createNativeAccountRuntimeBundle, createNativeAccountDispatchRoutes, type NativeAccountRuntimeBundle } from './native-account-runtime.ts';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import type { Server } from 'node:http';
@@ -21,7 +25,7 @@ import type { LoadedNativeBootstrap } from '../host/native-bootstrap.ts';
 import { createSettingsRoutes } from './settings.ts';
 import { createManagementOperations } from './operations.ts';
 import { createConfigurationRoutes } from './configuration.ts';
-import { createNativeRuntimeRoutes, createNativeRuntimeApplicationPorts, withNativeChatControl, restoreNativeChatRunningIntent, applyNativeAccessRuntime } from './runtime.ts';
+import { createNativeRuntimeRoutes, createNativeRuntimeApplicationPorts, withNativeChatControl, restoreNativeChatRunningIntent, applyNativeAccessRuntime, recoverNativeChatConnection } from './runtime.ts';
 import { nativeApplicationService } from './native-application.ts';
 import { nativeApplicationRequiresReconciliation } from '../contracts/native-application.ts';
 import { createNativeDshRestartRoutes } from './native-dsh-restart.ts';
@@ -40,7 +44,7 @@ import { createNativeDshDeploymentRuntime } from '../adapters/dsh-profile-deploy
 import { isLoopbackAddress, validatePublicOrigin } from './public-origin.ts';
 import { createNativeCapabilityApprovalResolver, createNativeCapabilityManagement } from './native-capabilities.ts';
 import { NativeConfigurationRepository } from './native-configuration-repository.ts';
-import { createNativeAssistantTarget } from '../host/native-assistant-target.ts';
+import { applySavedAssistantTarget, createNativeAssistantTarget } from '../host/native-assistant-target.ts';
 import { FrameworkError } from '../core/values.ts';
 import { createNativePackageConfigurationRegistry } from '../host/native-package-configuration.ts';
 import { readNativeRuntimeProjection } from '../host/native-runtime-projection.ts';
@@ -543,11 +547,7 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
   const repository = new NativeConfigurationRepository(directory);
   const packageConfigurationRegistry = createNativePackageConfigurationRegistry({ directory, contributions: options.bootstrap?.packageConfigurations });
   const assistantTarget = createNativeAssistantTarget({ directory,
-    loadConfiguration: () => readNativeChatConfiguration(directory), loadAssistant: () => repository.readAssistant(),
-    async authorizeApply(signal) {
-      signal.throwIfAborted();
-      if (!(await chatRuntime.status()).canApplyDeployment) throw new FrameworkError('ASSISTANT_DEPLOYMENT_REQUIRES_STOPPED', 'Stop chat before applying an assistant deployment.');
-    } });
+    loadConfiguration: () => readNativeChatConfiguration(directory), loadAssistant: () => repository.readAssistant() });
   const accessService = createAccessService({ ...createNativeAccessPersistence(directory),
     async publish(saved, previous, signal) {
       await applyNativeAccessRuntime(directory, chatRuntime, previous.revision, saved.revision, signal);
@@ -556,6 +556,19 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     change: (request, signal) => accessService.change(request, signal) });
   chatRuntime = createNativeChatRuntime({ directory, packageConfigurationRegistry, bootstrap: options.bootstrap,
     resolveWorkTarget: signal => assistantTarget.resolve(signal),
+    prepareWorkTarget: signal => assistantTarget.prepareWork(signal),
+    async readWorkIdentity(signal) {
+      signal.throwIfAborted();
+      const { value } = await repository.readAssistant();
+      signal.throwIfAborted();
+      return value.mode === 'chat-assistant' ? { nickname: value.nickname, model: value.model } : null;
+    },
+    async readWorkEnabled(signal) {
+      signal.throwIfAborted();
+      const document = await repository.readAssistant();
+      signal.throwIfAborted();
+      return document.value.mode === 'chat-assistant';
+    },
     controlCommands: [{ id: 'access-management', replyTexts: ACCESS_COMMAND_REPLIES,
       matches: message => parseAccessCommand(message) !== null,
       handle: context => accessCommand(context.message, context.reply, context.signal) }],
@@ -601,14 +614,48 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       }
     }
   }
+  async function finishSessionRemoval(target: import('../contracts/native-session-actions.ts').NativeSessionActionTarget, signal: AbortSignal) {
+    const reader = openReadonlySqliteStore(join(directory, 'native-chat.sqlite'));
+    let binding: unknown;
+    try { binding = reader.read('host.sessions', target.key)?.value; } finally { reader.close(); }
+    if (isRecord(binding) && binding.state === 'ready' && binding.sessionId === target.sessionId && binding.generation === target.generation) {
+      assert(nativeRuntimeIsQuiescent(await chatRuntime.status()), 'SESSION_DELETE_UNCONFIRMED', 'Chat must be stopped to finish deletion.');
+      await resetNativeSessionContext({ directory, state: () => chatRuntime.activity().state, target, signal });
+      binding = { state: 'retired', generation: target.generation + 1, sessionId: null };
+    }
+    assert(isRecord(binding) && typeof binding.generation === 'number' && binding.generation >= target.generation + 1
+      && binding.sessionId !== target.sessionId, 'SESSION_DELETE_UNCONFIRMED', 'Binding removal has not been confirmed.');
+    if (binding.state === 'retired' && binding.generation === target.generation + 1) {
+      const writer = createSqliteStore({ filename: join(directory, 'native-chat.sqlite'), requireExisting: true });
+      try {
+        const current = writer.read('host.sessions', target.key);
+        const history = writer.read('history', digest(target.key));
+        assert(current && isRecord(current.value) && current.value.state === 'retired' && current.value.generation === target.generation + 1, 'SESSION_DELETE_UNCONFIRMED', 'The binding changed before history removal.');
+        if (history) writer.compareAndSetBatch!([
+          { kind: 'check', namespace: 'host.sessions', key: target.key, expectedRevision: current.revision },
+          { kind: 'delete', namespace: 'history', key: history.key, expectedRevision: history.revision },
+        ]);
+      } finally { writer.close(); }
+    }
+  }
   const dshRestart = createNativeDshRestartService({ directory, signal: chatRuntime.applicationSignal(), ports: {
     configuration: () => repository.read(), status: () => chatRuntime.status(), inspect: localDsh.inspect,
     assertExclusive: assertDshExclusive,
     stop: async signal => { signal.throwIfAborted(); await lifecycle.stop(true); signal.throwIfAborted(); },
-    restart: (current, signal) => withNativeChatControl(directory, async () => {
+    async prepareDelete(target, current, signal) {
+      chatRuntime.assertDeletionReady(); chatRuntime.assertSessionIdle(target);
+      assert(await localDsh.inspectSession(current, target.sessionId, signal), 'SESSION_DELETE_NOT_FOUND', 'The model session does not exist.');
+    },
+    async verifyDelete(target, current, signal) {
+      assert(!(await localDsh.inspectSession(current, target.sessionId, signal)), 'SESSION_DELETE_UNCONFIRMED', 'Model history deletion has not been confirmed.');
+      await finishSessionRemoval(target, signal);
+    },
+    restart: (current, signal, target) => withNativeChatControl(directory, async () => {
       assert(nativeRuntimeIsQuiescent(await chatRuntime.status()), 'DSH_RESTART_NOT_QUIESCENT', 'Chat resources have not drained.');
       await assertDshExclusive(current, signal);
-      await localDsh.restart(current, signal);
+      if (target) await localDsh.deleteSession(current, target.sessionId, signal,
+        () => chatRuntime.assertSessionIdle(target), () => finishSessionRemoval(target, signal));
+      else await localDsh.restart(current, signal);
     }),
     verify: localDsh.verify,
     async restore(revisions, wasRunning, signal) {
@@ -623,6 +670,24 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       signal.throwIfAborted();
     }
   } });
+  async function reloadAssistantTarget(assistantRevision: string, signal: AbortSignal) {
+    signal.throwIfAborted();
+    assert((await repository.readAssistant()).revision === assistantRevision, 'ASSISTANT_CONFIGURATION_CONFLICT', 'The assistant settings changed.');
+    const operationId = randomUUID();
+    await dshRestart.create({ operationId, revisions: (await repository.read()).revisions });
+    await dshRestart.drain();
+    const result = await dshRestart.read(operationId);
+    assert(result.operation?.state === 'completed', result.operation?.reasons[0] ?? 'ASSISTANT_RELOAD_UNCONFIRMED', 'The assistant model has not finished loading.');
+    // Finish the admitted maintenance even if its browser has disconnected.
+    await withNativeChatControl(directory, async () => {
+      const completion = AbortSignal.any([chatRuntime.applicationSignal(), AbortSignal.timeout(10_000)]);
+      const target = await assistantTarget.status(completion);
+      assert(target.assistantRevision === assistantRevision && target.configurationRevision, 'ASSISTANT_CONFIGURATION_CONFLICT', 'The assistant settings changed.');
+      await assistantTarget.reconcile({ assistantRevision, configurationRevision: target.configurationRevision,
+        operationRevision: target.operationRevision }, completion);
+    });
+    signal.throwIfAborted();
+  }
   const maintenanceGuard = (route: AdminRoute): AdminRoute => ({ ...route, async handle(request) {
     if (route.method === 'POST' && !route.pathname.startsWith('/api/chat/dsh/restart') && await dshRestart.unresolved()
       && !(route.pathname === '/api/chat/runtime/stop' && !dshRestart.busy())) {
@@ -641,13 +706,22 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       return bundle;
     } }).map(maintenanceGuard),
     ...[...createNativeRuntimeRoutes({ directory, adapterRuntime, chatRuntime, deploymentRuntime, assistantTarget, packageConfigurationRegistry,
+      reloadAssistantTarget,
       interactions: () => chatRuntime.interactions(), tools: signal => chatRuntime.tools(signal) }),
     ...createNativeDshRestartRoutes(dshRestart),
+    { method: 'POST' as const, pathname: '/api/chat/sessions/delete', async handle({ signal }: Parameters<AdminRoute['handle']>[0]) {
+      signal.throwIfAborted();
+      throw new AdminRequestError(409, 'session_delete_use_dsh');
+    } },
     ...createNativeCapabilityManagement({ directory, deploymentRuntime,
       canApplyDeployment: async () => (await chatRuntime.status()).canApplyDeployment }).routes].map(route => ({ ...route,
       async handle(request: Parameters<AdminRoute['handle']>[0]) {
         if ((await accounts.read()).legacy.adoptedBy !== null) throw new AdminRequestError(409, 'native_legacy_account_adopted');
-        return maintenanceGuard(route).handle(request);
+        const result = await maintenanceGuard(route).handle(request);
+        if (route.method === 'GET' && route.pathname === '/api/chat/sessions' && isRecord(result)) {
+          return { ...result, deleteAvailable: false };
+        }
+        return result;
       }
     }))
   ];
@@ -685,11 +759,45 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     throw error;
   }
   const startupController = new AbortController();
-  const startupSignal = AbortSignal.any([startupController.signal, AbortSignal.timeout(45_000)]);
   const startup = (async () => {
     const maintenance = await createNativeDshRestartStorage(directory).read();
     if (maintenance.value.records.some(record => record.operation.state === 'running' || record.operation.state === 'unknown')) return;
     const registered = await accounts.read();
+    // One startup pass, before accepting QQ input. No per-message checks or automatic replay.
+    if (registered.legacy.adoptedBy === null && registered.accounts.length === 0) {
+      try {
+        const signal = AbortSignal.any([startupController.signal, AbortSignal.timeout(120_000)]);
+        const prepared = await withNativeChatControl(directory, async () => {
+          if (!nativeRuntimeIsQuiescent(await chatRuntime.status())
+            || !await assistantTarget.needsManagedSynchronization(signal)) return null;
+          await localDsh.inspect(await repository.read(), signal);
+          const reader = openReadonlySqliteStore(join(directory, 'native-chat.sqlite'));
+          try {
+            const idle = reader.withSnapshot(() => {
+              if (reader.list('host.execution-conversations', { limit: 1 }).length > 0) return false;
+              let after: string | undefined;
+              for (let page = 0; page < 100; page++) {
+                const rows = reader.list('native-work.executions', { limit: 100, ...(after ? { after } : {}) });
+                if (rows.some(row => !isRecord(row.value) || !['completed', 'failed'].includes(String(row.value.status))
+                  || ['delivering', 'unknown'].includes(String(row.value.delivery)))) return false;
+                if (rows.length < 100) return true;
+                after = rows.at(-1)!.key;
+              }
+              return false;
+            });
+            if (!idle) return null;
+          } finally { reader.close(); }
+          const assistant = await repository.readAssistant();
+          return applySavedAssistantTarget(assistantTarget, assistant.revision, signal);
+        });
+        if (prepared?.state === 'pending_reload' && prepared.missingReasons.length > 0
+          && prepared.missingReasons.every(reason => reason === 'pending_reload')) {
+          await reloadAssistantTarget(prepared.assistantRevision, signal);
+        }
+      } catch { /* Keep the recorded deployment outcome; chat recovery remains independent. */ }
+    }
+    if (await dshRestart.unresolved()) return;
+    const startupSignal = AbortSignal.any([startupController.signal, AbortSignal.timeout(45_000)]);
     if (registered.legacy.adoptedBy === null) {
       await readNativeAdapterConfiguration(directory)
         .then(adapters => chatRuntime.synchronizeProtocol(adapters,
@@ -711,6 +819,28 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
       } catch { /* Each account retains its own failed/unknown evidence; another account may still recover. */ }
     }
   })().catch(() => undefined);
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let recoveryTask: Promise<void> | undefined;
+  function scheduleConnectionRecovery() {
+    if (startupController.signal.aborted) return;
+    recoveryTimer = setTimeout(() => {
+      recoveryTask = (async () => {
+        const registered = await accounts.read();
+        const signal = AbortSignal.any([startupController.signal, AbortSignal.timeout(40_000)]);
+        const tasks: (() => Promise<unknown>)[] = [];
+        if (registered.legacy.adoptedBy === null) tasks.push(() => recoverNativeChatConnection(directory, chatRuntime, signal));
+        for (const account of registered.accounts) {
+          if (account.adoption !== 'ready') continue;
+          const accountDirectory = await accounts.accountDirectory(account.id);
+          const bundle = accountBundles.get(accountDirectory);
+          if (bundle) tasks.push(() => bundle.recoverConnection(signal));
+        }
+        await Promise.allSettled(tasks.map(run => run()));
+      })().catch(() => undefined).finally(scheduleConnectionRecovery);
+    }, 30_000);
+    recoveryTimer.unref();
+  }
+  void startup.finally(scheduleConnectionRecovery);
   const address = server.address();
   assert(address !== null && typeof address !== 'string', 'GATEWAY_ADMIN_LISTEN_FAILED',
     'No gateway administrator listener was created.');
@@ -721,12 +851,14 @@ export async function startGatewayAdmin(configuration: Readonly<GatewayAdminConf
     close() {
       stopping ??= (async () => {
         startupController.abort();
+        clearTimeout(recoveryTimer);
         try {
           const results = await Promise.allSettled([accounts.close(), chatRuntime.close(), dshRestart.drain()]);
           const failed = results.find(result => result.status === 'rejected');
           if (failed?.status === 'rejected') throw failed.reason;
         } finally {
           await startup;
+          await recoveryTask;
           await closeServer(server);
         }
       })();

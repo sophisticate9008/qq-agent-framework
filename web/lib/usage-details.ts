@@ -195,6 +195,7 @@ export function parseUsageSeries(value: unknown): UsageSeries | null {
 }
 
 export interface UsageTurn {
+  readonly costRecovery?: 'price-snapshot' | 'historical-reference' | null;
   readonly sessionId: string;
   readonly key: string | null;
   readonly turn: number | null;
@@ -299,6 +300,7 @@ export function parseUsageConversation(value: unknown, expectedKey?: string): Us
 }
 
 export interface UsageRecentEntry {
+  readonly costRecovery?: 'price-snapshot' | 'historical-reference' | null;
   readonly id?: string;
   readonly time: number;
   readonly key: string | null;

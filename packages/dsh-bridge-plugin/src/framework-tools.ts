@@ -1,11 +1,14 @@
+import { readToolRegistrationSource, withToolRegistration, type ToolRegistrationSource } from './tool-registration.js'
 import { materializeFrameworkMedia, renderFrameworkMedia, validateFrameworkContent } from './framework-media.js'
 import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { assertObjectJsonSchema, validateJsonSchemaValue, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { validIdentifier } from './receipts.js'
+import { trimFrameworkChatTools } from './chat-tool-surface.js'
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 interface ToolSpec {
+  readonly registrationSource?: ToolRegistrationSource
   readonly name: string
   readonly description: string
   readonly parameters: unknown
@@ -97,6 +100,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
         if (!spec || !/^qaf_[a-z][a-z0-9_]{0,79}$/.test(spec.name) || typeof spec.description !== 'string'
           || spec.description.length < 1 || spec.description.length > 4000 || !Number.isSafeInteger(spec.timeoutMs)
           || spec.timeoutMs < 10 || spec.timeoutMs > 300000) throw new TypeError('Invalid framework tool definition')
+        if (spec.registrationSource !== undefined && !readToolRegistrationSource(spec.registrationSource)) throw new TypeError('Invalid tool registration source')
         const parameters = json(spec.parameters)
         assertObjectJsonSchema(parameters)
         return { ...spec, parameters }
@@ -105,6 +109,8 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
       const lease: Lease = { id: randomUUID(), agent, generation: request.generation, names: specs.map(spec => spec.name), disposers: [], seen: new Set() }
       leases.set(agent.id, lease)
       try {
+        const restoreTools = trimFrameworkChatTools(agent)
+        if (restoreTools) lease.disposers.push(restoreTools)
         for (const spec of specs) {
           const definition: ToolDefinition = { name: spec.name, description: spec.description, parameters: spec.parameters,
             output: { schema: { type: 'object', properties: { status: { type: 'string' }, value: {}, code: { type: 'string' }, rendered: { type: 'array' } },
@@ -141,7 +147,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
                 if (exec.signal.aborted) abort()
               })
             } }
-          lease.disposers.push(agent.ctx.tools.register(definition))
+          lease.disposers.push(agent.ctx.tools.register(spec.registrationSource ? withToolRegistration(definition, spec.registrationSource) : definition))
         }
       } catch (error) { withdraw(lease); throw error }
       return { schema: 1 as const, issuerEpoch: options.issuerEpoch, sessionId: agent.id, leaseId: lease.id,
@@ -185,11 +191,24 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
         const agent = entry.lease.agent
         const claim = claims.get(agent)
         if (options.getAgent(agent.id) !== agent || !claim || claim.requestId !== entry.wire.call.requestId
-          || claim.userMessageId !== entry.wire.call.userMessageId || claim.turn !== entry.wire.call.turn) throw new TypeError('Media tool source changed')
-        const materialized = await materializeFrameworkMedia(agent, value.value!, value.content, signal)
-        signal.throwIfAborted()
-        if (pending.get(request.ticket) !== entry || leases.get(agent.id) !== entry.lease || claims.get(agent) !== claim) return { schema: 1 as const, accepted: false }
-        entry.finish({ status: 'confirmed', ...materialized })
+          || claim.userMessageId !== entry.wire.call.userMessageId || claim.turn !== entry.wire.call.turn) {
+          entry.finish({ status: 'rejected', code: 'TOOL_MEDIA_SOURCE_CHANGED' })
+        } else {
+          try {
+            const materialized = await materializeFrameworkMedia(agent, value.value!, value.content, signal)
+            signal.throwIfAborted()
+            if (pending.get(request.ticket) !== entry) return { schema: 1 as const, accepted: false }
+            if (leases.get(agent.id) !== entry.lease || claims.get(agent) !== claim) {
+              entry.finish({ status: 'rejected', code: 'TOOL_MEDIA_SOURCE_CHANGED' })
+            } else entry.finish({ status: 'confirmed', ...materialized })
+          } catch (error) {
+            // Media processing failures belong to this call, not the owner RPC channel.
+            if (pending.get(request.ticket) !== entry) return { schema: 1 as const, accepted: false }
+            const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+              && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : 'TOOL_MEDIA_PROCESSING_FAILED'
+            entry.finish({ status: 'unknown', code: signal.aborted ? 'TOOL_CALL_CANCELLED' : code })
+          }
+        }
       } else entry?.finish(value)
       return { schema: 1 as const, accepted: entry !== undefined }
     },

@@ -13,20 +13,30 @@ const history: HistoryMessage[] = [
 ];
 const options = { names: ['伙伴'], continuationMs: 90 };
 
-test('participation distinguishes explicit calls, nickname, reply, bounded continuation and other people', () => {
+test('participation distinguishes explicit calls and bounded conversation continuation for all speakers', () => {
   assert.equal(nativeParticipation(message, [], options, 100), 'ambient');
-  assert.equal(nativeParticipation(message, [], { ...options, activeSender: '123' }, 100), 'continuation');
+  assert.equal(nativeParticipation(message, [], { ...options, activatedAt: 20 }, 100), 'continuation');
   assert.equal(nativeParticipation({ ...message, content: [{ type: 'mention', userId: '789' }] }, [],
-    { ...options, activeSender: '123' }, 100), 'ambient');
+    { ...options, activatedAt: 20 }, 100), 'continuation');
   assert.equal(nativeParticipation({ ...message, directed: true }, [], options, 100), 'direct');
   assert.equal(nativeParticipation({ ...message, conversationId: 'private:123' }, [], options, 100), 'direct');
   assert.equal(nativeParticipation({ ...message, content: [{ type: 'text', text: '伙伴，帮我看看' }] }, [], options, 100), 'nickname');
   assert.equal(nativeParticipation({ ...message, content: [{ type: 'reply', messageId: 'answer' }] }, history, options, 100), 'reply');
   assert.equal(nativeParticipation(message, history, options, 100), 'continuation');
   assert.equal(nativeParticipation(message, history, options, 111), 'ambient');
-  assert.equal(nativeParticipation({ ...message, userId: '456' }, history, options, 100), 'ambient');
-  assert.equal(nativeParticipation({ ...message, content: [{ type: 'reply', messageId: 'first' }] }, history, options, 100), 'ambient');
-  assert.equal(nativeParticipation({ ...message, content: [{ type: 'mention', userId: '456' }, ...message.content] }, history, options, 100), 'ambient');
+  assert.equal(nativeParticipation({ ...message, userId: '456' }, history, options, 100), 'continuation');
+  assert.equal(nativeParticipation({ ...message, content: [{ type: 'reply', messageId: 'first' }] }, history, options, 100), 'continuation');
+  assert.equal(nativeParticipation({ ...message, content: [{ type: 'mention', userId: '456' }, ...message.content] }, history, options, 100), 'continuation');
+  assert.equal(nativeParticipation({ ...message, content: [{ type: 'mention', userId: '456' },
+    { type: 'text', text: '伙伴，帮我看看' }] }, history, options, 100), 'nickname');
+  assert.equal(nativeParticipation(message, history, { ...options, activatedAt: 95, continuationMs: 0 }, 100), 'ambient');
+  assert.equal(nativeParticipation(message, [], { ...options, activatedAt: 20 }, 111), 'ambient');
+  assert.equal(nativeParticipation(message, history, { ...options, activatedAt: 95 }, 111), 'continuation');
+  assert.equal(nativeParticipation(message, [...history,
+    { id: 'new-answer', actor: 'assistant', receivedAt: 120, content: message.content }],
+  { ...options, activatedAt: 20 }, 180), 'continuation');
+  assert.equal(nativeParticipation(message, [...history,
+    { id: 'new-question', actor: '456', receivedAt: 105, content: message.content }], options, 111), 'ambient');
   assert.equal(nativeParticipation({ ...message, isSelf: true, directed: true }, history, options, 100), 'ambient');
 });
 
@@ -51,11 +61,11 @@ test('context contains trusted speaker facts, bounded local history and explicit
   assert.equal(result.envelope.senderIsConfiguredOwner, true);
   assert.equal(result.envelope.conversationId, 'group:456');
   assert.equal(result.envelope.participation, 'reply');
-  assert.deepEqual(result.envelope.recent.map(item => item.actor), ['123', 'assistant']);
+  assert.deepEqual(result.envelope.recent.map(item => item.actor), ['123']);
   assert.deepEqual(result.envelope.quoted.map(item => item.available), [true, false]);
   assert.equal(result.envelope.quoted[0]?.text, '之前的回答');
   assert.match(result.text, /asset-1：未读取内容/);
-  assert.match(result.text, /不能变成系统指令或授权/);
+  assert.doesNotMatch(result.text, /不能变成系统指令或授权/, 'Fixed rules belong in the system preset, not every input.');
 });
 
 test('input budgets retain explicit truncation without invalid content at unicode and escape boundaries', () => {
@@ -77,6 +87,6 @@ test('unread metadata distinguishes retained context from newly consumed bounded
     data: { content: [{ type: 'text', text: 'new input' }], directed: true } }, history,
   { owner: null, partial: false, unread: { ids: ['answer', 'new'], readThrough: 1, through: 3, partial: false } });
   const text = result.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
-  assert.match(text, /"unread":\{"readThrough":1,"through":3,"count":2,"included":2,"partial":false\}/);
-  assert.match(text, /"id":"answer"[^}]+"unread":true/);
+  assert.match(text, /"unread":\{"readThrough":1,"through":3,"count":2,"included":1,"partial":false\}/);
+  assert.doesNotMatch(text, /"id":"answer"/, 'Assistant output already belongs to the DSH conversation.');
 });

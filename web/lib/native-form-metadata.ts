@@ -9,6 +9,7 @@ function form<Fields extends Record<string, string>>(page: PageId, id: string, t
 export const nativeFormMetadata = {
   bootstrap: form('features', 'native-bootstrap-summary', '可信扩展装配摘要', {}),
   output: form('overview', 'package-configuration-chat-output', '回复方式', {}),
+  media: form('overview', 'package-configuration-media', '视频观察', {}),
   forwardAuthorization: form('features', 'forward-authorization', '合并转发权限', { conversations: '允许合并转发的会话' }),
   workRecords: form('model', 'native-work-records', '独立工作记录', { conversation: '工作所属会话筛选' }),
   memory: form('features', 'native-memory', '记忆与偏好', {
@@ -61,7 +62,7 @@ export const nativeFormMetadata = {
   dsh: form('adapters', 'adapter-dshAgent', 'DSH 聊天引擎', {
     enabled: '启用此连接', endpoint: '服务地址', credential: '引擎访问凭据',
   }),
-  triggers: form('persona', 'persona-wake', '唤醒与续聊', { nicknames: '呼叫昵称', reply: '引用机器人时唤醒', continuation: '同人续聊时长（秒）' }),
+  triggers: form('persona', 'persona-wake', '唤醒与续聊', { nicknames: '呼叫昵称', reply: '引用机器人时唤醒', continuation: '会话续聊时长（秒）' }),
   deployment: form('model', 'dsh-deployment', '应用聊天设置', {
     profile: 'DSH 配置文件', credentials: 'DSH 凭据文件', context: '模型上下文容量', output: '模型最大输出',
     reasoning: '模型支持推理档位', layers: '基础配置文件（可选）', namespace: '生成配置名前缀',

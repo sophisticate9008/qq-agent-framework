@@ -167,7 +167,9 @@ export async function resetNativeSessionContext(options: {
       AND json_extract(value, '$.binding.conversationId') = ? AND json_extract(value, '$.binding.sessionId') = ?
       AND json_extract(value, '$.binding.generation') = ? AND (
         coalesce(json_extract(value, '$.isolated'), 1) != 0 OR
-        coalesce(json_extract(value, '$.status'), 'unknown') NOT IN ('completed', 'failed', 'rejected', 'timed-out') OR
+        NOT (coalesce(json_extract(value, '$.status'), '') IN ('completed', 'failed', 'rejected', 'timed-out') OR
+          (coalesce(json_extract(value, '$.status'), '') = 'unknown' AND
+            coalesce(json_extract(value, '$.externalStatus'), 'unknown') IN ('completed', 'failed', 'rejected', 'cancelled'))) OR
         coalesce(json_extract(value, '$.externalStatus'), 'unknown') NOT IN ('completed', 'failed', 'rejected', 'cancelled', 'not-started') OR
         coalesce(json_extract(value, '$.cancelStatus'), 'unknown') IN ('requesting', 'accepted', 'unknown') OR
         coalesce(json_extract(value, '$.noticeStatus'), 'unknown') IN ('sending', 'unknown')) LIMIT 1`)

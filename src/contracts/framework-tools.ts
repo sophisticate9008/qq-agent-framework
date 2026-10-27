@@ -1,8 +1,11 @@
+import type { NativeToolRegistrationSource } from './native-tool-inventory.ts'
 import type { FrameworkToolContent } from './framework-media.ts'
 import type { JsonObject, JsonValue } from './data.ts'
 
-/** Definitions are installed by trusted packages, never supplied in model arguments. */
+/** Definitions describe behavior and input/output semantics, not caller roles or grants.
+ * Installed by trusted packages, never supplied in model arguments. Host policy authorizes execution. */
 export interface FrameworkToolDefinition {
+  readonly registrationSource?: NativeToolRegistrationSource
   readonly name: string
   readonly description: string
   readonly parameters: JsonObject

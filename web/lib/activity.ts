@@ -4,7 +4,8 @@ export interface ConversationIdentity {
   readonly key: string;
   readonly kind: 'group' | 'private' | 'internal' | 'unattributed' | 'other';
   readonly identifier: string;
-  readonly label: '群聊' | '私聊' | '内部' | '未归属' | '历史';
+  readonly label: '群聊' | '私聊' | '模拟 · 群聊' | '模拟 · 私聊' | '内部' | '未归属' | '历史';
+  readonly simulationRunId?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -32,6 +33,9 @@ function timestamp(value: unknown): string | null {
 }
 
 export function describeConversationKey(key: string): ConversationIdentity {
+  const simulation = /^simulation:(qq-[A-Za-z0-9_-]{1,80}):(group|private):([1-9]\d{0,15})$/.exec(key);
+  if (simulation) return { key, kind: simulation[2] === 'group' ? 'group' : 'private', identifier: simulation[3]!,
+    label: simulation[2] === 'group' ? '模拟 · 群聊' : '模拟 · 私聊', simulationRunId: simulation[1]! };
   const match = /^(group|private):([1-9]\d{0,15})$/.exec(key);
   if (!match) {
     const internalPrefix = 'internal:';

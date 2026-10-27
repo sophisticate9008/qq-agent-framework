@@ -129,6 +129,8 @@ const reasons: Readonly<Record<string, { readonly text: string; readonly page: P
   migration_source_or_target_unavailable: { text: '旧的会话迁移操作未完成，请查看会话详情。', page: 'sessions' },
   migration_resources_unsupported: { text: '旧迁移方式不支持历史中的媒体资源；日常配置更新现在直接使用原会话。', page: 'sessions' },
   onebot_protocol_not_connected: { text: '协议尚未连接；启动聊天时会验证并建立连接。', page: 'adapters' },
+  onebot_account_offline: { text: 'QQ 已离线，请在协议端重新登录。', page: 'adapters' },
+  onebot_account_unhealthy: { text: 'QQ 接入服务状态异常，请检查协议端运行状态。', page: 'adapters' },
   runtime_not_started: { text: '聊天尚未启动，完成设置后点击启动聊天。', page: 'adapters' },
   configuration_changed: { text: '已保存设置有变更，请停止聊天后重新启动以应用。', page: 'adapters' },
   authorization_budget_unavailable: { text: '消息授权已用完或过期，请到访问范围检查。', page: 'access' },

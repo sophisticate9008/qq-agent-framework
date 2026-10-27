@@ -72,6 +72,39 @@ test('owner work captures a durable result before confirmed delivery and resolve
 
 const fixtureForTest = fixture
 
+test('owner admission uses one prepared backend, preserves owner checks, and never repeats full configuration loading', async context => {
+  let preparations = 0
+  let assertions = 0
+  let starts = 0
+  const f = fixture(context, {
+    async loadConfiguration() { throw new Error('Full configuration must be prepared once') },
+    async prepareAdmission() {
+      preparations++
+      return { configuration, async assertCurrent() { assertions++ }, backend: {
+        async verify() {}, async start(request) { starts++; return { childId: request.childId, result: Promise.resolve(result), async dispose() {} } }
+      } }
+    }
+  })
+  await assert.rejects(f.executor.execute(f.request('visitor-preparation', { task: 'must not prepare' }, 'visitor')), { code: 'NATIVE_MESSAGE_SOURCE_NOT_OWNER' })
+  assert.equal(preparations, 0)
+  const accepted = object(await f.executor.execute(f.request('owner-preparation', { task: 'run once' })))
+  assert.equal(preparations, 1)
+  assert.equal(assertions, 1)
+  assert.equal(starts, 1)
+  await awaitCondition(() => f.executor.read(String(accepted.id))?.delivery === 'confirmed', { timeoutMs: 1000, message: 'prepared work delivered' })
+})
+
+test('a changed local preparation before backend start is failed, with no external work or unknown result', async context => {
+  let starts = 0
+  const f = fixture(context, { async prepareAdmission() {
+    return { configuration, async assertCurrent() { throw Object.assign(new Error('Changed'), { code: 'ASSISTANT_CONFIGURATION_CHANGED' }) },
+      backend: { async verify() {}, async start(request) { starts++; return { childId: request.childId, result: Promise.resolve(result), async dispose() {} } } } }
+  } })
+  await assert.rejects(f.executor.execute(f.request('changed-preparation', { task: 'do not start' })), { code: 'ASSISTANT_CONFIGURATION_CHANGED' })
+  assert.equal(starts, 0)
+  assert.equal(f.executor.list().records[0]?.status, 'failed')
+})
+
 test('actual work lifecycle emits bounded correlated observations without exposing task or result and ignores observer faults',async context=>{
   const events:NativeEventInput[]=[]
   const f=fixture(context,{onObservation(event){events.push(event);if(event.status==='progress')throw Error('observer failed')}})

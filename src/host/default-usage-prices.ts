@@ -58,8 +58,11 @@ export function createDefaultUsagePriceTable({ holidays = referenceHolidays, hol
     models: {
       'deepseek-flash': flash,
       'deepseek-v4-flash': flash,
+      'deepseek-v4.1-flash': flash,
       'deepseek-v4-flash-vision-exp': flash,
+      'deepseek-pro': pro,
       'deepseek-v4-pro': pro,
+      'deepseek-v4.1-pro': pro,
     },
   })
 }
@@ -68,7 +71,13 @@ export const DEFAULT_USAGE_PRICE_TABLE = createDefaultUsagePriceTable()
 
 export function defaultUsagePriceAt(model: string, at: number, table: DefaultUsagePriceTable = DEFAULT_USAGE_PRICE_TABLE) {
   if (typeof model !== 'string' || model.length === 0 || !Number.isSafeInteger(at) || at < 0) return null
-  const referenceModel = Object.hasOwn(table.models, model) ? model : table.fallbackModel
+  const normalized = model.toLowerCase()
+  const deepseekTier = /deepseek|(?:^|[\W_])ds(?:[\W_]|$)/.test(normalized)
+    ? /(?:^|[\W_])pro(?:[\W_]|$)/.test(normalized) ? 'deepseek-pro'
+      : /(?:^|[\W_])flash(?:[\W_]|$)/.test(normalized) ? 'deepseek-flash' : undefined
+    : undefined
+  const referenceModel = Object.hasOwn(table.models, model) ? model
+    : deepseekTier !== undefined && Object.hasOwn(table.models, deepseekTier) ? deepseekTier : table.fallbackModel
   if (typeof referenceModel !== 'string' || !Object.hasOwn(table.models, referenceModel)) return null
   const entry = table.models[referenceModel]!
   const fallbackUsed = referenceModel !== model

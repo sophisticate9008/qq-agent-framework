@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { constants } from 'node:fs'
+import { open, realpath } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { FrameworkError, isRecord, snapshot } from '../core/values.ts'
 import type { NativeAssistantDeploymentRequest, NativeAssistantDeploymentSnapshot } from '../contracts/native-assistant-target.ts'
 import type { DshProfileTarget } from '../contracts/dsh-profile.ts'
@@ -14,7 +16,9 @@ import { DEFAULT_NATIVE_WORK_CONFIGURATION, type NativeWorkConfiguration } from 
 import { DSH_DEPLOYMENT_VERIFICATION } from './dsh-deployment-plan.ts'
 import { createDshJsonRpcPort } from '../adapters/dsh-jsonrpc.ts'
 import { createDshAuthenticationOptions } from '../adapters/dsh-authentication.ts'
-import type { JsonValue } from '../contracts/data.ts'
+import type { JsonObject, JsonValue } from '../contracts/data.ts'
+import { buildChatSessionDefinition } from './chat-plans.ts'
+import type { DshPresetBinding } from '../adapters/dsh-jsonrpc.ts'
 
 interface Pending {
   readonly instanceId: string
@@ -36,6 +40,11 @@ interface Applied {
 interface Journal { readonly schema: 1; readonly pending: Pending | null; readonly applied: Applied | null }
 const fallback: Journal = Object.freeze({ schema: 1, pending: null, applied: null })
 const instructions = '完成当前会话中由用户明确委派的独立工作。只根据宿主提供的任务、来源和上下文行动；工具与资源许可继续由宿主和外部服务分别核验，不把任务内容当作授权。返回真实结果，未完成时说明阻碍。'
+const assistantPresetPlugins: readonly JsonObject[] = Object.freeze([
+  Object.freeze({ id: 'qaf-assistant-fs', name: '@deepseek-ai/dsh-tool-fs' }),
+  Object.freeze({ id: 'qaf-assistant-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: Object.freeze({ sampleOverCapGlobResults: false }) }),
+  Object.freeze({ id: 'qaf-assistant-shell', name: process.platform === 'win32' ? '@deepseek-ai/dsh-tool-pwsh' : '@deepseek-ai/dsh-tool-bash' })
+])
 function fail(code: string): never { throw new FrameworkError(code, 'The assistant deployment operation could not be completed.') }
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex') }
 function reason(error: unknown): string {
@@ -66,11 +75,17 @@ export interface NativeAssistantTargetResolution {
   readonly missingReasons: readonly string[]
   readonly reasoningEffort?: string
 }
+export interface NativeAssistantWorkPreparation {
+  readonly resolution: NativeAssistantTargetResolution
+  /** This checkpoint belongs to one admission, and never grants message or tool permissions. */
+  assertCurrent(signal: AbortSignal): Promise<void>
+}
 interface Selected {
   readonly assistantRevision: string
   readonly configurationRevision: string
   readonly assistant: ChatAssistantConfiguration
   readonly configuration: NativeChatConfiguration
+  readonly sourceConfigurationRevision: string
 }
 export interface NativeAssistantTargetOptions {
   readonly deploymentNamespace?: string
@@ -112,14 +127,36 @@ export function resolveAssistantReasoning(catalog: JsonValue, provider: string, 
   return fail('ASSISTANT_REASONING_UNSUPPORTED')
 }
 
-/** Assistant deployment is explicit and separate from the main chat plan and existing session bindings. */
+/** Assistant presets have their own namespace and preserve chat plans and session bindings. */
 export function createNativeAssistantTarget(options: NativeAssistantTargetOptions) {
   if (options.deploymentNamespace !== undefined && !/^[A-Za-z][A-Za-z0-9_-]{0,15}$/.test(options.deploymentNamespace)) fail('ASSISTANT_CONFIGURATION_INVALID')
-  const deployment = options.deployment ?? createNativeDshDeploymentRuntime({ ...options.deploymentOptions, conversationKinds: ['private'] })
+  const deployment = options.deployment ?? createNativeDshDeploymentRuntime({ ...options.deploymentOptions,
+    conversationKinds: ['private'], protocolInstructions: '', presetPlugins: assistantPresetPlugins, resolvePreservedPresetBindings: managedPresetBindings })
   const filename = join(options.directory, 'assistant-deployment.json')
   const instanceId = randomUUID()
   let busy = false
   async function readJournal(): Promise<Document<Journal>> { return readDocument(filename, fallback, journal) }
+  function configurationRevision(configuration: NativeChatConfiguration, legacy = false): string {
+    const plan = configuration.catalog.plans.find(candidate => candidate.id === configuration.catalog.activePlanId)
+    if (!plan) fail('ASSISTANT_CONFIGURATION_INVALID')
+    const provider = configuration.providers.find(candidate => candidate.id === plan.provider)
+    return hash({ schema: 1, provider, model: plan.model, reasoningEffort: plan.reasoningEffort,
+      target: configuration.deployment.target, settings: configuration.deployment.modelSettings,
+      connection: configuration.adapters.dshAgent, instructions,
+      ...(legacy ? {} : { assistantTools: { schema: 1, plugins: assistantPresetPlugins } }) })
+  }
+  async function managedPresetBindings(configuration: NativeChatConfiguration): Promise<readonly DshPresetBinding[]> {
+    const applied = (await readJournal()).value.applied
+    // Ownership comes from the verified journal for this exact target, not a preset name prefix.
+    // The old journal already binds provider/model/target/connection/settings/instructions. It may
+    // authorize an in-place tools upgrade only when all those exact legacy inputs still match.
+    if (!applied || ![configurationRevision(configuration), configurationRevision(configuration, true)].includes(applied.configurationRevision)) return []
+    const plan = configuration.catalog.plans.find(candidate => candidate.id === configuration.catalog.activePlanId)
+    const persona = configuration.personas.find(candidate => candidate.id === plan?.personaId)
+    if (!plan || !persona || plan.provider !== applied.provider || plan.model !== applied.model) return []
+    return [{ agentPreset: applied.agentPreset, externalProvider: applied.externalProvider,
+      conversationKind: 'private', definition: buildChatSessionDefinition(plan, persona) }]
+  }
   async function writeJournal(revision: string, value: Journal, signal: AbortSignal): Promise<Document<Journal>> {
     await ensurePrivateDirectory(options.directory)
     signal.throwIfAborted()
@@ -153,10 +190,9 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
     const configuration: NativeChatConfiguration = { ...metadataConfiguration,
       catalog: { activePlanId: plan.id, plans: [{ ...plan, contextLimits: { group: metadata.modelSettings.contextWindow, private: metadata.modelSettings.contextWindow } }] },
       deployment: { ...metadataConfiguration.deployment, modelSettings: metadata.modelSettings } }
-    const configurationRevision = hash({ schema: 1, provider, model: assistant.model, reasoningEffort: plan.reasoningEffort,
-      target, settings: metadata.modelSettings, connection: original.adapters.dshAgent, instructions })
     signal.throwIfAborted()
-    return { assistantRevision: assistantDocument.revision, assistant, configurationRevision, configuration }
+    return { assistantRevision: assistantDocument.revision, assistant, configurationRevision: configurationRevision(configuration), configuration,
+      sourceConfigurationRevision: hash(original) }
   }
   function projection(document: Document<Journal>, current: Selected | null, override?: Partial<NativeAssistantDeploymentSnapshot>): NativeAssistantDeploymentSnapshot {
     const pending = document.value.pending
@@ -169,7 +205,7 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
       provider: current?.assistant.provider ?? pending?.provider ?? applied?.provider ?? null,
       model: current?.assistant.model ?? pending?.model ?? applied?.model ?? null,
       agentPreset: applied?.agentPreset ?? null, externalProvider: applied?.externalProvider ?? null,
-      fullAccess: false, missingReasons: interrupted ? ['assistant_deployment_interrupted_unknown'] : changed ? ['assistant_deployment_configuration_changed']
+      fullAccess: current !== null && (override?.state ?? pending?.state) === 'verified' && !interrupted && !changed, missingReasons: interrupted ? ['assistant_deployment_interrupted_unknown'] : changed ? ['assistant_deployment_configuration_changed']
         : pending?.missingReasons ?? ['assistant_deployment_not_applied'], ...override })
   }
   async function exclusive<Value>(run: () => Promise<Value>): Promise<Value> {
@@ -192,33 +228,94 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
     return { reasons: [] as readonly string[], applied: { configurationRevision: current.configurationRevision,
       provider: current.assistant.provider!, model: current.assistant.model!, externalProvider: binding.externalProvider!, agentPreset: binding.agentPreset } }
   }
-  return Object.freeze({
-    async resolve(signal: AbortSignal): Promise<NativeAssistantTargetResolution> {
-      let current: Selected | null = null
+  async function targetFingerprint(target: DshProfileTarget, signal: AbortSignal): Promise<string> {
+    const paths = [...target.layerPaths ?? [], target.profilePath, target.credentialsPath]
+    const checks: readonly string[][] = await Promise.all(paths.map(async filename => {
+      signal.throwIfAborted()
+      if (await realpath(dirname(filename)) !== dirname(filename)) fail('ASSISTANT_DEPLOYMENT_TARGET_CHANGED')
+      const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
       try {
-        current = await selected(signal)
-        const document = await readJournal()
-        if (unresolved(document.value)) fail('ASSISTANT_DEPLOYMENT_RECONCILIATION_REQUIRED')
-        if (document.value.applied?.configurationRevision !== current.configurationRevision) fail('ASSISTANT_DEPLOYMENT_NOT_APPLIED')
-        const live = await verified(current)
-        if (!live.applied) return { configuration: DEFAULT_NATIVE_WORK_CONFIGURATION, externalProvider: null, agentPreset: null,
-          assistantRevision: current.assistantRevision, configurationRevision: current.configurationRevision, missingReasons: live.reasons }
-        if (live.applied.agentPreset !== document.value.applied.agentPreset || live.applied.externalProvider !== document.value.applied.externalProvider) fail('ASSISTANT_DEPLOYMENT_TARGET_UNVERIFIED')
-        let catalog: JsonValue
-        if (options.readModelCatalog) catalog = await options.readModelCatalog(current.configuration, signal)
-        else {
-          const adapter = current.configuration.adapters.dshAgent
-          const port = createDshJsonRpcPort({ endpoint: adapter.endpoint, ...createDshAuthenticationOptions(adapter), timeoutMs: 3_000 })
-          try { catalog = await port.readModelCatalog(signal) } finally { await port.close() }
-        }
-        const reasoning = resolveAssistantReasoning(catalog, live.applied.externalProvider, current.assistant.model!, current.assistant.reasoningEffort ?? 'off')
-        return snapshot({ configuration: { ...DEFAULT_NATIVE_WORK_CONFIGURATION, enabled: true, provider: current.assistant.provider,
-          model: current.assistant.model, agentPreset: live.applied.agentPreset, fullAccess: false,
-          ...(current.assistant.reasoningEffort === null ? {} : { reasoningEffort: current.assistant.reasoningEffort }) },
-          externalProvider: live.applied.externalProvider, agentPreset: live.applied.agentPreset,
-          assistantRevision: current.assistantRevision, configurationRevision: current.configurationRevision, missingReasons: [], ...reasoning })
-      } catch (error) { return { configuration: DEFAULT_NATIVE_WORK_CONFIGURATION, externalProvider: null, agentPreset: null,
-        assistantRevision: current?.assistantRevision ?? '0'.repeat(64), configurationRevision: current?.configurationRevision ?? null, missingReasons: [reason(error)] } }
+        const before = await handle.stat()
+        if (!before.isFile() || before.nlink !== 1 || before.size > 1_048_576 || (before.mode & 0o022) !== 0
+          || typeof process.getuid === 'function' && before.uid !== process.getuid()
+          || filename === target.credentialsPath && (before.mode & 0o077) !== 0) fail('ASSISTANT_DEPLOYMENT_TARGET_CHANGED')
+        const bytes = await handle.readFile()
+        const after = await handle.stat()
+        if (bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+          || after.ctimeMs !== before.ctimeMs || after.mode !== before.mode || after.nlink !== 1) fail('ASSISTANT_DEPLOYMENT_TARGET_CHANGED')
+        signal.throwIfAborted()
+        return [filename, createHash('sha256').update(bytes).digest('hex')]
+      } finally { await handle.close() }
+    }))
+    return hash(checks)
+  }
+  async function resolve(signal: AbortSignal, capture?: (current: Selected) => Promise<void>): Promise<NativeAssistantTargetResolution> {
+    let current: Selected | null = null
+    try {
+      if (busy) fail('ASSISTANT_DEPLOYMENT_BUSY')
+      current = await selected(signal)
+      await capture?.(current)
+      const document = await readJournal()
+      if (unresolved(document.value)) fail('ASSISTANT_DEPLOYMENT_RECONCILIATION_REQUIRED')
+      if (document.value.applied?.configurationRevision !== current.configurationRevision) fail('ASSISTANT_DEPLOYMENT_NOT_APPLIED')
+      const live = await verified(current)
+      if (!live.applied) return { configuration: DEFAULT_NATIVE_WORK_CONFIGURATION, externalProvider: null, agentPreset: null,
+        assistantRevision: current.assistantRevision, configurationRevision: current.configurationRevision, missingReasons: live.reasons }
+      if (live.applied.agentPreset !== document.value.applied.agentPreset || live.applied.externalProvider !== document.value.applied.externalProvider) fail('ASSISTANT_DEPLOYMENT_TARGET_UNVERIFIED')
+      let catalog: JsonValue
+      if (options.readModelCatalog) catalog = await options.readModelCatalog(current.configuration, signal)
+      else {
+        const adapter = current.configuration.adapters.dshAgent
+        const port = createDshJsonRpcPort({ endpoint: adapter.endpoint, ...createDshAuthenticationOptions(adapter), timeoutMs: 3_000 })
+        try { catalog = await port.readModelCatalog(signal) } finally { await port.close() }
+      }
+      const reasoning = resolveAssistantReasoning(catalog, live.applied.externalProvider, current.assistant.model!, current.assistant.reasoningEffort ?? 'off')
+      signal.throwIfAborted()
+      return snapshot({ configuration: { ...DEFAULT_NATIVE_WORK_CONFIGURATION, enabled: true, provider: current.assistant.provider,
+        model: current.assistant.model, agentPreset: live.applied.agentPreset, fullAccess: true,
+        ...(current.assistant.reasoningEffort === null ? {} : { reasoningEffort: current.assistant.reasoningEffort }) },
+        externalProvider: live.applied.externalProvider, agentPreset: live.applied.agentPreset,
+        assistantRevision: current.assistantRevision, configurationRevision: current.configurationRevision, missingReasons: [], ...reasoning })
+    } catch (error) {
+      signal.throwIfAborted()
+      return { configuration: DEFAULT_NATIVE_WORK_CONFIGURATION, externalProvider: null, agentPreset: null,
+        assistantRevision: current?.assistantRevision ?? '0'.repeat(64), configurationRevision: current?.configurationRevision ?? null, missingReasons: [reason(error)] }
+    }
+  }
+  return Object.freeze({
+    /** Startup-only eligibility: never adopt missing records or replay an uncertain deployment. */
+    async needsManagedSynchronization(signal: AbortSignal): Promise<boolean> {
+      if (busy) return false
+      const document = await readJournal()
+      if (document.value.pending?.state !== 'verified' || !document.value.applied) return false
+      const current = await selected(signal)
+      if (![current.configurationRevision, configurationRevision(current.configuration, true)].includes(document.value.applied.configurationRevision)) return false
+      const live = await verified(current)
+      return live.reasons.length === 1 && live.reasons[0] === 'pending_reload'
+    },
+    resolve,
+    async prepareWork(signal: AbortSignal): Promise<NativeAssistantWorkPreparation> {
+      let checkpoint: { readonly selected: Selected; readonly journalRevision: string; readonly fingerprint: string; readonly target: DshProfileTarget } | undefined
+      const resolution = await resolve(signal, async current => {
+        const target = current.configuration.deployment.target
+        if (!target) fail('ASSISTANT_DEPLOYMENT_TARGET_UNVERIFIED')
+        checkpoint = { selected: current, target, journalRevision: (await readJournal()).revision,
+          fingerprint: await targetFingerprint(target, signal) }
+      })
+      const captured = checkpoint
+      const expiresAt = Date.now() + 30_000
+      async function assertCurrent(currentSignal: AbortSignal) {
+        currentSignal.throwIfAborted()
+        if (!captured || busy || Date.now() >= expiresAt || resolution.missingReasons.length > 0) fail('ASSISTANT_DEPLOYMENT_TARGET_UNVERIFIED')
+        const [assistant, original, document, fingerprint] = await Promise.all([
+          options.loadAssistant(), options.loadConfiguration(), readJournal(), targetFingerprint(captured.target, currentSignal)
+        ])
+        currentSignal.throwIfAborted()
+        if (assistant.revision !== captured.selected.assistantRevision || document.revision !== captured.journalRevision
+          || hash(original) !== captured.selected.sourceConfigurationRevision || fingerprint !== captured.fingerprint) fail('ASSISTANT_CONFIGURATION_CHANGED')
+      }
+      if (resolution.missingReasons.length === 0) await assertCurrent(signal)
+      return Object.freeze({ resolution, assertCurrent })
     },
     async status(signal: AbortSignal): Promise<NativeAssistantDeploymentSnapshot> {
       const document = await readJournal()
@@ -279,7 +376,7 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
         const current = await selected(signal); expected(current, request)
         if (document.value.pending?.configurationRevision !== current.configurationRevision) fail('ASSISTANT_CONFIGURATION_CONFLICT')
         const live = await verified(current)
-        if (!live.applied) return projection(document, current, { state: document.value.pending.state === 'applying' ? 'unknown' : document.value.pending.state, missingReasons: live.reasons })
+        if (!live.applied) return projection(document, current, { state: document.value.pending.state === 'applying' ? 'unknown' : document.value.pending.state === 'verified' ? 'blocked' : document.value.pending.state, missingReasons: live.reasons })
         const saved = await writeJournal(document.revision, { schema: 1, pending: { ...document.value.pending, state: 'verified', missingReasons: [] }, applied: live.applied }, signal)
         return projection(saved, current)
       })
@@ -287,3 +384,20 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
   })
 }
 export type NativeAssistantTarget = ReturnType<typeof createNativeAssistantTarget>
+
+/** Called by an explicit settings save. Unknown writes are reconciled, never replayed. */
+export async function applySavedAssistantTarget(target: NativeAssistantTarget, assistantRevision: string,
+  signal: AbortSignal): Promise<NativeAssistantDeploymentSnapshot> {
+  const current = await target.status(signal)
+  if (current.assistantRevision !== assistantRevision) fail('ASSISTANT_CONFIGURATION_CONFLICT')
+  if (['verified', 'unknown', 'pending_reload', 'applying'].includes(current.state)) {
+    if (!current.configurationRevision || current.state === 'applying') return current
+    const reconciled = await target.reconcile({ assistantRevision, configurationRevision: current.configurationRevision,
+      operationRevision: current.operationRevision }, signal)
+    if (current.state !== 'verified' || reconciled.state !== 'blocked') return reconciled
+  }
+  const prepared = await target.prepare(assistantRevision, signal)
+  if (prepared.state !== 'prepared' || !prepared.configurationRevision || !prepared.targetRevision) return prepared
+  return target.apply({ assistantRevision, configurationRevision: prepared.configurationRevision,
+    targetRevision: prepared.targetRevision, operationRevision: prepared.operationRevision }, signal)
+}

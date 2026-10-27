@@ -19,6 +19,7 @@ interface Queue {
   readonly entries: readonly NativeInboxEntry[];
   readonly receipts: readonly Receipt[];
   readonly errorCode: string | null;
+  readonly dispatchingIds?: readonly string[];
 }
 const namespace = 'native-chat.inbox';
 
@@ -49,7 +50,11 @@ function decode(record: StoredRecord): Queue {
       && (item.requestMessageId === null || reference(item.requestMessageId)), 'NATIVE_INBOX_CORRUPT', 'Invalid input receipt.');
     return { id: item.id, outcome: item.outcome as Outcome, requestMessageId: item.requestMessageId };
   });
-  return { schema: 1, conversationId: value.conversationId, phase: value.phase as Queue['phase'], entries, receipts,
+  const dispatchingIds = value.dispatchingIds;
+  assert(dispatchingIds === undefined || Array.isArray(dispatchingIds) && dispatchingIds.length <= 16
+    && dispatchingIds.every(id => typeof id === 'string' && entries.some(entry => entry.message.id === id))
+    && new Set(dispatchingIds).size === dispatchingIds.length, 'NATIVE_INBOX_CORRUPT', 'Invalid dispatch batch.');
+  return { ...(dispatchingIds === undefined ? {} : { dispatchingIds: dispatchingIds as string[] }), schema: 1, conversationId: value.conversationId, phase: value.phase as Queue['phase'], entries, receipts,
     errorCode: value.errorCode as string | null };
 }
 
@@ -86,6 +91,26 @@ export function createNativeInbox(options: {
   function receipts(queue: Queue, entries: readonly NativeInboxEntry[], outcome: Outcome, requestMessageId: string | null) {
     return [...queue.receipts, ...entries.map(entry => ({ id: entry.message.id, outcome, requestMessageId }))].slice(-64);
   }
+  // Only an interrupted submitted batch is uncertain. Waiting inputs retain their original deadline.
+  function resume(record: StoredRecord): StoredRecord {
+    const queue = decode(record);
+    let next = queue;
+    if (queue.phase !== 'pending') {
+      const uncertain = queue.phase === 'blocked' && queue.errorCode === 'NATIVE_INBOX_EXECUTION_UNCONFIRMED'
+        ? [] : queue.phase === 'dispatching' ? queue.dispatchingIds ?? queue.entries.map(entry => entry.message.id)
+        : queue.receipts.some(receipt => receipt.outcome === 'unknown' && queue.entries.some(entry => entry.message.id === receipt.id))
+          ? queue.receipts.filter(receipt => receipt.outcome === 'unknown').map(receipt => receipt.id)
+          : queue.entries.map(entry => entry.message.id);
+      const ids = new Set(uncertain);
+      const unrecorded = queue.entries.filter(entry => ids.has(entry.message.id) && !queue.receipts.some(receipt => receipt.id === entry.message.id));
+      next = { ...queue, phase: 'pending', dispatchingIds: [], entries: queue.entries.filter(entry => !ids.has(entry.message.id)),
+        receipts: receipts(queue, unrecorded, 'unknown', null), errorCode: null };
+    }
+    const expired = next.entries.filter(entry => entry.deadlineAt <= now());
+    if (expired.length) next = { ...next, entries: next.entries.filter(entry => entry.deadlineAt > now()),
+      receipts: receipts(next, expired, 'expired', null), errorCode: 'NATIVE_CHAT_DEADLINE_EXPIRED' };
+    return next === queue ? record : write(record, next);
+  }
   async function process(conversationId: string) {
     if (stopped) return;
     let record = read(conversationId);
@@ -101,12 +126,12 @@ export function createNativeInbox(options: {
     if (!queue.entries.length) return;
     const ready = options.readiness(conversationId);
     if (ready === 'busy') return;
-    if (ready === 'blocked') { write(record, { ...queue, phase: 'blocked', errorCode: 'NATIVE_INBOX_EXECUTION_UNCONFIRMED' }); return; }
+    if (ready === 'blocked') return; // Recheck on the next tick; never freeze unrelated future input.
     // Merge consecutive messages from one person; never promote somebody else's text to their identity.
     const first = queue.entries[0]!;
     const end = queue.entries.findIndex(entry => entry.message.userId !== first.message.userId);
     const batch = queue.entries.slice(0, end === -1 ? queue.entries.length : end);
-    write(record, { ...queue, phase: 'dispatching', errorCode: null });
+    write(record, { ...queue, phase: 'dispatching', dispatchingIds: batch.map(entry => entry.message.id), errorCode: null });
     let result: { readonly status: 'accepted' | 'rejected' | 'unknown'; readonly errorCode?: string | null };
     try { result = await options.deliver(snapshot(batch)); }
     catch (error) { result = { status: 'unknown', errorCode: errorCode(error, 'NATIVE_INBOX_DISPATCH_UNKNOWN') }; }
@@ -114,8 +139,8 @@ export function createNativeInbox(options: {
     assert(latest, 'NATIVE_INBOX_CORRUPT', 'Pending dispatch evidence disappeared.');
     const current = decode(latest);
     const ids = new Set(batch.map(entry => entry.message.id));
-    write(latest, { ...current, phase: result.status === 'unknown' ? 'blocked' : 'pending',
-      entries: result.status === 'unknown' ? current.entries : current.entries.filter(entry => !ids.has(entry.message.id)),
+    write(latest, { ...current, phase: 'pending', dispatchingIds: [],
+      entries: current.entries.filter(entry => !ids.has(entry.message.id)),
       receipts: receipts(current, batch, result.status, batch.at(-1)!.message.id), errorCode: result.errorCode ?? null });
   }
   function tick() {
@@ -123,9 +148,10 @@ export function createNativeInbox(options: {
     const pending: Promise<void>[] = [];
     for (const record of options.store.list(namespace, { limit: 256 })) {
       const queue = decode(record);
-      if (!queue.entries.length || queue.phase !== 'pending') continue;
+      if (!queue.entries.length) continue;
       const previous = running.get(queue.conversationId);
       if (previous) { pending.push(previous); continue; }
+      if (queue.phase !== 'pending') resume(record);
       const work = process(queue.conversationId).catch(error => options.onFault?.(errorCode(error, 'NATIVE_INBOX_FAILED')))
         .finally(() => { running.delete(queue.conversationId); });
       running.set(queue.conversationId, work); pending.push(work);
@@ -135,13 +161,13 @@ export function createNativeInbox(options: {
   return Object.freeze({
     recover() {
       for (const record of options.store.list(namespace, { limit: 256 })) {
-        const queue = decode(record);
-        if (queue.entries.length) write(record, { ...queue, phase: 'blocked', errorCode: 'NATIVE_INBOX_INTERRUPTED' });
+        resume(record);
       }
     },
     enqueue(entry: NativeInboxEntry) {
       assert(!stopped && !entry.message.isSelf && entry.message.directed, 'NATIVE_INBOX_UNAVAILABLE', 'Only admitted directed messages may queue.');
-      const prior = read(entry.message.conversationId);
+      let prior = read(entry.message.conversationId);
+      if (prior && decode(prior).phase === 'blocked') prior = resume(prior);
       const queue: Queue = prior ? decode(prior) : { schema: 1, conversationId: entry.message.conversationId,
         phase: 'pending', entries: [], receipts: [], errorCode: null };
       const duplicate = queue.entries.find(item => item.message.id === entry.message.id);
@@ -150,7 +176,6 @@ export function createNativeInbox(options: {
         return 'duplicate' as const;
       }
       if (queue.receipts.some(item => item.id === entry.message.id)) return 'duplicate' as const;
-      assert(queue.phase !== 'blocked', 'NATIVE_INBOX_BLOCKED', 'Pending input requires reconciliation.');
       const all = options.store.list(namespace, { limit: 256 });
       assert((prior !== null || all.length < 256) && all.reduce((sum, record) => sum + decode(record).entries.length, 0) < 256
         && queue.entries.length < 16, 'NATIVE_INBOX_BACKPRESSURE', 'Pending input queue is full.');

@@ -61,18 +61,14 @@ export interface EffectiveChatInputConfiguration {
   readonly continuationMs: number
 }
 
-/** Participation limits only; callers must independently enforce the current access policy. */
+/** Legacy switches and secondary scope lists are ignored; access is enforced by the whitelist. */
 export function resolveChatInputConfiguration(configuration: ChatInputConfiguration, conversationId: string,
   personaName?: string): EffectiveChatInputConfiguration {
   const current = validateChatInputConfiguration(configuration)
   if (!isNativeAccessScope(conversationId)) throw new TypeError('A canonical conversation is required')
-  const kind = conversationId.startsWith('group:') ? 'group' : 'private'
-  const reason = !current.enabled ? 'disabled' : !current.scopes[kind] ? 'kind-disabled'
-    : current.scopes.exclude.includes(conversationId) ? 'excluded'
-      : current.scopes.include.length > 0 && !current.scopes.include.includes(conversationId) ? 'not-included' : 'active'
   const candidates = [...current.nicknames, ...(typeof personaName === 'string' && personaName.trim().length > 0 ? [personaName.trim()] : [])]
   const names = candidates.filter((name, index) => candidates.findIndex(candidate => candidate.toLocaleLowerCase() === name.toLocaleLowerCase()) === index)
     .filter(name => name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(name)).slice(0, 16)
-  return Object.freeze({ enabled: reason === 'active', reason, names: Object.freeze(names), wakeOnMention: current.wakeOnMention,
+  return Object.freeze({ enabled: true, reason: 'active', names: Object.freeze(names), wakeOnMention: true,
     wakeOnReply: current.wakeOnReply, continuationMs: current.continuationMs })
 }

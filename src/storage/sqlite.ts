@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto';
 import type { Clock, JsonValue } from '../core/types.ts';
 import { FrameworkError, isRecord, snapshot } from '../core/values.ts';
 import { openReadonlySqliteStore, validateExistingSqliteSchema } from './sqlite-readonly.ts';
-import type { DurableCasMutation, DurableIndexDefinition, DurableLookup, DurableStore, DurableStoreStats, DurableStoreStatsOptions, StoredRecord, WriteOptions } from '../contracts/ports.ts';
+import type { DurableCasMutation, DurableIndexDefinition, DurableLookup, DurableNumberPage, DurableStore, DurableStoreStats, DurableStoreStatsOptions, StoredRecord, WriteOptions } from '../contracts/ports.ts';
+import { readNumberPage } from './sqlite-number-page.ts';
 
 const DEFAULT_MAX_RECORDS = 100_000;
 const DEFAULT_MAX_VALUE_BYTES = 1_048_576;
@@ -41,6 +42,7 @@ interface StoreStatements {
 }
 
 export interface SqliteStore extends DurableStore {
+  maintenancePage(cutoff: number, after?: { at: number; namespace: string; key: string }): readonly StoredRecord[];
   stats(options?: DurableStoreStatsOptions): DurableStoreStats;
   createIndex(definition: DurableIndexDefinition): void;
   lookup(query: DurableLookup): readonly StoredRecord[];
@@ -622,6 +624,18 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     }
   }
 
+  let maintenanceQuery: StatementSync | undefined;
+  function maintenancePage(cutoff: number, after?: { at: number; namespace: string; key: string }): readonly StoredRecord[] {
+    assertOpen();
+    if (!maintenanceQuery) {
+      database.exec('CREATE INDEX IF NOT EXISTS durable_maintenance_order ON durable_records(updated_at, namespace, key)');
+      maintenanceQuery = database.prepare(`SELECT namespace, key, value, revision, updated_at AS updatedAt, expires_at AS expiresAt
+        FROM durable_records WHERE updated_at <= ? AND (updated_at, namespace, key) > (?, ?, ?)
+        ORDER BY updated_at, namespace, key LIMIT 100`);
+    }
+    return maintenanceQuery.all(cutoff, after?.at ?? -1, after?.namespace ?? '', after?.key ?? '').map(decodeRecord);
+  }
+
   function close(): void {
     if (closed) return;
     closed = true;
@@ -632,5 +646,10 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     } finally { if (existingDescriptor !== undefined) closeSync(existingDescriptor); }
   }
 
-  return { read, write, delete: deleteRecord, list, compareAndSetBatch, purgeExpired, stats, createIndex, lookup, close };
+  function listByNumber(query: DurableNumberPage): readonly StoredRecord[] {
+    assertOpen();
+    try { return snapshot(readNumberPage(database, query, now(), true).map(decodeRecord)); }
+    catch (error) { redact(error); }
+  }
+  return { read, write, delete: deleteRecord, list, listByNumber, compareAndSetBatch, purgeExpired, stats, createIndex, lookup, maintenancePage, close };
 }

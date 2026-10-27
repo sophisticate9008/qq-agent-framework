@@ -1,8 +1,10 @@
+import { NATIVE_MEDIA_CONFIGURATION } from './native-media-configuration.ts'
 import { createBuiltinPackageContent } from './native-package-content.ts'
 import { FrameworkError } from '../core/values.ts'
 import type { EffectAdapter } from '../core/types.ts'
 import type { NativePackageDefinition } from './native-packages.ts'
-import { CHAT_INPUT_CONFIGURATION_CONTRIBUTION, readChatInputConfiguration } from './chat-input-configuration.ts'
+import type { ChatPersona } from '../contracts/chat-plans.ts'
+import { readChatInputConfiguration } from './chat-input-configuration.ts'
 import type { createNativeMediaRegistry } from './native-media.ts'
 import type { NativeReminderService } from './native-reminders.ts'
 import type { NativeMemoryService } from './native-memory.ts'
@@ -15,18 +17,18 @@ export interface NativeChatInputPackageService {
 }
 export type NativeMediaPackageService = ReturnType<typeof createNativeMediaRegistry>
 
-/** This package reads its own CAS configuration on each input and never grants access. */
-export function createChatInputNativePackage(options: { readonly directory: string }): NativePackageDefinition {
+/** Wake preferences follow the selected persona and never grant access. */
+export function createChatInputNativePackage(options: { readonly directory: string; readonly readPersona?: () => Promise<ChatPersona | undefined> }): NativePackageDefinition {
   return Object.freeze({
     content: CHAT_INPUT_CONTENT,
     manifest: { schema: 1, id: 'chat-input', version: '1.0.0', dependencies: [],
       provides: [{ id: 'chat-input', version: 1 }], requires: [],
       contributions: [{ kind: 'input-provider', id: 'chat-input' }] },
-    configurations: [CHAT_INPUT_CONFIGURATION_CONTRIBUTION],
     install(context) {
       const service = Object.freeze<NativeChatInputPackageService>({ async read(conversationId, personaName) {
         context.signal.throwIfAborted()
-        const result = await readChatInputConfiguration(options.directory, conversationId, personaName)
+        const persona = await options.readPersona?.()
+        const result = await readChatInputConfiguration(options.directory, conversationId, persona?.name ?? personaName, persona?.wake)
         context.signal.throwIfAborted()
         return result
       } })
@@ -39,7 +41,8 @@ export function createChatInputNativePackage(options: { readonly directory: stri
 /** The host keeps existing media facts and policy; the package owns only guarded service/effect registrations. */
 export function createMediaNativePackage(options: { readonly registry: NativeMediaPackageService }): NativePackageDefinition {
   return Object.freeze({
-    content: BUILTIN_CONTENT,
+    content: createBuiltinPackageContent(import.meta.url, ['./native-media', './native-media-configuration', '../contracts/native-media-configuration', '../contracts/framework-media', '../adapters/ffmpeg-video', '../adapters/gif-observation']),
+    configurations: [NATIVE_MEDIA_CONFIGURATION],
     manifest: { schema: 1, id: 'media', version: '1.0.0', dependencies: [],
       provides: [{ id: 'media', version: 1 }], requires: [],
       contributions: [{ kind: 'effect', id: 'media.inspect' }, { kind: 'effect', id: 'media.read' }] },
@@ -53,6 +56,7 @@ export function createMediaNativePackage(options: { readonly registry: NativeMed
       }
       const service: NativeMediaPackageService = Object.freeze({
         register(asset, signal) { return registry.register(asset, AbortSignal.any([signal, context.signal])) },
+        readForPrompt(request) { return registry.readForPrompt({ ...request, signal: AbortSignal.any([request.signal, context.signal]) }) },
         resolveOutgoing(request) { return registry.resolveOutgoing({ ...request, signal: AbortSignal.any([request.signal, context.signal]) }) },
         inspect: effect(registry.inspect), read: effect(registry.read)
       })

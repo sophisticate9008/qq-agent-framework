@@ -111,7 +111,6 @@ test('native runtime exposes empty editable resources without fabricating a conn
     'POST /api/chat/adapters/connect', 'POST /api/chat/adapters/disconnect',
     'GET /api/chat/packages/configuration', 'POST /api/chat/packages/configuration',
     'POST /api/chat/packages/configuration/migrate', 'GET /api/chat/interactions', 'GET /api/chat/tools',
-    'GET /api/chat/appearance', 'POST /api/chat/appearance'
   ].sort())
   const plans = await invoke(routes, 'GET', '/api/chat/plans')
   const personas = await invoke(routes, 'GET', '/api/chat/personas')

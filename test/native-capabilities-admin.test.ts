@@ -96,7 +96,7 @@ test('actual capability GET projects whitelist approval policy separately from l
   const legacy = await readFile(authorizationFile)
   assert.equal(Object.hasOwn(object(object(JSON.parse(legacy.toString())).authorization), 'mode'), false)
   const counted = await data.call('GET', '/api/chat/capabilities')
-  assert.equal(counted.compositionApprovalRequired, true)
+  assert.equal(counted.compositionApprovalRequired, false)
   assert.deepEqual(await readFile(authorizationFile), legacy)
   await data.approve()
   const saved = (await data.load()).deployment.capabilityApproval
@@ -104,7 +104,7 @@ test('actual capability GET projects whitelist approval policy separately from l
   const deploymentFile = join(data.directory, 'chat-deployment.json')
   const deployment = await readFile(deploymentFile)
   await data.save('authorization', { version: 'explicit-counted-projection', mode: 'counted', grants: [] })
-  assert.equal((await data.call('GET', '/api/chat/capabilities')).compositionApprovalRequired, true)
+  assert.equal((await data.call('GET', '/api/chat/capabilities')).compositionApprovalRequired, false)
   await data.save('authorization', { version: 'whitelist-projection', mode: 'whitelist', grants: [] })
   const beforeGet = await readFile(authorizationFile)
   const whitelist = await data.call('GET', '/api/chat/capabilities')
@@ -296,7 +296,7 @@ test('default gateway authenticates catalog and persists counted approval for ac
     return api(`/api/chat/${name}`, { revision: previous.revision, ...body })
   }
   await save('authorization', { version: 'legacy-counted-approval', grants: [] })
-  assert.equal((await api('/api/chat/capabilities')).compositionApprovalRequired, true)
+  assert.equal((await api('/api/chat/capabilities')).compositionApprovalRequired, false)
   await save('personas', { personas: [{ id: 'native', name: 'Native', identity: 'Synthetic.', style: 'Brief.' }] })
   await save('providers', { providers: [{ id: 'provider', name: 'Provider', type: 'openai', enabled: true,
     baseUrl: 'https://never-model.example.test', apiKey: 'synthetic-never-called', models: [{ id: 'fake', name: 'Fake' }] }] })
@@ -324,8 +324,8 @@ test('default gateway authenticates catalog and persists counted approval for ac
   await api('/api/chat/capabilities/revoke', { revisions: (await runtime()).revisions,
     approvalId: object(approved.approval).approvalId, confirm: true })
   const revoked = await api('/api/chat/deployment/reconcile', { revisions: (await runtime()).revisions })
-  assert.equal(revoked.verified, false)
-  assert.deepEqual(revoked.missingReasons, ['capability_owner_approval_required'])
+  assert.equal(revoked.verified, true)
+  assert.deepEqual(revoked.missingReasons, [])
   assert.equal((await runtime()).state, 'stopped')
   assert(methods.every(method => ['agentPresets/list', 'agentPresets/read', 'settings/describe', 'credentials/describe'].includes(method)))
 })

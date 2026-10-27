@@ -3,7 +3,7 @@ import type { DshJsonRpcPort, DshPresetBinding } from '../adapters/dsh-jsonrpc.t
 import type { ChatSessionDefinition } from '../contracts/chat-session.ts'
 import { parseNativeReplyDecision } from '../contracts/native-reply-decision.ts'
 import type { JsonObject } from '../core/types.ts'
-import { FrameworkError } from '../core/values.ts'
+import { errorCode, FrameworkError } from '../core/values.ts'
 import type { AgentAdapter, AgentEvent, DurableStore, SessionBinding } from './types.ts'
 import type { NativeChatConfiguration } from './native-chat-configuration.ts'
 import type { createBridgeHost } from './bridge.ts'
@@ -93,7 +93,6 @@ export function createNativeAgentCoordinator(options: {
           async submit(request) {
             const binding = bindingForSession(request.sessionId)
             if (!binding) failure('SESSION_STALE')
-            await guard(binding.conversationId, request.signal, false, 'submit')
             await checkpoint('agent.submitting', { conversationId: binding.conversationId,
               sessionId: request.sessionId, generation: binding.generation, requestId: request.requestId,
               content: json(request.content) }, request.signal)
@@ -105,7 +104,14 @@ export function createNativeAgentCoordinator(options: {
               configuredSessions.add(request.sessionId)
             }
             const delegatesTools = await inspectToolScope(request, binding)
-            await runtime.frameworkTools?.project(binding, request.signal)
+            try { await runtime.frameworkTools?.project(binding, request.signal) }
+            catch (error) {
+              activity.record('tool_projection_failed', binding.conversationId, undefined,
+                { requestId: request.requestId }, errorCode(error, 'TOOL_PROJECTION_UNKNOWN'))
+              // Preparation failed before sourceAgent.submit. This is a known
+              // rejection, not an uncertain model execution or global failure.
+              return { status: 'rejected' as const }
+            }
             const baseline = await runtime.claims.baseline(request.sessionId, request.signal)
             if (definition.capabilitySelection) await guard(binding.conversationId, request.signal, false, 'submit')
             request.signal.throwIfAborted()
@@ -126,6 +132,7 @@ export function createNativeAgentCoordinator(options: {
               return sourceAgent.submit({ ...request, signal: AbortSignal.any([signal, request.signal]) })
             })
             observeExecution(result)
+            if (result.externalStatus === 'accepted') activity.record('accepted', binding.conversationId)
             if (result.status !== 'running') runtime.messageSources?.releaseExecution({ requestId: request.requestId,
               sessionId: request.sessionId, generation: binding.generation })
             await checkpoint('agent.submitted', { conversationId: binding.conversationId, sessionId: request.sessionId,
@@ -178,7 +185,8 @@ export function createNativeAgentCoordinator(options: {
                   return
                 }
               }
-              if (event.type === 'failed') activity.record(aborted ? 'agent_cancelled' : 'agent_failed', binding.conversationId)
+              if (event.type === 'failed') activity.record(aborted ? 'agent_cancelled' : 'agent_failed', binding.conversationId,
+                undefined, {}, typeof event.data?.code === 'string' ? event.data.code : undefined)
             } else if (event.type === 'message') return
             await request.onEvent(event)
               } })

@@ -21,7 +21,7 @@ import { SettingsWindow } from './settings-window.tsx';
 import { DshRestartControl } from './dsh-restart-control.tsx';
 import { useDshRestart } from '../lib/use-dsh-restart.ts';
 import { parsePlanCatalog } from '../lib/chat-plans.ts';
-import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
+import { DetailsWindow, TechnicalDetails } from './read-only-details.tsx';
 
 type Effort = typeof efforts[number];
 
@@ -141,6 +141,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
   const [pendingReload, setPendingReload] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [supportedEfforts, setSupportedEfforts] = useState<readonly Effort[] | null>(null);
@@ -159,6 +160,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
   const dirtyCallback = useRef(setDirty);
   const dirty = saved !== null && form !== null && JSON.stringify(saved.form) !== JSON.stringify(form);
   useEffect(() => { dirtyCallback.current = setDirty; }, [setDirty]);
+  useEffect(() => { setProgressOpen(false); }, [api, connected]);
   useEffect(() => {
     if (applicationState.kind === 'application' && !applicationState.blocked) setBlocked(false);
   }, [applicationState.kind, applicationState.blocked]);
@@ -322,8 +324,9 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
 
   async function autoApply(): Promise<void> {
     const state = application.getSnapshot();
+    if (primaryAction === 'observe') { showProgress(); return; }
     if (state.kind === 'manual' && state.blocked && state.manualSource === 'deployment') { await restoreManualOperations(); return; }
-    if (application.getSnapshot().kind === 'application' && application.getSnapshot().busy && !request.current) { refreshApplication(); return; }
+    if (state.kind === 'application' && state.busy && !request.current) { showProgress(); return; }
     if (chatApplicationCanReconcile(application.getSnapshot())) { await reconcileApplication(); return; }
     if (!personaSelected || !saved || !form || !currentDocument() || applicationLoading || (prepareConfiguration ? configurationUpdateBlocked : connection.current.configurationDirty) || busy || blocked || frozen.current.has(api) || dirty || request.current) return;
     if (application.getSnapshot().busy) return;
@@ -381,6 +384,11 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
     updateReady: !applicationLoading && !observationError && !busy && saved !== null && form !== null && currentDocument() && !blocked && !dirty
       && personaSelected && !(prepareConfiguration ? configurationUpdateBlocked : configurationDirty) });
   const updateAvailable = primaryAction === 'update' || primaryAction === 'observe' || primaryAction === 'reconcile' || primaryAction === 'restore';
+  function showProgress(): void {
+    setProgressOpen(true);
+    refreshApplication();
+    runtimeResource.refresh();
+  }
   useImperativeHandle(updateRef, () => ({ updateChat: autoApply }));
   useEffect(() => { onUpdateAvailable?.(updateAvailable); }, [onUpdateAvailable, updateAvailable]);
   useEffect(() => { onUpdateActionChange?.(primaryAction); }, [onUpdateActionChange, primaryAction]);
@@ -459,6 +467,22 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
           : runtimeStatus.configurationChanged ? '有更改待应用' : runtimeStatus.chatReady ? '已生效' : '聊天未就绪';
   const actionLabel = primaryAction === 'restore' ? '恢复操作' : primaryAction === 'observe' ? '查看进度'
     : primaryAction === 'reconcile' ? '核对并继续' : busy ? '正在应用…' : runtimeStatus?.state === 'stopped' ? '应用并启动' : '应用';
+  const operation = applicationState.operation;
+  const operationStatus = operation?.state === 'completed' ? '应用已完成' : operation?.state === 'blocked' ? '应用未完成'
+    : operation?.state === 'unknown' ? '结果待核对' : applicationState.busy ? '正在应用' : statusLabel;
+  const progress = <DetailsWindow open={progressOpen} onOpenChange={setProgressOpen} title="应用进度" description="查看当前应用阶段与结果，窗口会随状态自动更新。">
+    <div className="grid gap-3">
+      <p role="status">{operationStatus}{applicationState.busy && applicationState.phase ? `：${chatApplicationPhaseLabels[applicationState.phase]}` : ''}</p>
+      {operation?.reasons.length ? <ul className="list-inside list-disc text-xs text-destructive">{[...new Set(operation.reasons.map(reason => chatRuntimeReason(reason).text))].map(reason => <li key={reason}>{reason}</li>)}</ul> : null}
+      {!applicationState.busy && notice && <p className="text-xs text-muted-foreground">{notice}</p>}
+      {error && <p className="text-xs text-destructive" role="alert">{error}</p>}
+      {observationError && <p role="status" className="text-xs text-destructive">暂时无法读取应用进度，当前显示上次已知状态。请刷新进度。</p>}
+      <TechnicalDetails fields={[{ label: '操作编号', value: applicationState.operationId },
+        { label: '处理阶段', value: applicationState.phase ? chatApplicationPhaseLabels[applicationState.phase] : '无' },
+        { label: '最近更新', value: operation ? new Date(operation.updatedAt).toLocaleString() : '尚未读取到操作记录' }]} />
+      <Button size="sm" variant="outline" className="justify-self-start" onClick={() => { refreshApplication(); runtimeResource.refresh(); }}><RefreshCw className="size-3.5" />刷新进度</Button>
+    </div>
+  </DetailsWindow>;
   const advanced = <SettingsWindow title="高级应用设置" label="高级设置" open={advancedOpen} onOpenChange={setAdvancedOpen} description="手动指定部署位置与模型能力，适用于远程或自定义接入。关闭窗口保留草稿。">
     {error && <p className="mb-2 text-sm text-destructive" role="alert">{error}</p>}
     {form ? <div className="grid gap-2">
@@ -489,12 +513,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
       {minimal && <span role="status" className="order-first mr-auto text-muted-foreground">{statusLabel}</span>}
       <ActionTip content={prepareConfiguration ? '保存并启用当前方案，保留聊天历史。' : '应用已保存的人设，保留聊天历史。'}><Button id={prepareConfiguration ? 'native-plan-update' : undefined} disabled={!updateAvailable} onClick={() => void autoApply()}>{busy && <RefreshCw className="size-3.5 animate-spin" />}{minimal && actionLabel === '应用' ? '应用方案' : actionLabel}</Button></ActionTip>{!minimal && <HelpTip label="应用">{prepareConfiguration ? '保存并启用当前方案；通常无需重启 DSH。' : '先保存人设，再应用到当前聊天；通常无需重启 DSH。'}</HelpTip>}
       {!minimal && <span role="status" className="text-muted-foreground">{personaSelected ? statusLabel : planResource.error ? '无法确认当前使用的人设' : '当前方案未使用此人设'}</span>}
-      {!minimal && <ReadOnlyDetails title="应用详情" description="查看配置生效状态与操作记录。">
-        <p className="mb-3">{prepareConfiguration ? '保存并启用当前方案。' : '应用已保存的人设与聊天设置。'}应用期间可能短暂停止聊天，会话历史保留；通常无需重启 DSH。</p>
-        <TechnicalDetails fields={[{ label: '状态', value: statusLabel }, { label: '操作编号', value: applicationState.operationId },
-          { label: '处理阶段', value: applicationState.phase ? chatApplicationPhaseLabels[applicationState.phase] : '无' },
-          { label: '处理说明', value: notice || '无' }, { label: '原因', value: applicationState.operation?.reasons ?? [] }]} />
-      </ReadOnlyDetails>}
+      {!minimal && <Button size="xs" variant="ghost" onClick={showProgress}>详情</Button>}
       {!minimal && configurationDocument === 'plans' && advanced}
       {(observationError || runtimeResource.error || !form) && <Button variant="ghost" size="sm" onClick={() => { refreshApplication(); runtimeResource.refresh(); planResource.refresh(); if (!request.current && !dirty) setReload(value => value + 1); }}>刷新状态</Button>}
     </div>
@@ -504,6 +523,7 @@ export function DshDeploymentManager({ api, connected, setDirty, running = false
     {(waitingForReload || pendingReload || restart.pending) && <div className="flex flex-wrap items-center gap-2">
       <span>配置尚未加载，可重启 DSH 后继续应用。</span><DshRestartControl api={api} connected={connected} compact />
     </div>}
+    {progress}
   </div>;
   if (compact) return controls;
   return <Section id={nativeFormMetadata.deployment.id} title="聊天设置" scrollable>{controls}</Section>;

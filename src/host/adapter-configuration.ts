@@ -61,6 +61,8 @@ export interface AdapterRuntimePort {
 }
 
 export interface AdapterConnectionStatus {
+  readonly accountOnline?: boolean | null
+  readonly accountGood?: boolean | null
   readonly state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error'
   readonly selfId: string | null
   readonly lastError: string | null

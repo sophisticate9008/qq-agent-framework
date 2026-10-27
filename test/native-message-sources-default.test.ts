@@ -133,9 +133,9 @@ test('default gateway bootstrap actually checks owner-only effects while preserv
     assert(host)
     assert.equal((await status()).chatReady, true)
     const initialGrants = host.policy.describe().grants
-    const relayBefore = initialGrants.filter(grant => grant.id.startsWith('native-chat:'))
+    const relayBefore = initialGrants.filter(grant => grant.id.startsWith('native-chat-whitelist:'))
     assert.equal(relayBefore.length, 2)
-    assert(relayBefore.every(grant => !grant.capabilities.includes('agent.tools.delegate')))
+    assert(relayBefore.every(grant => grant.capabilities.includes('agent.tools.delegate')))
     function inbound(messageId: number, userId: number, text: string, extra: Record<string, unknown> = {}) {
       assert(onebot.clients.size)
       for (const socket of onebot.clients) socket.send(JSON.stringify({ post_type: 'message', self_id: 999,
@@ -184,7 +184,7 @@ test('default gateway bootstrap actually checks owner-only effects while preserv
     const ungranted = store!.list('host.inbox', { limit: 100 }).find(record => object(record.value).eventId === '50')!
     assert.equal(object(ungranted.value).errorCode, 'POLICY_DENIED')
     assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 0)
-    assert.deepEqual(host.policy.describe().grants.filter(grant => grant.id.startsWith('native-chat:')), relayBefore)
+    assert.deepEqual(host.policy.describe().grants.filter(grant => grant.id.startsWith('native-chat-whitelist:')), relayBefore)
 
     inbound(6, 789, 'Ordinary friend chat stays available')
     await until(() => fixture.calls.some(call => call.method === 'session/prompt'), 'Friend chat must reach the real serializer')
@@ -216,7 +216,7 @@ test('default gateway bootstrap actually checks owner-only effects while preserv
     const oldReader = readers[0]!
     const oldScope: Readonly<EffectScope> = { conversationId: 'group:456', eventId: '1', featureId: 'owner-effect-control', version: '1.0.0' }
     await assert.rejects(oldReader.requireOwner(oldScope, new AbortController().signal), { code: 'NATIVE_MESSAGE_SOURCE_MISSING' })
-    const relaySpent = host.policy.describe().grants.filter(grant => grant.id.startsWith('native-chat:'))
+    const relaySpent = host.policy.describe().grants.filter(grant => grant.id.startsWith('native-chat-whitelist:'))
     await api('/api/chat/runtime/stop', {})
     await start()
     assert.equal(readers.length, 2)
@@ -230,8 +230,12 @@ test('default gateway bootstrap actually checks owner-only effects while preserv
     assert.equal(proofs[3]!.userId, '789')
     assert.equal(host.sessions.get('group:456')?.sessionId, sessionId)
     assert.equal(fixture.controls.creates, 1)
-    assert.deepEqual(host.policy.describe().grants.filter(grant => grant.id.startsWith('native-chat:')), relaySpent)
-    assert.equal(host.policy.describe().grants.length, initialGrants.length)
+    for (const old of relaySpent) {
+      const retained: (typeof relaySpent)[number] = host.policy.describe().grants.find(grant => grant.id === old.id)!
+      assert.equal(retained.active, false)
+      assert.deepEqual(retained.used, old.used)
+    }
+    assert.equal(host.policy.describe().grants.filter(grant => grant.id.startsWith('native-chat-whitelist:') && grant.active).length, 2)
     assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1)
     const workFiles = (await readdir(fixture.directory)).filter(filename => filename.startsWith('controlled-work-')).sort()
     assert.deepEqual(workFiles, ['controlled-work-1.json', 'controlled-work-4.json', 'controlled-work-9.json'])

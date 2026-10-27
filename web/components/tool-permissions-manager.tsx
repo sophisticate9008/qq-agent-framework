@@ -1,6 +1,7 @@
+import { NATIVE_TOOL_CAPABILITY_CATALOG, type NativeToolCapability } from '../../src/contracts/native-tool-capabilities.ts';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { NATIVE_TOOL_CAPABILITY_CATALOG, NATIVE_TOOL_PERMISSION_MAX_USES, NATIVE_TOOL_PERMISSIONS_PATH, parseNativeToolPermissionInput,
-  parseNativeToolPermissionsSnapshot, type NativeToolCapability } from '../../src/contracts/native-tool-permissions.ts';
+import { NATIVE_TOOL_PERMISSION_MAX_USES, NATIVE_TOOL_PERMISSIONS_PATH, parseNativeToolPermissionInput,
+  parseNativeToolPermissionsSnapshot } from '../../src/contracts/native-tool-permissions.ts';
 import { errorMessage, type ApiClient } from '../lib/api.ts';
 import { newChatApplicationId } from '../lib/chat-application.ts';
 import { createDraftKey, retainedDraft, retainDraft } from '../lib/retained-drafts.ts';

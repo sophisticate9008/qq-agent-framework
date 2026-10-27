@@ -15,6 +15,7 @@ const cancelStatuses = ['not-requested', 'unavailable', 'requesting', 'accepted'
 const noticeStatuses = ['not-requested', 'unavailable', 'sending', 'confirmed', 'rejected', 'unknown'] as const;
 const outcomes = ['completed', 'failed', 'cancelled'] as const;
 const cursorPattern = /^[a-f0-9]{64}$/;
+const pageCursorPattern = /^(?:\d{1,16}:)?[a-f0-9]{64}$/;
 
 export interface ExecutionJournalPage {
   readonly native: true;
@@ -28,8 +29,8 @@ export const executionJournalPageLimit = 100;
 export const executionJournalCollectionLimit = 100_000;
 
 export function executionJournalPath(after?: string): string {
-  if (after !== undefined && !cursorPattern.test(after)) throw new Error('invalid_execution_cursor');
-  const query = new URLSearchParams({ limit: String(executionJournalPageLimit) });
+  if (after !== undefined && !pageCursorPattern.test(after)) throw new Error('invalid_execution_cursor');
+  const query = new URLSearchParams({ limit: String(executionJournalPageLimit), order: 'recent' });
   if (after !== undefined) query.set('after', after);
   return `/api/chat/executions?${query}`;
 }
@@ -52,7 +53,8 @@ export function parseExecutionJournalEntry(input: unknown): ExecutionJournalEntr
   const message = asRecord(record.userMessage);
   const turn = asRecord(record.turn);
   const late = asRecord(record.lateOutcome);
-  if (record.schema !== 1 || typeof record.id !== 'string' || !cursorPattern.test(record.id) || record.cursor !== record.id
+  if (record.schema !== 1 || typeof record.id !== 'string' || !cursorPattern.test(record.id)
+    || record.cursor !== record.id && record.cursor !== `${record.admittedAt}:${record.id}`
     || !integer(record.revision, 1) || !reference(record.requestId)
     || typeof record.policyRevision !== 'string' || !/^[a-f0-9]{64}$/.test(record.policyRevision)
     || !reference(binding.conversationId) || !reference(binding.sessionId) || !integer(binding.generation, 1)
@@ -67,7 +69,7 @@ export function parseExecutionJournalEntry(input: unknown): ExecutionJournalEntr
     || record.turn !== null && (!reference(turn.id) || !reference(turn.evidenceId))
     || record.lateOutcome !== null && (!reference(late.eventId) || !member(outcomes, late.outcome))) return null;
   return {
-    schema: 1, id: record.id, cursor: record.id, revision: record.revision,
+    schema: 1, id: record.id, cursor: record.cursor as string, revision: record.revision,
     binding: { conversationId: binding.conversationId, sessionId: binding.sessionId, generation: binding.generation },
     requestId: record.requestId, policyRevision: record.policyRevision,
     admittedAt: record.admittedAt, deadlineAt: record.deadlineAt,
@@ -84,7 +86,7 @@ export function parseExecutionJournalEntry(input: unknown): ExecutionJournalEntr
 export function parseExecutionJournalPage(input: unknown): ExecutionJournalPage | null {
   const page = asRecord(input);
   if (page.native !== true || page.manualCancelAvailable !== false || !Array.isArray(page.items) || page.items.length > 1000
-    || page.next !== null && (typeof page.next !== 'string' || !cursorPattern.test(page.next))
+    || page.next !== null && (typeof page.next !== 'string' || !pageCursorPattern.test(page.next))
     || page.partial !== undefined && typeof page.partial !== 'boolean') return null;
   const items: ExecutionJournalEntry[] = [];
   const seen = new Set<string>();
@@ -119,11 +121,11 @@ export interface ExecutionPresentation {
 }
 
 export function executionPresentation(record: ExecutionJournalEntry): ExecutionPresentation {
-  if (record.deadlineReached || record.status === 'timed-out') return { label: '已超时', tone: 'warning', explanation: '已超过本次处理期限。超时不代表外部工作已停止；迟到结果只留档，不补发为下一条回复。' };
-  if (record.status === 'unknown' || record.externalStatus === 'unknown') return { label: '结果未知', tone: 'warning', explanation: '尚无法确认外部执行结果，不会自动重放、重置会话或补发请求。' };
+  if (record.deadlineReached || record.status === 'timed-out') return { label: '已超时', tone: 'warning', explanation: '本轮处理超时，迟到结果只留档。外部任务是否停止见下方状态。' };
+  if (record.status === 'unknown' || record.externalStatus === 'unknown') return { label: '结果未知', tone: 'warning', explanation: '尚未收到明确结果，本轮请求不会自动重发。' };
   if (record.status === 'completed' && record.externalStatus === 'completed' && !record.isolated && record.lateOutcome === null
     && record.userMessage !== null && record.turn !== null && record.lastEventId !== null
-    && !['requesting', 'accepted', 'unknown'].includes(record.cancelStatus)) return { label: '已完成', tone: 'success', explanation: '已观察到本次执行的处理完成；不代表所有出站消息都已送达。' };
+    && !['requesting', 'accepted', 'unknown'].includes(record.cancelStatus)) return { label: '处理完成', tone: 'success', explanation: '本轮模型处理已完成。消息送达情况请查看会话记录。' };
   if (record.externalStatus === 'cancelled') return { label: '已确认停止', tone: 'neutral', explanation: '已收到本次外部执行的停止确认，已发生的外部副作用不会撤回。' };
   if (record.status === 'failed' && record.externalStatus === 'failed') return { label: '执行失败', tone: 'warning', explanation: '已观察到处理失败；不会从此日志自动重放。' };
   if (record.status === 'rejected' && ['not-started', 'rejected'].includes(record.externalStatus)) return { label: '未受理', tone: 'neutral', explanation: '本次执行未被受理；不会通过日志按钮重新提交。' };
@@ -159,7 +161,7 @@ export function executionConversationLabel(conversationId: string): string {
 }
 
 export function executionContinuationLabel(record: ExecutionJournalEntry): string {
-  if (!record.isolated) return '未因本次记录暂停';
+  if (!record.isolated) return '本轮未暂停后续处理';
   return ['prepared', 'submitting', 'running'].includes(record.status) && !record.deadlineReached && record.externalStatus !== 'unknown'
     ? '等待本次任务结束' : '暂停后续任务';
 }

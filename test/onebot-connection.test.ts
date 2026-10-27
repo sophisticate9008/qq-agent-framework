@@ -70,7 +70,7 @@ test('manager waits for verified identity, omits event delivery and keeps protoc
   await fake.entered
   assert.deepEqual(manager.status(), { running: false })
   assert.equal(manager.connectionStatus().state, 'connecting')
-  assert.deepEqual(received, { endpoint: selected.onebotWs.endpoint, accessToken: 'private-ws-secret', connectTimeoutMs: 5_000, maxReconnectAttempts: 8 })
+  assert.deepEqual(received, { endpoint: selected.onebotWs.endpoint, accessToken: 'private-ws-secret', callbackTimeoutMs: 300_000, connectTimeoutMs: 5_000, maxReconnectAttempts: 8 })
   login.resolve()
   await connecting
   assert.deepEqual(manager.status(), { running: true })

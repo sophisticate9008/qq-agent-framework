@@ -84,6 +84,57 @@ function currency(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Z]{3}$/.test(value)
 }
 
+/** A known read split and exact total can prove an omitted write count is zero. */
+function restoreZeroCacheTokens(tokens: NativeUsageTokens): NativeUsageTokens {
+  if (tokens.cacheRead === null || tokens.input === null || tokens.output === null || tokens.total === null
+    || tokens.total !== tokens.input + tokens.output + (tokens.cacheRead ?? 0) + (tokens.cacheWrite ?? 0)) return tokens
+  return { ...tokens, cacheWrite: tokens.cacheWrite ?? 0 }
+}
+
+function historicalReferencePrice(turn: NativeUsageTurn, at: number): NativeUsagePriceSnapshot | undefined {
+  const rate = defaultUsagePriceAt(turn.model, at)
+  return rate ? { schema: 1, provider: turn.provider, model: turn.model, currency: rate.currency,
+    inputPerMillion: rate.cacheMiss, outputPerMillion: rate.output,
+    cacheReadPerMillion: rate.cacheHit, cacheWritePerMillion: rate.cacheWrite,
+    source: rate.source, version: rate.version, tier: rate.tier, unit: rate.unit, at,
+    cacheWritePricing: rate.cacheWritePricing, requestedModel: rate.requestedModel,
+    referenceModel: rate.referenceModel, fallbackUsed: rate.fallbackUsed } : undefined
+}
+
+function estimatedCost(tokens: NativeUsageTokens, price: NativeUsagePrice): number | null {
+  const { input, output, cacheRead, cacheWrite } = tokens
+  if (input === null || output === null || cacheRead === null || cacheWrite === null) return null
+  const amount = (input * price.inputPerMillion + output * price.outputPerMillion
+    + cacheRead * price.cacheReadPerMillion + cacheWrite * price.cacheWritePerMillion) / 1_000_000
+  assert(money(amount), 'USAGE_COST_OVERFLOW', 'Estimated cost exceeds supported bounds.')
+  return amount
+}
+
+/** Accept earlier null/zero cache encodings only for deduplication; never infer new usage from them. */
+function usageFingerprints(turn: NativeUsageTurn): ReadonlySet<string> {
+  let variants: NativeUsageTurn[] = [turn]
+  // Earlier DSH projections encoded all input as a cache miss when read usage
+  // was missing. Recognize that old fingerprint without rewriting its record.
+  if (turn.tokens.input === null && turn.tokens.cacheRead === null
+    && turn.tokens.total !== null && turn.tokens.output !== null
+    && turn.tokens.total >= turn.tokens.output + (turn.tokens.cacheWrite ?? 0)) {
+    variants.push({ ...turn, tokens: { ...turn.tokens,
+      input: turn.tokens.total - turn.tokens.output - (turn.tokens.cacheWrite ?? 0) } })
+  }
+  const compatible = variants.flatMap(base => {
+    let encodings = [base]
+    if (base.tokens.total !== null && base.tokens.input !== null && base.tokens.output !== null
+      && base.tokens.total === base.tokens.input + base.tokens.output + (base.tokens.cacheRead ?? 0) + (base.tokens.cacheWrite ?? 0)) {
+      for (const key of ['cacheRead', 'cacheWrite'] as const) if (base.tokens[key] === 0 || base.tokens[key] === null) {
+        encodings = encodings.flatMap(value => [value,
+          { ...value, tokens: { ...value.tokens, [key]: base.tokens[key] === null ? 0 : null } }])
+      }
+    }
+    return encodings
+  })
+  return new Set(compatible.map(value => digest(value)))
+}
+
 export function validateNativeUsagePrices(input: unknown): readonly NativeUsagePrice[] {
   assert(Array.isArray(input) && input.length <= 256, 'USAGE_INVALID_PRICING', 'A bounded price catalog is required.')
   const seen = new Set<string>()
@@ -118,13 +169,14 @@ function validateTurn(input: NativeUsageTurn): NativeUsageTurn {
     && (input.reportedCost === null || isRecord(input.reportedCost) && Object.keys(input.reportedCost).length === 2
       && money(input.reportedCost.amount) && currency(input.reportedCost.currency)),
   'USAGE_INVALID_TURN', 'Usage needs a trusted scoped turn and known or explicitly unknown counters.')
-  const knownComponents = [input.tokens.input, input.tokens.output, input.tokens.cacheRead, input.tokens.cacheWrite]
+  const tokens = restoreZeroCacheTokens(input.tokens)
+  const knownComponents = [tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite]
   if (knownComponents.every(value => value !== null)) {
     const total = knownComponents.reduce((sum, value) => sum + value, 0)
     assert(Number.isSafeInteger(total) && (input.tokens.total === null || input.tokens.total === total),
       'USAGE_INVALID_TURN', 'Reported total must match all reported token components.')
   }
-  return snapshot({ ...input, tokens: { ...input.tokens, reasoning: input.tokens.reasoning ?? null },
+  return snapshot({ ...input, tokens: { ...tokens, reasoning: tokens.reasoning ?? null },
     stepId: input.stepId ?? null, coverage: input.coverage ?? 'unknown' })
 }
 
@@ -165,15 +217,27 @@ export function readNativeUsageStoredTurn(record: StoredRecord) {
     ...(turn.stepId === undefined ? {} : { stepId: turn.stepId }), ...(turn.stepNumber === undefined ? {} : { stepNumber: turn.stepNumber }),
     ...(turn.retryNumber === undefined ? {} : { retryNumber: turn.retryNumber }), ...(turn.coverage === undefined ? {} : { coverage: turn.coverage }) }
   const rawPrice = value.priceSnapshot as unknown as NativeUsagePriceSnapshot | undefined
-  const priceSnapshot: NativeUsagePriceSnapshot | undefined = rawPrice === undefined ? undefined : {
+  let priceSnapshot: NativeUsagePriceSnapshot | undefined = rawPrice === undefined ? undefined : {
     schema: 1, source: rawPrice.source, version: rawPrice.version, tier: rawPrice.tier, unit: 1_000_000, at: rawPrice.at,
     provider: rawPrice.provider, model: rawPrice.model, currency: rawPrice.currency, inputPerMillion: rawPrice.inputPerMillion,
     outputPerMillion: rawPrice.outputPerMillion, cacheReadPerMillion: rawPrice.cacheReadPerMillion, cacheWritePerMillion: rawPrice.cacheWritePerMillion,
     cacheWritePricing: rawPrice.cacheWritePricing, ...(rawPrice.requestedModel === undefined ? {} : { requestedModel: rawPrice.requestedModel }),
     ...(rawPrice.referenceModel === undefined ? {} : { referenceModel: rawPrice.referenceModel }), ...(rawPrice.fallbackUsed === undefined ? {} : { fallbackUsed: rawPrice.fallbackUsed }) }
   const rawCost = value.cost as { amount: number; currency: string; source: string } | null
+  let cost = rawCost === null ? null : { amount: rawCost.amount, currency: rawCost.currency, source: rawCost.source }
+  let costRecovery: 'price-snapshot' | 'historical-reference' | null = null
+  if (cost === null && turn.recordKind !== 'opening-balance' && turn.recordKind !== 'detail-only') {
+    const originalPrice = priceSnapshot
+    const reference = originalPrice ?? historicalReferencePrice(turn, Number(value.recordedAt))
+    const amount = reference ? estimatedCost(turn.tokens, reference) : null
+    if (reference && amount !== null) {
+      priceSnapshot = reference
+      cost = { amount, currency: reference.currency, source: 'operator-price-estimate' }
+      costRecovery = originalPrice ? 'price-snapshot' : 'historical-reference'
+    }
+  }
   return { cursor: record.key, ...publicTurn, recordedAt: value.recordedAt,
-    cost: rawCost === null ? null : { amount: rawCost.amount, currency: rawCost.currency, source: rawCost.source },
+    cost, costRecovery,
     ...(priceSnapshot === undefined ? {} : { priceSnapshot }), pricingRevision: value.pricingRevision as number | null }
 }
 
@@ -249,10 +313,11 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, b
     const incompleteTotals = modelRecords.some(turn => turn.recordKind !== 'detail-only' && turn.coverage !== 'complete')
     const historical = items.some(turn => turn.recordKind === 'opening-balance' || turn.recordKind === 'detail-only' || turn.status === 'unknown')
     const tokens = Object.fromEntries(tokenKeys.map(key => [key,
-      partial || missingTokens[key] > 0 || incompleteTotals ? null : knownTokens[key]]))
+      totalRecords.length > missingTokens[key] ? knownTokens[key] : null]))
     return { turns: new Set(modelRecords.map(turn => digest([turn.sessionId, turn.generation, turn.turnId]))).size,
       records: items.length, incompleteTurns: incompleteTurns.size, partial, tokens, knownTokens, missingTokens,
-      knownCosts: costs, missingCostTurns, costComplete: !partial && missingCostRecords === 0 && !incompleteTotals,
+      knownCosts: costs, missingCostTurns, costComplete: !partial && missingCostRecords === 0 && !incompleteTotals
+        && totalRecords.length > 0 && Object.keys(costs).length === 1,
       tokenUsageAvailable: totalRecords.some(turn => tokenKeys.some(key => turn.tokens[key] !== null)),
       source: historical ? 'durable-dsh-turn-events-and-imported-history' : 'durable-dsh-turn-events',
       observationScope: historical ? 'observed-events-and-preserved-history' : 'observed-terminal-turns-only',
@@ -273,20 +338,21 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, b
       const turn = validateTurn(input)
       const key = digest([turn.conversationId, turn.sessionId, turn.generation, turn.turnId, turn.stepId])
       const fingerprint = digest(turn)
+      const fingerprints = usageFingerprints(turn)
       const prior = store.read(namespace, key)
       if (prior) {
-        assert(object(prior.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A recorded turn has different usage.')
+        assert(fingerprints.has(String(object(prior.value).fingerprint)), 'USAGE_TURN_CONFLICT', 'A recorded turn has different usage.')
         return readNativeUsageStoredTurn(prior)
       }
       const archived = store.read(NATIVE_USAGE_ARCHIVE_NAMESPACE, key)
       if (archived) {
-        assert(object(archived.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'An archived turn has different usage.')
+        assert(fingerprints.has(String(object(archived.value).fingerprint)), 'USAGE_TURN_CONFLICT', 'An archived turn has different usage.')
         return readNativeUsageStoredTurn(archived)
       }
       const retired = store.read(NATIVE_USAGE_RETIRED_NAMESPACE, key)
       if (retired) {
         const receipt = object(retired.value)
-        assert(receipt.schema === 1 && receipt.fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
+        assert(receipt.schema === 1 && fingerprints.has(String(receipt.fingerprint)), 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
         return Object.freeze({ retired: true as const, cursor: key, fingerprint })
       }
       const prices = turn.recordKind === 'opening-balance' || turn.recordKind === 'detail-only'
@@ -306,13 +372,10 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, b
           source: rate.source, version: rate.version, tier: rate.tier, unit: rate.unit, at: recordedAt,
           cacheWritePricing: rate.cacheWritePricing, requestedModel: rate.requestedModel,
           referenceModel: rate.referenceModel, fallbackUsed: rate.fallbackUsed } : null
-      let priceSnapshot: NativeUsagePriceSnapshot | undefined
+      let priceSnapshot: NativeUsagePriceSnapshot | undefined = price ?? undefined
       let cost: JsonObject | null = turn.reportedCost === null ? null : { ...turn.reportedCost, source: 'reported' }
-      if (cost === null && price && [turn.tokens.input, turn.tokens.output, turn.tokens.cacheRead, turn.tokens.cacheWrite]
-        .every(value => value !== null)) {
-        const amount = (turn.tokens.input! * price.inputPerMillion + turn.tokens.output! * price.outputPerMillion
-          + turn.tokens.cacheRead! * price.cacheReadPerMillion + turn.tokens.cacheWrite! * price.cacheWritePerMillion) / 1_000_000
-        assert(money(amount), 'USAGE_COST_OVERFLOW', 'Estimated cost exceeds supported bounds.')
+      const amount = cost === null && price ? estimatedCost(turn.tokens, price) : null
+      if (cost === null && price && amount !== null) {
         cost = { amount, currency: price.currency, source: 'operator-price-estimate' }
         priceSnapshot = price
       }
@@ -331,10 +394,10 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, b
         const winner = store.read(namespace, key) ?? store.read(NATIVE_USAGE_ARCHIVE_NAMESPACE, key)
         const retired = store.read(NATIVE_USAGE_RETIRED_NAMESPACE, key)
         if (!winner && retired) {
-          assert(object(retired.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
+          assert(fingerprints.has(String(object(retired.value).fingerprint)), 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
           return Object.freeze({ retired: true as const, cursor: key, fingerprint })
         }
-        assert(winner && object(winner.value).fingerprint === fingerprint, 'USAGE_TURN_CONFLICT', 'A recorded turn has different usage.')
+        assert(winner && fingerprints.has(String(object(winner.value).fingerprint)), 'USAGE_TURN_CONFLICT', 'A recorded turn has different usage.')
         return readNativeUsageStoredTurn(winner)
       }
     },

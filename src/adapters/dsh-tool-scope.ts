@@ -1,3 +1,4 @@
+import { parseNativeToolInventory, type NativeToolInventory } from '../contracts/native-tool-inventory.ts'
 import { DSH_EXECUTION_EVIDENCE_PROTOCOL, type DshExecutionEvidence, type DshExecutionEvidenceRequest } from '../contracts/dsh-execution-evidence.ts'
 import { readDshExecutionEvidence } from './dsh-execution-evidence.ts'
 export { createDshToolScopeReader } from './dsh-tool-scope-reader.ts'
@@ -29,6 +30,7 @@ export interface DshBridgePluginDescription {
 export interface DshBridgePluginPort {
   describe(signal: AbortSignal): Promise<DshBridgePluginDescription>
   inspectScope(request: DshToolScopeRequest, issuerEpoch: string, signal: AbortSignal): Promise<DshBridgeScopeInspection>
+  inspectToolInventory?(issuerEpoch: string, signal: AbortSignal): Promise<NativeToolInventory>
   inspectExecution?(request: DshExecutionEvidenceRequest, issuerEpoch: string, signal: AbortSignal): Promise<DshExecutionEvidence>
   claimReceipts(request: ClaimReceiptQuery & { readonly issuerEpoch: string }, signal: AbortSignal): Promise<ClaimReceiptPage>
 }
@@ -54,7 +56,7 @@ export type DshBridgeScopeInspection = {
   readonly missingReasons: readonly string[]
 }
 
-type PluginMethod = 'bridgePlugin/inspectExecution' | 'bridgePlugin/describe' | 'bridgePlugin/inspectScope' | 'bridgePlugin/claimReceipts'
+type PluginMethod = 'bridgePlugin/inspectToolInventory' | 'bridgePlugin/inspectExecution' | 'bridgePlugin/describe' | 'bridgePlugin/inspectScope' | 'bridgePlugin/claimReceipts'
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('DSH_PLUGIN_INVALID_RESPONSE')
@@ -94,6 +96,11 @@ export function createDshBridgePluginPort(invoke: (method: PluginMethod, request
         ...(value.frameworkToolProtocol === undefined ? {} : { frameworkToolProtocol: 'qq-agent-framework.tools/1' as const }),
         ...(value.workProtocol === undefined ? {} : { workProtocol: 'qq-agent-framework.work/1' as const }),
         ...(value.methods === undefined ? {} : { methods: [...value.methods as string[]] }) }
+    },
+    async inspectToolInventory(issuerEpoch, signal) {
+      const value = object(await invoke('bridgePlugin/inspectToolInventory', undefined, signal))
+      requireProof(value.protocol === BRIDGE_PLUGIN_PROTOCOL && value.issuerEpoch === issuerEpoch)
+      return parseNativeToolInventory(value)
     },
     async inspectExecution(request, issuerEpoch, signal) {
       const description = await port.describe(signal)

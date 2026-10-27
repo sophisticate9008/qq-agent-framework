@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { FrameworkError, assert, isRecord } from '../core/values.ts';
 import type { DurableStore, StoredRecord, DurableCasMutation } from '../contracts/ports.ts';
 import { NATIVE_USAGE_MAINTENANCE_ROWS, parseNativeUsageMaintenanceOperation, parseNativeUsageMaintenanceScope, isNativeUsageMaintenanceId,
@@ -55,6 +55,40 @@ export function createNativeUsageMaintenance(options: { readonly store: DurableS
   }
   return Object.freeze({
     get,
+    clearLedger() {
+      if (!store.compareAndSetBatch) fail('USAGE_MAINTENANCE_UNAVAILABLE');
+      const operationId = randomUUID(); const timestamp = now();
+      let affected = 0; const protectedUnknown = 0;
+      const resetNamespace = 'native-usage.resets';
+      let progress = store.write(resetNamespace, operationId,
+        json({ schema: 1, state: 'running', startedAt: timestamp, affected, protectedUnknown }), { expectedRevision: null });
+      for (const sourceNamespace of [NATIVE_USAGE_TURNS_NAMESPACE, NATIVE_USAGE_ARCHIVE_NAMESPACE]) {
+        let after: string | undefined;
+        while (true) {
+          const batch = store.list(sourceNamespace, { limit: 60, ...(after ? { after } : {}) });
+          if (batch.length === 0) break;
+          const mutations: DurableCasMutation[] = [];
+          for (const source of batch) {
+            readNativeUsageStoredTurn(source);
+            const fingerprint = object(source.value).fingerprint;
+            const retired = store.read(NATIVE_USAGE_RETIRED_NAMESPACE, source.key);
+            if (retired && object(retired.value).fingerprint !== fingerprint) fail('USAGE_MAINTENANCE_CONFLICT');
+            if (!retired) mutations.push({ kind: 'write', namespace: NATIVE_USAGE_RETIRED_NAMESPACE,
+              key: source.key, expectedRevision: null, value: json({ schema: 1, fingerprint, retiredAt: timestamp, operationId }) });
+            mutations.push({ kind: 'delete', namespace: sourceNamespace, key: source.key, expectedRevision: source.revision });
+            affected++;
+          }
+          mutations.push({ kind: 'write', namespace: resetNamespace, key: operationId, expectedRevision: progress.revision,
+            value: json({ schema: 1, state: 'running', startedAt: timestamp, affected, protectedUnknown }) });
+          const results = store.compareAndSetBatch(mutations);
+          progress = results[results.length - 1]!;
+          after = batch[batch.length - 1]!.key;
+        }
+      }
+      store.write(resetNamespace, operationId, json({ schema: 1, state: 'completed', startedAt: timestamp,
+        completedAt: now(), affected, protectedUnknown }), { expectedRevision: progress.revision });
+      return { ok: true as const, resetAccepted: true as const, operationId, affected, protectedUnknown };
+    },
     list(query: NativeUsageMaintenanceListQuery = {}): NativeUsageMaintenanceListSnapshot {
       const limit = query.limit ?? 20;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20 || Object.keys(query).some(key => !['limit', 'after'].includes(key)) || query.after !== undefined && !isNativeUsageMaintenanceId(query.after)) fail('USAGE_MAINTENANCE_INVALID');

@@ -27,3 +27,25 @@ test('typed SDK attachment reads aggregate bounded pages and reject cross-work o
   await assert.rejects(port.readAsset({ ...address, kind: 'file', attachmentId: asset.attachmentId }, new AbortController().signal),
     { code: 'DSH_WORK_INVALID_RESPONSE' })
 })
+
+
+test('full-access start requires explicit supported scope and verified child permission evidence', async () => {
+  let available = true
+  let supported: boolean | undefined
+  let fullAccess: boolean | undefined
+  const port = createDshWorkPort(async method => method === 'bridgePlugin/verifyWork'
+    ? { schema: 1, issuerEpoch: 'epoch', available, provider: 'spawn', continuable: true,
+      externalToolAuthorizationVerified: false, childFullAccessSupported: supported }
+    : { ...address, schema: 1, state: 'running', result: null, error: null, ...(fullAccess === undefined ? {} : { fullAccess }) })
+  const target = { issuerEpoch: 'epoch', parentSessionId: 'parent', modelProvider: 'provider', model: 'model', agentPreset: 'assistant', fullAccess: true }
+  const signal = new AbortController().signal
+  await assert.rejects(port.verify(target, signal), { code: 'DSH_WORK_INVALID_RESPONSE' })
+  available = false
+  assert.equal(await port.verify(target, signal), false)
+  available = true; supported = true
+  assert.equal(await port.verify(target, signal), true)
+  const start = { ...address, ...target, task: 'Owner task', context: '', timeoutMs: 1000 }
+  await assert.rejects(port.start(start, signal), { code: 'DSH_WORK_INVALID_RESPONSE' })
+  fullAccess = true
+  assert.equal((await port.start(start, signal)).fullAccess, true)
+})

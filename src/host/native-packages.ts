@@ -1,3 +1,4 @@
+import { extensionMetadata, validExtensionMetadata } from '../contracts/extension-metadata.ts'
 import { FrameworkError, assert, errorCode, identifier, snapshot } from '../core/values.ts'
 import type { DurableStore } from '../contracts/ports.ts'
 import type { NativePackageManifest, NativePackagePhase, NativePackageResourceKind, NativePackageSnapshot,
@@ -82,7 +83,7 @@ export function createNativePackages(options: {
   const configurationIds = new Set<string>()
   for (const definition of definitions) {
     const manifest = snapshot(definition.manifest)
-    assert(manifest.schema === 1 && identifier(manifest.id) && typeof manifest.version === 'string'
+    assert(manifest.schema === 1 && validExtensionMetadata(manifest) && identifier(manifest.id) && typeof manifest.version === 'string'
       && /^\d+\.\d+\.\d+$/.test(manifest.version)
       && (manifest.stateSchemaVersion === undefined || Number.isSafeInteger(manifest.stateSchemaVersion) && manifest.stateSchemaVersion >= 1 && manifest.stateSchemaVersion <= 1000)
       && Array.isArray(manifest.dependencies)
@@ -183,7 +184,7 @@ export function createNativePackages(options: {
   let stopping = false
   function describe(): readonly NativePackageSnapshot[] {
     return snapshot(order.map(entry => ({ schema: 1 as const, id: entry.definition.manifest.id,
-      version: entry.definition.manifest.version, state: entry.state, phase: entry.phase, reason: entry.reason,
+      version: entry.definition.manifest.version, ...extensionMetadata(entry.definition.manifest), dependencies: entry.definition.manifest.dependencies, state: entry.state, phase: entry.phase, reason: entry.reason,
       resources: entry.resources.map(({ id, kind, state }) => ({ id, kind, state })) })))
   }
   function context(entry: Entry, phaseSignal?: AbortSignal, phaseName?: NativePackagePhase, migrationSignal?: AbortSignal): NativePackageContext {

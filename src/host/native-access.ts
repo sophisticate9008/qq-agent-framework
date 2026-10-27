@@ -7,7 +7,8 @@ import { DEFAULT_NATIVE_CHAT_AUTHORIZATION, LEGACY_NATIVE_CHAT_AUTHORIZATION,
   type NativeChatAuthorization, type NativeChatConfiguration } from './native-chat-configuration.ts'
 
 export function nativeAuthorizationMode(authorization: NativeChatAuthorization): 'whitelist' | 'counted' {
-  return authorization.mode ?? 'counted'
+  // Legacy quota documents remain readable; runtime access is governed by the whitelist.
+  return 'whitelist'
 }
 
 export async function nativeAuthorizationFallback(directory: string) {
@@ -23,7 +24,7 @@ export async function nativeAuthorizationFallback(directory: string) {
 
 export function nativeAuthorizationProjection(authorization: NativeChatAuthorization,
   source: NonNullable<NativeChatConfiguration['authorizationSource']>) {
-  return { ...authorization, mode: nativeAuthorizationMode(authorization), whitelistAvailable: true,
+  return { ...authorization, mode: authorization.mode ?? 'counted', effectiveMode: 'whitelist', whitelistAvailable: true,
     modeSource: source === 'new-default' ? 'new-default-whitelist' : source === 'missing-with-history' ? 'missing-with-history'
       : authorization.mode === undefined ? 'legacy-counted' : 'explicit',
     authorizationDocumentPresent: source === 'stored', migrationRequired: source === 'missing-with-history',
@@ -55,7 +56,7 @@ export function readNativeAuthorizationVersion(directory: string, version: strin
 }
 
 export function nativeWhitelistCapabilities(configuration: NativeChatConfiguration, conversationId?: string): readonly string[] {
-  return ['agent.submit', 'messaging.send', ...(conversationId && configuration.authorization.forwardAllow?.includes(conversationId) ? ['messaging.forward'] : []), ...(configuration.execution.cancelOnTimeout ? ['agent.cancel'] : [])]
+  return ['agent.submit', 'messaging.send', 'messaging.forward', 'agent.tools.delegate', ...(configuration.execution.cancelOnTimeout ? ['agent.cancel'] : [])]
 }
 
 export function nativeChatGrantId(configuration: NativeChatConfiguration, identity: string, conversationId: string,

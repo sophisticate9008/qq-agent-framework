@@ -151,7 +151,7 @@ export function createAccessService(options: AccessServiceOptions) {
       let saved: AccessDocument | null = null;
       let writing = false;
       const reloadRequired = () => new AccessServiceError('APPLIED_RELOAD_REQUIRED',
-        'Access rules were saved, but runtime publication was not confirmed. Reload the saved rules; do not repeat the change.', saved, change.sourceId);
+        'Access rules were saved, but live synchronization was not confirmed. Repeating the same requested state can synchronize it without rewriting the list.', saved, change.sourceId);
       const interrupted = () => saved ? reloadRequired() : new AccessServiceError(writing ? 'ACCESS_CHANGE_UNKNOWN' : 'ACCESS_READ_UNKNOWN',
         writing ? 'The access write result is unknown. Read the saved rules before taking further action.' : 'The access read did not complete.', null, change.sourceId);
       return run(signal, async combined => {
@@ -165,7 +165,16 @@ export function createAccessService(options: AccessServiceOptions) {
         if (change.operation === 'add' && previous.value.deny.includes(target))
           throw new AccessServiceError('ACCESS_DENIED', 'A deny rule prevents adding this conversation.', null, change.sourceId);
         const present = previous.value.allow.includes(target);
-        if (present === (change.operation === 'add')) return snapshot({ state: 'unchanged' as const, document: previous, sourceId: change.sourceId });
+        if (present === (change.operation === 'add')) {
+          // A previous save may have succeeded before live publication failed.
+          // Reconcile the saved rules without writing or repeating the list change.
+          saved = previous;
+          if (publish) {
+            try { await publish(previous, previous, combined); if (combined.aborted) throw reloadRequired(); }
+            catch { throw reloadRequired(); }
+          }
+          return snapshot({ state: 'unchanged' as const, document: previous, sourceId: change.sourceId });
+        }
         const allow = change.operation === 'add' ? [...previous.value.allow, target] : previous.value.allow.filter(entry => entry !== target);
         if (allow.length > 1024) throw new AccessServiceError('ACCESS_LIMIT_EXCEEDED', 'The access allow list is at capacity.', null, change.sourceId);
         const next = snapshot({ allow, deny: previous.value.deny, owner: previous.value.owner });

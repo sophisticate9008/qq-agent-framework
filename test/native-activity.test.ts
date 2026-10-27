@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createNativeActivity } from '../src/host/native-activity.ts'
+import { createNativeActivity, nativeActivityContent } from '../src/host/native-activity.ts'
 
 test('native activity retains exactly the newest 100 observations in arrival order with immutable detached snapshots', () => {
   let now = 1000
@@ -50,4 +50,13 @@ test('native activity observation failures never escape into the host lifecycle'
   const invalid = createNativeActivity({ now: () => Number.NaN })
   assert.doesNotThrow(() => invalid.record('received'))
   assert.deepEqual(invalid.read('stopped').items, [])
+})
+
+test('media-only activity shows the actual content kind without leaking internal resource handles', () => {
+  const activity = createNativeActivity()
+  activity.record('send_confirmed', 'group:456', nativeActivityContent([
+    { type: 'image', assetId: 'internal-opaque-image' }, { type: 'face', id: '14' },
+    { type: 'file', assetId: 'internal-opaque-file', name: 'hello.txt' },
+  ]))
+  assert.equal(activity.read('running').items[0]!.content, '[图片] [QQ表情] [文件：hello.txt]')
 })

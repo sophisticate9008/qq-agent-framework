@@ -164,7 +164,11 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     { page: 'security', title: '运行设置', sectionTitle: '运行设置', sectionId: 'security-settings', kind: 'section' },
     { page: 'overview', title: '最近活动（100 条）', sectionTitle: '最近活动（100 条）', sectionId: 'recent-activity', kind: 'section' },
     { page: 'sessions', title: '待处理提问与工具审批', sectionTitle: '待处理提问与工具审批', sectionId: 'chat-interactions', kind: 'section' },
-    { page: 'features', title: 'Agent 扩展工具', sectionTitle: 'Agent 扩展工具', sectionId: 'chat-tools', kind: 'section' },
+    { page: 'features', title: '框架注入 DSH', sectionTitle: '框架注入 DSH', sectionId: 'chat-tools', kind: 'section' },
+    { page: 'features', title: '扩展注入 DSH', sectionTitle: '扩展注入 DSH', sectionId: 'extension-dsh-tools', kind: 'section' },
+    { page: 'features', title: 'DSH 自带工具', sectionTitle: 'DSH 自带工具', sectionId: 'dsh-builtin-tools', kind: 'section' },
+    { page: 'features', title: '本地扩展包', sectionTitle: '本地扩展包', sectionId: 'local-extensions', kind: 'section' },
+    { page: 'features', title: '框架服务', sectionTitle: '框架服务', sectionId: 'framework-services', kind: 'section' },
     { page: 'persona', title: '人设库', sectionTitle: '人设库', kind: 'section' },
     { page: 'adapters', title: '聊天运行', sectionTitle: '聊天运行', kind: 'section' },
     ...(runtimeConnected ? Object.values(usageSectionLabels).map(title => ({

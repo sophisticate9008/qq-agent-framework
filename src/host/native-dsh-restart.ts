@@ -1,3 +1,4 @@
+import type { NativeSessionActionTarget } from '../contracts/native-session-actions.ts'
 import { randomUUID } from 'node:crypto'
 import { assert, errorCode, snapshot } from '../core/values.ts'
 import { nativeRuntimeIsQuiescent } from '../contracts/native-runtime-quiescence.ts'
@@ -14,7 +15,9 @@ export interface NativeDshRestartPorts {
   inspect(configuration: NativeChatConfiguration, signal: AbortSignal): Promise<string>
   assertExclusive(configuration: NativeChatConfiguration, signal: AbortSignal): Promise<void>
   stop(signal: AbortSignal): Promise<void>
-  restart(configuration: NativeChatConfiguration, signal: AbortSignal): Promise<void>
+  prepareDelete?(target: NativeSessionActionTarget, configuration: NativeChatConfiguration, signal: AbortSignal): Promise<void>
+  verifyDelete?(target: NativeSessionActionTarget, configuration: NativeChatConfiguration, signal: AbortSignal): Promise<void>
+  restart(configuration: NativeChatConfiguration, signal: AbortSignal, target?: NativeSessionActionTarget): Promise<void>
   verify(configuration: NativeChatConfiguration, signal: AbortSignal): Promise<void>
   restore(revisions: NativeConfigurationRevisions, wasRunning: boolean, signal: AbortSignal): Promise<void>
 }
@@ -73,13 +76,17 @@ export function createNativeDshRestartService(options: {
           const configuration = await checkedConfiguration(revisions, signal)
           await options.ports.assertExclusive(configuration, signal)
           assert(await options.ports.inspect(configuration, signal) === record.targetIdentity, 'DSH_RESTART_TARGET_CHANGED', 'The local DSH target changed.')
-          await options.ports.restart(configuration, signal)
+          await options.ports.restart(configuration, signal, record.operation.deleteSession)
         })
       }
       await phase('verify', async signal => {
         const configuration = await checkedConfiguration(revisions, signal)
         assert(await options.ports.inspect(configuration, signal) === record.targetIdentity, 'DSH_RESTART_TARGET_CHANGED', 'The local DSH target changed.')
         await options.ports.verify(configuration, signal)
+        if (record.operation.deleteSession) {
+          assert(options.ports.verifyDelete, 'SESSION_DELETE_UNAVAILABLE', 'Deletion verification is unavailable.')
+          await options.ports.verifyDelete(record.operation.deleteSession, configuration, signal)
+        }
       })
       await phase('restore', signal => options.ports.restore(revisions, wasRunning, signal))
       await update(id, { state: 'completed', reasons: [] })
@@ -109,7 +116,7 @@ export function createNativeDshRestartService(options: {
         const prior = await storage.read()
         const existing = prior.value.records.find(record => record.operation.id === request.operationId)
         if (existing) {
-          assert(digest(existing.operation.revisions) === digest(request.revisions), 'DSH_RESTART_ID_CONFLICT', 'An operation ID cannot change intent.')
+          assert(digest([existing.operation.revisions, existing.operation.deleteSession ?? null]) === digest([request.revisions, request.deleteSession ?? null]), 'DSH_RESTART_ID_CONFLICT', 'An operation ID cannot change intent.')
           return read(request.operationId)
         }
         assert(!prior.value.retired?.some(item => item.id === request.operationId), 'DSH_RESTART_OPERATION_RETIRED', 'This completed maintenance identity cannot run again.')
@@ -123,12 +130,16 @@ export function createNativeDshRestartService(options: {
         const signal = AbortSignal.any([options.signal, AbortSignal.timeout(10_000)])
         const configuration = await checkedConfiguration(request.revisions, signal)
         await options.ports.assertExclusive(configuration, signal)
+        if (request.deleteSession) {
+          assert(options.ports.prepareDelete, 'SESSION_DELETE_UNAVAILABLE', 'Deletion is unavailable.')
+          await options.ports.prepareDelete(request.deleteSession, configuration, signal)
+        }
         const targetIdentity = await options.ports.inspect(configuration, signal)
         const status = await options.ports.status()
         assert(status !== null && typeof status === 'object' && 'state' in status, 'DSH_RESTART_STATUS_UNAVAILABLE', 'Chat status is unavailable.')
         assert(status.state === 'running' || status.state === 'stopped' || status.state === 'error', 'DSH_RESTART_BUSY', 'Chat lifecycle is busy.')
         const at = Date.now()
-        const operation: NativeDshRestartOperation = { schema: 1, id: request.operationId, state: 'running', phase: null, phaseState: 'pending',
+        const operation: NativeDshRestartOperation = { schema: 1, ...(request.deleteSession ? { deleteSession: request.deleteSession } : {}), id: request.operationId, state: 'running', phase: null, phaseState: 'pending',
           revisions: request.revisions, wasRunning: status.state === 'running', restartExecutionVerified: false, createdAt: at, updatedAt: at, reasons: [] }
         const record = { instanceId, targetIdentity, operation }
         await storage.write(prior.revision, { schema: 1, records: [...retained, record], retired })
@@ -163,6 +174,10 @@ export function createNativeDshRestartService(options: {
         await options.ports.assertExclusive(configuration, signal)
         assert(await options.ports.inspect(configuration, signal) === record.targetIdentity, 'DSH_RESTART_TARGET_CHANGED', 'The local DSH target changed.')
         await options.ports.verify(configuration, signal)
+        if (record.operation.deleteSession) {
+          assert(options.ports.verifyDelete, 'SESSION_DELETE_UNAVAILABLE', 'Deletion verification is unavailable.')
+          await options.ports.verifyDelete(record.operation.deleteSession, configuration, signal)
+        }
         const canContinue = operation.phase === 'restart' || operation.phase === 'verify' || operation.phase === 'restore'
         const next = { ...operation, state: alreadyRestored ? 'completed' as const : canContinue ? 'running' as const : 'blocked' as const,
           ...(alreadyRestored ? { phaseState: 'confirmed' as const } : {}),

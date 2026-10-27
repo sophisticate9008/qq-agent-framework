@@ -189,7 +189,7 @@ for (const scenario of cases) test(`default existing session: ${scenario.name} i
     assert.equal(object(privateGrant.used)['agent.submit'], 2)
     assert.equal(object(privateGrant.used)['messaging.send'], 2)
     if (scenario.selected) {
-      assert.equal(object(privateGrant.used)['agent.tools.delegate'], 2)
+      assert.equal(object(privateGrant.used)['agent.tools.delegate'], 0)
       assert.equal((await fixture.status()).toolDelegation && object((await fixture.status()).toolDelegation).externalToolAuthorizationVerified, false)
       assert(fixture.trace.filter(item => item.kind === 'scope' && item.names?.includes('local-observed-tool')).length >= 2)
     }

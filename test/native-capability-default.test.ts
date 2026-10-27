@@ -136,17 +136,14 @@ test('default text-only path retains prompt compatibility without requiring a ca
   assert.deepEqual(fixture.errors, [])
 })
 
-test('default unapproved capability selection cannot write deployment, create a native session or prompt', { timeout: 45_000 }, async context => {
+test('selected tools apply without separate approval and can start a whitelisted conversation', { timeout: 60_000 }, async context => {
   const fixture = await createNativeCapabilityRuntimeFixture(context)
-  await fixture.login()
-  await fixture.configure()
-  const before = await readFile(fixture.profilePath, 'utf8')
-  assert.equal((await fixture.apply()).state, 'blocked')
-  await fixture.start(503)
-  assert.equal(fixture.controls.creates, 0)
-  assert.equal(prompts(fixture).length, 0)
-  assert.equal(await readFile(fixture.profilePath, 'utf8'), before)
-  assert(!(await readdir(fixture.directory)).some(filename => filename.includes('.qqaf-backup-')))
+  await fixture.login(); await fixture.configure()
+  assert.equal((await fixture.apply()).state, 'verified')
+  assert.equal((await fixture.start()).chatReady, true)
+  fixture.inbound(1)
+  await until(() => prompts(fixture).length === 1, 'Expected prompt without separate tool approval')
+  assert.equal(fixture.controls.creates, 1)
   assert.deepEqual(fixture.errors, [])
 })
 
@@ -249,7 +246,7 @@ test('default prompt acceptance unknown isolates its actual native session and i
 const toolSchemas = () => [{ name: 'operator.work', description: 'Synthetic schema, no tool implementation is executed.',
   parameters: { type: 'object', properties: {}, additionalProperties: false } }]
 
-test('default selected nonempty live scope does not turn operator approval or owner identity into delegation permission', { timeout: 60_000 }, async context => {
+test('whitelisted nonempty live scope needs no separate delegation quota', { timeout: 60_000 }, async context => {
   const fixture = await createNativeCapabilityRuntimeFixture(context)
   fixture.controls.schemas = toolSchemas()
   await deploy(fixture)
@@ -263,7 +260,7 @@ test('default selected nonempty live scope does not turn operator approval or ow
   }, 'Delegation admission did not settle')
   assert.equal(fixture.controls.creates, 1)
   assert(fixture.trace.some(entry => entry.kind === 'scope' && entry.names?.includes('operator.work')))
-  assert.equal(prompts(fixture).length, 0)
+  assert.equal(prompts(fixture).length, 1)
   assert.deepEqual(fixture.errors, [])
 })
 
@@ -285,34 +282,25 @@ test('default explicit finite delegate and submit grants allow one observed none
   assert(fixture.selected.has(String(prompt.input.sessionId)))
   await finish(fixture, 1)
   fixture.inbound(2)
-  await settled(fixture, 2, 1)
-  assert.equal(prompts(fixture).length, 1)
+  await until(() => prompts(fixture).length === 2, 'Whitelist continues after an old finite quota')
   assert.equal(fixture.controls.creates, 1)
   assert.deepEqual(fixture.errors, [])
 })
 
-test('explicit new-version delegation after a denied observation reuses the same approved session without replaying the denied prompt', { timeout: 60_000 }, async context => {
+test('whitelisted tools retain the same session across completed rounds without changing authorization', { timeout: 60_000 }, async context => {
   const fixture = await createNativeCapabilityRuntimeFixture(context)
   fixture.controls.schemas = toolSchemas()
   await deploy(fixture)
   fixture.inbound(1)
-  await settled(fixture, 1)
-  assert.equal(prompts(fixture).length, 0)
-  assert.equal(fixture.controls.creates, 1)
-  const authorization = await fixture.api('/api/chat/authorization')
-  assert(Array.isArray(authorization.grants))
-  await fixture.api('/api/chat/runtime/stop', {})
-  await fixture.save('authorization', { version: '2', grants: authorization.grants.map(raw => ({ ...object(raw), toolDelegationUses: 1 })) })
-  assert.equal((await fixture.start()).chatReady, true)
-  assert.equal(prompts(fixture).length, 0)
+  await until(() => prompts(fixture).length === 1, 'First prompt')
+  await finish(fixture, 1)
   fixture.inbound(2)
-  await until(() => prompts(fixture).length === 1, 'Explicit new-version delegation was not admitted')
+  await until(() => prompts(fixture).length === 2, 'Second prompt')
+  assert.equal(prompts(fixture)[0]!.input.sessionId, prompts(fixture)[1]!.input.sessionId)
   assert.equal(fixture.controls.creates, 1)
-  assert.equal(prompts(fixture)[0]!.input.sessionId, 'capability-session-1')
-  assert.deepEqual(fixture.errors, [])
 })
 
-test('default delegation grant never substitutes for submit permission', { timeout: 60_000 }, async context => {
+test('legacy zero submit quota does not block whitelist', { timeout: 60_000 }, async context => {
   const fixture = await createNativeCapabilityRuntimeFixture(context)
   fixture.controls.schemas = toolSchemas()
   await fixture.login()
@@ -322,9 +310,11 @@ test('default delegation grant never substitutes for submit permission', { timeo
   await fixture.save('authorization', { version: '2', grants: authorization.grants.map(raw => ({ ...object(raw), submitUses: 0 })) })
   await fixture.approve()
   assert.equal((await fixture.apply()).state, 'verified')
-  await fixture.start(503)
-  assert.equal(fixture.controls.creates, 0)
-  assert.equal(prompts(fixture).length, 0)
+  await fixture.start()
+  fixture.inbound(1)
+  await until(() => prompts(fixture).length === 1, 'Legacy zero quota cannot block whitelist')
+  assert.equal(fixture.controls.creates, 1)
+  assert.equal(prompts(fixture).length, 1)
   assert.deepEqual(fixture.errors, [])
 })
 
@@ -373,8 +363,8 @@ test('recreating only the synthetic default gateway factory preserves spent dele
   assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization)
   await until(async () => (await fixture.status()).chatReady === true, 'Persisted running intent must finish restoring before fresh admission')
   fixture.inbound(2)
-  await settled(fixture, 1)
-  assert.equal(prompts(fixture).length, 1)
+  await until(() => prompts(fixture).length === 2, 'Restored whitelist remains usable')
+  assert.equal(prompts(fixture).length, 2)
   assert.equal(fixture.controls.creates, 1)
   assert.deepEqual(fixture.errors, [])
 })

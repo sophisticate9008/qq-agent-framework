@@ -30,7 +30,7 @@ export function recordNativeQuoteRead(store: DurableStore, conversationId: strin
   store.write(QUOTE_NAMESPACE, digest(conversationId), json(value), { expiresAt: value.at + 24 * 60 * 60 * 1000 })
 }
 export function readNativeMediaDiagnostics(store: Pick<DurableStore, 'read' | 'list'>, options: {
-  readonly conversationId: string; readonly running: boolean; readonly transcriber: boolean; readonly now?: number; readonly limit?: number
+  readonly conversationId: string; readonly running: boolean; readonly transcriber: boolean; readonly observeVideo?: boolean; readonly now?: number; readonly limit?: number
 }): NativeMediaDiagnostics {
   assert(isNativeAccessScope(options.conversationId), 'INVALID_CONVERSATION', 'A canonical conversation is required.')
   const now = options.now ?? Date.now()
@@ -41,11 +41,11 @@ export function readNativeMediaDiagnostics(store: Pick<DurableStore, 'read' | 'l
   const matched = rows.slice(0, 1000).map(row => object(row.value)).filter(value => value.conversationId === options.conversationId)
   const items: NativeMediaDiagnostics['items'][number][] = matched.slice(0, limit).map(value => {
     assert(value.schema === 1 && typeof value.assetId === 'string' && typeof value.messageId === 'string'
-      && ['image', 'audio', 'file', 'forward'].includes(String(value.kind))
+      && ['image', 'audio', 'file', 'video', 'forward'].includes(String(value.kind))
       && Number.isSafeInteger(value.registeredAt) && Number.isSafeInteger(value.expiresAt), 'MEDIA_DIAGNOSTICS_INVALID', 'Invalid media registration.')
     const kind = value.kind as NativeMediaDiagnostics['items'][number]['kind']
     const missingReasons = !options.running ? ['native_media_runtime_stopped'] : kind === 'audio' && !options.transcriber
-      ? ['native_media_transcriber_not_connected'] : Number(value.expiresAt) <= now ? ['native_media_expired'] : []
+      ? ['native_media_transcriber_not_connected'] : kind === 'video' && !options.observeVideo ? ['native_video_observation_disabled'] : Number(value.expiresAt) <= now ? ['native_media_expired'] : []
     return { assetId: String(value.assetId), kind, messageId: String(value.messageId), registeredAt: Number(value.registeredAt),
       expiresAt: Number(value.expiresAt), contentRead: value.contentRead === true, bytesRead: value.bytesRead === true,
       readingAvailable: missingReasons.length === 0, missingReasons, lastRead: observation(value.lastRead) }
@@ -59,6 +59,6 @@ export function readNativeMediaDiagnostics(store: Pick<DurableStore, 'read' | 'l
   }
   return snapshot({ schema: 1, conversationId: options.conversationId, observedAt: now, running: options.running,
     coverage: beyondScan || matched.length > limit ? 'partial' : 'complete', items, quote,
-    capabilities: { image: options.running, audio: options.running && options.transcriber, file: options.running,
+    capabilities: { video: options.running && options.observeVideo === true, image: options.running, audio: options.running && options.transcriber, file: options.running,
       forward: options.running, quote: options.running } })
 }

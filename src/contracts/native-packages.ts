@@ -1,3 +1,4 @@
+import type { ExtensionMetadata } from './extension-metadata.ts'
 export interface NativePackageServiceDeclaration {
   readonly id: string
   readonly version: number
@@ -10,7 +11,7 @@ export interface NativePackageContributionDeclaration {
   readonly order?: number
 }
 
-export interface NativePackageManifest {
+export interface NativePackageManifest extends ExtensionMetadata {
   readonly schema: 1
   readonly id: string
   readonly version: string
@@ -25,7 +26,8 @@ export type NativePackagePhase = 'prepare' | 'migrate' | 'install' | 'recover' |
 export type NativePackageState = 'registered' | 'starting' | 'running' | 'blocked' | 'failed' | 'stopping' | 'stopped' | 'unknown'
 export type NativePackageResourceKind = 'task' | 'timer' | 'subscription' | 'service' | 'contribution' | 'other'
 
-export interface NativePackageSnapshot {
+export interface NativePackageSnapshot extends ExtensionMetadata {
+  readonly dependencies?: readonly string[]
   readonly schema: 1
   readonly id: string
   readonly version: string

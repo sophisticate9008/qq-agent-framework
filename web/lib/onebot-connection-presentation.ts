@@ -1,4 +1,6 @@
 export interface OneBotConnectionSnapshot {
+  readonly accountOnline?: boolean | null;
+  readonly accountGood?: boolean | null;
   readonly state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
   readonly selfId: string | null;
   readonly lastError: string | null;
@@ -39,20 +41,25 @@ function describeError(code: string): { readonly category: DiagnosticCategory; r
 }
 
 export function presentOneBotConnection(connection: OneBotConnectionSnapshot) {
+  if (connection.state === 'connected' && connection.accountOnline === false) return {
+    statusLabel: 'QQ 已离线', statusTone: 'warning' as const,
+    diagnostic: { category: 'identity' as const, code: 'onebot_account_offline', tone: 'error' as const,
+      title: 'QQ 需要重新登录', message: 'QQ 已离线，请在协议端重新登录。' }
+  };
+  if (connection.state === 'connected' && connection.accountGood === false) return {
+    statusLabel: 'QQ 接入异常', statusTone: 'warning' as const,
+    diagnostic: { category: 'transport' as const, code: 'onebot_account_unhealthy', tone: 'error' as const,
+      title: 'QQ 接入服务异常', message: 'QQ 接入服务报告状态异常，请检查协议端运行状态。' }
+  };
   const statusLabel = { disconnected: 'WebSocket 未连接', connecting: 'WebSocket 正在连接', connected: 'WebSocket 已连接',
     reconnecting: 'WebSocket 正在重新连接', error: 'WebSocket 连接异常' }[connection.state];
   const statusTone = connection.state === 'connected' ? 'success' as const : connection.state === 'error' ? 'warning' as const : 'neutral' as const;
   let diagnostic: OneBotConnectionDiagnostic | null = null;
-  if (connection.lastError?.trim()) {
+  // Historical callback failures belong to message records, not connection health.
+  if (connection.state !== 'connected' && connection.lastError?.trim()) {
     const { category, detail } = describeError(connection.lastError);
     const code = /^[a-z][a-z0-9_]{0,95}$/.test(connection.lastError) ? connection.lastError : null;
-    if (category === 'processing') {
-      diagnostic = { category, code, tone: 'warning', title: '最近入站处理异常',
-        message: `${connection.state === 'connected' ? '当前 WebSocket 保持连接。' : ''}${detail}` };
-    } else if (connection.state === 'connected') {
-      diagnostic = { category, code, tone: 'neutral', title: '历史连接诊断',
-        message: '当前 WebSocket 已连接，最近一次异常记录保留供核对。可读取最新状态或查看管理日志，核对后续处理结果。' };
-    } else {
+    if (category !== 'processing') {
       diagnostic = { category, code, tone: category === 'lifecycle' ? 'neutral' : 'error',
         title: category === 'authentication' ? 'WebSocket 鉴权未通过' : category === 'identity' ? '协议账号待核验' : category === 'lifecycle' ? '连接关闭记录' : 'WebSocket 连接诊断', message: detail };
     }

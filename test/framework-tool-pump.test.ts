@@ -49,13 +49,35 @@ test('withdrawn SDK call cancels in-flight host work and unknown poll failure st
   assert.deepEqual(pump.status(), { state: 'unknown', pending: 0, lastError: 'TOOL_CHANNEL_UNKNOWN' })
 })
 
-test('unverified lease produces a rejection without invoking its proposed tool', async () => {
+test('a pump leaves other bridge leases untouched so their owning pump can complete them', async () => {
   let result: FrameworkToolResult | undefined
+  let polls = 0
   const pump = createFrameworkToolPump({ issuerEpoch: 'epoch-1', pollIntervalMs: 10,
-    port: port(async () => [item], async request => { result = request.result; return true }),
+    port: port(async () => { polls++; return [item] }, async request => { result = request.result; return true }),
     accepts: () => false, async execute() { throw new Error('must not dispatch an unverified lease') } })
   pump.start()
-  await awaitCondition(() => result !== undefined, { message: 'unverified tool projection rejected', timeoutMs: 1000 })
+  await awaitCondition(() => polls >= 3, { message: 'foreign lease remains available over several polls', timeoutMs: 1000 })
   await pump.close(signal)
-  assert.deepEqual(result, { status: 'rejected', code: 'TOOL_PROJECTION_UNVERIFIED' })
+  assert.equal(result, undefined)
+})
+
+test('an abort rejection for a withdrawn ticket leaves the channel available for the next conversation', async () => {
+  let polls = 0
+  const completed: string[] = []
+  const faults: string[] = []
+  const next = { ...item, ticket: 'ticket-next', call: { ...item.call, id: 'call-next', sessionId: 'session-next' } }
+  const pump = createFrameworkToolPump({ issuerEpoch: 'epoch-1', pollIntervalMs: 10,
+    port: port(async () => { polls++; return polls === 1 ? [item] : polls === 2 ? [] : [next] },
+      async request => { completed.push(request.ticket); return true }), accepts: () => true,
+    execute: (call, currentSignal) => call.id === 'call-next'
+      ? Promise.resolve({ status: 'confirmed', value: 'next conversation works' })
+      : new Promise((_resolve, reject) => currentSignal.addEventListener('abort', () => reject(currentSignal.reason), { once: true })),
+    onFault: code => faults.push(code) })
+  pump.start()
+  try {
+    await awaitCondition(() => completed.length === 1, { message: 'new conversation completes after another call is cancelled', timeoutMs: 1000 })
+    assert.deepEqual(completed, ['ticket-next'])
+    assert.deepEqual(faults, [])
+    assert.equal(pump.status().state, 'running')
+  } finally { await pump.close(signal) }
 })

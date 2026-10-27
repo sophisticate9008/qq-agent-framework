@@ -155,7 +155,7 @@ function archiveSource(store: DurableStore, binding: NativeSessionMigrationBindi
 
 export async function previewNativeSessionMigration(options: NativeSessionMigrationOptions): Promise<NativeSessionMigrationResult> {
   options.signal.throwIfAborted()
-  if (nativeAuthorizationMode(options.configuration.authorization) !== 'whitelist') return blocked(options, ['migration_counted_mode_unsupported'])
+  if (options.configuration.authorization.mode !== 'whitelist') return blocked(options, ['migration_counted_mode_unsupported'])
   const plans = listMigrationPlans(options.store)
   const unresolved = plans.filter(plan => ['committing', 'unknown', 'partial'].includes(plan.state))
   if (unresolved.length > 1) migrationFailure('NATIVE_SESSION_MIGRATION_INVALID')
@@ -244,7 +244,7 @@ export async function commitNativeSessionMigration(options: NativeSessionMigrati
   input: NativeSessionMigrationCommit): Promise<NativeSessionMigrationResult> {
   if (input.confirm !== true || digest(input.revisions) !== digest(options.configuration.revisions)
     || (input.migrationId === undefined) !== (input.revision === undefined)) migrationFailure('NATIVE_SESSION_MIGRATION_CONFIRMATION_REQUIRED')
-  if (nativeAuthorizationMode(options.configuration.authorization) !== 'whitelist') return blocked(options, ['migration_counted_mode_unsupported'])
+  if (options.configuration.authorization.mode !== 'whitelist') return blocked(options, ['migration_counted_mode_unsupported'])
   let record: StoredRecord | null
   if (input.migrationId !== undefined) record = options.store.read(NATIVE_SESSION_MIGRATIONS, input.migrationId)
   else {

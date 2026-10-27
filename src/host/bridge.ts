@@ -368,6 +368,13 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       const id = digest([binding.conversationId, binding.generation, event.id, event.type]);
       let record = store.read(agentEventNamespace, id);
       if (!record) {
+        const match = /^(.*):seq:(\d+)$/.exec(event.id);
+        if (match) {
+          const floor = store.read('host.agent-event-floors', digest([binding.sessionId, binding.generation, match[1]]));
+          if (floor && Number(object(floor.value).sequence) >= Number(match[2])) return;
+        }
+      }
+      if (!record) {
         try { record = store.write(agentEventNamespace, id, json({ sequence: nextAgentSequence(), payload,
           deadlineAt: clock() + eventTimeoutMs }), { expectedRevision: null }); }
         catch (error) {
@@ -501,6 +508,10 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       assert(reference(message.id) && reference(message.conversationId) && reference(message.userId)
         && Number.isFinite(message.receivedAt) && typeof message.directed === 'boolean' && typeof message.isSelf === 'boolean',
       'INVALID_INBOUND', 'A normalized authenticated message is required.');
+      const retentionFloor = store.read('host.retention', 'inbound-floor');
+      if (retentionFloor && message.receivedAt <= Number(object(retentionFloor.value).at)) {
+        return { status: 'rejected', eventId: message.id, errorCode: 'EVENT_RETENTION_EXPIRED' };
+      }
       let allowed: boolean;
       if (unsettledAuthorizations >= 256) {
         return snapshot({ status: 'rejected', eventId: message.id, errorCode: 'INBOUND_BACKPRESSURE' });

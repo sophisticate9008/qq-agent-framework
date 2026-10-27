@@ -13,7 +13,7 @@
 | 应用 running/unknown、apply 阶段 blocked/pending_reload | 原 operationId、phase、phaseState、reasons | 查询同一操作；明确 reconcile，不能另建请求绕开未决操作。 |
 | DSH 部署 pending_reload/unknown | 托管文件、provider/preset、当前进程可见的核验结果 | 使用对应部署 reconcile；读回证据满足要求后才进入下一步。 |
 | 执行 unknown/超时/丢流 | execution、session/generation、request/turn、取消状态 | 原执行只记录晚到结果；使用显式执行核对和恢复预览/提交。 |
-| inbox blocked | 所属会话、原期限、队列阶段与错误 | 保留未决输入，不自动恢复投递。 |
+| 历史 inbox blocked | 所属会话、原期限、已提交批次与错误 | 启动时整理旧队列；未提交且未过期的输入继续排队，结果未知的已提交输入只保留回执，不重发。 |
 | 包迁移/清理 unknown | owner、内容身份、operationId、页来源或生命周期证据 | 用包的明确只读核对接口检查，再选择后续动作。 |
 | legacy 接管 unknown | 原库存清单、账号身份、全部既有 DB marker | 只读核对后 CAS 完成登记；缺少原库不能按空库处理。 |
 | 私有存储不可读/损坏 | 文件身份、模式、owner、原数据库及 WAL | 恢复受信任的一致备份或修复外部条件后再读取，不改成缺省空状态。 |
@@ -52,7 +52,7 @@ GET /api/chat/application?id=<原 operationId>
 
 公开 reconcile DTO 中的 verified、missingReasons、verificationScope、unverified 和 preset 证据共同决定可继续条件。文件和托管 provider/preset provenance 通过，不等于外部进程已加载相同凭据值；公开 `credentialValueIdentityVerified` 保持 false。界面只在相应证据满足时提供明确的后续操作。
 
-助手目标独立使用 `/api/chat/assistant/deployment` 及其 `/prepare`、`/apply`、`/reconcile`。保存 `chat-assistant` 的 provider/model/reasoning 只是选择，明确应用后才部署独立 target；target resolver 仍检查当前配置、已应用证据与模型元数据。unknown 不在工作启动时隐式部署。`fullAccess: true` 不被执行器用来放大 DSH 权限。
+助手目标独立使用 `/api/chat/assistant/deployment` 及其 `/prepare`、`/apply`、`/reconcile`。保存 `chat-assistant` 的 provider/model/reasoning 只是选择，明确应用后才部署独立 target；target resolver 仍检查当前配置、已应用证据与模型元数据。unknown 不在工作启动时隐式部署。只有真实主人准入的独立工作子会话才应用 `fullAccess: true`，首轮前通过 DSH 官方权限服务设置并读回全本机权限；父会话和普通聊天不改变。请求范围与实际授予证据随工作记录持久保留，冷恢复仍核验原子会话绑定。
 
 本机接入优先自动发现实际 profile、凭据层与所选模型元数据，不要求重复填写已知路径或容量。修改受管配置之外的文件，不应通过“重新生成全部配置”来修复。实现与核对见 [dsh-profile-deployment.ts](../src/adapters/dsh-profile-deployment.ts)、[native-assistant-target.ts](../src/host/native-assistant-target.ts)。
 
@@ -70,7 +70,7 @@ GET /api/chat/application?id=<原 operationId>
 
 **`GET /api/chat/sessions/migration` 是准备操作。** 它读取外部 DSH 的迁移预览证据，并持久保存带 migrationId/revision 的 prepared 计划，不是纯历史查询。计划提交仍需显式 `POST /api/chat/sessions/migrate`，携带预览所得计划与 revision。迁移中断后使用原计划核对，不重做 child fork 或换 operationId 掩盖已有结果。
 
-重置要求聊天停止、确切绑定 revision/generation 且没有未排空执行。永久 sessionId ownership 保留旧 ID；不能把同一外部 sessionId 重新分配给另一会话或 generation。迁移后尚未再次启动就重置，也不能丢掉旧 ownership。
+解除绑定核对确切绑定 revision/generation，并要求目标会话没有未结束或结果未知的处理；运行中可以直接解除空闲会话的绑定。永久 sessionId ownership 保留旧 ID，不能把同一外部 sessionId 重新分配给另一会话或 generation。模型历史请到 DSH 删除，控制台禁用“删除”按钮，删除 API 返回 `session_delete_use_dsh`。已有删除维护操作继续按原操作编号查询与核对，未知结果不重复删除。
 
 执行 journal 保留 request、外部 claim receipt、userMessage、turn、期限、取消和晚到结果。`GET /api/chat/executions/recovery?id=<id>` 读取已保存恢复计划；`POST .../preview` 和 `POST .../commit` 分别准备与明确提交，commit 要求计划 revision 和 `confirm: true`。该流程在检查外部执行证据后建立后续绑定边界，不代表原 prompt 会重新提交。普通历史读取不实例化 executor 或发起恢复。
 
@@ -78,13 +78,13 @@ GET /api/chat/application?id=<原 operationId>
 
 ## 队列、工作、提醒与交互
 
-`GET /api/chat/inbox` 返回每个会话 idle/pending/dispatching/blocked、pending 数量、期限和错误，以及 `automaticReplayAvailable: false`。正常忙碌队列可以在同一已运行实例内继续处理新输入；重启未完成队列会转为 blocked，dispatching/unknown 不自动重放。全局 follow 池满导致的新会话拒绝也不等于已加入普通忙碌队列。
+`GET /api/chat/inbox` 返回每个会话 idle/pending/dispatching/blocked、pending 数量、期限和错误，以及 `automaticReplayAvailable: false`。正常忙碌和旧执行核对期间，新输入在原期限内排队；过期输入结束，不冻结后续消息。重启保留未提交且未过期的输入；中断的提交批次记为 unknown 回执并移出待发队列，不自动重放。旧 blocked 记录启动时按同样规则整理，旧格式无法确认提交范围时不补发。执行结果未确认且有新输入等待时，后台每会话最多五秒核对一次 SDK 结束证据、全局最多四路；确认结束后自动继续。SDK 尚未确认结束时不会强行并发提交；也不自动重建或清空会话。全局 follow 池满导致的新会话拒绝也不等于已加入普通忙碌队列。
 
 `GET /api/chat/work` 和带 id 的详情查询只读取持久工作记录，包括交付和文件回执。网页不提供工作 start/followup/interrupt/reconcile 写入口。工作指令仍通过所属 QQ 来源和功能 policy；SDK 封装也必须使用调用方 execution。
 
 提醒规则和 occurrence 分开持久化。显式停止 runtime 不删除规则；下次 start 恢复规则服务。发生时核验当前访问规则与发送授权，unknown 发送不自动重试，相应规则可保留阻断证据。配置提醒不会顺带授权模型工具或开启主动话题。日历和持久任务同样先保存发生记录，重启不会把原 running/unknown 当成尚未执行。
 
-模型问题和工具确认会发到所属 QQ 会话，实际配置主人在原问题上下文中答复。网页只读问题摘要，没有代答或批准接口。记忆 proposal 的确认也在 QQ 中完成：`/确认记忆 memory-...`；撤销使用 `/撤销记忆 memory-...`。`/记住` 默认绑定来源会话，`/记住群` 要求群来源，`/记住全局` 是主人明确共享。网页手工管理、纠正或撤销不会自动确认模型 proposal。
+模型问题会发到所属 QQ 会话，实际配置主人在原问题上下文中答复。外部工具确认按当前请求的真实主人来源自动允许或拒绝，不再等待逐次答复。网页只读问题摘要，没有代答或批准接口。记忆 proposal 的确认也在 QQ 中完成：`/确认记忆 memory-...`；撤销使用 `/撤销记忆 memory-...`。`/记住` 默认绑定来源会话，`/记住群` 要求群来源，`/记住全局` 是主人明确共享。网页手工管理、纠正或撤销不会自动确认模型 proposal。
 
 ## bootstrap、包状态与关闭
 

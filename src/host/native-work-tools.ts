@@ -1,3 +1,4 @@
+import { nativeToolCapabilityDefinition, type NativeToolCapability } from '../contracts/native-tool-capabilities.ts';
 import type { JsonObject, JsonValue, EffectAdapter, EffectRequest } from '../core/types.ts';
 import { assert, isRecord } from '../core/values.ts';
 import type { NativeToolContribution } from './native-framework-tools.ts';
@@ -5,17 +6,18 @@ import type { createNativeWorkExecutor } from './native-work.ts';
 import type { NativeMessageSourceReader } from './native-message-sources.ts';
 import { json } from './data.ts';
 
-const definitions: readonly { name: string; capability: string; description: string; properties: JsonObject }[] = [
-  { name: 'qaf_work_start', capability: 'native.work.start', description: '接受当前实际主人的明确工作委派，在独立助手运行并将结果送回当前QQ会话。聊天可继续。仅当前配置主人可以发起；失败或未知不自动重复执行。',
-    properties: { task: { type: 'string', minLength: 1, maxLength: 16000 }, context: { type: 'string', maxLength: 32000 } } },
-  { name: 'qaf_work_status', capability: 'native.work.status', description: '读取当前会话内一项工作的实际状态、结果和投递回执。查询不会重放工作。', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
-  { name: 'qaf_work_followup', capability: 'native.work.followup', description: '按当前实际主人的明确要求给原工作追加内容。queue排队，steer调整正在进行的工作。只限原会话和当前父会话代次。',
+const definitions: readonly { name: string; capability: NativeToolCapability; properties: JsonObject }[] = [
+  { name: 'qaf_work_start', capability: 'native.work.start',
+    properties: { task: { type: 'string', minLength: 1, maxLength: 16000, description: '交给助手执行的具体要求，保留用户指定的路径、内容和交付目标。' },
+      context: { type: 'string', maxLength: 32000, description: '完成任务必需的上下文；没有补充时传空字符串，不复制整段聊天或把先前未经核实的能力判断当成限制。' } } },
+  { name: 'qaf_work_status', capability: 'native.work.status', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
+  { name: 'qaf_work_followup', capability: 'native.work.followup',
     properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' }, text: { type: 'string', minLength: 1, maxLength: 16000 }, delivery: { enum: ['queue', 'steer'] } } },
-  { name: 'qaf_work_interrupt', capability: 'native.work.interrupt', description: '按当前实际主人的明确要求停止原工作，保留实际停止状态和已产出的结果。未知结果不重复停止。', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
-  { name: 'qaf_work_reconcile', capability: 'native.work.reconcile', description: '按当前实际主人的明确要求核对未知工作的SDK证据；不重新执行工作，也不自动补发结果。', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } }
+  { name: 'qaf_work_interrupt', capability: 'native.work.interrupt', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
+  { name: 'qaf_work_reconcile', capability: 'native.work.reconcile', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } }
 ];
 export const NATIVE_WORK_TOOLS: readonly NativeToolContribution[] = definitions.map(tool => ({
-  definition: { name: tool.name, capability: tool.capability, description: tool.description, featureId: 'framework-tools', timeoutMs: 10000,
+  definition: { registrationSource: { origin: 'framework-builtin' as const, ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' as const }, name: tool.name, capability: tool.capability, description: nativeToolCapabilityDefinition(tool.capability).description, featureId: 'framework-tools', timeoutMs: tool.name === 'qaf_work_start' ? 30000 : 10000,
     parameters: { type: 'object', additionalProperties: false, required: Object.keys(tool.properties), properties: tool.properties } },
   validate(input: JsonValue): JsonValue {
     assert(isRecord(input) && Object.keys(input).length === Object.keys(tool.properties).length

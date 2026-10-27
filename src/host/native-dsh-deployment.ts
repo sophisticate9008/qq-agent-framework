@@ -40,6 +40,8 @@ interface PreparedProfile {
   readonly sessionConfigurationFingerprint: string
 }
 export interface DshProfileDeploymentOptions {
+  readonly protocolInstructions?: string
+  readonly presetPlugins?: readonly JsonObject[]
   readonly verificationTimeoutMs?: number
   readonly pollIntervalMs?: number
   readonly resolveCapabilityApproval?: ResolveChatCapabilityApproval
@@ -47,6 +49,8 @@ export interface DshProfileDeploymentOptions {
   readonly conversationKinds?: readonly ('group' | 'private')[]
   /** Framework session storage whose verified baseline authorizes preserving managed chat preset identities. */
   readonly sessionDirectory?: string
+  /** Other managed targets may supply bindings backed by their own verified deployment journal. */
+  readonly resolvePreservedPresetBindings?: (configuration: NativeChatConfiguration) => Promise<readonly DshPresetBinding[]>
   readonly reloadSessions?: (configuration: NativeChatConfiguration, signal: AbortSignal) => Promise<void>
 }
 function configurationIdentity(configuration: NativeChatConfiguration): string {
@@ -102,7 +106,9 @@ async function prepareProfile(configuration: NativeChatConfiguration, signal: Ab
   if (!plan || !persona) fail('active_chat_plan_required')
   const read = await files.read(target)
   const definition = buildChatSessionDefinition(plan, persona)
-  const preservedBindings = preservedPresetBindings(configuration, options.sessionDirectory)
+  const preservedBindings = options.resolvePreservedPresetBindings
+    ? { bindings: await options.resolvePreservedPresetBindings(configuration), activeSessions: false }
+    : preservedPresetBindings(configuration, options.sessionDirectory)
   let capabilityDeclaration: ChatCapabilityDeclaration | undefined
   if (definition.capabilitySelection) {
     if (!configuration.adapters.dshAgent.enabled) fail('dsh_agent_not_enabled')
@@ -115,6 +121,8 @@ async function prepareProfile(configuration: NativeChatConfiguration, signal: Ab
     } finally { await client.close() }
   }
   const preparation = prepareDshDeployment({
+    ...(options.protocolInstructions === undefined ? {} : { protocolInstructions: options.protocolInstructions }),
+    ...(options.presetPlugins === undefined ? {} : { presetPlugins: options.presetPlugins }),
     definition, providers: configuration.providers, target: read.snapshot,
     modelSettings: configuration.deployment.modelSettings ?? undefined, namespace: configuration.deployment.namespace,
     ...(options.conversationKinds === undefined ? {} : { conversationKinds: options.conversationKinds }),
@@ -226,9 +234,11 @@ export function createNativeDshDeploymentRuntime(options: DshProfileDeploymentOp
   const timeoutMs = options.verificationTimeoutMs ?? 5_000
   const pollMs = options.pollIntervalMs ?? 250
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000
+    || options.protocolInstructions !== undefined && (typeof options.protocolInstructions !== 'string' || options.protocolInstructions.length > 65_536)
     || !Number.isSafeInteger(pollMs) || pollMs < 1 || pollMs > 5_000
     || options.sessionDirectory !== undefined && (typeof options.sessionDirectory !== 'string'
       || !isAbsolute(options.sessionDirectory) || options.sessionDirectory.length > 4_096 || options.sessionDirectory.includes('\0'))
+    || options.resolvePreservedPresetBindings !== undefined && (typeof options.resolvePreservedPresetBindings !== 'function' || options.sessionDirectory !== undefined)
     || options.reloadSessions !== undefined && typeof options.reloadSessions !== 'function'
     || options.resolveCapabilityApproval !== undefined && typeof options.resolveCapabilityApproval !== 'function') throw new TypeError('Invalid DSH deployment options')
   let staged: PreparedProfile | undefined

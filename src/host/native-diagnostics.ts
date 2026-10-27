@@ -21,6 +21,16 @@ export function readNativeDiagnosticHistory(store: Pick<DurableStore, 'read' | '
     const value = object(session.value)
     assert(value.schema === 1 && ['ready', 'creating', 'unknown', 'retired'].includes(String(value.state)), 'DIAGNOSTIC_HISTORY_INVALID', 'Invalid session metadata.')
     if (value.state === 'unknown' || value.state === 'creating') checks.push(check('session_unconfirmed', 'blocked', '会话创建结果尚未确认。', '核对会话记录；不要重复创建或清空历史。', '#sessions'))
+    if (typeof value.sessionId === 'string') {
+      const stored = store.read('native-chat.tool-projections', digest(value.sessionId))
+      const projection = stored ? object(stored.value) : null
+      if (projection?.generation === value.generation && ['installing', 'unknown'].includes(String(projection.state))) {
+        const code = typeof projection.lastError === 'string' && /^[A-Z][A-Z_]{1,63}$/.test(projection.lastError)
+          ? `（${projection.lastError}）` : ''
+        checks.push(check('tool_projection_unconfirmed', 'blocked', `模型所需的工具尚未准备好，这条消息还没有交给模型。${code}`,
+          '核对工具挂载错误；修复后启动聊天会核对挂载，不重放原消息。', '#features'))
+      }
+    }
   }
   const claim = store.read('host.execution-conversations', digest(conversationId))
   if (claim) {
@@ -33,8 +43,8 @@ export function readNativeDiagnosticHistory(store: Pick<DurableStore, 'read' | '
       && ['prepared', 'submitting', 'running', 'completed', 'failed', 'rejected', 'timed-out', 'unknown'].includes(String(value.status)),
     'DIAGNOSTIC_HISTORY_INVALID', 'Invalid execution evidence.')
     checks.push(['unknown', 'timed-out'].includes(String(value.status)) || ['unknown', 'requesting'].includes(String(value.cancelStatus))
-      ? check('execution_isolated', 'blocked', '本会话有结果未确认的执行，已隔离后续提交。', '到执行记录核对持久证据；取消未知时使用新会话地址恢复。', '#sessions')
-      : check('execution_busy', 'waiting', '本会话正在处理请求。', '等待本轮完成；连续补充会进入有界队列。', '#sessions'))
+      ? check('execution_isolated', 'blocked', '上一次处理仍待确认；新消息会在期限内等待后台核对。', '有新消息排队时会自动核对；也可查看原处理记录。', '#sessions')
+      : check('execution_busy', 'waiting', '模型正在处理这条会话。', '等待本轮完成；期间发来的补充会先排队。', '#sessions'))
   }
   const reply = store.read('host.replies', digest(conversationId))
   if (reply) {
@@ -94,15 +104,15 @@ export function projectNativeDiagnostics(options: {
   const checks: NativeDiagnosticCheck[] = []
   if (!options.running) checks.push(check('runtime_stopped', 'blocked', '聊天运行实例尚未启动。', '检查配置后显式启动聊天。', '#adapters'))
   for (const reason of options.globalReasons.slice(0, 32)) checks.push(check(reason, 'blocked', `运行条件未满足：${reason}`, '查看聊天运行状态及下一步操作。', '#adapters'))
-  if (!options.accessAllowed) checks.push(check('conversation_not_allowed', 'blocked', '当前访问策略未允许此会话。', '由主人确认后修改会话访问范围。', '#security'))
+  if (!options.accessAllowed) checks.push(check('conversation_not_allowed', 'blocked', '此会话不在白名单中。', '由主人确认后修改会话访问范围。', '#security'))
   if (options.authorized === false) checks.push(check('conversation_budget_unavailable', 'blocked', '此会话的提交或发送授权不可用、已过期或次数已用尽。', '核对当前授权范围、到期时间和剩余次数。', '#security'))
   if (options.authorized === null && options.running) checks.push(check('conversation_budget_unknown', 'unknown', '无法读取此会话的实际授权。'))
   if (!options.input) checks.push(check('input_configuration_unknown', 'unknown', '无法读取消息参与配置。', '检查消息参与配置。', '#features'))
   else if (!options.input.enabled) checks.push(check('input_' + options.input.reason, 'blocked', '消息参与配置排除了此会话。', '修改参与开关或适用范围。', '#features'))
-  if (options.pendingInteractions) checks.push(check('qq_interaction_pending', 'waiting', '模型正在等待所属 QQ 会话内的主人答复或工具确认。', '请实际配置主人在原 QQ 会话回复对应提示。'))
+  if (options.pendingInteractions) checks.push(check('qq_interaction_pending', 'waiting', '模型正在等待主人在 QQ 中回答问题。', '请实际配置主人在原 QQ 会话回复对应提示。'))
   checks.push(...(options.history?.checks ?? []))
   if (options.historyState === 'unavailable') checks.push(check('history_unavailable', 'unknown', '无法核实持久执行和发送记录。', '检查本机存储和诊断日志。'))
-  if (checks.length === 0) checks.push(check('ready', 'ready', '已核对的运行、访问、参与和执行条件均满足。'))
+  if (checks.length === 0) checks.push(check('ready', 'ready', '当前连接、白名单与会话状态正常。'))
   const state = checks.some(item => item.state === 'blocked') ? 'blocked' : checks.some(item => item.state === 'unknown') ? 'unknown'
     : checks.some(item => item.state === 'waiting') ? 'waiting' : 'ready'
   return snapshot({ schema: 1, source: 'native-chat', conversationId: options.conversationId, observedAt: options.now ?? Date.now(), state, checks,

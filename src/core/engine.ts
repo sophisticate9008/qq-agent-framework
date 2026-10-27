@@ -1,3 +1,4 @@
+import { extensionMetadata, validExtensionMetadata } from '../contracts/extension-metadata.ts';
 import { assertAccountScope, normalizeAccountScope } from './account-scope.ts';
 import type { AccountScope } from '../contracts/account-scope.ts';
 import { normalizeDeliveryReceipt } from './delivery.ts';
@@ -144,14 +145,14 @@ async function beforeDeadline<Result>(operation: PromiseLike<Result> | Result, d
 }
 
 function featureDefinition(feature: FeatureDefinition, supportedEvents: Set<string>, supportedCapabilities: Set<string>): FeatureManifest {
-  assert(feature && identifier(feature.id) && !feature.id.includes('.')
+  assert(feature && validExtensionMetadata(feature) && identifier(feature.id) && !feature.id.includes('.')
     && typeof feature.version === 'string' && /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(feature.version)
     && feature.apiVersion === 1 && synchronous(feature.setup), 'INVALID_FEATURE', 'A versioned synchronous feature setup is required.');
   for (const [field, allowed] of [['capabilities', supportedCapabilities], ['subscriptions', supportedEvents]] as const) {
     assert(Array.isArray(feature[field]) && feature[field].every(value => allowed.has(value))
       && new Set(feature[field]).size === feature[field].length, 'INVALID_FEATURE', 'Feature contracts must use supported unique entries.');
   }
-  return snapshot({ id: feature.id, version: feature.version, apiVersion: 1,
+  return snapshot({ id: feature.id, version: feature.version, apiVersion: 1, ...extensionMetadata(feature),
     capabilities: feature.capabilities, subscriptions: feature.subscriptions });
 }
 

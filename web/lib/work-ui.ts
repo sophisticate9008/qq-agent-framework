@@ -10,6 +10,7 @@ export const workDeliveryLabels: Readonly<Record<NativeWorkView['delivery'], str
 export function workContentSummary(content: MessageContent): string {
   switch (content.type) {
     case 'text': return content.text;
+    case 'face': return `QQ表情：${content.id}`;
     case 'image': return `图片资源：${content.assetId}`;
     case 'audio': return `音频资源：${content.assetId}`;
     case 'file': return `文件：${content.name}（资源 ${content.assetId}）`;

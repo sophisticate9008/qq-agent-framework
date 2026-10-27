@@ -1,3 +1,5 @@
+import { NATIVE_TOOL_CAPABILITY_CATALOG } from '../../src/contracts/native-tool-capabilities.ts';
+
 const capabilityNames = new Map<string, string>([
   ['chat-plans', '聊天方案'], ['personas', '人设'], ['model-settings', '模型设置'], ['access-policy', '访问范围'],
   ['agent.submit', '提交聊天请求'], ['agent.cancel', '请求停止任务'], ['agent.tools.delegate', '委派含工具的会话'], ['model.respond', '调用模型'],
@@ -10,7 +12,7 @@ const featureStates = new Map<string, string>([
 ]);
 
 export function capabilityLabel(id: string): string {
-  return capabilityNames.get(id) ?? '扩展能力';
+  return capabilityNames.get(id) ?? NATIVE_TOOL_CAPABILITY_CATALOG.find(item => item.capability === id)?.name ?? '扩展能力';
 }
 
 export function readDeclaredCapabilities(value: unknown): readonly string[] | null {

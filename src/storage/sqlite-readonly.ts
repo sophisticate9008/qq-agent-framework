@@ -3,7 +3,8 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { JsonValue } from '../core/types.ts';
 import { assert, FrameworkError, snapshot } from '../core/values.ts';
-import type { DurableStore, StoredRecord } from '../contracts/ports.ts';
+import type { DurableNumberPage, DurableStore, StoredRecord } from '../contracts/ports.ts';
+import { readNumberPage } from './sqlite-number-page.ts';
 
 export interface ReadonlySqliteStore extends DurableStore {
   withSnapshot<Result>(read: () => Result): Result;
@@ -113,6 +114,9 @@ export function openReadonlySqliteStore(filename: string): ReadonlySqliteStore {
 
   const denied = (): never => fail('STORE_READONLY');
   return Object.freeze({
+    listByNumber(query: DurableNumberPage) {
+      return readOperation(() => snapshot(readNumberPage(connection, query, snapshotTime ?? Date.now()).map(decode)));
+    },
     revision() {
       return readOperation(() => {
         const value = connection.prepare("SELECT value FROM durable_meta WHERE name = 'revision'").get()?.value;

@@ -1,4 +1,3 @@
-import { NATIVE_APPEARANCE_FILE, EMPTY_NATIVE_APPEARANCE, parseNativeAppearanceConfiguration } from '../contracts/native-appearance.ts'
 import { validateNativeChatAccess } from '../contracts/native-access.ts'
 import { opendir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
@@ -157,14 +156,16 @@ export function validateStoredExecution(value: unknown): StoredExecution {
 }
 
 export async function readNativeChatConfigurationUnlocked(directory: string): Promise<NativeChatConfiguration> {
-  const plans = await readDocument(join(directory, 'chat-plans.json'), DEFAULT_PLANS, validateStoredPlans)
-  const personas = await readDocument(join(directory, 'chat-personas.json'), DEFAULT_PERSONAS, validateStoredPersonas)
-  const access = await readDocument(join(directory, 'chat-access.json'), DEFAULT_ACCESS, validateStoredAccess)
-  const adapters = await readDocument(join(directory, 'chat-adapters.json'), DEFAULT_ADAPTERS, validateStoredAdapters)
-  const providers = await readDocument(join(directory, 'chat-providers.json'), DEFAULT_PROVIDERS, validateStoredProviders)
-  const authorization = await readAuthorizationDocument(directory)
-  const deployment = await readDocument(join(directory, 'chat-deployment.json'), DEFAULT_DEPLOYMENT, validateStoredDeployment)
-  const execution = await readDocument(join(directory, 'chat-execution.json'), DEFAULT_EXECUTION, validateStoredExecution)
+  const [plans, personas, access, adapters, providers, authorization, deployment, execution] = await Promise.all([
+    readDocument(join(directory, 'chat-plans.json'), DEFAULT_PLANS, validateStoredPlans),
+    readDocument(join(directory, 'chat-personas.json'), DEFAULT_PERSONAS, validateStoredPersonas),
+    readDocument(join(directory, 'chat-access.json'), DEFAULT_ACCESS, validateStoredAccess),
+    readDocument(join(directory, 'chat-adapters.json'), DEFAULT_ADAPTERS, validateStoredAdapters),
+    readDocument(join(directory, 'chat-providers.json'), DEFAULT_PROVIDERS, validateStoredProviders),
+    readAuthorizationDocument(directory),
+    readDocument(join(directory, 'chat-deployment.json'), DEFAULT_DEPLOYMENT, validateStoredDeployment),
+    readDocument(join(directory, 'chat-execution.json'), DEFAULT_EXECUTION, validateStoredExecution)
+  ])
   return {
     revisions: { plans: plans.revision, personas: personas.revision, access: access.revision,
       adapters: adapters.revision, providers: providers.revision, authorization: authorization.revision,
@@ -276,7 +277,7 @@ export async function updateNativeChatAuthorization(directory: string, expectedR
     const current = await readAuthorizationDocument(directory)
     if (current.revision !== expectedRevision) requestError(409, 'chat_revision_conflict')
     const transition = current.source === 'missing-with-history' || current.exists
-      && nativeAuthorizationMode(current.value.authorization) !== nativeAuthorizationMode(value)
+      && (current.value.authorization.mode ?? 'counted') !== (value.mode ?? 'counted')
     if (transition && (value.mode === undefined || value.version === current.value.authorization.version)) {
       requestError(409, 'chat_authorization_new_mode_version_required')
     }
@@ -388,14 +389,6 @@ export class NativeConfigurationRepository {
       DEFAULT_PERSONAS, validateStoredPersonas, () => value, async next => {
         const plans = await this.readPlans()
         assertPersonaReferences(plans.value.plans, next.personas)
-        const appearance = await readDocument(join(this.directory, NATIVE_APPEARANCE_FILE), EMPTY_NATIVE_APPEARANCE, input => {
-          const configuration = parseNativeAppearanceConfiguration(input)
-          if (!configuration) requestError(500, 'appearance_configuration_invalid')
-          return configuration
-        })
-        const ids = new Set(next.personas.map(persona => persona.id))
-        if (appearance.value.bindings.some(binding => binding.assetId !== null && !ids.has(binding.personaId)))
-          requestError(409, 'persona_in_use_by_appearance')
       })
   }
 
@@ -562,18 +555,20 @@ export class NativeConfigurationRepository {
       DEFAULT_NATIVE_CHAT_RUNNING_INTENT, validateNativeChatRunningIntent, value))
   }
 
-  recordAccessApplication(previousAccessRevision: string, revisions: Readonly<Record<string, string>>): Promise<void> {
+  recordAccessApplication(_previousAccessRevision: string, revisions: Readonly<Record<string, string>>): Promise<void> {
     return withDirectoryWriteLock(this.directory, async () => {
       const document = await this.readRunningIntent()
       if (!document.exists || !document.value.desiredRunning || !document.value.revisions) return
       const previous = document.value.revisions
-      if (previous.access !== previousAccessRevision
+      const saved = await this.readAccess()
+      if (saved.revision !== revisions.access
         || Object.keys(previous).some(key => key !== 'access' && previous[key] !== revisions[key])) {
         requestError(409, 'chat_revision_conflict')
       }
+      if (previous.access === revisions.access) return
       await writeDocumentLocked(this.directory, join(this.directory, NATIVE_CHAT_LIFECYCLE_FILE), document.revision,
         DEFAULT_NATIVE_CHAT_RUNNING_INTENT, validateNativeChatRunningIntent,
-        { ...document.value, revisions: { ...revisions }, updatedAt: Date.now() })
+        { ...document.value, revisions: { ...previous, access: revisions.access }, updatedAt: Date.now() })
     })
   }
 

@@ -37,20 +37,29 @@ function id(value: unknown, signed = false): string | null {
   const result = typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
   return typeof result === 'string' && result.length <= 32 && (signed ? /^-?[1-9]\d*$/ : /^[1-9]\d*$/).test(result) ? result : null;
 }
-function segments(value: unknown): readonly JsonObject[] | null {
+export function decodeOneBotMessageSegments(value: unknown): readonly JsonObject[] | null {
   if (typeof value === 'string') return value.length > 0 && value.length <= 8000 ? [{ type: 'text', data: { text: value } }] : null;
   if (!Array.isArray(value) || value.length === 0 || value.length > 64) return null;
   const result: JsonObject[] = [];
   for (const segment of value) {
     if (!isRecord(segment) || !text(segment.type, 64) || !isRecord(segment.data)) return null;
-    // Resource pointers remain private to the host; arbitrary nested objects are not accepted as messages.
+    // Keep canonical scalar facts. Protocol implementations also add raw/native
+    // objects and nullable decorations; those never enter model-facing content.
     const data: JsonObject = {};
     if (Object.keys(segment.data).length > 32) return null;
     for (const [key, field] of Object.entries(segment.data)) {
-      if (!text(key, 64) || typeof field !== 'string' && typeof field !== 'number' && typeof field !== 'boolean'
+      if (!text(key, 64)) return null;
+      if (field === null || typeof field === 'object') continue;
+      if (typeof field !== 'string' && typeof field !== 'number' && typeof field !== 'boolean'
         || typeof field === 'number' && !Number.isFinite(field) || typeof field === 'string' && field.length > 8000) return null;
       data[key] = field;
     }
+    if (segment.type === 'text' && typeof data.text !== 'string'
+      || segment.type === 'at' && data.qq !== 'all' && id(data.qq) === null
+      || segment.type === 'reply' && id(data.id, true) === null
+      || segment.type === 'forward' && text(data.id, 512) === null
+      || segment.type === 'face' && !(typeof data.id === 'number' && Number.isSafeInteger(data.id) && data.id >= 0 && data.id <= 99999
+        || typeof data.id === 'string' && /^(0|[1-9]\d{0,4})$/.test(data.id))) return null;
     result.push({ type: String(segment.type), data });
   }
   return snapshot(result);
@@ -79,7 +88,7 @@ function forward(value: unknown): { readonly messages: readonly OneBotForwardNod
     const node = raw.type === 'node' && isRecord(raw.data) ? raw.data : raw;
     const sender = isRecord(node.sender) ? node.sender : {};
     const senderId = id(node.uin ?? node.user_id ?? sender.user_id);
-    const message = segments(node.content ?? node.message);
+    const message = decodeOneBotMessageSegments(node.content ?? node.message);
     if (senderId === null || message === null || [node.uin, node.user_id, sender.user_id]
       .some(value => value !== undefined && id(value) !== senderId)) return null;
     const senderName = text(node.name ?? node.nickname ?? sender.nickname, 255);
@@ -96,7 +105,7 @@ function message(value: unknown, expectedId: string, conversationId: string): On
   const peerId = id(value.user_id ?? value.target_id ?? value.sender.user_id);
   const scope = value.message_type === 'group' && groupId !== null ? `group:${groupId}`
     : value.message_type === 'private' && peerId !== null ? `private:${peerId}` : null;
-  const content = segments(value.message);
+  const content = decodeOneBotMessageSegments(value.message);
   if (messageId !== expectedId || userId === null || scope !== conversationId || content === null
     || value.user_id !== undefined && id(value.user_id) !== userId
     || value.message_type === 'private' && userId !== peerId) return null;

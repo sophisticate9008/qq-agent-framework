@@ -48,10 +48,8 @@ test('real work backend reserves one fixed child, polls result without replaying
 
 const fixtureForTest = fixture
 
-test('missing parent, unsupported permission expansion and unknown remote outcome fail without creating replacement work', async () => {
+test('missing parent and unknown remote outcome fail without creating replacement work', async () => {
   const fixture = fixtureForTest()
-  await assert.rejects(fixture.backend.verify({ parentSessionId: request.parentSessionId, configuration: { ...configuration, fullAccess: true }, signal }),
-    { code: 'WORK_PERMISSION_UNSUPPORTED' })
   fixture.generation(null)
   await assert.rejects(fixture.backend.start(request), { code: 'WORK_PARENT_UNAVAILABLE' })
   assert.equal(fixture.starts(), 0)
@@ -94,5 +92,40 @@ test('structured SDK media requires an explicit scoped registrar and preserves t
   assert.deepEqual(await activation.result, { stopReason: 'completed', output: [
     { type: 'text', text: 'before' }, { type: 'image', assetId: 'scoped-asset' }, { type: 'text', text: 'after' }] })
   assert.equal(registered, 1)
+  await activation.dispose()
+})
+
+test('owner-admitted full-access scope propagates through both SDK verification and creation', async () => {
+  const fixture = fixtureForTest()
+  const original = fixture.port.start
+  let verified = false
+  fixture.port.verify = async value => { assert.equal(value.fullAccess, true); verified = true; return true }
+  fixture.port.start = async value => { assert.equal(value.fullAccess, true); return original(value, signal) }
+  const full = { ...configuration, fullAccess: true }
+  await fixture.backend.verify({ parentSessionId: request.parentSessionId, configuration: full, signal })
+  const activation = await fixture.backend.start({ ...request, configuration: full })
+  fixture.state('completed')
+  await activation.result
+  await activation.dispose()
+  assert.equal(verified, true)
+})
+
+
+test('completed child SDK token facts are observed under its original work address without replaying a model', async () => {
+  const data = fixtureForTest()
+  const step = { eventId: 'assistant/message:seq:16', turn: '1', step: 1, at: 1000, provider: 'actual-dsh-provider',
+    model: 'model-1', status: 'completed' as const, usage: { inputTokens: 2, outputTokens: 3, cacheReadTokens: 7, cacheWriteTokens: 0, totalTokens: 12 } }
+  const observations: unknown[] = []
+  data.port.inspect = async value => ({ ...value, schema: 1, state: 'completed', usage: [step],
+    result: { stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }, error: null })
+  const backend = createDshNativeWorkBackend({ port: data.port, issuerEpoch: 'epoch', generation: () => 3, pollIntervalMs: 10,
+    async resolveTarget() { return { modelProvider: 'actual-dsh-provider', model: 'model-1', agentPreset: 'work-preset' } },
+    recordUsage(value) { observations.push(value); assert.equal(value.address.childId, request.childId); assert.deepEqual(value.steps, [step]) } })
+  const activation = await backend.start(request)
+  await activation.result
+  assert.equal(observations.length, 1)
+  assert.equal(data.starts(), 1)
+  await backend.inspect!({ id: request.id, childId: request.childId, parentSessionId: request.parentSessionId, generation: 3, signal })
+  assert.equal(observations.length, 2, 'inspection can repeat exact usage for idempotent ledger projection')
   await activation.dispose()
 })

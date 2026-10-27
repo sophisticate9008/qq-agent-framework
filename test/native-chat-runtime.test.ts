@@ -58,9 +58,11 @@ async function fixture(context: TestContext, options: {
   accountScope?: AccountScope
   expectedSelfId?: string
   protocolSelfId?: number
+  deploymentDelayMs?: number
   authFails?: boolean
   wrongHttpIdentity?: boolean
   unknownSend?: boolean
+  rejectedSend?: boolean
   holdCreate?: boolean
   pluginMissing?: boolean
   holdPrompt?: boolean
@@ -130,6 +132,7 @@ async function fixture(context: TestContext, options: {
       } else {
         sends.push(JSON.parse(body) as Record<string, unknown>)
         if (options.unknownSend) { response.destroy(); return }
+        if (options.rejectedSend) { response.end(JSON.stringify({ status: 'failed', retcode: 100, data: null })); return }
         if (url.pathname === '/onebot/upload_private_file') { response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { file_id: 'uploaded-report' } })); return }
         response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 1000 + sends.length } }))
       }
@@ -275,6 +278,7 @@ async function fixture(context: TestContext, options: {
     },
     resolveDeployment: async configuration => {
       assert.equal(historyOnly, false, 'Offline history must not resolve deployment')
+      if (options.deploymentDelayMs) await new Promise(resolve => setTimeout(resolve, options.deploymentDelayMs))
       const selectedPlan = configuration.catalog.plans.find(value => value.id === configuration.catalog.activePlanId)!
       const selectedPersona = configuration.personas.find(value => value.id === selectedPlan?.personaId)!
       return { missingReasons: [], presetBindings: selectedPlan && selectedPersona ? [{ agentPreset: options.migrationChannel && selectedPlan.model === 'next-model' ? 'test-native-next' : 'test-native-chat',
@@ -802,7 +806,7 @@ test('delegation availability does not upgrade legacy grants and used authorizat
     assert((authorization.grants as Record<string, unknown>[]).every(grant => !Object.hasOwn(grant, 'toolDelegationUses')))
     await fake.start()
     const before = fake.runtime().host()!.policy.describe().grants
-    assert(before.every(grant => !grant.capabilities.includes('agent.tools.delegate')))
+    assert(before.every(grant => grant.capabilities.includes('agent.tools.delegate')))
     await fake.runtime().stop()
     const configuration = await readNativeChatConfiguration(fake.directory)
     await fake.save('authorization', { version: configuration.authorization.version,
@@ -813,32 +817,24 @@ test('delegation availability does not upgrade legacy grants and used authorizat
   }
 })
 
-test('explicit delegation uses the actual persistent policy without implying submit, grant refill or external authorization', async context => {
+test('legacy zero quotas no longer block whitelisted chat or tool delegation and policy remains persistent', async context => {
   const fake = await fixture(context)
   await fake.configure()
-  const configuration = await readNativeChatConfiguration(fake.directory)
-  const saved = await fake.save('authorization', { version: 'delegate-explicit',
-    grants: configuration.authorization.grants.map(grant => ({ ...grant,
-      ...(grant.conversationId === 'private:123' ? { submitUses: 0, toolDelegationUses: 1 } : {}) })) })
-  assert.equal(saved.toolDelegationAvailable, true)
+  await fake.save('authorization', { version: 'legacy-zero', grants: [{ conversationId: 'private:123', submitUses: 0, sendUses: 0, toolDelegationUses: 0, expiresAt: null }] })
   await fake.start()
-  const policy = fake.runtime().host()!.policy
   const privateGrant = () => fake.runtime().host()!.policy.describe().grants.find(grant => grant.conversationId === 'private:123')!
-  assert.equal(privateGrant().maxUses['agent.tools.delegate'], 1)
-  assert.equal(privateGrant().maxUses['agent.submit'], 0)
+  assert.equal(privateGrant().maxUses['agent.tools.delegate'], null)
+  assert.equal(privateGrant().maxUses['agent.submit'], null)
   fake.message(1)
-  await until(async () => (await fake.runtime().status()).ingress.received === 1)
-  assert.equal(fake.rpc.filter(request => request.method === 'session/prompt').length, 0)
-  assert.equal(privateGrant().used['agent.tools.delegate'], 0)
-  const reservation = policy.reserve({ featureId: 'agent-relay', conversationId: 'private:123', capability: 'agent.tools.delegate' })
-  policy.begin(reservation)
-  assert.equal(privateGrant().used['agent.tools.delegate'], 1)
+  await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
+  fake.answer()
+  await until(() => fake.sends.length === 1)
+  const policy = fake.runtime().host()!.policy
+  policy.begin(policy.reserve({ featureId: 'agent-relay', conversationId: 'private:123', capability: 'agent.tools.delegate' }))
   await fake.restart()
   assert.equal(privateGrant().used['agent.tools.delegate'], 1)
-  assert.throws(() => fake.runtime().host()!.policy.reserve({ featureId: 'agent-relay',
-    conversationId: 'private:123', capability: 'agent.tools.delegate' }), { code: 'BUDGET_EXHAUSTED' })
+  assert.doesNotThrow(() => fake.runtime().host()!.policy.reserve({ featureId: 'agent-relay', conversationId: 'private:123', capability: 'agent.tools.delegate' }))
   assert.equal((await fake.runtime().status()).toolDelegation.externalToolAuthorizationVerified, false)
-  assert.equal(fake.rpc.filter(request => request.method === 'session/prompt').length, 0)
 })
 
 test('selected work identity changes cannot reuse or reset an existing native session', async context => {
@@ -1025,15 +1021,10 @@ test('access deny and forged WS identities never create agent sessions; self men
   assert.match(prompt, /\"conversationId\":\"group:456\"/)
 })
 
-test('allow and owner do not grant effects; configuration changes fail closed without clearing sessions', async context => {
+test('whitelist allows chat without quotas and removing access blocks replies without clearing sessions', async context => {
   const fake = await fixture(context)
   await fake.configure()
   await fake.save('authorization', { version: '1', grants: [] })
-  await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_CONFIGURATION_INCOMPLETE' })
-  assert.equal(fake.creates(), 0)
-  await fake.save('authorization', { version: '2', grants: [
-    { conversationId: 'private:123', submitUses: 2, sendUses: 2, expiresAt: null }
-  ] })
   await fake.start()
   fake.message(1)
   await until(() => fake.creates() === 1 && fake.follows.length === 1)
@@ -1352,6 +1343,87 @@ test('native protocol notice reaches installed feature with scope checks and no 
   assert.equal(fake.sends.length, 0)
 })
 
+for (const delivery of ['confirmed', 'rejected', 'unknown'] as const) test(`control command activity records one real receipt without a model step or replay duplicates: ${delivery}`, async context => {
+  let selections = 0
+  let executions = 0
+  const text = '控制命令固定回执。'
+  const bootstrap: LoadedNativeBootstrap = { metadata: { manifest: { id: 'control-activity-fixture', version: '1.0.0', apiVersion: 1 },
+    codeFingerprint: 'e'.repeat(64), trust: 'trusted-operator-code', sandboxed: false, requiresSeparateAuthorization: true },
+    controlCommands: [{ id: 'control-activity-fixture', replyTexts: [text],
+      matches(message) { selections++; return message.content.some(part => part.type === 'text' && part.text === '/control-fixture') },
+      async handle(context) { executions++; await context.reply(text) } }], create() { return {} } }
+  const fake = await fixture(context, { bootstrap, unknownSend: delivery === 'unknown', rejectedSend: delivery === 'rejected' })
+  await fake.configure(); await fake.start()
+  const raw = { user_id: 123, message_type: 'group', group_id: 789, time: Math.floor(Date.now() / 1000),
+    message: [{ type: 'text', data: { text: '/control-fixture' } }] }
+  fake.message(805, raw)
+  await until(() => fake.runtime().activity().items.some(item => item.type === 'sent'))
+  const activity = fake.runtime().activity().items
+  const received = activity.filter(item => item.type === 'received')
+  const sent = activity.filter(item => item.type === 'sent')
+  assert.equal(received.length, 1); assert.equal(received[0]!.content, '/control-fixture')
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0]!.summary, delivery === 'confirmed' ? '协议已确认发送回复。'
+    : delivery === 'rejected' ? '协议未接受回复发送。' : '回复发送结果未确认，未自动重复发送。')
+  assert.equal(sent[0]!.content, delivery === 'confirmed' ? text : null)
+  assert.equal(sent[0]!.level, delivery === 'confirmed' ? 'info' : 'warning')
+  assert(activity.indexOf(sent[0]!) < activity.indexOf(received[0]!), 'Actual receipt follows the received command in time')
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0)
+  assert.equal(activity.some(item => item.summary === '模型已接收本轮请求，正在等待回复。'), false)
+  assert.equal(selections, 1); assert.equal(executions, 1); assert.equal(fake.sends.length, 1)
+  fake.message(805, raw)
+  await delay(50)
+  assert.equal(selections, 1); assert.equal(executions, 1); assert.equal(fake.sends.length, 1)
+  assert.equal(fake.runtime().activity().items.filter(item => item.type === 'received').length, 1)
+  assert.equal(fake.runtime().activity().items.filter(item => item.type === 'sent').length, 1)
+  fake.message(806, { ...raw, message: [{ type: 'text', data: { text: '不在白名单内的普通聊天。' } }] })
+  await delay(50)
+  assert.equal(fake.runtime().activity().items.filter(item => item.type === 'received').length, 1, 'Denied everyday traffic does not add activity spam')
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0)
+})
+
+test('conversational notices admit group uploads through normal wake rules and wake only bot-targeted group pokes', async context => {
+  const fake = await fixture(context)
+  await fake.configure(); await fake.start()
+  const time = Math.floor(Date.now() / 1000)
+  const poke = { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', group_id: 456, user_id: 124, time }
+  fake.message(810, { ...poke, target_id: 125 })
+  fake.message(811, { ...poke, user_id: 999, target_id: 999 })
+  fake.message(812, { post_type: 'notice', notice_type: 'group_upload', group_id: 456, user_id: 124, time,
+    file: { id: 'fixture-group-file', name: 'notes.txt', size: 42, busid: 102 } })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456').messages.some(message => message.content.some(part => part.type === 'file')))
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0, 'An inactive group upload does not force a model reply')
+  const file = fake.runtime().host()!.history.snapshot('group:456').messages.find(message => message.content.some(part => part.type === 'file'))!
+  assert.equal(file.actor, '124'); assert.match(file.id, /^onebot-notice:/)
+  fake.message(813, { ...poke, target_id: 999 })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  const prompt = JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request)
+  assert.match(prompt, /拍一拍/); assert.match(prompt, /senderIsConfiguredOwner\\\":false/)
+  fake.message(814, { ...poke, target_id: 999 })
+  await delay(40)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1, 'A replayed notice never starts a second concurrent prompt')
+  assert(fake.runtime().readEvents().events.some(event => event.kind === 'message' && event.status === 'received'
+    && event.correlation.conversationId === 'group:456'))
+})
+
+test('private pokes become real sender direct input while self echoes and other targets stay silent', async context => {
+  const fake = await fixture(context)
+  await fake.configure(); await fake.start()
+  const poke = { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: 123, time: Math.floor(Date.now() / 1000) }
+  fake.message(820, { ...poke, target_id: 124 })
+  fake.message(821, { ...poke, user_id: 999, target_id: 999 })
+  await delay(40)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0)
+  fake.message(822, { ...poke, target_id: 999 })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const messages = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages
+  assert(messages.some(message => message.actor === '123' && message.id.startsWith('onebot-notice:')))
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  assert(fake.runtime().readEvents().events.some(event => event.kind === 'message' && event.status === 'received'
+    && event.correlation.conversationId === 'private:123'))
+})
+
 test('native input configuration changes trigger behavior live without resetting sessions and cancels withdrawn queued continuation', async context => {
   const { createDefaultPackageConfigurationRegistry } = await import('../src/host/chat-input-configuration.ts')
   const { DEFAULT_CHAT_INPUT_CONFIGURATION } = await import('../src/contracts/chat-input-configuration.ts')
@@ -1453,7 +1525,7 @@ test('native default framework tools project only explicit grants and execute me
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
   const lease = fake.toolLeases.get(sessionId)!
-  assert.deepEqual(lease.names, ['qaf_media_inspect', 'qaf_media_read'])
+  assert(lease.names.includes('qaf_media_inspect') && lease.names.includes('qaf_media_read'))
   const call = { id: 'tool-call-1', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
     name: 'qaf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
   fake.toolCalls.push({ ticket: 'ticket-forged', leaseId: lease.leaseId, call: { ...call, id: 'forged', userMessageId: 'unmatched-source' } })
@@ -1469,7 +1541,7 @@ test('native default framework tools project only explicit grants and execute me
   assert(toolEvents.events.every(event => event.correlation.requestId === requestId && event.correlation.generation === 1))
   assert(!JSON.stringify(toolEvents).includes(assetId))
   assert.match(JSON.stringify(result), /由真实宿主工具展开的正文/)
-  assert.equal(fake.runtime().host()!.policy.describe().grants.find(grant => grant.id === 'explicit-framework-media')?.used['native.media.read'], 1)
+  assert.equal(fake.runtime().host()!.policy.describe().grants.reduce((total, grant) => total + (grant.used['native.media.read'] ?? 0), 0), 1)
   assert.equal(fake.sends.length, 0)
   assert.equal(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages.length, 1)
   await fake.runtime().stop()
@@ -1545,43 +1617,26 @@ test('native reminder unknown send is retained across restart without an automat
   assert.equal(fake.runtime().readReminderHistory().history[0].status, 'unknown')
 })
 
-test('native explicit tool permission management projects tools, preserves consumed budgets and withdraws revoked capabilities', async context => {
+test('whitelist projects tools without a grant document and removing access rejects an already projected call', async context => {
   const fake = await fixture(context, { frameworkToolChannel: true,
-    forwardMessages: [{ sender: { user_id: 789 }, content: [{ type: 'text', data: { text: '显式授权读取' } }] }] })
-  await fake.configure()
-  const path = '/api/chat/tool-permissions'
-  const initial = await invoke(fake.routes(), 'GET', path)
-  const id = randomUUID()
-  let permissions = await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
-    id, conversationId: 'private:123', capabilities: ['native.media.read'], maxUses: { 'native.media.read': 1 }, expiresAt: null } })
-  assert.equal((permissions.runtime as Record<string, unknown>).state, 'not-running')
-  await fake.start()
-  assert.equal(((await invoke(fake.routes(), 'GET', path)).runtime as Record<string, unknown>).state, 'applied')
+    forwardMessages: [{ sender: { user_id: 789 }, content: [{ type: 'text', data: { text: '白名单读取' } }] }] })
+  await fake.configure(); await fake.start()
   fake.message(970, { message: [{ type: 'forward', data: { id: 'forward-token' } }, { type: 'text', data: { text: '读取' } }] })
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
   const lease = fake.toolLeases.get(sessionId)!
-  assert.deepEqual(lease.names, ['qaf_media_read'])
-  const call = { id: 'configured-read', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
+  assert(lease.names.includes('qaf_media_read'))
+  const call = { id: 'whitelist-read', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
     name: 'qaf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
-  fake.toolCalls.push({ ticket: 'configured-read', leaseId: lease.leaseId, call })
-  await until(() => fake.toolResults.has('configured-read'))
-  assert.equal(fake.toolResults.get('configured-read')?.status, 'confirmed')
-  permissions = await invoke(fake.routes(), 'POST', path, { revision: permissions.revision, action: 'grant', grant: {
-    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.media.inspect'], maxUses: { 'native.media.inspect': 2 }, expiresAt: null } })
-  assert.deepEqual(fake.toolLeases.get(sessionId)?.names, ['qaf_media_inspect'])
-  const used = () => fake.runtime().host()!.policy.describe().grants.find(grant => grant.id === `native-framework-tool:${id}`)!
-  assert.equal(used().used['native.media.read'], 1)
-  permissions = await invoke(fake.routes(), 'POST', path, { revision: permissions.revision, action: 'revoke', id })
-  assert.equal(used().active, false)
-  fake.toolCalls.push({ ticket: 'revoked-read', leaseId: lease.leaseId, call: { ...call, id: 'revoked-read' } })
-  await until(() => fake.toolResults.has('revoked-read'))
-  assert.equal(fake.toolResults.get('revoked-read')?.status, 'rejected')
-  await fake.runtime().stop(); await fake.start()
-  assert.equal(used().used['native.media.read'], 1)
-  assert.equal(used().active, false)
+  fake.toolCalls.push({ ticket: 'whitelist-read', leaseId: lease.leaseId, call })
+  await until(() => fake.toolResults.has('whitelist-read'))
+  assert.equal(fake.toolResults.get('whitelist-read')?.status, 'confirmed')
+  await fake.save('access', { allow: ['group:456'], deny: [], owner: '123' })
+  fake.toolCalls.push({ ticket: 'removed-read', leaseId: lease.leaseId, call: { ...call, id: 'removed-read' } })
+  await until(() => fake.toolResults.has('removed-read'))
+  assert.equal(fake.toolResults.get('removed-read')?.status, 'rejected')
   assert.equal(fake.sends.length, 0)
 })
 
@@ -1746,17 +1801,11 @@ test('native child questions use QQ owner replies while the main conversation co
   assert.equal(fake.runtime().readWork(id)?.status, 'running')
   fake.interaction({ type: 'waterfall', event: 'approval/request', agentId: work.childId, eventId: 'work-approval',
     request: { toolName: 'workspace.write', reason: '需要写入测试报告 secret=dsh-test-secret' } })
-  await until(() => fake.sends.length === 2)
-  assert.match(JSON.stringify(fake.sends[1]), /需要写入测试报告/)
-  assert(!JSON.stringify(fake.sends[1]).includes('dsh-test-secret'))
-  assert.match(JSON.stringify(fake.sends[1]), /秒内回复/)
-  fake.message(1302, { user_id: 456, message: [{ type: 'text', data: { text: '同意' } }] })
-  await delay(30)
-  assert.equal(fake.rpc.filter(call => call.method === '$events/result').length, 0)
-  fake.message(1303, { message: [{ type: 'text', data: { text: '同意' } }] })
   await until(() => fake.rpc.some(call => call.method === '$events/result'))
   const answered = fake.rpc.find(call => call.method === '$events/result')!.request
   assert.equal(answered.eventId, 'work-approval')
+  assert.equal(fake.sends.length, 1)
+  assert.match(JSON.stringify(answered), /allowed-once/)
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 2)
   fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [{ type: 'text', text: '工作完成' }] } })
   await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
@@ -1922,45 +1971,6 @@ test('default native host publishes shared versioned services and invalidates re
   await assert.rejects(consumers[0]['native-tools'].catalog(new AbortController().signal))
 })
 
-test('default appearance binding supplies opaque context and policy-controlled real image content without changing persona identity', async context => {
-  const fake = await fixture(context, { frameworkToolChannel: true })
-  await fake.configure()
-  const configuration = await readNativeChatConfiguration(fake.directory)
-  const personaId = configuration.catalog.plans[0].personaId
-  const { createNativeAppearanceService } = await import('../src/host/native-appearance.ts')
-  const appearance = createNativeAppearanceService({ directory: fake.directory })
-  const signal = new AbortController().signal
-  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHd8AAAAASUVORK5CYII='
-  const uploaded = await appearance.execute({ action: 'upload', revision: (await appearance.snapshot()).revision,
-    name: '参考图', description: '仅作视觉资料', mediaType: 'image/png', data: png }, signal)
-  const assetId = uploaded.assets[0].id
-  const bound = await appearance.execute({ action: 'bind', revision: uploaded.revision, personaId, assetId, version: 1 }, signal)
-  const permissions = await invoke(fake.routes(), 'GET', '/api/chat/tool-permissions')
-  await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: permissions.revision, action: 'grant', grant: {
-    id: randomUUID(), conversationId: 'private:123', capabilities: ['native.role.read'], maxUses: { 'native.role.read': 3 }, expiresAt: null } })
-  await fake.start(); fake.message(1801)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
-  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
-  assert.match(JSON.stringify(prompt.content), new RegExp(assetId))
-  assert(!JSON.stringify(prompt.content).includes(png))
-  assert(!JSON.stringify(prompt.content).includes(fake.directory))
-  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
-  const lease = fake.toolLeases.get(sessionId)!
-  assert.deepEqual(lease.names, ['qaf_role_reference'])
-  async function read(id: string, version: number) {
-    fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name: 'qaf_role_reference', input: { assetId, version },
-      sessionId, requestId, generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
-    await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
-  }
-  const image = await read('appearance-valid', 1)
-  assert.equal(image.status, 'confirmed', JSON.stringify(image)); assert(image.status === 'confirmed')
-  assert.deepEqual(image.content, [{ type: 'image', mediaType: 'image/png', data: png }])
-  await appearance.execute({ action: 'unbind', revision: bound.revision, personaId }, signal)
-  assert.equal((await read('appearance-unbound', 1)).status, 'rejected')
-  assert.deepEqual((await readNativeChatConfiguration(fake.directory)).personas, configuration.personas)
-  assert.equal(fake.sends.length, 0)
-})
-
 test('native output package sends registered image audio file and configured long forward with real delivery receipts', async context => {
   const fake = await fixture(context, { mediaBytes: true })
   await fake.configure()
@@ -2002,7 +2012,7 @@ test('native output package sends registered image audio file and configured lon
   assert.equal(fake.rpc.filter(call => call.method === 'session/create').length, 1)
 })
 
-test('long-forward behavior never grants forwarding and unknown output is not replayed after restart', async context => {
+test('long-forward uses whitelist and unknown output is not replayed after restart', async context => {
   const fake = await fixture(context)
   await fake.configure()
   const { createNativePackageConfigurationRegistry } = await import('../src/host/native-package-configuration.ts')
@@ -2014,11 +2024,8 @@ test('long-forward behavior never grants forwarding and unknown output is not re
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
   fake.agentEvent('assistant/message', { turn: 1, message: { id: 'no-forward-authority', role: 'assistant', content: [{ type: 'text', text: '没有转发权限。'.repeat(100) }] } })
   fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
-  await awaitCondition(() => fake.runtime().host()!.engine.describe().outbox.some(row => row.status === 'denied'),
-    { message: 'Forward without permission must be denied before transport', timeoutMs: 1500, diagnostics: () => fake.runtime().host()!.engine.describe().outbox })
-  assert(fake.runtime().host()!.engine.describe().outbox.some(row => row.errorCode === 'POLICY_DENIED'))
-  assert.equal(fake.sends.length, 0)
-  assert(fake.runtime().host()!.policy.describe().grants.every(grant => !grant.capabilities.includes('messaging.forward')))
+  await until(() => fake.sends.length === 1)
+  await until(() => fake.runtime().host()!.engine.describe().outbox.some(row => row.status === 'confirmed'))
   const unknown = await fixture(context, { unknownSend: true })
   await unknown.configure(); await unknown.start(); unknown.message(1911)
   await until(() => unknown.rpc.some(call => call.method === 'session/prompt'))
@@ -2030,14 +2037,14 @@ test('long-forward behavior never grants forwarding and unknown output is not re
   assert(unknown.runtime().host()!.outbox.list().some(row => row.status === 'unknown'))
 })
 
-test('whitelist forwarding is scoped to explicit conversations and never inherited by another allowed conversation', async context => {
+test('all whitelisted conversations can forward without an independent forwarding list', async context => {
   const fake = await fixture(context)
   await fake.configure()
   await fake.save('authorization', { version: 'whitelist-forward', mode: 'whitelist', grants: [], forwardAllow: ['private:123'] })
   await fake.start()
   const grants = fake.runtime().host()!.policy.describe().grants.filter(grant => grant.featureId === 'agent-relay' && grant.active)
   assert(grants.find(grant => grant.conversationId === 'private:123')!.capabilities.includes('messaging.forward'))
-  assert(!grants.find(grant => grant.conversationId === 'group:456')!.capabilities.includes('messaging.forward'))
+  assert(grants.find(grant => grant.conversationId === 'group:456')!.capabilities.includes('messaging.forward'))
   assert((await invoke(fake.routes(), 'GET', '/api/chat/authorization')).forwardAllow)
   await fake.runtime().stop(); await fake.start()
   const actual = fake.runtime().host()!.policy.describe().grants.filter(grant => grant.featureId === 'agent-relay' && grant.active)
@@ -2189,7 +2196,7 @@ function promptHostFacts(request: Record<string, unknown>): Record<string, unkno
   return facts
 }
 
-test('actual prompt tool facts change after permission revocation and never promise an absent work backend', async context => {
+test('legacy tool permissions do not restrict whitelist tools and absent work backends remain unavailable', async context => {
   const fake = await fixture(context, { frameworkToolChannel: true })
   await fake.configure()
   const path = '/api/chat/tool-permissions'
@@ -2201,14 +2208,15 @@ test('actual prompt tool facts change after permission revocation and never prom
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
   const first = promptHostFacts(fake.rpc.find(call => call.method === 'session/prompt')!.request)
   assert(isRecord(first.tools) && Array.isArray(first.tools.tools))
-  assert.deepEqual(first.tools.tools.map(tool => isRecord(tool) ? tool.name : null), ['qaf_media_inspect'])
-  assert(isRecord(first.output)); assert.equal(first.output.forwardAuthorized, false)
+  assert(first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qaf_media_inspect'))
+  assert(!first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qaf_work_start'))
+  assert(isRecord(first.output)); assert.equal(first.output.forwardAuthorized, true)
   fake.answer(1); await until(() => fake.sends.length === 1)
   await invoke(fake.routes(), 'POST', path, { revision: granted.revision, action: 'revoke', id })
   fake.message(2301)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
   const second = promptHostFacts(fake.rpc.filter(call => call.method === 'session/prompt')[1]!.request)
-  assert(isRecord(second.tools)); assert.deepEqual(second.tools.tools, [])
+  assert(isRecord(second.tools)); assert.deepEqual(second.tools.tools, first.tools.tools)
   assert.equal(fake.runtime().workStatus().available, false)
   assert.equal(fake.creates(), 1)
 })
@@ -2270,4 +2278,36 @@ test('two default native accounts isolate matching logical sessions grants and r
   await wrong.configure()
   await assert.rejects(wrong.start(), { code: 'NATIVE_ACCOUNT_IDENTITY_MISMATCH' })
   assert.equal(wrong.creates(), 0); assert.equal(wrong.sends.length, 0)
+})
+
+
+test('native submit preparation can exceed six seconds within the original turn deadline', { timeout: 60_000 }, async context => {
+  const controls = { deploymentDelayMs: 0, frameworkToolChannel: true }
+  const f = await fixture(context, controls)
+  await f.configure()
+  await f.start()
+  controls.deploymentDelayMs = 2200
+  f.message(901)
+  await awaitCondition(() => f.rpc.some(call => call.method === 'session/prompt'), { message: 'Preparation should reach the model within the turn deadline', timeoutMs: 35_000 })
+  assert.equal(f.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  assert.notEqual((await f.runtime().status()).lastError, 'AGENT_SUBMIT_TIMEOUT_UNKNOWN')
+  controls.deploymentDelayMs = 0
+  f.answer()
+  await until(() => f.sends.length > 0)
+})
+
+
+for (const ownerRequest of [true, false]) test(`external tool confirmation is automatic and restricted to the real owner: ${ownerRequest}`, async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  if (!ownerRequest) await fake.save('access', { allow: ['private:123', 'group:456'], deny: [], owner: '456' })
+  await fake.start(); fake.message(2900)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const sessionId = String(fake.rpc.find(call => call.method === 'session/prompt')!.request.sessionId)
+  fake.interaction({ type: 'waterfall', event: 'approval/request', agentId: sessionId, eventId: 'external-tool',
+    request: { toolName: 'workspace.write', reason: 'Synthetic write request' } })
+  await until(() => fake.rpc.some(call => call.method === '$events/result'))
+  const response = fake.rpc.find(call => call.method === '$events/result')!.request
+  assert.match(JSON.stringify(response), ownerRequest ? /allowed-once/ : /rejected/)
+  assert.equal(fake.sends.length, 0)
 })

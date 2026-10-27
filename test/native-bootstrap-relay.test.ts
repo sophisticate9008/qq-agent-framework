@@ -116,14 +116,14 @@ test('default gateway child prepares standard DSH text using trusted scoped pref
     await command({ op: 'relay-settings', configuration: true, format: 'forward' });
     const beforeDenied = sends.length;
     const beforeOutbox = (await outbox()).length;
-    await answer('# 配置不是准备授权', 'failed');
+    await answer('# 配置不是扩展准备授权', 'failed');
     assert.equal(await count('presentation-effect'), 0);
     assert.equal(sends.length, beforeDenied);
     await command({ op: 'relay-grant', grantId: 'relay-prepare-only', capabilities: ['presentation.prepare'] });
-    await answer('# 准备不等于转发授权', 'failed');
+    await answer('# 扩展准备后的白名单转发', 'completed');
     assert.equal(await count('presentation-effect'), 1);
-    assert.equal(sends.length, beforeDenied);
-    assert.equal((await outbox()).length, beforeOutbox);
+    assert(sends.length > beforeDenied);
+    assert((await outbox()).length > beforeOutbox);
     await command({ op: 'relay-grant', grantId: 'relay-forward-only', capabilities: ['messaging.forward'] });
     await answer('# 标准文本整理\n\n- 第一项\n- 第二项', 'completed', spoof);
     assert.equal(sendActions.at(-1), '/onebot/send_group_forward_msg');

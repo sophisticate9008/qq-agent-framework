@@ -3,7 +3,8 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { FrameworkError } from '../core/values.ts'
 import type { DurableStore } from '../contracts/ports.ts'
 import type { NativeMemoryReadOptions } from '../contracts/native-memory.ts'
-import { createSqliteStore, type SqliteStore } from '../storage/sqlite.ts'
+import { createNativeDurableStore as createSqliteStore } from './native-retention.ts'
+type SqliteStore = ReturnType<typeof createSqliteStore>
 import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
 import { createNativeMemoryService, readNativeMemoryEntries, readNativeMemoryEntry, type NativeMemoryOptions,
   type NativeMemoryService } from './native-memory.ts'

@@ -40,6 +40,12 @@ export interface DurableLookup {
   readonly where?: DurableIndexDefinition['where'];
   readonly limit?: number;
 }
+export interface DurableNumberPage {
+  readonly namespace: string;
+  readonly field: string;
+  readonly limit: number;
+  readonly before?: { readonly value: number; readonly key: string };
+}
 export type DurableCasMutation =
   | { readonly kind: 'write'; readonly namespace: string; readonly key: string; readonly expectedRevision: number | null;
     readonly value: JsonValue; readonly expiresAt?: number | null }
@@ -57,6 +63,8 @@ export interface DurableStore {
   stats?(options?: DurableStoreStatsOptions): DurableStoreStats;
   createIndex?(definition: DurableIndexDefinition): void;
   lookup?(query: DurableLookup): readonly StoredRecord[];
+  /** Descending numeric field + key pagination, independent of later record updates. */
+  listByNumber?(query: DurableNumberPage): readonly StoredRecord[];
   close(): void;
 }
 

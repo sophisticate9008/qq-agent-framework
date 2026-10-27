@@ -36,17 +36,20 @@ export function createFrameworkToolPump(options: {
       const tickets = new Set(pending.map(entry => entry.ticket))
       for (const [ticket, entry] of active) if (!tickets.has(ticket)) entry.controller.abort()
       for (const item of pending) {
-        if (seen.has(item.ticket)) continue
+        // Polling is shared by bridge instances. Only the lease owner may settle a ticket.
+        if (seen.has(item.ticket) || !options.accepts(item)) continue
         assert(seen.size < 4096, 'TOOL_CALL_CAPACITY', 'Restart the explicit tool projection after retained calls reach capacity.')
         seen.add(item.ticket)
         const controller = new AbortController()
         const signal = AbortSignal.any([lifetime.signal, controller.signal])
         const operation = (async () => {
-          let result: FrameworkToolResult
-          if (!options.accepts(item)) result = { status: 'rejected', code: 'TOOL_PROJECTION_UNVERIFIED' }
-          else result = await options.execute(item.call, signal)
+          const result = await options.execute(item.call, signal)
           if (!signal.aborted) await options.port.complete({ issuerEpoch: options.issuerEpoch, ticket: item.ticket, result }, signal)
-        })().catch(fail).finally(() => active.delete(item.ticket))
+        })().catch(error => {
+          // A withdrawn or expired ticket cancels only this call. It does not
+          // invalidate other conversations sharing the healthy polling channel.
+          if (!signal.aborted) fail(error)
+        }).finally(() => active.delete(item.ticket))
         active.set(item.ticket, { controller, operation })
       }
     } catch (error) {

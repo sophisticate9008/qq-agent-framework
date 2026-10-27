@@ -58,7 +58,7 @@ export function SessionDeleteDialog({ api, target, onClose, onDeleted }: {
       if (owner.current.api !== api || owner.current.target !== target || controller.signal.aborted) return;
       const reason = error instanceof ApiError ? error.code : 'session_delete_unknown'; setCode(reason);
       if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
-        setError(/BUSY|UNSETTLED|busy|unsettled/.test(reason) ? '还有任务未结束，请等处理完成后再删除。' : /NOT_FOUND|not_found/.test(reason) ? '模型会话已不存在，请刷新后核对绑定。' : '会话状态已变化或维护尚未结束，请刷新后核对。');
+        setError(reason === 'session_delete_use_dsh' ? '请到 DSH 删除模型会话。' : /BUSY|UNSETTLED|busy|unsettled/.test(reason) ? '还有任务未结束，请等处理完成后再删除。' : /NOT_FOUND|not_found/.test(reason) ? '模型会话已不存在，请刷新后核对绑定。' : '会话状态已变化或维护尚未结束，请刷新后核对。');
       } else { setOperationId(id); setError('删除结果暂未确认，正在查询这次操作；不会重复删除。'); }
     } finally { if (owner.current.api === api && owner.current.target === target) setSending(false); }
   }

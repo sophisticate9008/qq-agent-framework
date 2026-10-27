@@ -33,7 +33,7 @@ async function complete(fixture: Fixture, messageId: number) {
   const turn = prompts(fixture).filter(call => call.input.sessionId === sessionId).length
   const stream = fixture.streams.findLast(stream => stream.sessionId === sessionId && stream.socket.readyState === 1)!
   fixture.event('turn/start', { turn }, stream)
-  fixture.event('assistant/message', { turn, message: { role: 'assistant', content: [{ type: 'text', text: 'PRIVATE-MODEL-OUTPUT-NOT-ACTIVITY' }] } }, stream)
+  fixture.event('assistant/message', { turn, message: { role: 'assistant', content: [{ type: 'text', text: 'Synthetic visible reply.' }] } }, stream)
   fixture.event('turn/end', { turn, reason: { kind: 'completed' } }, stream)
 }
 
@@ -56,11 +56,14 @@ test('activity HTTP GET is authenticated, strict, unavailable without runtime an
   assert.equal((await fetch(`${origin}/api/chat/activity`)).status, 401)
   const headers = { authorization: 'Bearer synthetic-activity-admin-token-0123456789' }
   assert.equal((await fetch(`${origin}/api/chat/activity?limit=100`, { headers })).status, 400)
+  assert.equal((await fetch(`${origin}/api/chat/activity?source=other`, { headers })).status, 400)
+  assert.equal((await fetch(`${origin}/api/chat/activity?source=qq&source=simulation`, { headers })).status, 400)
   const response = await fetch(`${origin}/api/chat/activity`, { headers })
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { source: 'native-chat', retention: 'process', capacity: 100, state: 'stopped', items: [] })
+  assert.deepEqual(await response.json(), { source: 'native-chat', retention: 'process', capacity: 100, state: 'stopped', items: [],
+    simulation: { state: 'none', runId: null, updatedAt: null } })
   const absent = createNativeRuntimeRoutes({ directory: missing }).find(route => route.pathname === '/api/chat/activity')!
-  assert.throws(() => absent.handle({ body: null, query: new URLSearchParams(), signal: new AbortController().signal }),
+  await assert.rejects(async () => absent.handle({ body: null, query: new URLSearchParams(), signal: new AbortController().signal }),
     { statusCode: 503, code: 'runtime_not_connected' })
   assert.equal(loads, 0)
   assert.deepEqual(await readdir(directory), [])
@@ -93,8 +96,9 @@ test('default gateway records real native receive and confirmed send, rejects ou
     assert(activity.some(entry => entry.type === 'processed' && entry.level === 'info'))
     assert(activity.some(entry => entry.type === 'sent' && entry.summary === '协议已确认发送回复。'))
     fixture.inbound(2, 'group')
-    await until(async () => (await entries(fixture)).some(entry => entry.type === 'processed' && entry.level === 'warning'
-      && entry.conversationId === 'group:456'), 'Expected denied conversation activity')
+    await until(async () => object((await fixture.status()).ingress).rejected === 1, 'Expected denied conversation admission')
+    assert.equal(object(object((await fixture.status()).ingress).lastReceipt).errorCode, 'NATIVE_CHAT_ACCESS_DENIED')
+    assert(!(await entries(fixture)).some(entry => entry.conversationId === 'group:456'))
     assert.equal(prompts(fixture).length, 1)
     await fixture.api('/api/chat/runtime/stop', {})
     const before = await disk(join(fixture.directory, 'runtime'))
@@ -105,7 +109,7 @@ test('default gateway records real native receive and confirmed send, rejects ou
     assert.deepEqual(await fixture.api('/api/chat/activity'), stopped)
     assert.deepEqual(await disk(join(fixture.directory, 'runtime')), before)
     const callCount = fixture.calls.length
-    assert(!JSON.stringify(stopped).includes('PRIVATE-MODEL-OUTPUT'))
+    assert(stopped.items.map(object).some(entry => entry.type === 'sent' && entry.content === 'Synthetic visible reply.'))
     for (const secret of ['fixture-dsh-owner', 'fixture-onebot-http', 'synthetic-model-key']) assert(!JSON.stringify(stopped).includes(secret))
     await fixture.start()
     assert((await entries(fixture)).some(entry => entry.id === activity[0]!.id))
@@ -168,6 +172,6 @@ test('default native transport records actual unconfirmed delivery as warning, n
   const activity = await entries(fixture)
   assert(!activity.some(entry => entry.summary === '协议已确认发送回复。'))
   assert(activity.some(entry => entry.summary === '回复发送结果未确认，未自动重复发送。'))
-  assert(!JSON.stringify(activity).includes('PRIVATE-MODEL-OUTPUT'))
+  assert(activity.filter(entry => entry.type === 'sent').every(entry => entry.content === null))
   assert.equal(prompts(fixture).length, 1)
 })

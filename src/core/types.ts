@@ -1,3 +1,4 @@
+import type { ExtensionMetadata } from '../contracts/extension-metadata.ts';
 import type { AccountScope } from '../contracts/account-scope.ts';
 export type { AccountScope } from '../contracts/account-scope.ts';
 import type { ResolvedContext, FeatureStateScope } from './context.ts';
@@ -70,7 +71,7 @@ export interface FeatureSetup {
   on(type: string, handler: FeatureHandler): void;
   defer(dispose: () => void): void;
 }
-export interface FeatureDefinition {
+export interface FeatureDefinition extends ExtensionMetadata {
   id: string;
   version: string;
   apiVersion: 1;

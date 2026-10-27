@@ -119,18 +119,3 @@ test('provider edits preserve active and retained assistant targets until explic
   assert.deepEqual((await repository.updateProviders(saved.revision, [])).value.providers, [])
 })
 
-test('persona deletion preserves active appearance references and permits explicitly unbound tombstones', async context => {
-  const { directory, repository } = await fixture(context)
-  const persona = { id: 'appearance-persona', name: 'Appearance', identity: 'Synthetic identity.', style: 'Brief.' }
-  const saved = await repository.replacePersonas((await repository.readPersonas()).revision, [persona])
-  const filename = join(directory, 'chat-appearance.json')
-  const appearance = { schema: 1, assets: [{ id: '11111111-1111-4111-8111-111111111111', versions: [{ version: 1,
-    name: 'Synthetic image', description: '', source: 'manual-upload', createdAt: 1, mediaType: 'image/png', bytes: 1,
-    width: 1, height: 1, sha256: 'a'.repeat(64) }] }], bindings: [{ personaId: persona.id,
-    assetId: '11111111-1111-4111-8111-111111111111', version: 1, generation: 1, updatedAt: 1 }] }
-  await writeFile(filename, JSON.stringify(appearance), { mode: 0o600 })
-  await assert.rejects(repository.replacePersonas(saved.revision, []), errorCode('persona_in_use_by_appearance'))
-  assert.equal((await repository.readPersonas()).revision, saved.revision)
-  await writeFile(filename, JSON.stringify({ ...appearance, bindings: [{ ...appearance.bindings[0], assetId: null, version: null, generation: 2 }] }), { mode: 0o600 })
-  assert.deepEqual((await repository.replacePersonas(saved.revision, [])).value.personas, [])
-})

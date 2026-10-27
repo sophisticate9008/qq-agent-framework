@@ -1,56 +1,7 @@
-import { asRecord } from './api.ts';
+export type { AdminActivityState as ActivityState, AdminActivityType as ActivityType, AdminActivityEntry as ActivityEntry, AdminActivitySnapshot as RecentActivitySnapshot } from '../../src/contracts/admin-activity.ts';
+import { parseAdminActivitySnapshot, type AdminActivityType as ActivityType, type AdminActivityState as ActivityState } from '../../src/contracts/admin-activity.ts';
 
-export type ActivityState = 'stopped' | 'starting' | 'running' | 'stopping' | 'error';
-export type ActivityType = 'received' | 'processed' | 'sent' | 'timeout' | 'error' | 'runtime';
-
-export interface ActivityEntry {
-  readonly id: string;
-  readonly at: number;
-  readonly level: 'info' | 'warning' | 'error';
-  readonly type: ActivityType;
-  readonly conversationId: string | null;
-  readonly summary: string;
-  readonly content?: string | null;
-  readonly count?: number;
-  readonly errorCode?: string | null;
-}
-
-export interface RecentActivitySnapshot {
-  readonly source: 'native-chat';
-  readonly retention: 'process';
-  readonly capacity: 100;
-  readonly state: ActivityState;
-  readonly items: readonly ActivityEntry[];
-}
-
-const states: readonly string[] = ['stopped', 'starting', 'running', 'stopping', 'error'];
-const types: readonly string[] = ['received', 'processed', 'sent', 'timeout', 'error', 'runtime'];
-const levels: readonly string[] = ['info', 'warning', 'error'];
-
-export function parseRecentActivity(value: unknown): RecentActivitySnapshot | null {
-  const root = asRecord(value);
-  if (root.source !== 'native-chat' || root.retention !== 'process' || root.capacity !== 100
-    || typeof root.state !== 'string' || !states.includes(root.state)
-    || !Array.isArray(root.items) || root.items.length > 100) return null;
-  const ids = new Set<string>();
-  const items: ActivityEntry[] = [];
-  for (const value of root.items) {
-    const entry = asRecord(value);
-    if (typeof entry.id !== 'string' || entry.id.trim() === '' || entry.id.length > 256 || ids.has(entry.id)
-      || typeof entry.at !== 'number' || !Number.isSafeInteger(entry.at) || entry.at < 0 || entry.at > 8_640_000_000_000_000
-      || typeof entry.level !== 'string' || !levels.includes(entry.level)
-      || typeof entry.type !== 'string' || !types.includes(entry.type)
-      || entry.conversationId !== null && (typeof entry.conversationId !== 'string' || entry.conversationId.trim() === '' || entry.conversationId.length > 256)
-      || typeof entry.summary !== 'string' || entry.summary.trim() === '' || entry.summary.length > 2048
-      || entry.content !== undefined && entry.content !== null && (typeof entry.content !== 'string' || entry.content.length > 2000)) return null;
-    ids.add(entry.id);
-    items.push({ count: typeof entry.count === 'number' && Number.isSafeInteger(entry.count) && entry.count > 0 ? entry.count : 1,
-      errorCode: typeof entry.errorCode === 'string' && /^[A-Z][A-Z_]{1,63}$/.test(entry.errorCode) ? entry.errorCode : null, id: entry.id, at: entry.at, level: entry.level as ActivityEntry['level'], type: entry.type as ActivityType,
-      conversationId: entry.conversationId as string | null, summary: entry.summary,
-      content: (entry.type === 'received' || entry.type === 'sent') && typeof entry.content === 'string' ? entry.content : null });
-  }
-  return { source: 'native-chat', retention: 'process', capacity: 100, state: root.state as ActivityState, items };
-}
+export const parseRecentActivity = parseAdminActivitySnapshot;
 
 export function activityTypeLabel(type: ActivityType): string {
   return { received: '收到消息', processed: '消息处理', sent: '发送回执', timeout: '处理超时', error: '发生异常', runtime: '运行状态' }[type];

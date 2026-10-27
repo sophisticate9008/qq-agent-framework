@@ -2,6 +2,63 @@
 
 扩展通过功能定义、宿主服务、包贡献和生命周期进入框架。声明入口后，实际副作用仍由调用方的 `FeatureExecution` 和当前 policy 核验。bootstrap 是可信运维代码，在宿主进程内运行；安装扩展需要运维信任，运行扩展还需要独立的会话授权。
 
+能力名称与工具说明只描述功能，例如“启动工作”“发布动态”；身份、白名单和自主执行权限由宿主策略单独配置与检查，不写入能力定义或模型参数。SDK `contracts` 导出独立的 `NATIVE_TOOL_CAPABILITY_CATALOG`、`nativeToolCapabilityDefinition` 与 `NativeToolCapability`，供工具和界面复用。目录列出能力不等于能力已安装、就绪或获得授权。
+
+## 本地框架插件的登记约定
+
+框架插件使用下文的功能包机制，独立于 DSH 的 MCP 服务与 DSH 插件。本地未发布的 TypeScript 包也可以接入：由可信 bootstrap 的 `create()` 返回 `packages`，不要求发布到 npm，不自动扫描任意目录或执行其中的文件。
+
+交给 Agent 编写插件时，至少约定：
+
+- 稳定包标识、语义化版本及依赖，登记在 `NativePackageManifest`。新插件同时填写 `displayName`（用户可读名称）、`description`（实际用途）和 `toolNames`（本扩展拥有的完整工具名），不要让内部包标识充当产品名称。
+- 需要提供的功能、服务、事件或输入贡献，在 manifest 声明后由 `install()` 注册。
+- 配置使用 `packageConfigurations`，运行状态与持久数据由包自身管理，计时器、订阅等通过 `context.own()` 登记清理。
+- 能力只描述动作；白名单、主人身份和实际执行权限仍由宿主判断。
+- 模型可调用工具需要接入实际工具注册与投影通道；仅声明普通功能或提供服务不会自动变成模型工具。
+
+`NativePackageManifest` 和直接注册的 `FeatureDefinition` 共用展示字段：`displayName` 最多 80 字符，`description` 最多 500 字符，均为非空、无控制字符的单行文本。用途说明应描述用户能完成什么，例如通用生图填写“按提示词和参考图生成图片并发送”，角色前置输入填写“准备角色设定、参考图和生图提示词”，不要填写“发送消息”等底层能力，也不要把权限条件写成用途。稳定 `id` 用于存储、依赖和授权关联，显示名称修改不改变 `id`。字段对旧插件保持可选；未填写用途时页面明确提示缺少说明，能力仅在详情中展示。
+
+```ts
+const metadata = {
+  displayName: '通用图片生成',
+  description: '按提示词和可选参考图生成图片，查询进度并发送到对应会话。',
+  toolNames: ['generate_image', 'image_status'],
+};
+// 在 NativePackageManifest 或 FeatureDefinition 中展开 ...metadata。
+```
+
+`toolNames` 最多 128 个互不重复的完整工具标识，只用于声明工具归属，不注册工具、不授予执行权限。运行时注册记录优先于包声明；同名多包声明或与实际来源不一致时显示冲突。工具始终是其所属扩展的子项。
+
+### 注册来源与接入方式
+
+注册来源、DSH 注册范围、传输方式分别建模。`registrationSource` 包含 `origin`（`framework-builtin`、`dsh-builtin` 或 `extension`）、`ownerId`、`ownerName` 和 `transport`（`native` 或 `mcp`）。框架随版本提供的工具或 MCP 登记为框架内置；DSH 自带工具单列为 DSH 内置；后续安装的包、Agent 编写的插件或动态扩展登记为扩展。DSH 全局注册、会话注册以及 `mcp__` 前缀都不能单独证明工具属于哪一类。
+
+框架投影工具在 `FrameworkToolDefinition.registrationSource` 中声明。直接在 DSH 注册工具时，使用桥接插件的 `@qq-agent-framework/dsh-bridge-plugin/registration` 导出：
+
+```ts
+import { withToolRegistration, declareMcpToolRegistration } from '@qq-agent-framework/dsh-bridge-plugin/registration';
+
+ctx.tools.register(withToolRegistration(toolDefinition, {
+  origin: 'extension', ownerId: 'image-generation', ownerName: '通用图片生成', transport: 'native',
+}));
+
+// MCP 客户端自行登记工具时，安装者为该服务声明来源，并随生命周期撤销。
+ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
+  origin: 'extension', ownerId: 'search-addon', ownerName: '联网搜索',
+}));
+```
+
+纯框架默认装配的 MCP 使用相同接口，将 `origin` 登记为 `framework-builtin`；这项来源由装配代码声明，不是网页权限开关。MCP 服务声明匹配对应 DSH 范围和命名空间下的实际工具列表，支持服务动态增加或移除工具；声明本身不会连接服务或生成虚假的工具记录。简单命名空间限 1–32 个 ASCII 字母、数字、连字符或下划线，不包含双下划线；特殊名称应在具体工具定义上登记来源。同一范围同一命名空间重复声明时不采用推断结果。
+
+旧工具缺少来源登记时，目录兼容 DSH `0.2.1-rc.2`：在同一实际注册范围内核对已加载的内置工具模块与该版本的精确工具目录；可配置名称读取已解析的 `toolName`。已加载 MCP 客户端按其实际 `serverName` 关联现有工具，默认归为外部扩展服务；框架内置 MCP 的显式声明优先。未加载、已停用或仅存在配置声明的模块不会补出工具来源，不执行配置表达式、连接请求或模型调用。该兼容目录用于补齐旧注册信息，并非 DSH 提供的逐工具来源证明；同名冲突保留未识别状态。
+
+已运行扩展的精确 `toolNames` 仍可补充剩余缺失归属。只有上述来源均无法识别时才进入“来源待核对”；来源声明只影响目录展示，不扩大执行权限。
+
+
+工具属于扩展的子项，扩展之间的运行依赖使用已有 `dependencies` 与 `requires` / `provides`，不能用工具前缀推断父子关系。例如“通用图片生成”提供输入材料服务，“自我形象与提示词前置输入”依赖它登记参考图并准备提示词；前置输入并不拥有通用生图能力。自拍、换装是提示词内容，不需要分别注册工具。包管理器按依赖顺序启动、逆序停止，运行快照 `dependencies` 用于控制台展示实际关系。角色资料按需准备，不应每轮重复注入。
+
+目前没有独立的插件市场、目录自动热加载或一站式工具插件注册器。控制台读取注册元数据和实际运行状态，不能把尚未接入的源码目录显示为已安装。工具页分别呈现声明、注册与会话加载状态，框架服务页展示基础设施。
+
 ## SDK 与示例运行方式
 
 当前 SDK 包为 `@qq-agent-framework/sdk`，要求 Node.js 24.12.0 或更新版本。以下子路径有公开 `exports` 和声明文件：
@@ -13,8 +70,11 @@
 | `@qq-agent-framework/sdk/host` | bridge、bootstrap、包、配置、任务、日历、事件、服务与账号 registry。 |
 | `@qq-agent-framework/sdk/contracts` | 纯 DTO、ports、account scope、事件与包状态契约。 |
 | `@qq-agent-framework/sdk/storage` | SQLite、只读 SQLite、持久 policy/state 和账号 store 绑定。 |
+| `@qq-agent-framework/sdk/adapters` | 可复用的外部协议适配器，当前提供 OneBot 空间发布与删除。 |
 
 源码中的其他路径不构成 SDK 承诺。SDK 包不包含管理服务器和网页。仓库可以本地生成 tarball；以下示例不依赖 npm 上已有公开发布：
+
+QQ 空间的共用接口、能力声明及自主发布接入约定见 [空间适配](QZONE.md)。
 
 ```sh
 # 在框架仓库中
@@ -157,7 +217,7 @@ const hook = { id: 'example-send-guard', checkpoint: 'send.before' as const,
   run({ signal }: { signal: AbortSignal }) { signal.throwIfAborted(); } };
 ```
 
-把 hook 放到 bootstrap 的 `lifecycleHooks`；执行与关闭验收见 [lifecycle-hooks.test.ts](../test/lifecycle-hooks.test.ts)。模型提问、工具批准与记忆 proposal 确认仍留在所属 QQ 会话，不能用 hook 或管理 route 建网页审批旁路。
+把 hook 放到 bootstrap 的 `lifecycleHooks`；执行与关闭验收见 [lifecycle-hooks.test.ts](../test/lifecycle-hooks.test.ts)。模型提问与记忆 proposal 确认仍留在所属 QQ 会话，工具按白名单与敏感操作主人身份检查，不能用 hook 或管理 route 建网页审批旁路。
 
 ## 配置贡献与日历
 
@@ -178,7 +238,7 @@ calendar.setEnabled('daily-report', false);
 await calendar.stop();
 ```
 
-weekly 的 dayOfWeek 为 ISO 1–7。occurrence 在回调前持久化；中断结果为 unknown，不在重启时重放。默认原生提醒在此基础上提供 once/delay/daily/weekly、规则 CAS、启停、next/history，并在发生时走当前 guard 与发送 policy。只处理用户明确创建的提醒，不默认开启主动话题。完整可重复验收见 [triggers.test.ts](../test/triggers.test.ts)、[native-reminders.test.ts](../test/native-reminders.test.ts)、[native-bootstrap-example.ts](../test/fixtures/native-bootstrap-example.ts)。
+weekly 的 dayOfWeek 为 ISO 1–7。occurrence 在回调前持久化；中断结果为 unknown，不在重启时重放。宿主 `reminders` 服务在此基础上提供 once/delay/daily/weekly、规则 CAS、启停、next/history，并在发生时走当前 guard 与发送 policy。插件可以通过声明依赖并取得 `reminders` v1 服务注册定时规则；通用日历钩子也可直接用于插件任务。控制台不提供提醒规则表单，默认不向模型注册提醒工具。记忆与偏好同样通过 `memory` v1 服务接入，插件负责工具及上下文贡献。完整可重复验收见 [triggers.test.ts](../test/triggers.test.ts)、[native-reminders.test.ts](../test/native-reminders.test.ts)、[native-bootstrap-example.ts](../test/fixtures/native-bootstrap-example.ts)。
 
 ## 示例二：实际内容指纹、稳定键与 CAS 迁移
 

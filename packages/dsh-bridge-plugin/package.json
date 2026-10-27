@@ -18,6 +18,10 @@
     "./migration": {
       "types": "./dist/migration-protocol.d.ts",
       "default": "./dist/migration-protocol.js"
+    },
+    "./registration": {
+      "types": "./dist/tool-registration.d.ts",
+      "default": "./dist/tool-registration.js"
     }
   },
   "files": [
@@ -43,6 +47,7 @@
     "@deepseek-ai/dsh-attachment": "0.2.1-rc.2",
     "@deepseek-ai/dsh-config-editor": "0.2.1-rc.2",
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-fs": "0.2.1-rc.2",
     "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session": "0.2.1-rc.2",
@@ -52,7 +57,8 @@
     "@deepseek-ai/dsh-subagent": "0.2.1-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-workspace": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-workspace": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-working-directory": "0.2.1-rc.2"
   },
   "dependencies": {
     "@deepseek-ai/cosmokit": "1.8.6",
@@ -81,6 +87,12 @@
     "typescript": "5.9.3"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-fs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-working-directory": {
+      "optional": true
+    },
     "@deepseek-ai/dsh-subagent": {
       "optional": true
     }

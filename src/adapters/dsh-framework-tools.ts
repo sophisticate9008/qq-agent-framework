@@ -1,6 +1,7 @@
 import type { FrameworkToolDefinition, FrameworkToolPendingCall, FrameworkToolResult } from '../contracts/framework-tools.ts'
 import { DshAdapterError } from './dsh.ts'
 import { isRecord, reference, snapshot } from '../core/values.ts'
+import { projectDshToolSchema } from './dsh-tool-schema.ts'
 
 export type DshFrameworkToolMethod = 'bridgePlugin/installFrameworkTools' | 'bridgePlugin/withdrawFrameworkTools'
   | 'bridgePlugin/pollFrameworkTools' | 'bridgePlugin/completeFrameworkTool' | 'bridgePlugin/inspectFrameworkTools'
@@ -31,7 +32,8 @@ export function createDshFrameworkToolPort(invoke: (method: DshFrameworkToolMeth
       return { sessionId: request.sessionId, generation: Number(projection.generation), leaseId: projection.leaseId, names: projection.names }
     },
     async install(request, signal) {
-      const value = snapshot(await invoke('bridgePlugin/installFrameworkTools', request, signal))
+      const wire = { ...request, tools: request.tools.map(tool => ({ ...tool, parameters: projectDshToolSchema(tool.parameters) })) }
+      const value = snapshot(await invoke('bridgePlugin/installFrameworkTools', wire, signal))
       if (!epoch(value, request.issuerEpoch) || !isRecord(value) || !reference(value.leaseId)
         || value.sessionId !== request.sessionId || value.generation !== request.generation || !Array.isArray(value.names)
         || JSON.stringify([...value.names].sort()) !== JSON.stringify(request.tools.map(tool => tool.name).sort())) return invalid()

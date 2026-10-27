@@ -108,8 +108,8 @@ test('hot add preserves every existing grant byte, revision and used counter whi
   assert.equal(added.conversationId, 'private:202');
   assert.equal(added.featureId, 'agent-relay');
   assert.deepEqual(added.capabilities, nativeWhitelistCapabilities(next));
-  assert.deepEqual(added.used, { 'agent.submit': 0, 'messaging.send': 0, 'agent.cancel': 0 });
-  assert.deepEqual(added.maxUses, { 'agent.submit': null, 'messaging.send': null, 'agent.cancel': null });
+  assert.deepEqual(added.used, { 'agent.submit': 0, 'messaging.send': 0, 'messaging.forward': 0, 'agent.tools.delegate': 0, 'agent.cancel': 0 });
+  assert.deepEqual(added.maxUses, { 'agent.submit': null, 'messaging.send': null, 'messaging.forward': null, 'agent.tools.delegate': null, 'agent.cancel': null });
   setup.consume('private:202');
 });
 

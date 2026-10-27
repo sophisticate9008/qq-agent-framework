@@ -3,10 +3,10 @@ import { useReadResource } from '../lib/use-read-resource.ts';
 import type { ApiClient } from '../lib/api.ts';
 import { Button } from './ui/button.tsx';
 import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
-const kinds = { image: '图片', audio: '语音', file: '文件', forward: '合并转发', quote: '引用消息' };
+const kinds = { image: '图片', audio: '语音', file: '文件', video: '视频抽样画面', forward: '合并转发', quote: '引用消息' };
 function reason(code: string): string {
   const labels: Readonly<Record<string, string>> = {
-    native_media_transcriber_not_connected: '语音转写尚未接通', native_media_reader_not_connected: '文件下载尚未接通', native_media_read_unknown: '下载结果尚未确认', native_media_read_rejected: '下载被拒绝', native_media_too_large: '内容太大', image_too_large: '图片太大', unsupported_image_format: '不支持这种图片格式', unsupported_file_format: '不支持这种文件格式', quoted_context_unavailable: '暂时无法读取引用消息', quoted_context_scope_mismatch: '引用消息不属于此会话', native_quote_scope_mismatch: '引用消息不属于此会话',
+    native_media_transcriber_not_connected: '语音转写尚未接通', native_media_reader_not_connected: '文件下载尚未接通', native_media_read_unknown: '下载结果尚未确认', native_media_read_rejected: '下载被拒绝', native_media_too_large: '内容太大', onebot_media_too_large: '原文件超过下载大小上限', onebot_media_timeout_unknown: '下载超时', onebot_media_read_unknown: '下载中断，未取得完整内容', onebot_media_http_rejected: '图片来源暂时无法下载', onebot_media_encoding_rejected: '下载编码不受支持', onebot_media_origin_rejected: '下载地址不可用', onebot_media_empty: '下载内容为空', image_decode_failed: '图片无法解码', image_pixel_limit: '图片分辨率过大', image_processing_timeout: '图片处理超时', image_too_large_after_compression: '图片压缩后仍过大', image_download_too_large: '原图超过下载大小上限', image_too_large: '图片太大', unsupported_image_format: '不支持这种图片格式', unsupported_file_format: '不支持这种文件格式', quoted_context_unavailable: '暂时无法读取引用消息', quoted_context_scope_mismatch: '引用消息不属于此会话', native_quote_scope_mismatch: '引用消息不属于此会话',
   }; return labels[code.toLowerCase()] ?? '读取遇到问题，可查看详细记录';
 }
 function state(item: NativeMediaDiagnosticItem): string {

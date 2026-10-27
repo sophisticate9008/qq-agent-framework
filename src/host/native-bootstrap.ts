@@ -1,3 +1,4 @@
+import { validExtensionMetadata } from '../contracts/extension-metadata.ts';
 import type { OneBotTransportOptions } from '../adapters/onebot.ts';
 import type { FeatureDefinition } from '../core/types.ts';
 import { FrameworkError, assert, errorCode, identifier, isRecord, snapshot } from '../core/values.ts';
@@ -148,7 +149,7 @@ function extension(input: NativeBootstrapExtension): Readonly<NativeBootstrapExt
     'INVALID_NATIVE_BOOTSTRAP', 'A bootstrap may declare at most 128 packages.');
   const packages = packageInput.map((definition: NativePackageDefinition) => {
     plain(definition, ['manifest', 'content', 'configurations', 'configurationIds', 'prepare', 'migrate', 'install', 'recover', 'start', 'drain', 'dispose']);
-    plain(definition.manifest, ['schema', 'id', 'version', 'stateSchemaVersion', 'dependencies', 'provides', 'requires', 'contributions']);
+    plain(definition.manifest, ['schema', 'id', 'version', 'displayName', 'description', 'toolNames', 'stateSchemaVersion', 'dependencies', 'provides', 'requires', 'contributions']);
     return Object.freeze({ ...definition, manifest: snapshot(definition.manifest) });
   });
   const lifecycleHooks = input.lifecycleHooks ?? [];
@@ -159,8 +160,8 @@ function extension(input: NativeBootstrapExtension): Readonly<NativeBootstrapExt
     'INVALID_NATIVE_BOOTSTRAP', 'A bootstrap may install at most 64 features.');
   const ids = new Set<string>();
   const copiedFeatures = features.map(feature => {
-    plain(feature, ['id', 'version', 'apiVersion', 'capabilities', 'subscriptions', 'setup']);
-    assert(identifier(feature.id) && feature.id !== 'agent-relay' && !ids.has(feature.id)
+    plain(feature, ['id', 'version', 'displayName', 'description', 'toolNames', 'apiVersion', 'capabilities', 'subscriptions', 'setup']);
+    assert(validExtensionMetadata(feature) && identifier(feature.id) && feature.id !== 'agent-relay' && !ids.has(feature.id)
       && typeof feature.version === 'string' && feature.version.length <= 100 && versionPattern.test(feature.version)
       && feature.apiVersion === 1 && typeof feature.setup === 'function',
     'INVALID_NATIVE_BOOTSTRAP', 'Bootstrap features must have distinct non-reserved versioned identities.');

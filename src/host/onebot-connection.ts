@@ -23,7 +23,7 @@ export class OneBotConnectionError extends Error {
 }
 
 const DISCONNECTED: AdapterConnectionStatus = Object.freeze({
-  state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false
+  state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false, accountOnline: null, accountGood: null
 })
 
 async function untilAborted<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
@@ -68,7 +68,8 @@ export function createOneBotConnectionManager(options: {
     const status = client.status()
     return Object.freeze({
       state: status.state, selfId: status.selfId, lastError: status.lastError,
-      received: status.received, dropped: status.dropped, chatReady: false
+      received: status.received, dropped: status.dropped, chatReady: false,
+      accountOnline: status.accountOnline ?? null, accountGood: status.accountGood ?? null
     })
   }
 
@@ -85,7 +86,7 @@ export function createOneBotConnectionManager(options: {
         if (client === previous) client = undefined
       }
       lifecycle = undefined
-      last = Object.freeze({ ...last, state: 'disconnected', selfId: null, lastError: null })
+      last = Object.freeze({ ...last, state: 'disconnected', selfId: null, lastError: null, accountOnline: null, accountGood: null })
     })()
     stopping = operation
     try {
@@ -98,7 +99,8 @@ export function createOneBotConnectionManager(options: {
   return Object.freeze({
     status() {
       const status = connectionStatus()
-      return { running: status.state === 'connected' && status.selfId !== null }
+      return { running: status.state === 'connected' && status.selfId !== null
+        && status.accountOnline !== false && status.accountGood !== false }
     },
     connectionStatus,
     async connect(configuration: NativeAdapterConfiguration, signal: AbortSignal) {
@@ -110,7 +112,8 @@ export function createOneBotConnectionManager(options: {
       const controller = new AbortController()
       const cancel = (): void => controller.abort()
       signal.addEventListener('abort', cancel, { once: true })
-      const timer = setTimeout(cancel, 5_000)
+      // Allow both disposal of the previous socket and the new five-second handshake.
+      const timer = setTimeout(cancel, 10_000)
       const operation = (async () => {
         try {
           lifecycle?.abort()
@@ -126,7 +129,8 @@ export function createOneBotConnectionManager(options: {
             ...(options.onProtocolEvent === undefined ? {} : { onProtocolEvent: options.onProtocolEvent }),
             ...(options.accountId === undefined ? {} : { accountId: options.accountId }),
             ...(selected.onebotWs.secret === '' ? {} : { accessToken: selected.onebotWs.secret }),
-            connectTimeoutMs: 5_000, maxReconnectAttempts: 8
+            // Native admission enforces the configured turn deadline, including preparation.
+            callbackTimeoutMs: 300_000, connectTimeoutMs: 5_000, maxReconnectAttempts: null
           })
           await untilAborted(client.connect(controller.signal), controller.signal)
           if (controller.signal.aborted) throw new OneBotConnectionError('adapter_runtime_aborted')
@@ -145,7 +149,7 @@ export function createOneBotConnectionManager(options: {
           const code = signal.aborted ? 'adapter_runtime_aborted'
             : error instanceof Error && 'code' in error && typeof error.code === 'string'
               && /^onebot_ws_[a-z0-9_]{1,64}$/.test(error.code) ? error.code : 'onebot_ws_connection_failed'
-          last = Object.freeze({ ...last, state: 'error', selfId: null, lastError: code })
+          last = Object.freeze({ ...last, state: 'error', selfId: null, lastError: code, accountOnline: null, accountGood: null })
           throw new OneBotConnectionError(code)
         } finally {
           clearTimeout(timer)

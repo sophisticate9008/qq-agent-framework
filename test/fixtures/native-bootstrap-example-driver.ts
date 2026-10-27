@@ -143,7 +143,7 @@ export default defineNativeBootstrap({ manifest: { id: 'example-default-path-fix
         if (command.op === 'relay-revoke') {
           for (const grant of host.policy.describe().grants) {
             if (grant.featureId === 'agent-relay' && (command.grantId === grant.id
-              || command.native === true && grant.id.startsWith('native-chat:'))) host.policy.revoke(grant.id);
+              || command.native === true && (grant.id.startsWith('native-chat:') || grant.id.startsWith('native-chat-whitelist:')))) host.policy.revoke(grant.id);
           }
           record('relay-control', { id: command.id });
           return;

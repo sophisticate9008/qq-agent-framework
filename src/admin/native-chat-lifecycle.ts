@@ -110,7 +110,7 @@ export function createNativeChatLifecycle<Status extends NativeChatLifecycleStat
       const expected = revisions(intent.value.revisions)
       const status = await options.runtime.status()
       signal.throwIfAborted()
-      if (status.state !== 'stopped') return skipped('runtime_not_stopped')
+      if (status.state !== 'stopped' && status.state !== 'error') return skipped('runtime_not_stopped')
       if (!sameRevisions(expected, revisions(status.revisions))) return skipped('configuration_changed')
       if (status.canStart !== true) return skipped('runtime_not_ready')
       const latest = await options.read()
@@ -122,11 +122,17 @@ export function createNativeChatLifecycle<Status extends NativeChatLifecycleStat
       return { state: 'restored', reason: null }
       }, 'restore')
     })().catch((): NativeChatRestoreResult => ({ state: 'failed', reason: 'startup_restore_failed' }))
-    restoreTask = Promise.race([operation, cancelled]).then(result => {
+    const task = Promise.race([operation, cancelled]).then(result => {
       restoration = Object.freeze(result)
       return restoration
     }).finally(() => { if (abort) signal.removeEventListener('abort', abort) })
-    return restoreTask
+    restoreTask = task
+    // Deduplicate in-flight work, not its historical outcome. Wait for the actual
+    // operation even when cancellation wins the race before permitting another try.
+    void operation.finally(() => {
+      void task.finally(() => { if (restoreTask === task) restoreTask = undefined })
+    })
+    return task
   }
 
   async function describe() {

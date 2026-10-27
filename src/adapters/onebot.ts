@@ -13,6 +13,7 @@ import { normalizeContent } from '../core/content.ts'
 import { normalizeOutboundScope, personaKey } from '../core/scope.ts'
 import type { InboundMessage } from '../contracts/ports.ts'
 import { classifyOneBotResponse } from './onebot-response.ts'
+import { normalizeOneBotProtocolEvent, projectOneBotNoticeForChat } from './onebot-events.ts'
 
 type MaybePromise<Value> = Value | Promise<Value>
 
@@ -51,7 +52,7 @@ export interface OneBotIncomingAssetSource {
 }
 
 export interface OneBotIncomingAsset {
-  kind: 'image' | 'audio' | 'file' | 'forward'
+  kind: 'image' | 'audio' | 'file' | 'video' | 'forward'
   messageId: string
   conversationId: string
   name?: string
@@ -64,7 +65,7 @@ export type OneBotIncomingAssetRegistrar = (
 ) => MaybePromise<string>
 
 export interface OneBotInboundMediaPreview {
-  type: 'image' | 'audio' | 'file' | 'forward'
+  type: 'image' | 'audio' | 'file' | 'video' | 'forward'
 }
 
 export interface OneBotAuthorizationContext {
@@ -182,6 +183,11 @@ async function outboundSegments(
       segments.push({ type: 'text', data: { text: block.text } })
       continue
     }
+    if (block.type === 'face') {
+      if (!/^(0|[1-9]\d{0,4})$/.test(block.id)) return null
+      segments.push({ type: 'face', data: { id: block.id } })
+      continue
+    }
     if (block.type === 'mention') {
       const userId = positiveIdentifier(block.userId)
       if (userId === null) return null
@@ -282,7 +288,7 @@ export function createOneBotTransport(options: OneBotTransportOptions): Transpor
 
   return Object.freeze({
     capabilities() {
-      const contentTypes: MessageContent['type'][] = ['text', 'mention', 'reply']
+      const contentTypes: MessageContent['type'][] = ['text', 'mention', 'reply', 'face']
       if (options.resolveAsset) contentTypes.push('image', 'audio', 'file')
       if (forward?.group || forward?.private) contentTypes.push('forward')
       return Object.freeze({ contentTypes: Object.freeze(contentTypes), ...(contentTypes.includes('forward') ? { maxForwardNodes: 32 } : {}) })
@@ -425,6 +431,11 @@ async function normalizeSegments(
       content.push({ type: 'text', text: data.text })
       continue
     }
+    if (rawSegment.type === 'face') {
+      const id = typeof data.id === 'number' && Number.isSafeInteger(data.id) ? String(data.id) : data.id
+      if (typeof id === 'string' && /^(0|[1-9]\d{0,4})$/.test(id)) content.push({ type: 'face', id })
+      continue
+    }
     if (rawSegment.type === 'at') {
       const userId = positiveIdentifier(data.qq)
       if (userId !== null) {
@@ -442,12 +453,14 @@ async function normalizeSegments(
       ? 'image'
       : rawSegment.type === 'record'
         ? 'audio'
-        : rawSegment.type === 'file' ? 'file'
+        : rawSegment.type === 'video' ? 'video'
+          : rawSegment.type === 'file' ? /\.(?:mp4|m4v|mov|mkv|webm|avi|mpeg|mpg)$/i.test(fileName(data)) ? 'video' : 'file'
           : rawSegment.type === 'forward' && safeString(data.id, 512) !== undefined ? 'forward' : null
     if (kind === null) continue
     media.push(Object.freeze({ type: kind }))
     if (!context.register) continue
-    const name = kind === 'file' ? fileName(data) : undefined
+    const name = kind === 'video' ? rawSegment.type === 'file' ? fileName(data) : fileName({ name: data.name, file: '视频.mp4' })
+      : kind === 'file' ? fileName(data) : undefined
     const assetId = await waitWithSignal(context.register({
         kind,
         messageId: context.messageId,
@@ -473,6 +486,32 @@ interface NormalizedOneBotEvent {
   media: readonly OneBotInboundMediaPreview[]
 }
 
+async function normalizeOneBotChatNotice(event: Record<string, unknown>, options: NormalizeOneBotOptions,
+  allowEmptyContent: boolean): Promise<NormalizedOneBotEvent | null> {
+  const configuredSelfId = positiveIdentifier(options.selfId)
+  if (!configuredSelfId) return null
+  const protocol = normalizeOneBotProtocolEvent(event, { selfId: configuredSelfId, receivedAt: (options.now ?? Date.now)() })
+  if (!protocol || !projectOneBotNoticeForChat(protocol) || typeof protocol.userId !== 'string') return null
+  const messageId = `onebot-notice:${protocol.id.slice('onebot:'.length)}`
+  const signal = options.signal ?? new AbortController().signal
+  let segments: readonly unknown[]
+  const poke = protocol.type === 'protocol.group.poked' || protocol.type === 'protocol.private.poked'
+  if (poke) segments = [{ type: 'text', data: { text: '[拍一拍] 对方戳了戳你。' } }]
+  else {
+    const file = protocol.data.file
+    if (!record(file)) return null
+    segments = [{ type: 'text', data: { text: '上传了一个群文件。' } }, { type: 'file', data: { id: file.id, name: file.name,
+      ...(typeof file.busId === 'number' ? { busid: file.busId } : {}) } }]
+  }
+  const normalized = await normalizeSegments(segments, undefined, { messageId, conversationId: protocol.conversationId,
+    register: options.registerIncomingAsset, signal })
+  if (!normalized || normalized.content.length === 0 && !allowEmptyContent) return null
+  let content: readonly MessageContent[]
+  try { content = normalized.content.length ? normalizeContent(normalized.content) : Object.freeze([]) } catch { return null }
+  return Object.freeze({ message: Object.freeze({ id: messageId, conversationId: protocol.conversationId, userId: protocol.userId,
+    receivedAt: Number(protocol.data.occurredAt), content, directed: poke, isSelf: false }), media: Object.freeze(normalized.media) })
+}
+
 /** Normalize an authorized protocol read without inventing a new authenticated message sender. */
 export async function normalizeOneBotContent(segments: unknown, options: {
   readonly messageId: string
@@ -492,7 +531,9 @@ async function normalizeOneBotEvent(
   options: NormalizeOneBotOptions,
   allowEmptyContent: boolean,
 ): Promise<NormalizedOneBotEvent | null> {
-  if (!record(event) || event.post_type !== 'message') return null
+  if (!record(event)) return null
+  if (event.post_type === 'notice') return normalizeOneBotChatNotice(event, options, allowEmptyContent)
+  if (event.post_type !== 'message') return null
   const configuredSelfId = positiveIdentifier(options.selfId)
   const eventSelfId = positiveIdentifier(event.self_id)
   const userId = positiveIdentifier(event.user_id)

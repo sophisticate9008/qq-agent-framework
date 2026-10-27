@@ -103,7 +103,7 @@ export function OverviewPage(props: PageProps) {
         <RecentActivity api={api} connected={connected} onViewAll={() => navigate('sessions')} />
         <Section title="当前聊天" className="[&>.panel-body]:p-0" actions={<Button size="xs" variant="link" onClick={() => navigate('model')}>完整编辑</Button>}>
           <ChatPlanManager {...props} compact setDirty={(dirty, scope) => { setLocalDirty(dirty); setDirty(dirty, scope); }}>
-            <div className="border-b"><PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['chat-output']} embedded /></div>
+            <div className="border-b"><PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['chat-output', 'media']} embedded /></div>
             <div className="flatgroup"><div className="row"><span>访问范围</span><div className="row push">{scope ? <><span className="chip">{scope.groups} 个群聊</span><span className="chip">{scope.privateChats} 个私聊</span></> : <span className="small muted">名单待读取</span>}<OverviewSettings title="主人与白名单" label="管理">{() => <AccessPage {...props} connected={connected} embedded />}</OverviewSettings></div></div><div className="row small mt-1"><span className="oktext">✓ 群聊 @ 唤醒</span><span className="oktext">✓ 私聊唤醒</span><span className="muted">引用与续聊跟随人设</span><HelpTip label="唤醒规则">在白名单范围内，群聊 @ 和私聊必定唤醒；引用与续聊在人设里配置。</HelpTip></div></div>
             <div className="flatgroup"><div className="row between"><span>自动维护</span><AutomaticMaintenanceStatus api={api} connected={connected} /></div><p className="small muted mt-1">已结束运行记录保留 7 天；未完成和未知结果保留。</p></div>
           </ChatPlanManager>

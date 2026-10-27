@@ -29,14 +29,39 @@ function totals(records: readonly UsageRecord[], partial: boolean, currency: str
   const modelRecords = records.filter(item => item.recordKind !== 'opening-balance')
   const totalModelRecords = items.filter(item => item.recordKind !== 'opening-balance')
   const complete = !partial && totalModelRecords.every(item => item.coverage === 'complete')
-  const sum = (key: keyof UsageRecord['tokens']) => items.length > 0 && complete && items.every(item => item.tokens[key] !== null && item.tokens[key] !== undefined)
-    ? items.reduce((amount, item) => amount + item.tokens[key]!, 0) : null
-  const cost = items.length > 0 && complete && items.every(item => item.cost?.currency === currency)
-    ? items.reduce((amount, item) => amount + item.cost!.amount, 0) : null
+  const sumKnown = (values: readonly (number | null | undefined)[]) => {
+    const known = values.filter((value): value is number => value !== null && value !== undefined)
+    if (known.length === 0) return null
+    const total = known.reduce((amount, value) => amount + value, 0)
+    assert(Number.isSafeInteger(total), 'USAGE_TOTAL_OVERFLOW', 'Usage total exceeds safe integer bounds.')
+    return total
+  }
+  const tokenKeys = ['input', 'output', 'cacheRead', 'cacheWrite', 'total', 'reasoning'] as const
+  const missingTokens = Object.fromEntries(tokenKeys.map(key => [key,
+    items.filter(item => item.tokens[key] === null || item.tokens[key] === undefined).length])) as Record<typeof tokenKeys[number], number>
+  const sum = (key: keyof UsageRecord['tokens']) => sumKnown(items.map(item => item.tokens[key]))
+  const priced = items.filter(item => item.cost?.currency === currency)
+  const cost = priced.length > 0 ? priced.reduce((amount, item) => amount + item.cost!.amount, 0) : null
   const cacheMiss = sum('input')
   const cacheHit = sum('cacheRead')
   const cacheWrite = sum('cacheWrite')
-  const input = cacheMiss !== null && cacheHit !== null && cacheWrite !== null ? cacheMiss + cacheHit + cacheWrite : null
+  const inputs = items.map(item => {
+    const counts = item.tokens
+    if (counts.input !== null && counts.cacheRead !== null && counts.cacheWrite !== null) {
+      return counts.input + counts.cacheRead + counts.cacheWrite
+    }
+    // Exact aggregate input remains available even when its cache split is unknown.
+    if (counts.total !== null && counts.output !== null && counts.total >= counts.output
+      && counts.total - counts.output >= (counts.input ?? 0) + (counts.cacheRead ?? 0) + (counts.cacheWrite ?? 0)) {
+      return counts.total - counts.output
+    }
+    return null
+  })
+  const input = sumKnown(inputs)
+  const missingCostRecords = items.filter(item => item.cost === null).length
+  const costComplete = complete && items.length > 0 && missingCostRecords === 0 && priced.length === items.length
+  const totalsComplete = costComplete
+    && tokenKeys.filter(key => key !== 'reasoning').every(key => missingTokens[key] === 0)
   const turns = new Set(modelRecords.map(item => digest([item.sessionId, item.generation, item.turnId]))).size
   const totalModelTurns = new Set(totalModelRecords.map(item => digest([item.sessionId, item.generation, item.turnId]))).size
   const modelCost = totalModelRecords.length > 0 && !partial
@@ -44,14 +69,16 @@ function totals(records: readonly UsageRecord[], partial: boolean, currency: str
     ? totalModelRecords.reduce((amount, item) => amount + item.cost!.amount, 0) : null
   return { totalTokens: sum('total'), inputTokens: input, outputTokens: sum('output'),
     cacheHitTokens: cacheHit, cacheMissTokens: cacheMiss, cacheWriteTokens: cacheWrite, reasoningTokens: sum('reasoning'),
-    cost, estimated: items.some(item => item.cost?.source === 'operator-price-estimate') || !complete,
+    cost, estimated: items.some(item => item.cost?.source === 'operator-price-estimate') || !totalsComplete,
     conversations: new Set(records.map(item => item.conversationId)).size, turns, steps: modelRecords.length,
     attributedCost: cost, unattributedCost: 0,
     buckets: { cacheMiss, cacheHit, cacheWrite, output: sum('output'), reasoning: sum('reasoning') },
-    byTier: null, cacheHitRate: input === null || cacheHit === null ? null : input > 0 ? cacheHit / input : 0,
+    byTier: null, cacheHitRate: !complete || missingTokens.cacheRead > 0 || inputs.some(value => value === null)
+      || input === null || cacheHit === null ? null : input > 0 ? cacheHit / input : 0,
     avgCostPerTurn: modelCost === null ? null : totalModelTurns > 0 ? modelCost / totalModelTurns : 0,
     avgCostPerStep: modelCost === null ? null : totalModelRecords.length > 0 ? modelCost / totalModelRecords.length : 0,
-    coverage: items.length === 0 ? 'unknown' : complete ? 'complete' : 'partial',
+    coverage: items.length === 0 ? 'unknown' : totalsComplete ? 'complete' : 'partial',
+    totalsComplete, costComplete, missingTokens, missingCostRecords,
     knownCosts: Object.fromEntries([...new Set(items.flatMap(item => item.cost ? [item.cost.currency] : []))]
       .map(unit => [unit, items.reduce((amount, item) => amount + (item.cost?.currency === unit ? item.cost.amount : 0), 0)])),
     missingCostTurns: new Set(totalModelRecords.filter(item => !item.cost).map(item => digest([item.sessionId, item.generation, item.turnId]))).size,
@@ -82,6 +109,8 @@ function groupTurns(items: readonly UsageRecord[], partial: boolean, currency: s
       timeSource: 'framework-observed', model: models.length === 1 ? models[0] : null,
       provider: providers.length === 1 ? providers[0] : null,
       buckets: summary.buckets, cost: summary.cost, tier: tiers.length === 1 ? tiers[0] : 'mixed', coverage: summary.coverage,
+      costRecovery: group.some(item => item.costRecovery === 'historical-reference') ? 'historical-reference'
+        : group.some(item => item.costRecovery === 'price-snapshot') ? 'price-snapshot' : null,
       knownCosts: Object.fromEntries([...new Set(group.flatMap(item => item.cost ? [item.cost.currency] : []))]
         .map(unit => [unit, group.reduce((amount, item) => amount + (item.cost?.currency === unit ? item.cost.amount : 0), 0)])) }
   }).sort((left, right) => right.endedAt - left.endedAt || left.sessionId.localeCompare(right.sessionId))
@@ -134,7 +163,7 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
         unavailable: [], priceVersion: priceTable.version,
         pricingEstimateAvailable: nowTier !== null,
         pricingEstimateMissingReasons: nowTier ? [] : ['model_pricing_unavailable'],
-        nowTier, priceTable, pricingMode: priceTable.pricingMode, prices, resetAvailable: false,
+        nowTier, priceTable, pricingMode: priceTable.pricingMode, prices, resetAvailable: true,
         priceSelection: { model, provider: provider ?? null,
           source: query.model ? 'query' : observed ? 'observed-history'
             : prices.prices.length === 1 ? 'operator-example' : 'builtin-reference' },
@@ -173,7 +202,7 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
           model: item.model, provider: item.provider, tokens: item.tokens.total, cacheMiss: item.tokens.input,
           cacheHit: item.tokens.cacheRead, cacheWrite: item.tokens.cacheWrite, output: item.tokens.output,
           reasoning: item.tokens.reasoning ?? null, cost: item.cost?.currency === currency ? item.cost.amount : null,
-          currency: item.cost?.currency ?? null, knownCost: item.cost, tier: item.priceSnapshot?.tier ?? 'flat',
+          currency: item.cost?.currency ?? null, knownCost: item.cost, costRecovery: item.costRecovery, tier: item.priceSnapshot?.tier ?? 'flat',
           estimated: item.cost?.source === 'operator-price-estimate', coverage: item.coverage,
           pricingRevision: item.pricingRevision })) })
     },

@@ -1,11 +1,12 @@
+import { extensionMetadata, type ExtensionMetadata } from '../contracts/extension-metadata.ts'
 import { snapshot } from '../core/values.ts'
 import { NATIVE_EDITABLE_RESOURCE_IDS, type NativeRuntimeProjection, type NativeRuntimeFeatureProjection } from '../contracts/native-runtime-projection.ts'
 export interface NativeRuntimeProjectionSource {
   status(): Promise<{ readonly state: NativeRuntimeProjection['state']; readonly chatReady: boolean; readonly missingReasons: readonly string[] }>
-  host(): { readonly engine: { describe(): { readonly features: readonly {
+  host(): { readonly engine: { describe(): { readonly features: readonly (ExtensionMetadata & {
     readonly id: string; readonly version: string; readonly status: NativeRuntimeFeatureProjection['status'];
     readonly capabilities: readonly string[]; readonly subscriptions: readonly string[]
-  }[] } } } | undefined
+  })[] } } } | undefined
 }
 
 /** Describe installation and readiness without evaluating a conversation's policy or creating state. */
@@ -15,7 +16,7 @@ export async function readNativeRuntimeProjection(runtime?: NativeRuntimeProject
   const features: NativeRuntimeFeatureProjection[] = []
   let bytes = 0
   for (const feature of described.slice(0, 256)) {
-    const projected: NativeRuntimeFeatureProjection = { id: feature.id, version: feature.version, status: feature.status,
+    const projected: NativeRuntimeFeatureProjection = { id: feature.id, version: feature.version, ...extensionMetadata(feature), status: feature.status,
       declared: true, installed: feature.status === 'active', ready: feature.status === 'active' && status?.chatReady === true,
       authorized: null, capabilities: [...feature.capabilities], subscriptions: [...feature.subscriptions] }
     const size = Buffer.byteLength(JSON.stringify(projected))
@@ -46,7 +47,7 @@ export function nativeRuntimeFeatureResponse(projection: NativeRuntimeProjection
     seen.add(capability.id)
   }
   return { runtimeConnected: projection.chatReady, editableResources: true, capabilities: capabilities.slice(0, 512),
-    features: projection.features.map(({ id, version, status, declared, installed, capabilities }) => ({ id, version, status, declared, installed, capabilities })),
+    features: projection.features.map(feature => ({ id: feature.id, version: feature.version, status: feature.status, declared: feature.declared, installed: feature.installed, capabilities: feature.capabilities, ...extensionMetadata(feature), ...(feature.displayName ? { name: feature.displayName } : {}) })),
     featuresLimited: projection.featuresLimited, capabilitiesLimited: projection.capabilitiesLimited || capabilities.length > 512,
     authorizationEvaluated: false, projection }
 }

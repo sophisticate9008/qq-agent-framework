@@ -5,7 +5,7 @@ import { isRecord, snapshot } from '../core/values.ts';
 export const ONEBOT_PROTOCOL_EVENT_TYPES = Object.freeze([
   'protocol.message.recalled', 'protocol.group.member.changed', 'protocol.group.admin.changed',
   'protocol.group.ban.changed', 'protocol.group.file.uploaded', 'protocol.friend.added',
-  'protocol.group.poked', 'protocol.request.received', 'protocol.connection.lifecycle', 'protocol.connection.heartbeat',
+  'protocol.group.poked', 'protocol.private.poked', 'protocol.request.received', 'protocol.connection.lifecycle', 'protocol.connection.heartbeat',
 ] as const);
 export type OneBotProtocolEventType = typeof ONEBOT_PROTOCOL_EVENT_TYPES[number];
 export interface OneBotProtocolEvent extends FrameworkEvent { readonly type: OneBotProtocolEventType }
@@ -68,12 +68,17 @@ export function normalizeOneBotProtocolEvent(value: unknown, context: {
       const file = isRecord(value.file) ? value.file : null;
       if (groupId === null || userId === null || file === null || boundedText(file.id, 512) === null
         || boundedText(file.name, 255) === null || !integer(file.size)) return null;
+      const busId = file.busid ?? file.bus_id ?? file.busId;
+      if (busId !== undefined && !integer(busId)) return null;
       type = 'protocol.group.file.uploaded'; conversationId = `group:${groupId}`;
-      details = { file: { id: String(file.id), name: String(file.name), size: file.size }, senderId: userId };
+      details = { file: { id: String(file.id), name: String(file.name), size: file.size,
+        ...(busId === undefined ? {} : { busId }) }, senderId: userId };
     } else if (value.notice_type === 'notify' && value.sub_type === 'poke') {
       const targetId = identifier(value.target_id);
-      if (groupId === null || userId === null || targetId === null || userId === context.selfId) return null;
-      type = 'protocol.group.poked'; conversationId = `group:${groupId}`;
+      if (userId === null || targetId === null || userId === context.selfId
+        || groupId === null && value.group_id !== undefined && value.group_id !== null && value.group_id !== 0 && value.group_id !== '0') return null;
+      type = groupId === null ? 'protocol.private.poked' : 'protocol.group.poked';
+      conversationId = groupId === null ? `private:${userId}` : `group:${groupId}`;
       details = { senderId: userId, targetId, directedToSelf: targetId === context.selfId };
     } else return null;
   } else if (value.post_type === 'request') {
@@ -121,7 +126,7 @@ export function validateOneBotProtocolEventData(type: string, data: unknown): bo
     sub_type: data.enabled === true ? 'ban' : 'lift_ban', user_id: data.memberId, operator_id: data.operatorId, duration: data.durationSeconds });
   else if (type === 'protocol.group.file.uploaded') Object.assign(raw, { post_type: 'notice', notice_type: 'group_upload', user_id: data.senderId, file: data.file });
   else if (type === 'protocol.friend.added') Object.assign(raw, { post_type: 'notice', notice_type: 'friend_add', user_id: data.friendId });
-  else if (type === 'protocol.group.poked') Object.assign(raw, { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: data.senderId, target_id: data.targetId });
+  else if (type === 'protocol.group.poked' || type === 'protocol.private.poked') Object.assign(raw, { post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: data.senderId, target_id: data.targetId });
   else if (type === 'protocol.request.received') Object.assign(raw, { post_type: 'request', request_type: data.kind,
     sub_type: data.subType, user_id: data.requesterId, flag: data.flag, comment: data.comment });
   else if (type === 'protocol.connection.lifecycle') Object.assign(raw, { post_type: 'meta_event', meta_event_type: 'lifecycle', sub_type: data.phase });
@@ -136,6 +141,22 @@ export function validateOneBotProtocolEventData(type: string, data: unknown): bo
   }
   try { const encoded = canonical(data); return encoded.length <= 64 * 1024 && encoded === canonical(normalized.data); }
   catch { return false; }
+}
+
+/** Only conversational notices re-enter normal message admission; management notices remain events. */
+export function projectOneBotNoticeForChat(event: Readonly<OneBotProtocolEvent>): Readonly<JsonObject> | null {
+  if (!validateOneBotProtocolEventData(event.type, event.data)) return null;
+  const data = event.data;
+  if (data.senderId === data.selfId) return null;
+  const base: JsonObject = { post_type: 'notice', self_id: data.selfId, user_id: data.senderId,
+    time: Number(data.occurredAt) / 1000 };
+  const group = /^group:([1-9]\d{0,31})$/.exec(event.conversationId);
+  if (event.type === 'protocol.group.poked' || event.type === 'protocol.private.poked') {
+    if (data.directedToSelf !== true || data.targetId !== data.selfId) return null;
+    return snapshot({ ...base, ...(group ? { group_id: group[1]! } : {}), notice_type: 'notify', sub_type: 'poke', target_id: data.targetId });
+  }
+  if (event.type === 'protocol.group.file.uploaded' && group) return snapshot({ ...base, group_id: group[1]!, notice_type: 'group_upload', file: data.file });
+  return null;
 }
 
 export function createOneBotProtocolEventValidators(scope: { readonly accountId: string; readonly selfId: string }):

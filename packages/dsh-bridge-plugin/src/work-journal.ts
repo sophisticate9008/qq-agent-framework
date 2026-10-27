@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
+import { validWorkUsage, type WorkUsageStep } from './work-usage.js'
 import { validIdentifier } from './receipts.js'
 import { validWorkOutput, type WorkOutput } from './work-output.js'
 import type { WorkStart } from './work.js'
@@ -10,7 +11,9 @@ export interface WorkJournalRecord {
   readonly schema: 1
   readonly fingerprint: string
   readonly address: { readonly id: string; readonly parentSessionId: string; readonly childId: string; readonly generation: number }
-  readonly target: { readonly modelProvider: string; readonly model: string; readonly agentPreset: string; readonly reasoningEffort?: string; readonly timeoutMs: number }
+  readonly target: { readonly fullAccess?: boolean; readonly modelProvider: string; readonly model: string; readonly agentPreset: string; readonly reasoningEffort?: string; readonly timeoutMs: number }
+  readonly usage?: readonly WorkUsageStep[]
+  readonly permissionVerified?: boolean
   readonly state: 'starting' | 'running' | 'completed' | 'unknown'
   readonly result: { readonly stopReason: string; readonly output: readonly WorkOutput[] } | null
   readonly error: string | null
@@ -35,6 +38,10 @@ function valid(value: unknown): value is WorkJournalRecord {
   if (Object.keys(address).sort().join(',') !== 'childId,generation,id,parentSessionId'
     || ![address.id, address.parentSessionId, address.childId].every(validIdentifier)
     || address.childId === address.parentSessionId || !Number.isSafeInteger(address.generation) || Number(address.generation) < 1
+    || 'usage' in value && !validWorkUsage(value.usage)
+    || 'permissionVerified' in value && value.permissionVerified !== undefined && typeof value.permissionVerified !== 'boolean'
+    || 'permissionVerified' in value && value.permissionVerified === true && target.fullAccess !== true
+    || target.fullAccess !== undefined && typeof target.fullAccess !== 'boolean'
     || ![target.modelProvider, target.model, target.agentPreset].every(validIdentifier)
     || target.reasoningEffort !== undefined && !validIdentifier(target.reasoningEffort)
     || !Number.isSafeInteger(target.timeoutMs) || Number(target.timeoutMs) < 10 || Number(target.timeoutMs) > 300000

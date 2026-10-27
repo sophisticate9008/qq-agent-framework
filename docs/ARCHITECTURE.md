@@ -16,7 +16,7 @@ flowchart TD
   Observation --> Engine
   Effects --> Outbox[持久 outbox 与确认回执]
   Outbox --> QQ
-  Agent --> Questions[模型提问与工具确认]
+  Agent --> Questions[模型提问]
   Questions --> QQ
   QQ --> Answers[实际主人在原会话回复]
   Answers --> Agent
@@ -45,7 +45,7 @@ flowchart TD
 
 ## 配置、应用与运行
 
-配置仓储 [native-configuration-repository.ts](../src/admin/native-configuration-repository.ts) 统一保存与引用约束。计划、人设、访问规则、连接、提供方、授权、部署和执行策略组成八个原生配置 revision。JSON 文档通过私有目录写锁和原子替换进行 CAS；过期 revision 返回冲突，读取失败不伪装成默认空配置。提供方和模型被方案或助手引用、人设被参考图绑定时，相应删除必须先明确处理引用。
+配置仓储 [native-configuration-repository.ts](../src/admin/native-configuration-repository.ts) 统一保存与引用约束。计划、人设、访问规则、连接、提供方、授权、部署和执行策略组成八个原生配置 revision。JSON 文档通过私有目录写锁和原子替换进行 CAS；过期 revision 返回冲突，读取失败不伪装成默认空配置。提供方和模型被方案或助手引用、人设被方案引用时，相应删除必须先明确处理引用。
 
 保存目录与应用到 DSH 是两个操作。领域 planner 生成受管配置，profile 适配器只修改托管部分并读回核对；本机配置和模型元数据由自动发现提供，静态 YAML 不执行表达式。模型的输入类型来自真实元数据，缺少 image 证据时按 text 处理。DSH 凭据值是否已被运行中的外部进程加载，不由文件 provenance 推断为已验证。
 
@@ -53,7 +53,7 @@ flowchart TD
 
 [native-configuration-impact.ts](../src/host/native-configuration-impact.ts) 比较实际选中的方案、人设、提供方和已部署工具、连接、鉴权、执行等依赖。编辑未选中的目录对象不必停止当前聊天；实际依赖变化仍需按影响核验、迁移或重启。访问规则撤回在副作用前生效。secret 参与依赖指纹时不进入公开状态。
 
-包配置有独立文档与 CAS revision。`packageConfigurations` 是 bootstrap 顶层的静态贡献，管理 registry 可在聊天未启动时提供配置。运行包通过声明的 `configurationIds` 使用同一 schema；热读取不会新增全局启动 revision，也不授予工具能力。默认输入配置与输出配置分别见 [chat-input-configuration.ts](../src/contracts/chat-input-configuration.ts)、[native-output.ts](../src/contracts/native-output.ts)。
+包配置有独立文档与 CAS revision。`packageConfigurations` 是 bootstrap 顶层的静态贡献，管理 registry 可在聊天未启动时提供配置。运行包通过声明的 `configurationIds` 使用同一 schema；热读取不会新增全局启动 revision，也不授予工具能力。唤醒设置随人设保存，见 [persona-wake.ts](../src/contracts/persona-wake.ts)；回复方式仍使用包配置，见 [native-output.ts](../src/contracts/native-output.ts)。
 
 ## 会话、执行与交付证据
 
@@ -96,7 +96,7 @@ GET /api/accounts/dispatch?account=<ID>&path=%2Fapi%2Fchat%2Fwork&limit=20
 
 ## 控制台、QQ 与私有存储
 
-控制台可以配置、明确应用、维护统计及读取状态。模型提问和工具确认发到所属 QQ 会话，答复只认实际配置主人及原问题上下文；网页没有批准、拒绝或代答入口。记忆 proposal 也不因网页纠正或读取而获得确认，global 共享必须由主人明确授权。
+控制台可以配置、明确应用、维护统计及读取状态。模型提问发到所属 QQ 会话，答复只认实际配置主人及原问题上下文；工具随白名单开放，外部工具确认按当前主人来源自动处理；网页没有批准、拒绝或代答入口。记忆 proposal 也不因网页纠正或读取而获得确认，global 共享必须由主人明确授权。
 
 概览和功能页读取同一 [runtime projection](../src/host/native-runtime-projection.ts)。功能的 declared/installed/ready 与每次会话授权分别展示。账号切换重挂页面并取消旧读取，草稿、缓存和未知写入证据按 API 身份保留，不能把旧账号的异步响应应用到新账号。
 

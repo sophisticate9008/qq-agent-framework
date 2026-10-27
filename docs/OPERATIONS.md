@@ -34,6 +34,12 @@ npm start
 
 停止进程使用 Ctrl+C、SIGINT 或 SIGTERM，等待清理结果；CLI 没有 `stop` 子命令。控制台的停止聊天只控制聊天运行状态，不等于停止管理进程。若关闭或取消结果未知，按 [恢复手册](RECOVERY.md) 处理，不能直接把未知记录当作已清理。
 
+## 本机 boot 接入
+
+本机 `boot` 通过本框架的 `qqagent start` 启动所选协议端、DSH、已启用的辅助服务及框架网关和宿主。入口为 `ops/qqagent`，实现为 `scripts/service-manager.ts`，服务清单位于私有的 `runtime/live/services.json`。NapCat / SnowLuma 两套安装与登录数据保留，`qqagent protocol napcat|snowluma` 管理当前选择。框架宿主沿用已选择的部署入口和私有配置，按已保存的运行意图恢复原生聊天。
+
+`qqagent restart framework-admin` 单独重启框架；`boot logs qqagent`、`boot logs framework-admin` 和 `qqagent logs` 均查看框架日志。`boot logs qqbridge` 保留为日志别名。`qqagent status` 展示当前选中的服务，`qqagent doctor` 只读核对配置的健康检查与 QQ 在线状态。启动或停止失败时返回非零退出码，停止未完成时不继续重启。服务安装目录可以独立配置，运维命令不调用其他项目的启动脚本。配置格式、安装与常用命令见 [服务运维](SERVICE_MANAGER.md)。
+
 ## 需要区分的默认值
 
 | 项目 | 默认行为 |
@@ -42,8 +48,8 @@ npm start
 | 独立出站请求期限 | 60 秒；发送额度控制默认关闭，访问范围仍须授权 |
 | 输入参与 | 群聊、私聊开启；@ 和引用唤醒开启；续聊窗口 90 秒，可设 0–300 秒 |
 | 昵称 | 显式列表默认空；当前人设名称也参与有效昵称解析 |
-| 输出 | 分气泡与媒体开启；长文合并转发关闭，阈值 3500 字符 |
-| 转发 | 需要独立权限与可用协议能力；开输出开关不授予权限 |
+| 输出 | 分气泡开启；长文合并转发关闭，阈值 3500 字符；媒体按协议端支持发送 |
+| 转发 | 随会话白名单开放，仍需要可用协议能力和相应输出设置 |
 | 模型容量 | 优先读取实际模型元数据与已应用值；未知已应用容量显示未知 |
 | 无元数据的方案容量回退 | 群聊、私聊各 128000；不是所有模型的容量声明 |
 
@@ -79,3 +85,11 @@ npm run test:sdk
 浏览器工具按需安装到 `runtime/testing/`，普通安装、构建、启动和单元测试不需要 Playwright。需要预装时执行 `npm run cli -- install --browser`；系统库不足时可加 `--with-deps`。`--skip-browser-download` 只安装工具包。`npm run cli -- uninstall --browser` 只清理浏览器工具，不清业务数据和证据。
 
 单组浏览器命令为 `npm run cli -- test --browser --target <名称>`，名称包括 `browser`、`management`、`page-navigation`、`activity`、`usage`、`markdown`、`presentation`、`virtual-list-perf`、`native-chat-ui`、`execution-journal`。这些测试使用隔离配置与协议替身；真实模型质量另行记录。插件测试命令与加载方法见 [DSH](DSH.md)，最终结果及历史失败处理见 [验收记录](VALIDATION.md)。
+
+## 自动保留
+
+原生数据库的运行记录自动保留 7 天，后台分批清除过期临时数据并在容量高水位提前回收已结束记录。状态在会话页“自动维护”详情查看。未知任务、会话历史、用量账本及必要去重状态保留；需要处理提示应核对这些记录，不手工删除数据库。
+
+文件日志由进程管理器轮转。仓库提供 `ops/logrotate.conf` 模板：将 `@LOG_DIRECTORY@` 替换为私有日志目录，通过 cron 每分钟调用 logrotate；采用每日或超过 10MiB 轮转，当前文件加最多四份历史、历史最多 7 天。持续写入日志通过 copytruncate 轮转，检查间隔内可能短暂超过大小阈值，截断交接有标准 copytruncate 的短暂丢行窗口。框架数据库的执行结果不依赖文本日志。
+
+本机使用独立的 `/etc/cron.d/qq-agent-framework-logrotate` 和 `/etc/logrotate.d/qq-agent-framework` 管理本框架及沿用的服务日志；进程无需重启即可启用轮转。部署到其他机器时由其进程管理器安装同等规则，模板见 `ops/logrotate.conf`。

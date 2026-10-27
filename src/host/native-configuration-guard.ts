@@ -4,7 +4,6 @@ import type { ChatSessionDefinition } from '../contracts/chat-session.ts';
 import { FrameworkError, snapshot } from '../core/values.ts';
 import type { NativeChatConfiguration } from './native-chat-configuration.ts';
 import { analyzeNativeConfigurationImpact } from './native-configuration-impact.ts';
-import { digest } from './data.ts';
 
 export type NativeGuardPhase = 'operation' | 'admission' | 'submit' | 'delivery' | 'resource' | 'interaction' | 'protocol';
 interface GuardGeneration {
@@ -13,7 +12,7 @@ interface GuardGeneration {
   readonly configuration?: NativeChatConfiguration;
   readonly bindings: readonly NativeDeploymentPresetBinding[];
 }
-/** Every side-effect boundary rechecks authority. Measurements do not introduce a permission cache. */
+/** Message boundaries read current local authority. Full DSH verification belongs to start/apply. */
 export function createNativeConfigurationGuard(options: {
   readonly current: () => GuardGeneration;
   readonly loadConfiguration: () => Promise<NativeChatConfiguration>;
@@ -23,10 +22,6 @@ export function createNativeConfigurationGuard(options: {
   }>;
 }) {
   const pending = new Set<Promise<void>>();
-  type Deployment = Awaited<ReturnType<typeof options.resolveDeployment>>;
-  const deploymentReads = new WeakMap<AbortSignal, Map<string, Promise<Deployment>>>();
-  let coalescedReads = 0;
-  let activeDeploymentReads = 0;
   const phases = Object.fromEntries(['operation', 'admission', 'submit', 'delivery', 'resource', 'interaction', 'protocol']
     .map(phase => [phase, { calls: 0, failures: 0, configurationReads: 0, deploymentReads: 0, totalMs: 0, maxMs: 0 }])) as
     Record<NativeGuardPhase, { calls: number; failures: number; configurationReads: number; deploymentReads: number; totalMs: number; maxMs: number }>;
@@ -40,7 +35,7 @@ export function createNativeConfigurationGuard(options: {
       || !['starting', 'running'].includes(current.state)) failure('NATIVE_CHAT_STOPPED');
   }
   return Object.freeze({
-    check(conversationId: string, signal: AbortSignal, recheckConfiguration = false, phase: NativeGuardPhase = 'operation'): Promise<void> {
+    check(conversationId: string, signal: AbortSignal, _recheckConfiguration = false, phase: NativeGuardPhase = 'operation'): Promise<void> {
       const metrics = phases[phase];
       metrics.calls++;
       const began = performance.now();
@@ -53,36 +48,6 @@ export function createNativeConfigurationGuard(options: {
         const active = initial.configuration;
         if (!active || !analyzeNativeConfigurationImpact(active, latest).canContinue) failure('NATIVE_CHAT_CONFIGURATION_CHANGED');
         if (!allowed(active, conversationId) || !allowed(latest, conversationId)) failure('NATIVE_CHAT_ACCESS_DENIED');
-        const definition = options.definition(latest);
-        if (!definition) failure('NATIVE_CHAT_CONFIGURATION_CHANGED');
-        let reads = deploymentReads.get(initial.signal!);
-        if (!reads) { reads = new Map(); deploymentReads.set(initial.signal!, reads); }
-        // Share only an unfinished read for exactly the same observed inputs and runtime lifetime.
-        // Every caller still reads current configuration and checks its own conversation authority.
-        const key = digest({ configuration: latest, definition, bindings: initial.bindings });
-        let deploymentRead = reads.get(key);
-        if (deploymentRead) coalescedReads++;
-        else {
-          metrics.deploymentReads++;
-          deploymentRead = Promise.resolve().then(() => options.resolveDeployment(latest, definition));
-          if (reads.size < 32) {
-            reads.set(key, deploymentRead); activeDeploymentReads++;
-            const current = reads;
-            void deploymentRead.finally(() => { current.delete(key); activeDeploymentReads--; }).catch(() => undefined);
-          }
-        }
-        const deployment = await deploymentRead;
-        verifyGeneration(initial, signal);
-        if (deployment.missingReasons.length > 0 || deployment.presetBindings.length === 0
-          || !analyzeNativeConfigurationImpact(active, latest, { previousBindings: initial.bindings,
-            nextBindings: deployment.presetBindings }).canContinue) failure('NATIVE_CHAT_DEPLOYMENT_CHANGED');
-        if (recheckConfiguration || ['submit', 'delivery', 'resource', 'interaction'].includes(phase)) {
-          metrics.configurationReads++;
-          const final = await options.loadConfiguration();
-          verifyGeneration(initial, signal);
-          if (!analyzeNativeConfigurationImpact(active, final).canContinue) failure('NATIVE_CHAT_CONFIGURATION_CHANGED');
-          if (!allowed(active, conversationId) || !allowed(final, conversationId)) failure('NATIVE_CHAT_ACCESS_DENIED');
-        }
       })().catch(error => { metrics.failures++; throw error; }).finally(() => {
         const elapsed = performance.now() - began;
         metrics.totalMs += elapsed; metrics.maxMs = Math.max(metrics.maxMs, elapsed);
@@ -92,7 +57,7 @@ export function createNativeConfigurationGuard(options: {
       return operation;
     },
     describe() { return snapshot({ schema: 1, inFlight: pending.size, permissionCaching: false,
-      coalescedReads, activeDeploymentReads, phases }); },
+      deploymentVerification: 'startup-and-apply' as const, coalescedReads: 0, activeDeploymentReads: 0, phases }); },
     async drain() { await Promise.allSettled([...pending]); },
   });
 }

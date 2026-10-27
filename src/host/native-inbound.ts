@@ -1,6 +1,6 @@
 import type { AccountScope } from '../contracts/account-scope.ts'
 import type { OneBotWebSocketOptions } from '../adapters/onebot-websocket.ts'
-import { validateOneBotProtocolEventData } from '../adapters/onebot-events.ts'
+import { projectOneBotNoticeForChat, validateOneBotProtocolEventData } from '../adapters/onebot-events.ts'
 import { mapOneBotProtocolObservation } from './native-event-mapping.ts'
 import { isOneBotControlContent, normalizeOneBotMessage, type OneBotIncomingAsset } from '../adapters/onebot.ts'
 import type { JsonObject } from '../core/types.ts'
@@ -14,7 +14,7 @@ import type { createNativeMessageSources } from './native-message-sources.ts'
 import type { createNativeInteractionMessages } from './native-interaction-messages.ts'
 import type { createNativeQuotedContext } from './native-quoted-context.ts'
 import type { NativeChatInputPackageService } from './default-native-packages.ts'
-import type { createNativeActivity } from './native-activity.ts'
+import { nativeActivityContent, type createNativeActivity } from './native-activity.ts'
 import type { createControlCommands } from './control-commands.ts'
 import type { LifecycleCheckpoint } from './lifecycle-hooks.ts'
 import type { InboundMessage } from './types.ts'
@@ -63,6 +63,8 @@ export function createNativeInboundController(options: {
   const participationReasons = new Map<string, NativeParticipationReason>()
   const preparedReadCursors = new Map<string, number>()
   const admissionTimes = new Map<string, number>()
+  const activeConversations = new Map<string, number>()
+  const activationTimes = new Map<string, number>()
   let received = 0
   let rejected = 0
   let unknown = 0
@@ -86,6 +88,9 @@ export function createNativeInboundController(options: {
       if (current !== runtime.host || runtime.lifetime !== generation || signal.aborted) return
       await current.dispatchEvent(normalized, { signal })
       try { const observation = mapOneBotProtocolObservation(normalized); if (observation) activity.observe(observation) } catch {}
+      const chatNotice = projectOneBotNoticeForChat(normalized)
+      if (chatNotice && current === runtime.host && runtime.lifetime === generation && !signal.aborted)
+        await handlers.onEvent?.(chatNotice, { ...context, signal })
     },
     async onEvent(event, context) {
       const admittedAt = context.receivedAt
@@ -103,10 +108,10 @@ export function createNativeInboundController(options: {
         if (mediaConversationId === null || !(error instanceof FrameworkError) || error.code !== 'NATIVE_CHAT_ACCESS_DENIED') throw error
         rejected++
         lastReceipt = { status: 'rejected', errorCode: error.code }
-        activity.record('rejected', mediaConversationId)
         return
       }
       if (!normalizedMessage || normalizedMessage.isSelf || runtime.closed || context.signal.aborted) return
+      if (normalizedMessage.receivedAt < Date.now() - 7 * 24 * 60 * 60 * 1000) return
       const message: InboundMessage = { ...normalizedMessage, ...(options.accountScope ? { accountScope: options.accountScope } : {}) }
       await checkpoint('message.normalized', { message: json(message), chatState: runtime.state }, context.signal)
       if (controlDefinitions.length > 0 && isOneBotControlContent(event)) {
@@ -124,13 +129,12 @@ export function createNativeInboundController(options: {
       if (!runtime.configuration || !allowed(runtime.configuration, message.conversationId)) {
         rejected++
         lastReceipt = { status: 'rejected', errorCode: 'NATIVE_CHAT_ACCESS_DENIED' }
-        activity.record('rejected', message.conversationId)
         await checkpoint('message.rejected', { conversationId: message.conversationId, messageId: message.id,
           reason: 'access_denied' }, context.signal)
         return
       }
       const content = message.content.filter(part => part.type !== 'mention' || part.userId !== context.selfId)
-      const activityContent = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')
+      const activityContent = nativeActivityContent(content)
       if (await runtime.interactionMessages?.receive({ ...message, content }, context.signal)) {
         received++
         activity.record('received', message.conversationId, activityContent)
@@ -139,7 +143,7 @@ export function createNativeInboundController(options: {
       if (content.length === 0) {
         rejected++
         lastReceipt = { status: 'rejected', errorCode: 'NATIVE_CHAT_TEXT_ONLY' }
-        activity.record('unsupported', message.conversationId)
+        if (message.directed || message.conversationId.startsWith('private:')) activity.record('unsupported', message.conversationId)
         return
       }
       received++
@@ -149,15 +153,30 @@ export function createNativeInboundController(options: {
       const personaId = configuredDefinition(configuration)?.personaId
       const persona = configuration.personas.find(value => value.id === personaId)
       const inputSettings = await readInputConfiguration(message.conversationId, persona?.name)
-      const quotedMessages = inputSettings.effective.enabled && inputSettings.effective.wakeOnReply
+      const initialParticipation = nativeParticipation({ ...message, content }, history.messages,
+        { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId) }, admittedAt)
+      const quotedMessages = inputSettings.effective.wakeOnReply && !['direct', 'nickname', 'reply'].includes(initialParticipation)
         ? await runtime.quotedContext?.read(message, history.messages, context.signal) : undefined
       if (current !== runtime.host || runtime.lifetime !== generation || context.signal.aborted) return
-      const currentExecution = runtime.executions?.forConversation(message.conversationId)
-      const activeSender = currentExecution ? history.messages.find(entry =>
-        digest([message.conversationId, entry.id, 'prompt']) === currentExecution.requestId)?.actor : undefined
       const participation = nativeParticipation({ ...message, content }, history.messages,
-        { ...inputSettings.effective, activeSender, quotedMessages }, admittedAt)
-      const incoming = { ...message, content, directed: inputSettings.effective.enabled && participation !== 'ambient' }
+        { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId), quotedMessages }, admittedAt)
+      if (['direct', 'nickname', 'reply'].includes(participation)
+        && !history.messages.some(entry => entry.id === message.id)
+        && !runtime.inbox?.contains(message.conversationId, message.id)) {
+        // Activate on the call itself, before model submission or reply delivery.
+        // This account owns the map; the conversation key never crosses accounts.
+        for (const [conversationId, activatedAt] of activationTimes) {
+          if (admittedAt - activatedAt > 300_000 || !allowed(configuration, conversationId)) activationTimes.delete(conversationId)
+        }
+        const activatedAt = Math.max(activationTimes.get(message.conversationId) ?? admittedAt, admittedAt)
+        activationTimes.delete(message.conversationId)
+        if (activationTimes.size >= 1_024) {
+          const oldest = activationTimes.keys().next().value
+          if (oldest !== undefined) activationTimes.delete(oldest)
+        }
+        activationTimes.set(message.conversationId, activatedAt)
+      }
+      const incoming = { ...message, content, directed: participation !== 'ambient' }
       participationReasons.set(digest([message.conversationId, message.id, 'prompt']), participation)
       const execution = runtime.executions?.forConversation(message.conversationId)
       if (incoming.directed && (execution || runtime.inbox?.hasPending(message.conversationId) || runtime.inbox?.contains(message.conversationId, message.id))) {
@@ -194,22 +213,19 @@ export function createNativeInboundController(options: {
     if (admissionTimes.size >= 256 && !admissionTimes.has(requestId)) {
       rejected++
       lastReceipt = { status: 'rejected', errorCode: 'NATIVE_CHAT_ADMISSION_BACKPRESSURE' }
-      activity.record('backpressure', message.conversationId)
+      if (incoming.directed) activity.record('backpressure', message.conversationId)
       return { status: 'rejected' as const, eventId: message.id, errorCode: 'NATIVE_CHAT_ADMISSION_BACKPRESSURE' }
     }
     const ownsAdmission = !admissionTimes.has(requestId)
     admissionTimes.set(requestId, admissionTimes.get(requestId) ?? admittedAt)
+    activeConversations.set(message.conversationId, (activeConversations.get(message.conversationId) ?? 0) + 1)
     let releaseSource: (() => void) | undefined
     try {
-      const inputSettings = await readInputConfiguration(incoming.conversationId)
-      if (!inputSettings.effective.enabled && incoming.directed) {
-        return { status: 'rejected' as const, eventId: message.id, errorCode: 'NATIVE_CHAT_INPUT_DISABLED' }
-      }
       const remaining = admissionTimes.get(requestId)! + runtime.configuration!.execution.turnTimeoutMs - Date.now()
       if (remaining <= 0) {
         rejected++
         lastReceipt = { status: 'rejected', errorCode: 'NATIVE_CHAT_DEADLINE_EXPIRED' }
-        activity.record('deadline', message.conversationId)
+        if (incoming.directed) activity.record('deadline', message.conversationId)
         return { status: 'rejected' as const, eventId: message.id, errorCode: 'NATIVE_CHAT_DEADLINE_EXPIRED' }
       }
       if (!runtime.messageSources) failure('NATIVE_MESSAGE_SOURCE_UNAVAILABLE')
@@ -229,14 +245,20 @@ export function createNativeInboundController(options: {
       if (receipt.status === 'rejected') rejected++
       if (receipt.status === 'unknown') unknown++
       lastReceipt = { status: receipt.status, errorCode: receipt.errorCode ?? null }
-      activity.record(receipt.status, message.conversationId)
+      if (incoming.directed && receipt.status !== 'accepted' && !activity.requestFailureReported(requestId))
+        activity.record(receipt.status, message.conversationId, undefined, {}, receipt.errorCode)
       return receipt
     } catch (error) {
       unknown++
       lastReceipt = { status: 'unknown', errorCode: safeCode(error) }
-      activity.record(lastReceipt.errorCode === 'NATIVE_CHAT_DEADLINE_EXPIRED' ? 'deadline' : 'unknown', message.conversationId)
+      if (incoming.directed && !activity.requestFailureReported(requestId)) activity.record(lastReceipt.errorCode === 'NATIVE_CHAT_DEADLINE_EXPIRED' ? 'deadline' : 'unknown',
+        message.conversationId, undefined, {}, lastReceipt.errorCode ?? undefined)
       return { status: 'unknown' as const, eventId: message.id, errorCode: lastReceipt.errorCode }
     } finally {
+      activity.finishRequest(requestId)
+      const remainingActive = (activeConversations.get(message.conversationId) ?? 1) - 1
+      if (remainingActive) activeConversations.set(message.conversationId, remainingActive)
+      else activeConversations.delete(message.conversationId)
       releaseSource?.()
       if (ownsAdmission) admissionTimes.delete(requestId)
       participationReasons.delete(requestId)
@@ -245,11 +267,18 @@ export function createNativeInboundController(options: {
   }
 
   return Object.freeze({ handlers, dispatchIncoming, readInputConfiguration,
-    status: () => ({ received, rejected, unknown, droppedWhileStopped, lastReceipt }),
+    // Called only after the durable command registry admits a first execution.
+    // A selector probe, replayed receipt or ordinary denied message is not a new row.
+    controlReceived(message: Readonly<InboundMessage>) {
+      received++
+      activity.record('received', message.conversationId, nativeActivityContent(message.content), { userMessageId: message.id })
+    },
+    isProcessing: (conversationId: string) => activeConversations.has(conversationId),
+    status: () => ({ activeConversations: activeConversations.size, received, rejected, unknown, droppedWhileStopped, lastReceipt }),
     admittedAt: (requestId: string) => admissionTimes.get(requestId),
     preparedReadCursor(requestId: string, sequence: number) { preparedReadCursors.set(requestId, sequence) },
     participation: (requestId: string) => participationReasons.get(requestId),
     continuation(requestId: string) { participationReasons.set(requestId, 'continuation') },
-    clear() { participationReasons.clear(); preparedReadCursors.clear(); admissionTimes.clear() }
+    clear() { participationReasons.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear() }
   })
 }

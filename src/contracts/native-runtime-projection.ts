@@ -1,4 +1,5 @@
-export interface NativeRuntimeFeatureProjection {
+import { validExtensionMetadata, type ExtensionMetadata } from './extension-metadata.ts'
+export interface NativeRuntimeFeatureProjection extends ExtensionMetadata {
   readonly id: string
   readonly version: string
   readonly status: 'installing' | 'active' | 'stopping' | 'stopped' | 'failed'
@@ -48,7 +49,8 @@ export function parseNativeRuntimeProjection(input: unknown): NativeRuntimeProje
   const features: NativeRuntimeFeatureProjection[] = []
   const seen = new Set<string>()
   for (const feature of input.features) {
-    if (!record(feature) || !exact(feature, ['id', 'version', 'status', 'declared', 'installed', 'ready', 'authorized', 'capabilities', 'subscriptions'])
+    if (!record(feature) || !exact(feature, ['id', 'version', 'status', 'declared', 'installed', 'ready', 'authorized', 'capabilities', 'subscriptions', ...(['displayName', 'description', 'toolNames'] as const).filter(key => Object.hasOwn(feature, key))])
+      || !validExtensionMetadata(feature)
       || !name(feature.id) || seen.has(feature.id) || typeof feature.version !== 'string' || feature.version.length > 100 || feature.version.length === 0
       || !['installing', 'active', 'stopping', 'stopped', 'failed'].includes(String(feature.status)) || feature.declared !== true
       || feature.installed !== (feature.status === 'active') || feature.ready !== (feature.installed && input.chatReady)

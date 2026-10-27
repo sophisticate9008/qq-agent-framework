@@ -68,6 +68,7 @@ export function assistantAvailabilityMessage(snapshot: ChatAssistantSnapshot): s
   if (snapshot.configuration.mode === 'chat-only') return '助手已关闭';
   if (snapshot.state === 'available') return '助手已启用';
   const reasons = snapshot.missingReasons.join(' ');
+  if (/assistant_deployment_busy/.test(reasons)) return '助手正在更新';
   if (/not_running/.test(reasons)) return '助手已保存，聊天尚未启动';
   if (/not_applied/.test(reasons)) return '助手尚未启用';
   if (/reconciliation|unknown|interrupted/.test(reasons)) return '助手加载结果待确认，请刷新状态';

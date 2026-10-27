@@ -1,5 +1,6 @@
-import { snapshot } from '../core/values.ts'
+import { FrameworkError, snapshot } from '../core/values.ts'
 import { normalizeContent } from '../core/content.ts'
+import { normalizeDshOutputText } from './dsh-output-content.ts'
 import type { JsonObject, JsonValue, MessageContent } from '../core/types.ts'
 import type { AgentAdapter, AgentEvent } from '../contracts/ports.ts'
 import type { NativeEventInput } from '../contracts/native-events.ts'
@@ -168,13 +169,10 @@ export interface DshSdkPortOptions {
   cancel?: DshSdkCancel
 }
 
-export class DshAdapterError extends Error {
-  readonly code: string
-
+export class DshAdapterError extends FrameworkError {
   constructor(code: string, message: string) {
-    super(message)
+    super(code, message)
     this.name = 'DshAdapterError'
-    this.code = code
   }
 }
 
@@ -205,6 +203,7 @@ function copyContent(content: readonly MessageContent[]): readonly MessageConten
   return snapshot(content.map(block => {
     if (block.type === 'text') return { type: block.type, text: block.text }
     if (block.type === 'file') return { type: block.type, assetId: block.assetId, name: block.name }
+    if (block.type === 'face') return { type: block.type, id: block.id }
     if (block.type === 'mention') return { type: block.type, userId: block.userId }
     if (block.type === 'reply') return { type: block.type, messageId: block.messageId }
     if (block.type === 'forward') return normalizeContent([block])[0]
@@ -216,7 +215,7 @@ function eventContent(data: JsonObject | undefined): readonly MessageContent[] |
   const message = jsonRecord(data?.message)
   const rawContent = message?.content
   if (!Array.isArray(rawContent)) return undefined
-  const content: MessageContent[] = []
+  const content: { type: 'text'; text: string }[] = []
   for (const value of rawContent) {
     const block = jsonRecord(value)
     if (block === null) return undefined
@@ -226,8 +225,9 @@ function eventContent(data: JsonObject | undefined): readonly MessageContent[] |
     } else if (block.type !== 'reasoning') return undefined
   }
   try {
-    return content.length === 0 ? undefined : normalizeContent(content)
-  } catch {
+    return content.length === 0 ? undefined : normalizeDshOutputText(content)
+  } catch (error) {
+    if (error instanceof FrameworkError && error.code === 'DSH_OUTPUT_LIMIT') throw error
     return undefined
   }
 }
@@ -283,6 +283,16 @@ function usageStep(frame: DshSessionEvent): JsonObject | undefined {
     if (value === undefined && key !== 'inputTokens' && key !== 'outputTokens') continue
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return undefined
     copied[key] = value
+  }
+  // An omitted read counter may mean the provider did not report its cache split.
+  // In that case inputTokens can include cache reads; preserve only exact aggregate
+  // input via totalTokens - outputTokens in the accounting projection.
+  if (copied.cacheReadTokens === undefined) delete copied.inputTokens
+  if (typeof copied.cacheReadTokens === 'number' && typeof copied.totalTokens === 'number'
+    && typeof copied.inputTokens === 'number' && typeof copied.outputTokens === 'number'
+    && copied.totalTokens === copied.inputTokens + copied.outputTokens
+      + Number(copied.cacheReadTokens ?? 0) + Number(copied.cacheWriteTokens ?? 0)) {
+    copied.cacheWriteTokens ??= 0
   }
   return snapshot({ eventId: id, turn: data.turn!, step: data.step, provider: source.provider, model: source.model, usage: copied })
 }
@@ -604,6 +614,7 @@ export function createDshAdapter(client: DshClientPort, observations: {
           signal: request.signal,
           async onEvent(frame) {
             if (frame.sessionId !== request.sessionId) return
+            let outputFailure: AgentEvent | undefined
             if (frame.type === 'session/event' && observations.onObservation) {
               try {
                 const observation = mapDshObservation(frame)
@@ -630,13 +641,21 @@ export function createDshAdapter(client: DshClientPort, observations: {
                   usageSteps.push(step)
                 }
                 const source = jsonRecord(data?.message)
-                const content = eventContent(data)
+                let content: readonly MessageContent[] | undefined
+                let contentError: string | undefined
+                try { content = eventContent(data) }
+                catch (error) {
+                  if (!(error instanceof FrameworkError) || error.code !== 'DSH_OUTPUT_LIMIT') throw error
+                  contentError = error.code
+                }
                 const id = sessionEventId(frame)
-                if (id !== null && content && (nonEmpty(turn) || typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 0)
+                if (id !== null && (content || contentError) && (nonEmpty(turn) || typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 0)
                   && data?.interrupted === undefined && (source?.role === undefined || source.role === 'assistant')
                   && data?.visibility === undefined && data?.channel === undefined && source?.visibility === undefined && source?.channel === undefined) {
-                  pending = { turn, message: snapshot({ id, sessionId: frame.sessionId, type: 'message', content,
-                    data: { turn, ...(nonEmpty(source?.id) ? { message: { id: source.id } } : {}) } }) }
+                  pending = { turn, message: contentError
+                    ? snapshot({ id, sessionId: frame.sessionId, type: 'failed', data: { turn, code: contentError } })
+                    : snapshot({ id, sessionId: frame.sessionId, type: 'message', content: content!,
+                      data: { turn, ...(nonEmpty(source?.id) ? { message: { id: source.id } } : {}) } }) }
                 }
                 return
               }
@@ -644,11 +663,16 @@ export function createDshAdapter(client: DshClientPort, observations: {
                 const candidate = pending
                 pending = undefined
                 if (candidate && candidate.turn === frame.event.data?.turn
-                  && jsonRecord(frame.event.data?.reason)?.kind === 'completed') await request.onEvent(candidate.message)
+                  && jsonRecord(frame.event.data?.reason)?.kind === 'completed') {
+                  if (candidate.message.type === 'failed') outputFailure = candidate.message
+                  else await request.onEvent(candidate.message)
+                }
               }
               if (frame.event.type === 'turn/error' || frame.event.type === 'session/error') pending = undefined
             } else if (frame.type === 'stream/error') pending = undefined
-            const event = normalizeDshEvent(frame)
+            const normalized = normalizeDshEvent(frame)
+            const event = normalized && outputFailure ? snapshot({ ...normalized, type: 'failed' as const,
+              data: { ...normalized.data, ...outputFailure.data } }) : normalized
             if (event !== null) {
               if (frame.type === 'session/event' && (frame.event.type === 'turn/end' || frame.event.type === 'turn/error')) {
                 await request.onEvent(snapshot({ ...event, data: { ...event.data,

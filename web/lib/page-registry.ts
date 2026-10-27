@@ -39,8 +39,8 @@ const definitions = [
     shortcut: { order: 6, description: '原生宿主接入后查看用量' } },
   { id: 'persona', configurationCategory: true, label: '人设与唤醒', description: '管理伙伴的人设、表达和唤醒方式', icon: 'UserRound',
     navigation: { label: '人设编辑', order: 2 }, subpageLabel: '人设', shortcut: { order: 2, description: '管理身份、表达与唤醒方式' } },
-  { id: 'features', configurationCategory: true, label: '功能与扩展', description: '查看框架服务、Agent 扩展与回复方式', icon: 'Sparkles',
-    navigation: { label: '功能与扩展', order: 7 }, shortcut: { order: 3, description: '查看本地装配能力' } },
+  { id: 'features', configurationCategory: true, label: '功能与扩展', description: '查看 MCP 与本地注册工具、扩展包和框架服务', icon: 'Sparkles',
+    navigation: { label: '功能与扩展', order: 7 }, searchAliases: 'MCP 工具 插件 本地工具 扩展包 框架服务', shortcut: { order: 3, description: '查看工具清单与本地扩展包' } },
   { id: 'security', configurationCategory: true, label: '访问与设置', description: '管理访问控制、聊天处理和管理服务', icon: 'ShieldCheck',
     navigation: { label: '访问与设置', order: 8 }, searchAliases: 'access settings 访问范围 运行设置 群聊 私聊 白名单 拒绝名单 主人 超时 容量 监听 安全',
     aliases: [

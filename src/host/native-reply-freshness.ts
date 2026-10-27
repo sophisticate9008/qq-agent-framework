@@ -5,15 +5,16 @@ import { digest, object } from './data.ts'
 
 const namespace = 'native-chat.unsent-replies'
 
-/** Defer an unstarted reply only for newer admitted input from its actual sender. */
+/** Reconsider stale observations once; direct replies retain same-speaker correction semantics. */
 export function createNativeReplyFreshness(options: {
   readonly host: ReturnType<typeof createBridgeHost>
   readonly store: DurableStore
-  readonly hasWaitingFrom: (conversationId: string, userId: string, messageId: string) => boolean | Promise<boolean>
+  readonly hasWaitingFrom: (conversationId: string, userId: string, messageId: string, mode?: 'same-speaker' | 'group-observation') => boolean | Promise<boolean>
   readonly onDeferred: (conversationId: string) => void
 }) {
   const prepared = new Map<string, StoredRecord>()
-  const key = (binding: SessionBinding, userId: string) => digest([binding.conversationId, binding.sessionId, binding.generation, userId])
+  const modes = new Map<string, 'same-speaker' | 'group-observation'>()
+  const key = (binding: SessionBinding, userId: string) => digest([binding.conversationId, binding.sessionId, binding.generation, binding.conversationId.startsWith('group:') ? 'group' : userId])
   return Object.freeze({
     async hold(event: FrameworkEvent): Promise<boolean> {
       const requestId = object(event.data.agentData ?? {}).nativeRequestId
@@ -23,7 +24,7 @@ export function createNativeReplyFreshness(options: {
       const source = options.host.history.snapshot(event.conversationId, { afterSequence: 0, limit: 100 }).messages
         .find(item => digest([event.conversationId, item.id, 'prompt']) === requestId)
       if (!source || source.actor === 'system' || source.actor === 'assistant'
-        || !await options.hasWaitingFrom(event.conversationId, source.actor, source.id)) return false
+        || !await options.hasWaitingFrom(event.conversationId, source.actor, source.id, modes.get(requestId) ?? 'same-speaker')) return false
       const current = options.host.sessions.get(event.conversationId)
       if (current?.sessionId !== binding.sessionId || current.generation !== binding.generation) return false
       const id = key(binding, source.actor)
@@ -35,11 +36,18 @@ export function createNativeReplyFreshness(options: {
           { expectedRevision: previous?.revision ?? null, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 })
         options.onDeferred(event.conversationId)
       }
-      options.host.replies.suppress(binding, source.id)
+      const pending = options.host.replies.get(event.conversationId)
+      if (pending?.sessionId === binding.sessionId && pending.generation === binding.generation && pending.requestId === source.id)
+        options.host.replies.suppress(binding, source.id)
       return true
     },
-    prepare(binding: SessionBinding, userId: string, messageId: string): readonly string[] | undefined {
+    prepare(binding: SessionBinding, userId: string, messageId: string, addressed = false): readonly string[] | undefined {
       const record = options.store.read(namespace, key(binding, userId))
+      const requestId = digest([binding.conversationId, messageId, 'prompt'])
+      if (modes.size >= 256) modes.delete(modes.keys().next().value!)
+      // A reconsidered batch may speak despite ongoing unrelated chatter; otherwise
+      // a busy group could postpone every attempted reply forever.
+      modes.set(requestId, binding.conversationId.startsWith('group:') && !addressed && !record ? 'group-observation' : 'same-speaker')
       if (!record) return undefined
       const ids = object(record.value).messageIds
       if (!Array.isArray(ids) || !ids.length || !ids.every((value): value is string => typeof value === 'string')) return undefined
@@ -53,6 +61,6 @@ export function createNativeReplyFreshness(options: {
       if (accepted && record && options.store.read(namespace, record.key)?.revision === record.revision)
         options.store.delete(namespace, record.key, record.revision)
     },
-    clear() { prepared.clear() }
+    clear() { prepared.clear(); modes.clear() }
   })
 }

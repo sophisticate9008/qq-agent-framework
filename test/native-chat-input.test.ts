@@ -47,7 +47,7 @@ function prepare(content: InboundMessage['content'], entries = history, budget =
     maxHistoryCharacters: budget, participation: 'reply' });
   const text = result.map(part => part.type === 'text' ? part.text : '').join('');
   const start = text.indexOf('\n') + 1;
-  const end = text.indexOf('当前消息：\n');
+  const end = text.indexOf('本批最新消息（结合未读消息选择回应对象）：\n');
   const envelope = JSON.parse(text.slice(start, end)) as { senderId: string; senderIsConfiguredOwner: boolean;
     conversationId: string; participation: string; recent: { id: string; actor: string }[];
     quoted: { id: string; available: boolean; text: string }[]; historyTruncated: boolean; currentTruncated: boolean };

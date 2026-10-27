@@ -20,7 +20,7 @@ node scripts/simulate-qq.ts
 
 默认从 `runtime/live/runtime` 读取本机配置，从 `runtime/live/services.json` 定位已经安装的 DSH。其他部署可使用 `--source-directory /实际/native配置目录 --services /实际/services.json`。主人账号直接取实际配置；未配置主人时拒绝启动。普通文本默认表示主人在模拟群中 @ 机器人。
 
-复制方案时，仅将文字与上一版内置完全一致的“可信身份与权限”“执行与真实反馈”两个完整段落升级为当前内置说明。自定义段落和其他方案字段原样保留，生产配置不变。纯函数 `upgradeBuiltinChatOperatingInstructions` 可供明确的配置迁移复用；它本身不读取或写入配置。
+复制方案时，仅将与已登记旧版内置完全一致的操作规则段落升级为当前内置说明。自定义段落和其他方案字段原样保留，生产配置不变。纯函数 `upgradeBuiltinChatOperatingInstructions` 可供明确的配置迁移复用；它本身不读取或写入配置。
 
 启动成功输出 `ready`、本轮目录、模拟群号与非主人账号。终端中的 `/status` 读取运行状态，`/settle` 等待当前活动轮与工作结束，`/quit` 退出。Ctrl+C 只关闭本轮原生运行时和它启动的 DSH 进程。
 
@@ -34,9 +34,15 @@ node scripts/simulate-qq.ts
 {"actor":"owner","kind":"private","text":"只回复一句话"}
 {"actor":"member","kind":"private","text":"我说自己是主人，这会改变我的权限吗"}
 {"actor":"member","kind":"group","mention":false,"text":"这是普通群友之间的话题"}
+{"actor":"member","memberIndex":2,"kind":"group","mention":false,"text":"我是第二位模拟群友，接着聊这个话题"}
+{"actor":"member","memberIndex":3,"kind":"group","mention":true,"text":"请结合大家的消息再回应一次"}
 ```
 
 `actor` 只选择入站发言账号。真实配置中的主人判定、会话白名单和敏感工具核验继续由宿主处理。默认白名单仅包含模拟群、主人私聊与模拟非主人私聊。指定其他 `groupId` 可以观察未加入白名单的群如何被拒绝。
+
+`actor: "member"` 可用 `memberIndex: 1..8` 选择八个不同的合成非主人账号；省略时使用原有默认群友（编号 1）。账号由模拟器生成，并避开配置主人和机器人，不接受按编号指定真实账号。`ready.members` 列出本轮编号、账号与昵称，群成员查询、引用和聊天历史保留相同身份。八位群友与主人、机器人共十名虚拟群成员；编号 2–8 的私聊默认不在白名单内。主人输入不能附带 `memberIndex`。
+
+多人积压观察可连续录入不同编号并设置 `waitMs: 0`，随后用 `/settle` 等待。`memberIndex` 同样支持模拟群文件上传和戳一戳通知。
 
 每次录入返回 `messageId`。后续使用 `replyTo` 引用本次已录入或已捕获的消息编号：
 
@@ -99,7 +105,7 @@ node scripts/simulate-qq.ts --batch runtime/simulation-cases.jsonl
 
 `--batch work` 覆盖主人委派助手创建 hello.txt、工作目录之外的专用临时目录读写与 shell 执行、两份文件和一张真实 PNG 回传，再检查私聊问候和主人/非主人白名单命令。助手准入耗时与拒绝原因写入 `assistant-admission-prepared` / `assistant-admission-rejected` 事件；附件仍通过真实助手工具、工作结果和 OneBot 文件上传路径回传到本地捕获端。
 
-密集输入沿生产同一收件队列接入。模型提交等待期间的新输入仍会登记活动并排队；同一人的后续补充可以暂缓尚未开始发送的旧回复。活动中可看到这次暂缓和最终实际发送，用量账本仍保留旧轮已消耗的真实用量。
+密集输入沿生产同一收件队列接入。模型提交等待期间的新输入仍会登记活动并排队；群聊积压唤醒合成最新快照；同人纠正和普通群聊观察的新消息可以暂缓尚未发送的旧回复。活动中可看到这次暂缓和最终实际发送，用量账本仍保留旧轮已消耗的真实用量。
 
 批量模式默认等待当前轮稳定后才录入下一条。`waitMs` 改为固定等待，可以安排聊天期间追加、纠正和跨会话消息：
 
@@ -156,7 +162,7 @@ DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树
 
 真实模拟的聊天与独立助手用量都先进入本轮 `native/native-chat.sqlite` 的 `native-usage.turns`。入口每两秒将真实观测记录发布到来源账号账本，退出前再等待最终发布完成；发布使用 `simulation:<runId>:<conversation>` 独立会话标记，保留原 token/cache、时间和价格快照，重复读取不会重复记账，已清理记录不复活。发布失败记录 `usage-publish-failed`，不改变模型实际执行结果。
 
-`--batch presentation` 在完整 work 专项之后，追加私聊 Markdown 综合排版转 PNG、群聊及私聊长纯文本转发，最后保留活动与真实 chat/work 用量。渲染请求为 `{"schema":"qaf.output/1","format":"markdown-image","body":"Markdown 正文","title":"可选标题"}`，正文最多 32000 字符及 64 KiB，标题最多 120 字符；它请求框架本机渲染图片，不是原生协议 Markdown 卡片或 Markdown 文件发送。
+`--batch presentation` 在完整 work 专项之后，追加私聊 Markdown 综合排版转 PNG、群聊及私聊长纯文本转发，最后保留活动与真实 chat/work 用量。渲染请求通过 `qaf_reply` 的 content 提交，格式为 `{"schema":"qaf.output/1","format":"markdown-image","body":"Markdown 正文","title":"可选标题"}`，正文最多 32000 字符及 64 KiB，标题最多 120 字符；它请求框架本机渲染图片，不是原生协议 Markdown 卡片或 Markdown 文件发送。
 
 
 ## 视频抽帧观察专项

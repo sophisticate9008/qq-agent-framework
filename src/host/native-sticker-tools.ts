@@ -16,7 +16,7 @@ function validate(input: JsonValue): { query: string; limit: number } {
 export const NATIVE_STICKER_TOOLS: readonly NativeToolContribution[] = Object.freeze([{
   definition: { name: 'qaf_sticker_list', capability: 'native.stickers.list', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' },
-    description: '查看或按备注搜索QQ账号当前收藏的表情包，返回当前会话可用的图片assetId。没有收藏或匹配项时返回空列表。可用qaf_media_read读取图片；选择后用qaf.output/1的image内容和该assetId发送。读取列表不等于已经发送，实际发送由宿主核验会话权限、资源归属和协议端支持情况。',
+    description: '查看或按备注搜索QQ账号当前收藏的表情包，返回当前会话可用的图片assetId。没有收藏或匹配项时返回空列表。可用qaf_media_read读取图片；选择后调用qaf_reply({content:[{type:"image",assetId:"实际返回的assetId"}]})发送。读取列表不等于已经发送，实际发送由宿主核验会话权限、资源归属和协议端支持情况。',
     parameters: { type: 'object', additionalProperties: false, properties: {
       query: { type: 'string', maxLength: 128, description: '按表情备注或标识搜索；无备注时可以读取图片判断。' },
       limit: { type: 'integer', minimum: 1, maximum: 50, description: '最多返回数量，默认24。' },

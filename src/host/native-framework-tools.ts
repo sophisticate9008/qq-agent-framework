@@ -1,7 +1,7 @@
 import { nativeToolCapabilityDefinition } from '../contracts/native-tool-capabilities.ts';
 import type { DshFrameworkToolPort } from '../adapters/dsh-framework-tools.ts';
 import type { FrameworkToolCall, FrameworkToolDefinition } from '../contracts/framework-tools.ts';
-import type { EffectRequest, EffectScope, FeatureDefinition, JsonObject, JsonValue } from '../core/types.ts';
+import type { EffectRequest, EffectScope, FeatureDefinition, FeatureExecution, FrameworkEvent, JsonObject, JsonValue } from '../core/types.ts';
 import { assert, errorCode, FrameworkError, isRecord, reference } from '../core/values.ts';
 import type { createBridgeHost } from './bridge.ts';
 import { digest, json, object } from './data.ts';
@@ -17,6 +17,10 @@ export const NATIVE_TOOL_FEATURE = 'framework-tools';
 export interface NativeToolContribution {
   readonly definition: FrameworkToolDefinition;
   readonly validate: (input: JsonValue) => JsonValue;
+  readonly deliveryCapabilities?: readonly ('messaging.send' | 'messaging.forward')[];
+  /** Runs after the capability invocation, inside its admitted feature execution. */
+  readonly afterInvoke?: (value: JsonValue, execution: FeatureExecution, event: FrameworkEvent,
+    host: ReturnType<typeof createBridgeHost>) => Promise<JsonValue>;
 }
 export const NATIVE_MEDIA_TOOLS: readonly FrameworkToolDefinition[] = Object.freeze(
   (['native.media.inspect', 'native.media.read'] as const).map(capability => {
@@ -61,7 +65,7 @@ export function createNativeFrameworkTools(options: {
   assert(additional.every(tool => tool.definition.featureId === NATIVE_TOOL_FEATURE),
     'INVALID_FRAMEWORK_TOOL', 'Native tool permissions belong to the registered framework-tools feature.');
   const feature: FeatureDefinition = { id: NATIVE_TOOL_FEATURE, version: '1.0.0', apiVersion: 1,
-    capabilities: [...new Set([...NATIVE_MEDIA_TOOLS.map(tool => tool.capability), ...additional.map(tool => tool.definition.capability)])], subscriptions: [NATIVE_TOOL_EVENT],
+    capabilities: [...new Set([...NATIVE_MEDIA_TOOLS.map(tool => tool.capability), ...additional.map(tool => tool.definition.capability), ...additional.flatMap(tool => tool.deliveryCapabilities ?? [])])], subscriptions: [NATIVE_TOOL_EVENT],
     setup(services) { services.on(NATIVE_TOOL_EVENT, async (execution, event) => {
       const entry = invocations.get(String(event.data.ticket));
       assert(entry && event.id === entry.request.scope.eventId && event.conversationId === entry.request.scope.conversationId
@@ -70,7 +74,9 @@ export function createNativeFrameworkTools(options: {
       try {
         entry.request.signal.throwIfAborted();
         await options.guard(event.conversationId, execution.signal);
-        entry.value = await execution.invoke(entry.capability, entry.request.input);
+        const value = await execution.invoke(entry.capability, entry.request.input);
+        const tool = additional.find(tool => tool.definition.capability === entry.capability);
+        entry.value = tool?.afterInvoke ? await tool.afterInvoke(value, execution, event, options.host) : value;
         entry.completed = true;
       } catch (error) { entry.error = error; throw error; }
     }); } };

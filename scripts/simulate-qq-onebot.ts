@@ -7,6 +7,7 @@ import { isRecord } from '../src/core/values.ts'
 
 export interface SimulatedMessage {
   readonly actor: 'owner' | 'member'
+  readonly memberIndex?: number
   readonly kind: 'private' | 'group'
   readonly text: string
   readonly mention?: boolean
@@ -19,6 +20,29 @@ export interface SimulatedAsset {
   readonly kind: 'image' | 'record' | 'file' | 'video'
 }
 
+export function simulatedMemberIndex(actor: unknown, value: unknown): number {
+  if (value === undefined) return 1
+  if (actor !== 'member' || typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 8)
+    throw new Error('simulation_invalid_member_index')
+  return value
+}
+
+export function createSimulatedMembers(identity: { readonly selfId: string; readonly ownerId: string; readonly memberId: string }) {
+  const reserved = new Set([identity.selfId, identity.ownerId, identity.memberId])
+  if (!/^[1-9][0-9]{0,14}$/.test(identity.memberId) || identity.memberId === identity.ownerId || identity.memberId === identity.selfId)
+    throw new Error('simulation_invalid_member_identity')
+  const members = [{ memberIndex: 1, userId: identity.memberId, nickname: '模拟群友' }]
+  let candidate = 900000000010n
+  while (members.length < 8) {
+    const userId = String(candidate++)
+    if (reserved.has(userId)) continue
+    reserved.add(userId)
+    const memberIndex = members.length + 1
+    members.push({ memberIndex, userId, nickname: `模拟群友${memberIndex}` })
+  }
+  return members
+}
+
 /** A local protocol peer. No upstream, proxy, or URL supplied by a model exists here. */
 export async function startSimulatedOneBot(options: {
   readonly selfId: string
@@ -28,6 +52,15 @@ export async function startSimulatedOneBot(options: {
   readonly directory: string
   readonly record: (entry: Readonly<Record<string, unknown>>) => void
 }) {
+  const members = createSimulatedMembers(options)
+  const memberIds = new Set(members.map(member => member.userId))
+  const knownIds = new Set([options.ownerId, options.selfId, ...memberIds])
+  const nickname = (userId: string) => userId === options.selfId ? '模拟机器人' : userId === options.ownerId ? '模拟主人'
+    : members.find(member => member.userId === userId)?.nickname ?? '模拟群友'
+  const sender = (actor: 'owner' | 'member', memberIndex?: number) => {
+    const index = simulatedMemberIndex(actor, memberIndex)
+    return actor === 'owner' ? options.ownerId : members[index - 1]!.userId
+  }
   const secret = randomBytes(32).toString('hex')
   const messages = new Map<number, Readonly<Record<string, unknown>>>()
   const sockets = new Set<WebSocket>()
@@ -108,9 +141,9 @@ export async function startSimulatedOneBot(options: {
       return asset ? { status: 'ok', retcode: 0, data: { file: key, file_name: asset.name, file_size: asset.bytes.length, url: `${endpoint}/assets/${key}` } }
         : { status: 'failed', retcode: 1404, data: null, message: 'simulation_asset_not_found' }
     }
-    if (name === 'get_group_list') return { status: 'ok', retcode: 0, data: [{ group_id: Number(options.groupId), group_name: '本地模拟群', member_count: 3, max_member_count: 3 }] }
+    if (name === 'get_group_list') return { status: 'ok', retcode: 0, data: [{ group_id: Number(options.groupId), group_name: '本地模拟群', member_count: knownIds.size, max_member_count: knownIds.size }] }
     if (name === 'get_group_info') return String(params.group_id) === options.groupId
-      ? { status: 'ok', retcode: 0, data: { group_id: Number(options.groupId), group_name: '本地模拟群', member_count: 3, max_member_count: 3 } }
+      ? { status: 'ok', retcode: 0, data: { group_id: Number(options.groupId), group_name: '本地模拟群', member_count: knownIds.size, max_member_count: knownIds.size } }
       : { status: 'failed', retcode: 1404, data: null, message: 'simulation_group_not_found' }
     if (name === 'get_group_msg_history' || name === 'get_friend_msg_history') {
       const count = typeof params.count === 'number' && Number.isSafeInteger(params.count) ? Math.min(100, Math.max(1, params.count)) : 10
@@ -119,20 +152,20 @@ export async function startSimulatedOneBot(options: {
         : message.message_type === 'private' && String(message.user_id === Number(options.selfId) ? message.target_id : message.user_id) === String(params.user_id))
       return { status: 'ok', retcode: 0, data: { messages: history.slice(-count) } }
     }
-    if (name === 'get_friend_list') return { status: 'ok', retcode: 0, data: [options.ownerId, options.memberId].map(userId => ({ user_id: Number(userId), nickname: userId === options.ownerId ? '模拟主人' : '模拟群友', remark: '' })) }
+    if (name === 'get_friend_list') return { status: 'ok', retcode: 0, data: [options.ownerId, options.memberId].map(userId => ({ user_id: Number(userId), nickname: nickname(userId), remark: '' })) }
     if (['get_group_member_info', 'get_group_member_list', 'get_stranger_info'].includes(name)) {
       if (name !== 'get_stranger_info' && String(params.group_id) !== options.groupId
-        || name !== 'get_group_member_list' && ![options.ownerId, options.memberId, options.selfId].includes(String(params.user_id))) {
+        || name !== 'get_group_member_list' && !knownIds.has(String(params.user_id))) {
         return { status: 'failed', retcode: 1404, data: null, message: 'simulation_member_not_found' }
       }
-      const member = (userId: string) => ({ group_id: Number(options.groupId), user_id: Number(userId), nickname: userId === options.ownerId ? '模拟主人' : '模拟群友', card: '', role: 'member', sex: 'unknown', age: 0, area: '', join_time: 1, last_sent_time: 1, level: '1', unfriendly: false, title: '', title_expire_time: 0, card_changeable: false })
+      const member = (userId: string) => ({ group_id: Number(options.groupId), user_id: Number(userId), nickname: nickname(userId), card: '', role: 'member', sex: 'unknown', age: 0, area: '', join_time: 1, last_sent_time: 1, level: '1', unfriendly: false, title: '', title_expire_time: 0, card_changeable: false })
       const requested = String(params.user_id)
-      return { status: 'ok', retcode: 0, data: name === 'get_group_member_list' ? [member(options.ownerId), member(options.memberId)] : member(requested) }
+      return { status: 'ok', retcode: 0, data: name === 'get_group_member_list' ? [...knownIds].map(member) : member(requested) }
     }
     if (name === 'fetch_custom_face_detail' || name === 'get_custom_face') return { status: 'ok', retcode: 0,
       data: [...assets].filter(([, asset]) => asset.kind === 'image').map(([key, asset]) => ({ emoji_id: key, desc: asset.name, url: `${endpoint}/assets/${key}` })) }
     if (name === 'group_poke' || name === 'friend_poke' || name === 'delete_msg') {
-      if (name !== 'delete_msg' && (![options.ownerId, options.memberId, options.selfId].includes(String(params.user_id))
+      if (name !== 'delete_msg' && (!knownIds.has(String(params.user_id))
         || name === 'group_poke' && String(params.group_id) !== options.groupId)) return { status: 'failed', retcode: 1404, data: null, message: 'simulation_poke_target_not_found' }
       if (name === 'delete_msg' && !messages.has(Number(params.message_id))) return { status: 'failed', retcode: 1404, data: null, message: 'simulation_message_not_found' }
       if (name === 'delete_msg') messages.delete(Number(params.message_id))
@@ -261,6 +294,7 @@ export async function startSimulatedOneBot(options: {
   heartbeat.unref()
   return {
     endpoint,
+    members,
     websocketEndpoint: `ws://127.0.0.1:${address.port}/events`, secret,
     sent: () => sent,
     registerAsset,
@@ -272,27 +306,29 @@ export async function startSimulatedOneBot(options: {
       return registerForward([...nodes, { type: 'node', data: { uin: options.memberId, name: '模拟群友',
         time: Math.floor(Date.now() / 1000), content } }])
     },
-    async uploadGroupFile(actor: 'owner' | 'member', filename: string, input: { readonly busId?: number; readonly groupId?: string } = {}) {
+    async uploadGroupFile(actor: 'owner' | 'member', filename: string, input: { readonly busId?: number; readonly groupId?: string; readonly memberIndex?: number } = {}) {
+      const senderId = sender(actor, input.memberIndex)
       const busId = input.busId ?? 102
       if (!Number.isSafeInteger(busId) || busId < 0 || input.groupId !== undefined && !/^[1-9][0-9]{0,14}$/.test(input.groupId))
         throw new Error('simulation_invalid_group_upload')
       const asset = await registerAsset(filename, 'file')
       const event = { time: Math.floor(Date.now() / 1000), self_id: Number(options.selfId), post_type: 'notice', notice_type: 'group_upload',
-        group_id: Number(input.groupId ?? options.groupId), user_id: Number(actor === 'owner' ? options.ownerId : options.memberId),
+        group_id: Number(input.groupId ?? options.groupId), user_id: Number(senderId),
         file: { id: asset.data.file_id, name: asset.data.name, size: asset.data.size, busid: busId } }
       emitNotice(event)
       return { fileId: asset.data.file_id, size: asset.data.size }
     },
-    poke(actor: 'owner' | 'member', input: { readonly kind?: 'group' | 'private'; readonly target?: 'self' | 'other'; readonly selfSender?: boolean } = {}) {
+    poke(actor: 'owner' | 'member', input: { readonly kind?: 'group' | 'private'; readonly target?: 'self' | 'other'; readonly selfSender?: boolean; readonly memberIndex?: number } = {}) {
+      const senderId = sender(actor, input.memberIndex)
       const event = { time: Math.floor(Date.now() / 1000), self_id: Number(options.selfId), post_type: 'notice',
         notice_type: 'notify', sub_type: 'poke', ...(input.kind === 'private' ? {} : { group_id: Number(options.groupId) }),
-        user_id: Number(input.selfSender ? options.selfId : actor === 'owner' ? options.ownerId : options.memberId),
+        user_id: Number(input.selfSender ? options.selfId : senderId),
         target_id: Number(input.target === 'other' ? actor === 'owner' ? options.memberId : options.ownerId : options.selfId) }
       emitNotice(event)
     },
     inject(input: SimulatedMessage) {
       if (![...sockets].some(socket => socket.readyState === WebSocket.OPEN)) throw new Error('simulation_protocol_not_connected')
-      const senderId = input.actor === 'owner' ? options.ownerId : options.memberId
+      const senderId = sender(input.actor, input.memberIndex)
       const messageId = ++sequence
       const segments = [...(input.replyTo === undefined ? [] : [{ type: 'reply', data: { id: String(input.replyTo) } }]),
         ...(input.mention && input.kind === 'group' ? [{ type: 'at', data: { qq: options.selfId } }] : []),
@@ -301,9 +337,10 @@ export async function startSimulatedOneBot(options: {
         message_type: input.kind, sub_type: input.kind === 'group' ? 'normal' : 'friend', message_id: messageId,
         user_id: Number(senderId), ...(input.kind === 'group' ? { group_id: Number(input.groupId ?? options.groupId) } : {}),
         message: segments, raw_message: input.text, font: 0,
-        sender: { user_id: Number(senderId), nickname: input.actor === 'owner' ? '模拟主人' : '模拟群友', card: '', role: 'member' } }
+        sender: { user_id: Number(senderId), nickname: nickname(senderId), card: '', role: 'member' } }
       messages.set(messageId, event)
-      options.record({ type: 'inbound', messageId, actor: input.actor, event })
+      options.record({ type: 'inbound', messageId, actor: input.actor,
+        ...(input.actor === 'member' ? { memberIndex: input.memberIndex ?? 1 } : {}), event })
       for (const socket of sockets) if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event))
       return messageId
     },

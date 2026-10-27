@@ -36,8 +36,8 @@ export interface NativeActivityEntry {
 const descriptions = {
   received: ['info', 'received', '收到一条消息。'],
   queued: ['info', 'processed', '消息已排队，当前轮完成后合并处理连续补充。'],
-  reply_suppressed: ['info', 'processed', '本轮已确认无需回复，未发送消息。'],
-  reply_deferred: ['info', 'processed', '收到同一人的新补充，旧回复暂未发送，将结合新内容回复。'],
+  reply_suppressed: ['info', 'processed', '本轮观察结束，未发言。'],
+  reply_deferred: ['info', 'processed', '会话有新消息，旧回复暂未发送，将结合最新内容判断是否接话。'],
   reply_decision_invalid: ['warning', 'processed', '模型的不参与决定格式无效，未发送内部控制内容。'],
   unsupported: ['warning', 'processed', '未处理此消息：未发现可处理的消息内容。'],
   inactive: ['warning', 'processed', '未处理入站事件：原生聊天尚未运行。'],

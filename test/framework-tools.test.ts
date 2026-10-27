@@ -84,3 +84,56 @@ test('cancellation, withdrawal during resolution and noncooperating effects are 
   registry.close()
   assert.deepEqual(await registry.execute(call({ id: 'closed' }), signal), { status: 'rejected', code: 'TOOL_REGISTRY_CLOSED' })
 })
+
+test('settled expired calls release capacity while expired duplicates reject before cached success', async () => {
+  let now = 1_000_000
+  const realNow = Date.now
+  Date.now = () => now
+  let invocations = 0
+  const registry = createFrameworkToolRegistry({ maxCalls: 1,
+    async resolveScope(request) { return { eventId: 'source', conversationId: 'group:123', sessionId: request.sessionId,
+      generation: 3, featureId: 'media-tools', version: '1' } },
+    async invoke() { invocations++; return { status: 'sent' } } })
+  registry.register(definition, validate)
+  try {
+    const first = call({ expiresAt: now + 100 })
+    assert.equal((await registry.execute(first, signal)).status, 'confirmed')
+    assert.equal((await registry.execute(first, signal)).status, 'confirmed')
+    assert.equal(invocations, 1)
+    assert.deepEqual(await registry.execute(call({ id: 'while-valid', expiresAt: now + 200 }), signal),
+      { status: 'rejected', code: 'TOOL_CALL_CAPACITY' })
+    now += 101
+    assert.deepEqual(await registry.execute(first, signal), { status: 'rejected', code: 'TOOL_CALL_EXPIRED' })
+    assert.equal(invocations, 1)
+    assert.equal((await registry.execute(call({ id: 'after-expiry', expiresAt: now + 100 }), signal)).status, 'confirmed')
+    assert.equal(invocations, 2)
+  } finally { registry.close(); Date.now = realNow }
+})
+
+test('expired in-flight calls and settled unknown calls within their validity retain capacity', async () => {
+  let now = 2_000_000
+  const realNow = Date.now
+  Date.now = () => now
+  let finish!: () => void
+  const pending = new Promise<void>(resolve => { finish = resolve })
+  const registry = createFrameworkToolRegistry({ maxCalls: 1,
+    async resolveScope(request) { return { eventId: 'source', conversationId: 'group:123', sessionId: request.sessionId,
+      generation: 3, featureId: 'media-tools', version: '1' } },
+    async invoke() { await pending; throw new FrameworkError('TRANSPORT_LOST', 'Unknown result') } })
+  registry.register({ ...definition, timeoutMs: 1000 }, validate)
+  try {
+    const first = call({ expiresAt: now + 100 })
+    const result = registry.execute(first, signal)
+    await Promise.resolve(); await Promise.resolve()
+    now += 101
+    assert.deepEqual(await registry.execute(call({ id: 'still-in-flight', expiresAt: now + 100 }), signal),
+      { status: 'rejected', code: 'TOOL_CALL_CAPACITY' })
+    finish()
+    assert.equal((await result).status, 'unknown')
+    now += 1
+    const unknown = call({ id: 'unknown-valid', expiresAt: now + 100 })
+    assert.equal((await registry.execute(unknown, signal)).status, 'unknown')
+    assert.deepEqual(await registry.execute(call({ id: 'unknown-not-expired', expiresAt: now + 100 }), signal),
+      { status: 'rejected', code: 'TOOL_CALL_CAPACITY' })
+  } finally { finish(); registry.close(); Date.now = realNow }
+})

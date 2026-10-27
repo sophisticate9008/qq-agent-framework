@@ -8,9 +8,10 @@ export interface NativeInboxEntry {
   readonly message: InboundMessage;
   readonly admittedAt: number;
   readonly deadlineAt: number;
-  readonly trigger?: 'private' | 'mention' | 'nickname' | 'reply' | 'continuation';
+  readonly historySequence?: number;
+  readonly trigger?: 'private' | 'mention' | 'nickname' | 'reply' | 'continuation' | 'observation';
 }
-type Outcome = 'accepted' | 'rejected' | 'unknown' | 'expired';
+type Outcome = 'accepted' | 'rejected' | 'unknown' | 'expired' | 'coalesced';
 interface Receipt { readonly id: string; readonly outcome: Outcome; readonly requestMessageId: string | null }
 interface Queue {
   readonly schema: 1;
@@ -38,15 +39,18 @@ function decode(record: StoredRecord): Queue {
       && typeof item.message.isSelf === 'boolean' && Number.isFinite(item.admittedAt)
       && Number.isFinite(item.deadlineAt) && Number(item.deadlineAt) > Number(item.admittedAt),
     'NATIVE_INBOX_CORRUPT', 'Invalid queued message.');
-    assert(item.trigger === undefined || ['private', 'mention', 'nickname', 'reply', 'continuation'].includes(String(item.trigger)),
+    assert(item.trigger === undefined || ['private', 'mention', 'nickname', 'reply', 'continuation', 'observation'].includes(String(item.trigger)),
       'NATIVE_INBOX_CORRUPT', 'Invalid input trigger.');
-    return { ...(item.trigger === undefined ? {} : { trigger: item.trigger as NativeInboxEntry['trigger'] }),
+    assert(item.historySequence === undefined || Number.isSafeInteger(item.historySequence) && Number(item.historySequence) > 0,
+      'NATIVE_INBOX_CORRUPT', 'Invalid original input history sequence.');
+    return { ...(item.historySequence === undefined ? {} : { historySequence: Number(item.historySequence) }),
+      ...(item.trigger === undefined ? {} : { trigger: item.trigger as NativeInboxEntry['trigger'] }),
       message: { id: item.message.id, conversationId, userId: item.message.userId,
       receivedAt: Number(item.message.receivedAt), directed: item.message.directed, isSelf: item.message.isSelf,
       content: normalizeContent(item.message.content) }, admittedAt: Number(item.admittedAt), deadlineAt: Number(item.deadlineAt) };
   });
   const receipts = value.receipts.map(item => {
-    assert(isRecord(item) && reference(item.id) && ['accepted', 'rejected', 'unknown', 'expired'].includes(String(item.outcome))
+    assert(isRecord(item) && reference(item.id) && ['accepted', 'rejected', 'unknown', 'expired', 'coalesced'].includes(String(item.outcome))
       && (item.requestMessageId === null || reference(item.requestMessageId)), 'NATIVE_INBOX_CORRUPT', 'Invalid input receipt.');
     return { id: item.id, outcome: item.outcome as Outcome, requestMessageId: item.requestMessageId };
   });
@@ -135,19 +139,26 @@ export function createNativeInbox(options: {
     const ready = options.readiness(conversationId);
     if (ready === 'busy') return;
     if (ready === 'blocked') return; // Recheck on the next tick; never freeze unrelated future input.
-    // Ordinary group chatter is one observation batch. Explicit calls remain boundaries;
-    // the last actual message alone supplies the execution identity, not the whole batch.
+    // Every queued group wake belongs to one fresh unread observation. Older calls
+    // never become separate replies after the conversation has already moved on.
+    // Each entry retains its actor; only the last actual message supplies identity.
     const first = queue.entries[0]!;
-    const groupObservation = groupContinuationCoalesceMs > 0 && conversationId.startsWith('group:') && first.trigger === 'continuation';
-    const end = groupObservation
-      ? queue.entries.findIndex(entry => entry.trigger !== 'continuation')
-      : queue.entries.findIndex(entry => entry.message.userId !== first.message.userId);
-    const batch = queue.entries.slice(0, end === -1 ? queue.entries.length : groupObservation ? end + 1 : end);
-    const includesExplicitCall = groupObservation && end !== -1;
+    const groupObservation = conversationId.startsWith('group:');
+    const end = groupObservation ? -1 : queue.entries.findIndex(entry => entry.message.userId !== first.message.userId);
+    const batch = queue.entries.slice(0, end === -1 ? queue.entries.length : end);
+    const includesExplicitCall = groupObservation && batch.some(entry => entry.trigger !== 'continuation' && entry.trigger !== 'observation');
     const quietMs = groupObservation && !includesExplicitCall ? groupContinuationCoalesceMs : coalesceMs;
     if (now() < Math.min(first.admittedAt + (groupObservation && !includesExplicitCall ? 1500 : 500),
       batch.at(-1)!.admittedAt + quietMs)) return;
-    write(record, { ...queue, phase: 'dispatching', dispatchingIds: batch.map(entry => entry.message.id), errorCode: null });
+    const submitted = groupObservation ? batch.slice(-1) : batch;
+    const coalesced = groupObservation ? batch.slice(0, -1) : [];
+    const submittedIds = new Set(submitted.map(entry => entry.message.id));
+    const coalescedIds = new Set(coalesced.map(entry => entry.message.id));
+    // The durable submitted source fences recovery while leaving bounded room for
+    // fresh arrivals. Coalesced wake receipts never claim model processing.
+    write(record, { ...queue, phase: 'dispatching', dispatchingIds: [...submittedIds],
+      entries: queue.entries.filter(entry => !coalescedIds.has(entry.message.id)),
+      receipts: receipts(queue, coalesced, 'coalesced', batch.at(-1)!.message.id), errorCode: null });
     let result: { readonly status: 'accepted' | 'rejected' | 'unknown'; readonly errorCode?: string | null };
     try { result = await options.deliver(snapshot(batch)); }
     catch (error) { result = { status: 'unknown', errorCode: errorCode(error, 'NATIVE_INBOX_DISPATCH_UNKNOWN') }; }
@@ -157,7 +168,7 @@ export function createNativeInbox(options: {
     const ids = new Set(batch.map(entry => entry.message.id));
     write(latest, { ...current, phase: 'pending', dispatchingIds: [],
       entries: current.entries.filter(entry => !ids.has(entry.message.id)),
-      receipts: receipts(current, batch, result.status, batch.at(-1)!.message.id), errorCode: result.errorCode ?? null });
+      receipts: receipts(current, submitted, result.status, batch.at(-1)!.message.id), errorCode: result.errorCode ?? null });
   }
   function tick() {
     if (stopped) return Promise.resolve();
@@ -193,9 +204,21 @@ export function createNativeInbox(options: {
       }
       if (queue.receipts.some(item => item.id === entry.message.id)) return 'duplicate' as const;
       const all = options.store.list(namespace, { limit: 256 });
-      assert((prior !== null || all.length < 256) && all.reduce((sum, record) => sum + decode(record).entries.length, 0) < 256
-        && queue.entries.length < 16, 'NATIVE_INBOX_BACKPRESSURE', 'Pending input queue is full.');
-      const value = { ...queue, entries: [...queue.entries, snapshot(entry)] };
+      const total = all.reduce((sum, record) => sum + decode(record).entries.length, 0);
+      let value = { ...queue, entries: [...queue.entries, snapshot(entry)] };
+      const fits = () => value.entries.length <= 16 && total - queue.entries.length + value.entries.length <= 256
+        && Buffer.byteLength(JSON.stringify(value)) <= 192 * 1024;
+      if (entry.message.conversationId.startsWith('group:')) {
+        while (!fits()) {
+          const waiting = value.entries.filter(item => item.message.id !== entry.message.id
+            && !queue.dispatchingIds?.includes(item.message.id));
+          const oldest = waiting.find(item => item.trigger === 'continuation' || item.trigger === 'observation') ?? waiting[0];
+          if (!oldest) break;
+          value = { ...value, entries: value.entries.filter(item => item.message.id !== oldest.message.id),
+            receipts: receipts(value, [oldest], 'coalesced', entry.message.id) };
+        }
+      }
+      assert((prior !== null || all.length < 256) && fits(), 'NATIVE_INBOX_BACKPRESSURE', 'Pending input queue is full.');
       // Validate all trusted fields before persisting, using the same decoder as recovery.
       decode({ namespace, key: digest(queue.conversationId), revision: 0, updatedAt: now(), expiresAt: null, value: json(value) });
       write(prior, value);
@@ -208,6 +231,18 @@ export function createNativeInbox(options: {
       return queue.entries.some(entry => entry.message.id === messageId) || queue.receipts.some(receipt => receipt.id === messageId);
     },
     hasPending(conversationId: string) { const record = read(conversationId); return record !== null && decode(record).entries.length > 0; },
+    hasWaitingAfter(conversationId: string, messageId: string,
+      eligible: (entry: NativeInboxEntry) => boolean = () => true) {
+      const record = read(conversationId);
+      if (!record) return false;
+      const queue = decode(record);
+      const sourceIndex = queue.entries.findIndex(entry => entry.message.id === messageId);
+      // Queue order is admission order, independent of sender or protocol timestamps.
+      // A completed batch's receipt proves that all currently waiting entries follow it.
+      if (sourceIndex === -1 && !queue.receipts.some(receipt => receipt.id === messageId)) return false;
+      return queue.entries.slice(sourceIndex + 1).some(entry => entry.deadlineAt > now()
+        && !queue.dispatchingIds?.includes(entry.message.id) && eligible(entry));
+    },
     hasWaitingFrom(conversationId: string, userId: string, messageId: string,
       eligible: (entry: NativeInboxEntry) => boolean = () => true) {
       const record = read(conversationId);

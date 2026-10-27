@@ -24,7 +24,7 @@ export function isNativeMarkdownText(text: string): boolean {
     || /(?:^|\n)[^\n]*\|[^\n]*\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*\|[ \t]*:?-{3,}:?[ \t]*(?:\|[^\n]*)?(?:\n|$)/.test(text)
 }
 
-function structured(content: readonly MessageContent[]): readonly MessageContent[] | NativeMarkdownOutputRequest {
+export function parseNativeOutputContent(content: readonly MessageContent[]): readonly MessageContent[] | NativeMarkdownOutputRequest {
   if (!content.every(part => part.type === 'text')) return content
   const text = content.map(part => part.type === 'text' ? part.text : '').join('')
   let input: unknown
@@ -66,7 +66,7 @@ export function createNativeOutputService(registry: PackageConfigurationRegistry
     signal.throwIfAborted()
     const configuration = validateNativeOutputConfiguration((await registry.read('chat-output')).configuration)
     signal.throwIfAborted()
-    const selected = structured(normalizeContent(content))
+    const selected = parseNativeOutputContent(normalizeContent(content))
     let result: readonly MessageContent[]
     if ('format' in selected) {
       assert(options.renderMarkdown, 'NATIVE_MARKDOWN_UNAVAILABLE', 'Markdown image rendering is unavailable.')

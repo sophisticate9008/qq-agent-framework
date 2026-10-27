@@ -7,7 +7,7 @@ import { errorCode, FrameworkError } from '../core/values.ts'
 import type { AgentAdapter, AgentEvent, DurableStore, SessionBinding } from './types.ts'
 import type { NativeChatConfiguration } from './native-chat-configuration.ts'
 import type { createBridgeHost } from './bridge.ts'
-import type { createNativeExecutionController } from './native-execution.ts'
+import type { createNativeExecutionController, NativeExecutionRecord } from './native-execution.ts'
 import type { createNativeExecutionClaims } from './native-execution-claims.ts'
 import type { createNativeFrameworkTools } from './native-framework-tools.ts'
 import type { createNativeMessageSources } from './native-message-sources.ts'
@@ -45,6 +45,7 @@ export function createNativeAgentCoordinator(options: {
   readonly bindingForSession: (sessionId: string) => SessionBinding | undefined
   readonly admittedAt: (requestId: string) => number | undefined
   readonly recordUsage: (event: AgentEvent) => void
+  readonly onReplyAttempted?: (requestId: string) => boolean
   readonly onReplySuppressed?: (requestId: string) => void
   readonly onReplyFailed?: (requestId: string, known: boolean) => void
   readonly checkpoint: (point: LifecycleCheckpoint, data: JsonObject, signal: AbortSignal) => Promise<void>
@@ -57,6 +58,25 @@ export function createNativeAgentCoordinator(options: {
   const observedMessages = new Set<string>()
   function observeExecution(record: Parameters<typeof mapNativeExecutionObservation>[0]) {
     try { const event = mapNativeExecutionObservation(record); if (event) activity.observe(event) } catch {}
+  }
+  function matchingReply(binding: SessionBinding, requestId: string) {
+    const pending = runtime.host?.replies.get(binding.conversationId)
+    return pending?.sessionId === binding.sessionId && pending.generation === binding.generation
+      && digest([binding.conversationId, pending.requestId, 'prompt']) === requestId ? pending : null
+  }
+  function settleSilent(execution: NativeExecutionRecord, decision: ReturnType<typeof parseNativeReplyDecision> = null) {
+    const binding = execution.binding
+    const pending = matchingReply(binding, execution.requestId)
+    if (pending) runtime.host!.replies.suppress(binding, pending.requestId)
+    if (options.onReplyAttempted?.(execution.requestId)) return
+    const previous = store.read('native-chat.reply-decisions', execution.id)
+    if (previous) return
+    store.write('native-chat.reply-decisions', execution.id, { schema: 1, executionId: execution.id,
+      conversationId: binding.conversationId, sessionId: binding.sessionId, generation: binding.generation,
+      messageId: pending?.requestId ?? null, state: decision?.state ?? 'silent', reason: decision?.reason ?? 'no-explicit-send' },
+    { expectedRevision: null, expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000 })
+    options.onReplySuppressed?.(execution.requestId)
+    activity.record(decision?.state === 'invalid' ? 'reply_decision_invalid' : 'reply_suppressed', binding.conversationId)
   }
         const inspectToolScope = async (request: Parameters<AgentAdapter['submit']>[0], binding: NonNullable<ReturnType<typeof bindingForSession>>) => {
           if (!definition.capabilitySelection) return false
@@ -178,29 +198,33 @@ export function createNativeAgentCoordinator(options: {
               if (event.type === 'message') {
                 if (observedMessages.size >= 512) observedMessages.delete(observedMessages.values().next().value!)
                 observedMessages.add(execution.requestId)
+                const pending = matchingReply(binding, execution.requestId)
+                // Only host-authored work feedback uses final text as a presentation result.
+                // QQ turns speak through qaf_reply; final text is never a fallback send.
+                const feedback = pending?.requestId.startsWith('work-feedback:')
+                  ? store.read('native-work.feedback', pending.requestId) : null
+                const value = feedback ? object(feedback.value) : null
+                const workFeedback = value?.schema === 1 && value.conversationId === binding.conversationId
+                  && value.parentSessionId === binding.sessionId && value.generation === binding.generation
                 const decision = parseNativeReplyDecision(event.content ?? [])
-                if (decision) {
-                  const source = runtime.host?.history.snapshot(binding.conversationId, { afterSequence: 0, limit: 100 }).messages.find(item =>
-                    digest([binding.conversationId, item.id, 'prompt']) === execution.requestId)
-                  if (!source || !runtime.host || !store) failure('NATIVE_CHAT_REPLY_DECISION_UNVERIFIED')
-                  const previous = store.read('native-chat.reply-decisions', execution.id)
-                  if (!previous) store.write('native-chat.reply-decisions', execution.id, { schema: 1, executionId: execution.id,
-                    conversationId: binding.conversationId, sessionId: binding.sessionId, generation: binding.generation,
-                    messageId: source.id, state: decision.state, reason: decision.reason }, { expectedRevision: null })
-                  runtime.host.replies.suppress(binding, source.id)
-                  options.onReplySuppressed?.(execution.requestId)
-                  activity.record(decision.state === 'silent' ? 'reply_suppressed' : 'reply_decision_invalid', binding.conversationId)
+                if (!workFeedback || decision) {
+                  settleSilent(execution, decision)
+                  runtime.host?.releaseDeliveryRequest(execution.requestId)
                   return
                 }
               }
               if (event.type === 'failed') {
+                const pending = matchingReply(binding, execution.requestId)
+                if (pending) runtime.host!.replies.suppress(binding, pending.requestId)
                 options.onReplyFailed?.(execution.requestId, true)
+                runtime.host?.releaseDeliveryRequest(execution.requestId)
                 activity.record(aborted ? 'agent_cancelled' : 'agent_failed', binding.conversationId,
                   undefined, {}, typeof event.data?.code === 'string' ? event.data.code : undefined)
               }
               if (event.type === 'completed') {
-                if (!observedMessages.has(execution.requestId)) options.onReplyFailed?.(execution.requestId, true)
+                if (!observedMessages.has(execution.requestId) && observed.decision === 'deliver') settleSilent(execution)
                 observedMessages.delete(execution.requestId)
+                runtime.host?.releaseDeliveryRequest(execution.requestId)
               }
             } else if (event.type === 'message') return
             await request.onEvent(event)

@@ -67,6 +67,14 @@ export interface BridgeHostOptions {
   onAgentDelivery?(requestId: string, receipt: DeliveryReceipt): void;
   shouldSendAgentMessage?(event: FrameworkEvent): boolean | Promise<boolean>;
 }
+export interface AgentMessageDelivery {
+  readonly status: 'sent' | 'rejected' | 'unknown';
+  readonly receipts: readonly DeliveryReceipt[];
+  readonly errorCode?: string;
+  readonly cached?: boolean;
+  readonly reused?: boolean;
+  readonly explanation?: string;
+}
 export interface InboundReceipt { status: 'accepted' | 'rejected' | 'unknown'; eventId: string; errorCode?: string }
 const inboxNamespace = 'host.inbox';
 const agentEventNamespace = 'host.agent-events';
@@ -162,6 +170,84 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   let lastFaultCode: string | null = null;
   let startupState: 'idle' | 'recovering' | 'ready' | 'degraded' | 'stopped' = 'idle';
   let unsettledAuthorizations = 0;
+  const agentDeliveries = new Map<string, AgentMessageDelivery>();
+  // The tool registry also retains at most 4096 calls in this host lifetime.
+  const explicitDeliveries = new Map<string, Promise<AgentMessageDelivery>>();
+  const explicitRequestKeys = new Map<string, Set<string>>();
+  const supersededRequests = new Map<string, AgentMessageDelivery>();
+
+  /** Reuse the admitted execution so nested tool sends keep its policy and event ledger. */
+  async function performAgentMessageDelivery(execution: FeatureExecution, event: FrameworkEvent, respondToWatchdog: boolean): Promise<AgentMessageDelivery> {
+    const requestId = object(event.data.agentData ?? {}).nativeRequestId;
+    const receipts: DeliveryReceipt[] = [];
+    function record(result: AgentMessageDelivery): AgentMessageDelivery {
+      const value = snapshot(result);
+      if (!respondToWatchdog && typeof requestId === 'string' && explicitRequestKeys.has(requestId)) {
+        if (agentDeliveries.size >= 4096 && !agentDeliveries.has(requestId)) agentDeliveries.delete(agentDeliveries.keys().next().value!);
+        agentDeliveries.set(requestId, value);
+      }
+      return value;
+    }
+    record({ status: 'unknown', receipts });
+    let prepared: readonly MessageContent[] | null;
+    let messages: readonly (readonly MessageContent[])[];
+    try {
+      prepared = prepareAgentMessage ? await prepareAgentMessage(Object.freeze({ context: execution.context,
+        signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), event) : normalizeContent(event.data.content);
+      if (prepared === null) return record({ status: 'rejected', receipts, errorCode: 'AGENT_MESSAGE_SUPPRESSED' });
+      const content = normalizeContent(prepared);
+      const selected = splitAgentMessage ? splitAgentMessage(content, snapshot(event)) : [content];
+      assert(Array.isArray(selected) && selected.length > 0 && selected.length <= 4,
+        'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
+      messages = selected.map(message => normalizeContent(message));
+      if (await shouldSendAgentMessage?.(snapshot(event)) === false) return record({ status: 'rejected', receipts, errorCode: 'AGENT_MESSAGE_SUPPRESSED' });
+    } catch (error) { return record({ status: 'rejected', receipts, errorCode: errorCode(error, 'AGENT_MESSAGE_PREPARATION_FAILED') }); }
+    try {
+      for (const [index, message] of messages.entries()) {
+        const result = await execution.send(message);
+        receipts.push(result);
+        if (result.status !== 'confirmed') return record({ status: result.status, receipts,
+          errorCode: result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN' });
+        if (isConfirmedMessageReceipt(result)) history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content: message, receivedAt: clock() });
+        if (index === 0 && respondToWatchdog) {
+          const binding = sessions.get(event.conversationId);
+          if (binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation) replies.responded(binding);
+        }
+      }
+      return record({ status: 'sent', receipts });
+    } catch (error) { return record({ status: 'unknown', receipts, errorCode: errorCode(error, 'DELIVERY_UNKNOWN') }); }
+  }
+
+  function explicitResult(result: AgentMessageDelivery, cached: boolean): AgentMessageDelivery {
+    const explanation = result.errorCode === 'AGENT_MESSAGE_SUPPRESSED'
+      ? '本轮已被新消息替代，内容未发送。请结束本轮，等待新的会话快照；不要改写后重发旧回复。'
+      : result.status === 'sent' ? '已送达。请直接结束本轮，不重复发送；确有不同的必要内容时才继续发送。'
+        : result.status === 'unknown' ? '发送结果未确认，可能已经送达。不要重复或改写后重发这份内容；请结束本轮等待后续消息。'
+          : '未发送。请根据错误原因停止本次发送，不重复提交同一内容。';
+    return snapshot({ ...result, cached, reused: cached, explanation });
+  }
+
+  async function deliverAgentMessage(execution: FeatureExecution, event: FrameworkEvent, respondToWatchdog = false): Promise<AgentMessageDelivery> {
+    if (respondToWatchdog) return performAgentMessageDelivery(execution, event, true);
+    const requestId = object(event.data.agentData ?? {}).nativeRequestId;
+    assert(typeof requestId === 'string' && reference(requestId), 'INVALID_AGENT_MESSAGE_SOURCE', 'Explicit delivery requires its admitted request identity.');
+    const content = normalizeContent(event.data.content);
+    const fingerprint = object(event.data.agentData ?? {}).nativeContentFingerprint;
+    const identity = typeof fingerprint === 'string' && /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : content;
+    const key = digest([event.conversationId, event.sessionId ?? null, event.data.generation ?? null, requestId, identity]);
+    const previous = explicitDeliveries.get(key);
+    if (previous) return explicitResult(await previous, true);
+    const superseded = supersededRequests.get(requestId);
+    if (superseded) return explicitResult(superseded, true);
+    if (explicitDeliveries.size >= 4096) return explicitResult({ status: 'rejected', receipts: [], errorCode: 'AGENT_MESSAGE_BACKPRESSURE' }, false);
+    const keys = explicitRequestKeys.get(requestId) ?? new Set<string>();
+    keys.add(key); explicitRequestKeys.set(requestId, keys);
+    const operation = performAgentMessageDelivery(execution, event, false);
+    explicitDeliveries.set(key, operation);
+    const result = await operation;
+    if (result.errorCode === 'AGENT_MESSAGE_SUPPRESSED' && explicitRequestKeys.has(requestId)) supersededRequests.set(requestId, result);
+    return explicitResult(result, false);
+  }
 
   function fault(error: unknown) {
     const code = errorCode(error, 'HOST_FAILED');
@@ -220,28 +306,10 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         const requestId = object(event.data.agentData ?? {}).nativeRequestId;
         let receipt: DeliveryReceipt = { status: 'unknown' };
         try {
-          const prepared = prepareAgentMessage ? await prepareAgentMessage(Object.freeze({ context: execution.context,
-            signal: execution.signal, invoke: execution.invoke, generate: execution.generate }), event) : event.data.content;
-          if (prepared === null) return;
-          const content = normalizeContent(prepared);
-          const selected = splitAgentMessage ? splitAgentMessage(content, snapshot(event)) : [content];
-          assert(Array.isArray(selected) && selected.length > 0 && selected.length <= 4,
-            'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
-          const messages = selected.map(message => normalizeContent(message));
-          // Decide before the first bubble; never truncate a reply already being delivered.
-          if (await shouldSendAgentMessage?.(snapshot(event)) === false) { receipt = { status: 'rejected' }; return; }
-          for (const [index, message] of messages.entries()) {
-            receipt = { status: 'unknown' };
-            const result = await execution.send(message);
-            receipt = result;
-            assert(result.status === 'confirmed', result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN',
-              'The transport did not confirm delivery.');
-            if (isConfirmedMessageReceipt(result)) history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content: message, receivedAt: clock() });
-            if (index === 0) {
-              const binding = sessions.get(event.conversationId);
-              if (binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation) replies.responded(binding);
-            }
-          }
+          const result = await deliverAgentMessage(execution, event, true);
+          receipt = result.status === 'sent' ? result.receipts.at(-1) ?? { status: 'unknown' } : { status: result.status };
+          if (result.errorCode === 'AGENT_MESSAGE_SUPPRESSED') return;
+          assert(result.status === 'sent', result.errorCode ?? 'DELIVERY_UNKNOWN', 'The transport did not confirm delivery.');
         } finally {
           if (typeof requestId === 'string') onAgentDelivery?.(requestId, receipt);
         }
@@ -493,7 +561,12 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   }
 
   return Object.freeze({
-    accountScope, engine, policy, sessions, outbox, tasks, history, replies,
+    accountScope, engine, policy, sessions, outbox, tasks, history, replies, deliverAgentMessage,
+    deliveryForRequest(requestId: string): AgentMessageDelivery | null { return agentDeliveries.get(requestId) ?? null; },
+    releaseDeliveryRequest(requestId: string): void {
+      for (const key of explicitRequestKeys.get(requestId) ?? []) explicitDeliveries.delete(key);
+      explicitRequestKeys.delete(requestId); agentDeliveries.delete(requestId); supersededRequests.delete(requestId);
+    },
     /** A host observation in an existing conversation; never a QQ sender or a new owner instruction. */
     async notifyAgent(request: { readonly binding: SessionBinding; readonly id: string;
       readonly content: readonly MessageContent[]; readonly signal: AbortSignal }) {
@@ -532,7 +605,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       signal.throwIfAborted();
       return processEvent(event, signal);
     },
-    async receive(input: InboundMessage, options: { signal?: AbortSignal } = {}): Promise<InboundReceipt> {
+    async receive(input: InboundMessage, options: { signal?: AbortSignal; historySequence?: number } = {}): Promise<InboundReceipt> {
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
       const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
       signal.throwIfAborted();
@@ -573,7 +646,19 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         try { routed = createRoutedMessageEvent(message, routeIncoming(message)); }
         catch (error) { return snapshot({ status: 'rejected', eventId: message.id, errorCode: errorCode(error, 'INBOUND_ROUTING_FAILED') }); }
       }
-      history.append(message.conversationId, { id: message.id, actor: message.userId, content: message.content, receivedAt: message.receivedAt });
+      if (options.historySequence === undefined) {
+        history.append(message.conversationId, { id: message.id, actor: message.userId, content: message.content, receivedAt: message.receivedAt });
+      } else {
+        const original = history.snapshot(message.conversationId, { afterSequence: 0, limit: 100 });
+        const retained = original.messages.find(entry => entry.id === message.id);
+        assert(Number.isSafeInteger(options.historySequence) && options.historySequence > 0
+          && options.historySequence <= original.latestSequence
+          && (retained ? retained.sequence === options.historySequence && retained.actor === message.userId
+            && digest(retained.content) === digest(message.content) : options.historySequence <= original.droppedThrough),
+        'INBOUND_HISTORY_CONFLICT', 'The queued source must retain its original trusted history sequence.');
+        // A durable queued source can outlive bounded history. Its original position
+        // must never be reassigned after later arrivals or consume their unread state.
+      }
       return processEvent(routed ?? { id: message.id, type: 'message.received', conversationId: message.conversationId, userId: message.userId,
         data: { content: json(message.content), text: message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
           directed: message.directed, isSelf: message.isSelf } }, signal);

@@ -63,7 +63,9 @@ export function createNativeInboundController(options: {
   const runtime = options.resources
   const { activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode } = options
   const participationReasons = new Map<string, NativeParticipationReason>()
+  const groupWakes = new Map<string, readonly { readonly messageId: string; readonly actor: string; readonly reason: NativeParticipationReason }[]>()
   const preparedReadCursors = new Map<string, number>()
+  const inputSequences = new Map<string, number>()
   const admissionTimes = new Map<string, number>()
   const activeConversations = new Map<string, number>()
   const activationTimes = new Map<string, number>()
@@ -178,7 +180,11 @@ export function createNativeInboundController(options: {
         }
         activationTimes.set(message.conversationId, activatedAt)
       }
-      const incoming = { ...message, content, directed: participation !== 'ambient' }
+      // Ambient arrivals may refresh an already pending/busy group observation.
+      // They neither start a fresh idle wake nor renew the continuation window.
+      const followGroupObservation = participation === 'ambient' && message.conversationId.startsWith('group:')
+        && (runtime.inbox?.hasPending(message.conversationId) || Boolean(runtime.executions?.forConversation(message.conversationId)))
+      const incoming = { ...message, content, directed: participation !== 'ambient' || Boolean(followGroupObservation) }
       participationReasons.set(digest([message.conversationId, message.id, 'prompt']), participation)
       // Release the protocol callback after durable admission, before model preparation/submission.
       // Otherwise subsequent QQ corrections remain stuck in the WebSocket queue.
@@ -186,11 +192,13 @@ export function createNativeInboundController(options: {
         try {
           await guard(message.conversationId, context.signal, false, 'admission')
           if (!runtime.inbox || runtime.lifetime !== generation || generation!.signal.aborted) failure('NATIVE_CHAT_STOPPED')
+          const historySequence = runtime.inbox.contains(message.conversationId, message.id) ? undefined
+            : current.history.append(message.conversationId, { id: message.id, actor: message.userId,
+              content, receivedAt: message.receivedAt })
           runtime.inbox.enqueue({ message: incoming, admittedAt, deadlineAt: admittedAt + configuration.execution.turnTimeoutMs,
+            ...(historySequence === undefined ? {} : { historySequence }),
             trigger: participation === 'direct' ? message.conversationId.startsWith('private:') ? 'private' : 'mention'
-              : participation === 'ambient' ? undefined : participation })
-          current.history.append(message.conversationId, { id: message.id, actor: message.userId,
-            content, receivedAt: message.receivedAt })
+              : participation === 'ambient' ? 'observation' : participation })
           lastReceipt = { status: 'queued', errorCode: null }
         } catch (error) {
           rejected++
@@ -203,20 +211,26 @@ export function createNativeInboundController(options: {
     }
   }
 
-  async function dispatchIncoming(message: InboundMessage, incoming: InboundMessage, admittedAt: number, signal: AbortSignal) {
+  async function dispatchIncoming(message: InboundMessage, incoming: InboundMessage, admittedAt: number, signal: AbortSignal,
+    historySequence?: number) {
     const current = runtime.host
     const generation = runtime.lifetime
+    const requestId = digest([message.conversationId, message.id, 'prompt'])
     if (!current || !runtime.configuration || runtime.state !== 'running' || !generation || generation.signal.aborted) {
+      participationReasons.delete(requestId)
+      groupWakes.delete(requestId)
       return { status: 'rejected' as const, eventId: message.id, errorCode: 'NATIVE_CHAT_STOPPED' }
     }
-    const requestId = digest([message.conversationId, message.id, 'prompt'])
     if (admissionTimes.size >= 256 && !admissionTimes.has(requestId)) {
+      participationReasons.delete(requestId)
+      groupWakes.delete(requestId)
       rejected++
       lastReceipt = { status: 'rejected', errorCode: 'NATIVE_CHAT_ADMISSION_BACKPRESSURE' }
       if (incoming.directed) activity.record('backpressure', message.conversationId)
       return { status: 'rejected' as const, eventId: message.id, errorCode: 'NATIVE_CHAT_ADMISSION_BACKPRESSURE' }
     }
     const ownsAdmission = !admissionTimes.has(requestId)
+    if (historySequence !== undefined) inputSequences.set(requestId, historySequence)
     admissionTimes.set(requestId, admissionTimes.get(requestId) ?? admittedAt)
     activeConversations.set(message.conversationId, (activeConversations.get(message.conversationId) ?? 0) + 1)
     let releaseSource: (() => void) | undefined
@@ -237,7 +251,7 @@ export function createNativeInboundController(options: {
       if (remainingAfterHooks <= 0) failure('NATIVE_CHAT_DEADLINE_EXPIRED')
       const receipt = await withDeadline({ signal: AbortSignal.any([signal, generation!.signal]),
         timeoutMs: remainingAfterHooks, code: 'NATIVE_CHAT_DEADLINE_EXPIRED',
-        run: signal => current.receive(incoming, { signal }) })
+        run: signal => current.receive(incoming, { signal, ...(historySequence === undefined ? {} : { historySequence }) }) })
       const readCursor = preparedReadCursors.get(requestId)
       accepted = receipt.status === 'accepted'
       if (receipt.status === 'accepted' && readCursor !== undefined && current === runtime.host && runtime.lifetime === generation) {
@@ -265,6 +279,8 @@ export function createNativeInboundController(options: {
       releaseSource?.()
       if (ownsAdmission) admissionTimes.delete(requestId)
       participationReasons.delete(requestId)
+      groupWakes.delete(requestId)
+      inputSequences.delete(requestId)
       preparedReadCursors.delete(requestId)
     }
   }
@@ -279,9 +295,15 @@ export function createNativeInboundController(options: {
     isProcessing: (conversationId: string) => activeConversations.has(conversationId),
     status: () => ({ activeConversations: activeConversations.size, received, rejected, unknown, droppedWhileStopped, lastReceipt }),
     admittedAt: (requestId: string) => admissionTimes.get(requestId),
+    inputSequence: (requestId: string) => inputSequences.get(requestId),
     preparedReadCursor(requestId: string, sequence: number) { preparedReadCursors.set(requestId, sequence) },
     participation: (requestId: string) => participationReasons.get(requestId),
     setParticipation(requestId: string, reason: NativeParticipationReason) { participationReasons.set(requestId, reason) },
-    clear() { participationReasons.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear() }
+    groupWake: (requestId: string) => groupWakes.get(requestId),
+    setGroupWake(requestId: string, wake: readonly { readonly messageId: string; readonly actor: string; readonly reason: NativeParticipationReason }[]) {
+      if (groupWakes.size >= 256 && !groupWakes.has(requestId)) groupWakes.delete(groupWakes.keys().next().value!)
+      groupWakes.set(requestId, wake.slice(-16))
+    },
+    clear() { participationReasons.clear(); groupWakes.clear(); inputSequences.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear() }
   })
 }

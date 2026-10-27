@@ -20,12 +20,14 @@ import { createAccessService } from '../src/host/access-service.ts'
 import { ACCESS_COMMAND_REPLIES, createAccessCommandHandler, parseAccessCommand } from '../src/features/access-commands.ts'
 import { createNativePackageConfigurationRegistry } from '../src/host/native-package-configuration.ts'
 import { validateNativeOutputConfiguration } from '../src/contracts/native-output.ts'
+import { upgradeBuiltinPersonaParticipation } from '../src/host/chat-personas.ts'
+import { validateChatPersona } from '../src/contracts/chat-plans.ts'
 import { upgradeBuiltinChatOperatingInstructions } from '../src/host/chat-operating-instructions.ts'
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts'
 import { createNativeDshDeploymentRuntime } from '../src/host/native-dsh-deployment.ts'
 import { createNativeAssistantTarget, applySavedAssistantTarget } from '../src/host/native-assistant-target.ts'
 import { prepareSimulationDsh } from './simulate-qq-dsh.ts'
-import { startSimulatedOneBot, type SimulatedAsset, type SimulatedMessage } from './simulate-qq-onebot.ts'
+import { simulatedMemberIndex, startSimulatedOneBot, type SimulatedAsset, type SimulatedMessage } from './simulate-qq-onebot.ts'
 
 const HELP = `本机 QQ 消息模拟（真实模型）
 node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--services <服务清单>] [--batch <JSONL|basic|work|presentation|video>] [--prepare-only]
@@ -33,7 +35,7 @@ node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--s
 默认从 runtime/live/runtime 与 runtime/live/services.json 读取现有配置。
 每次创建全新 runtime/simulations/qq-*/，使用独立DSH进程/鉴权/会话，OneBot发送仅写本地捕获。
 --prepare-only 只准备私有配置，不启动DSH、不发送模型请求。
-交互普通文本默认主人群聊@；JSON支持 actor:owner|member、kind:group|private、mention、text、replyTo、segments。
+交互普通文本默认主人群聊@；JSON支持 actor:owner|member、memberIndex:1..8、kind:group|private、mention、text、replyTo、segments。
 命令 /status、/settle、/quit；批量控制行 {"waitMs":1000}、{"settleMs":180000}、{"status":true}。
 批量消息默认等候稳定；waitMs:0 可制造并发追加。详细用法见 docs/SIMULATION.md。`
 
@@ -155,6 +157,12 @@ async function copyConfiguration(source: string, destination: string) {
       })
       content = Buffer.from(JSON.stringify({ ...document, plans }) + '\n')
     }
+    if (name === 'chat-personas.json') {
+      const document: unknown = JSON.parse(content.toString('utf8'))
+      if (!isRecord(document) || !Array.isArray(document.personas)) throw new Error('simulation_source_personas_invalid')
+      content = Buffer.from(JSON.stringify({ ...document, personas: document.personas.map(persona =>
+        upgradeBuiltinPersonaParticipation(validateChatPersona(persona))) }) + '\n')
+    }
     await writeFile(join(destination, name), content, { mode: 0o600, flag: 'wx' })
   }
 }
@@ -169,8 +177,10 @@ function messageInput(value: unknown): SimulatedMessage {
     || value.segments !== undefined && (!Array.isArray(value.segments) || value.segments.length > 64 || !value.segments.every(isRecord))) {
     throw new Error('simulation_invalid_message')
   }
+  const memberIndex = simulatedMemberIndex(value.actor, value.memberIndex)
   return { actor: value.actor === 'member' ? 'member' : 'owner', kind: value.kind === 'private' ? 'private' : 'group',
     text: value.text, mention: value.mention !== false,
+    ...(value.actor === 'member' ? { memberIndex } : {}),
     ...(typeof value.groupId === 'string' ? { groupId: value.groupId } : {}),
     ...(typeof value.replyTo === 'number' ? { replyTo: value.replyTo } : {}),
     ...(Array.isArray(value.segments) ? { segments: value.segments as Record<string, unknown>[] } : {}) }
@@ -473,7 +483,8 @@ export async function simulateQq(values = process.argv.slice(2)) {
     stopActivitySnapshots = async () => { clearInterval(activityTimer); await activityWrite; await saveActivity(); await usageWrite; await publishUsage() }
     await native.start((await load()).revisions, lifetime.signal)
     record({ type: 'ready', status: await native.status() })
-    console.log(JSON.stringify({ type: 'ready', directory, groupId, memberId, defaultActor: 'owner', defaultKind: 'group', defaultMention: true }))
+    console.log(JSON.stringify({ type: 'ready', directory, groupId, memberId, members: peer.members,
+      defaultActor: 'owner', defaultKind: 'group', defaultMention: true }))
     async function status() {
       const snapshot = { type: 'status', runtime: await native.status(), work: native.listWork(),
         activity: native.activity(), capturedSends: peer.sent() }
@@ -549,17 +560,19 @@ export async function simulateQq(values = process.argv.slice(2)) {
       if (input.notice === 'poke' || input.notice === 'group_upload') {
         if (input.actor !== undefined && input.actor !== 'owner' && input.actor !== 'member') throw new Error('simulation_invalid_notice_actor')
         const actor = input.actor === 'member' ? 'member' : 'owner'
+        const memberIndex = simulatedMemberIndex(input.actor, input.memberIndex)
         if (input.notice === 'poke') {
           if (input.kind !== undefined && input.kind !== 'group' && input.kind !== 'private'
             || input.target !== undefined && input.target !== 'self' && input.target !== 'other'
             || input.selfSender !== undefined && typeof input.selfSender !== 'boolean') throw new Error('simulation_invalid_poke')
           peer.poke(actor, { kind: input.kind === 'private' ? 'private' : 'group', target: input.target === 'other' ? 'other' : 'self',
-            selfSender: input.selfSender === true })
+            selfSender: input.selfSender === true, ...(actor === 'member' ? { memberIndex } : {}) })
         } else {
           if (typeof input.path !== 'string' || input.kind !== undefined && input.kind !== 'group'
             || input.busId !== undefined && (typeof input.busId !== 'number' || !Number.isSafeInteger(input.busId) || input.busId < 0)
             || input.groupId !== undefined && typeof input.groupId !== 'string') throw new Error('simulation_invalid_group_upload')
           const registered = await peer.uploadGroupFile(actor, resolve(input.path), {
+            ...(actor === 'member' ? { memberIndex } : {}),
             ...(typeof input.busId === 'number' ? { busId: input.busId } : {}), ...(typeof input.groupId === 'string' ? { groupId: input.groupId } : {}) })
           console.log(JSON.stringify({ type: 'injected-notice', notice: 'group_upload', bytes: registered.size }))
         }

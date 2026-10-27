@@ -57,6 +57,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   readonly attachImages?: boolean;
   readonly maxHistoryCharacters?: number;
   readonly participation?: NativeParticipationReason;
+  readonly groupWake?: readonly { readonly messageId: string; readonly actor: string; readonly reason: NativeParticipationReason }[];
   readonly unsentReplyMessageIds?: readonly string[];
   readonly sentWhileQueued?: readonly HistoryMessage[];
   readonly quotedMessages?: readonly HistoryMessage[];
@@ -76,7 +77,8 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   const recentWindow = currentTime === undefined ? [] : history.filter(message => message.receivedAt <= currentTime
     && message.receivedAt > currentTime - 120_000);
   const groupParticipation = event.conversationId.startsWith('group:') ? {
-    mode: participation === 'direct' || participation === 'reply' ? 'addressed' : 'observe-and-select',
+    mode: participation === 'direct' || participation === 'reply'
+      || options.groupWake?.some(item => item.reason === 'direct' || item.reason === 'reply') ? 'addressed' : 'observe-and-select',
     sentMessagesInTwoMinutes: recentWindow.filter(message => message.actor === 'assistant').length,
     receivedMessagesInTwoMinutes: recentWindow.filter(message => message.actor !== 'assistant' && message.actor !== 'system').length,
     speakersInTwoMinutes: new Set(recentWindow.filter(message => message.actor !== 'assistant' && message.actor !== 'system').map(message => message.actor)).size
@@ -108,19 +110,21 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
       note: '当前消息先到达，以上回复随后才发送。模型处理顺序不等于群聊发言顺序，不能把当前消息当成对这些回复的反馈。'
     } } : {}),
     ...(options.unsentReplyMessageIds?.length ? { replyDelivery: { unsentFor: options.unsentReplyMessageIds,
-      note: '这些旧消息的模型回复尚未发送，因为你收到同一人的后续补充。结合最新要求重新组织回复，不把此前模型输出当作用户已收到的答复；已执行的工具动作仍有效，不重复执行。' } } : {}),
+      requests: history.filter(item => options.unsentReplyMessageIds?.includes(item.id)).slice(-4)
+        .map(item => ({ id: item.id, actor: item.actor, text: contentText(item.content).slice(0, 400) })),
+      note: '这些旧消息的模型回复尚未发送，因为会话有新消息需要结合理解。先合并原请求与后续纠正，保留数量等未被修改的要求；其他人的顺嘴闲聊不是新的答复任务。不把此前模型输出当作用户已收到的答复；已执行的工具动作仍有效，不重复执行。' } } : {}),
     senderId: event.userId ?? null, senderIsConfiguredOwner: options.owner !== null && event.userId === options.owner,
-    participation, ...(groupParticipation ? { groupParticipation } : {}),
+    participation, ...(groupParticipation ? { groupParticipation, groupWake: options.groupWake ?? [] } : {}),
     unread: options.unread ? { readThrough: options.unread.readThrough, through: options.unread.through,
       count: options.unread.ids.length, included: recent.filter(item => item.unread).length + (options.unread.ids.includes(event.id) ? 1 : 0),
       partial: options.unread.partial || historyTruncated } : null,
-    recent, quoted, memory: options.memory ?? null, tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ?? null, historyTruncated, currentTruncated });
+    recent, quoted, memory: options.memory ?? null, tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ? { ...options.output, sendMode: 'explicit-tool', sendTool: 'qaf_reply' } : null, historyTruncated, currentTruncated });
 
   function build(length: number): readonly MessageContent[] {
     const parts: MessageContent[] = [];
     const context = `会话事实：\n${envelope(length < text.length)}`;
     for (let offset = 0; offset < context.length; offset += 8_000) parts.push({ type: 'text', text: context.slice(offset, offset + 8_000) });
-    const current = `当前消息：\n${text.slice(0, length)}${length < text.length ? '\n[当前消息超出输入预算，部分内容未提供]' : ''}`;
+    const current = `${event.conversationId.startsWith('group:') ? '本批最新消息（结合未读消息选择回应对象）' : '当前消息'}：\n${text.slice(0, length)}${length < text.length ? '\n[当前消息超出输入预算，部分内容未提供]' : ''}`;
     for (let offset = 0; offset < current.length; offset += 8_000) parts.push({ type: 'text', text: current.slice(offset, offset + 8_000) });
     return parts;
   }

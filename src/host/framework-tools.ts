@@ -17,7 +17,7 @@ export interface FrameworkToolRegistryOptions {
 
 export function createFrameworkToolRegistry(options: FrameworkToolRegistryOptions) {
   const definitions = new Map<string, { definition: FrameworkToolDefinition; validate: (input: JsonValue) => JsonValue }>()
-  const calls = new Map<string, { fingerprint: string; result: Promise<FrameworkToolResult> }>()
+  const calls = new Map<string, { fingerprint: string; result: Promise<FrameworkToolResult>; expiresAt: number; settled: boolean }>()
   const lifetime = new AbortController()
   const maxCalls = options.maxCalls ?? 4096
   assert(Number.isSafeInteger(maxCalls) && maxCalls > 0 && maxCalls <= 65536,
@@ -50,6 +50,10 @@ export function createFrameworkToolRegistry(options: FrameworkToolRegistryOption
           && Buffer.byteLength(JSON.stringify(call)) <= 65536,
         'INVALID_TOOL_CALL', 'A tool call needs bounded input and an exact session identity.')
       } catch { return { status: 'rejected', code: 'INVALID_TOOL_CALL' } }
+      const now = Date.now()
+      for (const [key, cached] of calls) if (cached.settled && cached.expiresAt <= now) calls.delete(key)
+      // An expired ticket cannot recover a cached success or replay a completed effect.
+      if (call.expiresAt <= now) return { status: 'rejected', code: 'TOOL_CALL_EXPIRED' }
       const key = JSON.stringify([call.sessionId, call.id])
       const fingerprint = createHash('sha256').update(JSON.stringify(call)).digest('hex')
       const prior = calls.get(key)
@@ -88,7 +92,7 @@ export function createFrameworkToolRegistry(options: FrameworkToolRegistryOption
           const code = errorCode(error, 'TOOL_EXECUTION_UNKNOWN')
           const rejected = !invoked || ['POLICY_DENIED', 'CAPABILITY_DENIED', 'FEATURE_DISABLED', 'CAPABILITY_UNAVAILABLE',
             'NATIVE_WORK_PREPARATION_REJECTED', 'ASSISTANT_CONFIGURATION_CHANGED',
-            'INVALID_CONVERSATION_INPUT', 'CONVERSATION_SCOPE_INVALID', 'CONVERSATION_SCOPE_MISMATCH',
+            'INVALID_REPLY_INPUT', 'INVALID_CONVERSATION_INPUT', 'CONVERSATION_SCOPE_INVALID', 'CONVERSATION_SCOPE_MISMATCH',
             'POKE_SCOPE_MISMATCH', 'POKE_TARGET_NOT_MEMBER', 'RECALL_MESSAGE_SCOPE_MISMATCH', 'INVALID_STICKER_INPUT',
             'BUDGET_EXHAUSTED', 'POLICY_PAUSED', 'NATIVE_MESSAGE_SOURCE_NOT_OWNER', 'INVALID_MEDIA_INPUT',
             'NATIVE_MEDIA_UNAVAILABLE', 'NATIVE_MEDIA_READER_UNAVAILABLE', 'REMINDER_INVALID', 'REMINDER_NOT_FOUND',
@@ -99,7 +103,10 @@ export function createFrameworkToolRegistry(options: FrameworkToolRegistryOption
           return { status: rejected ? 'rejected' : 'unknown', code }
         }
       })()
-      calls.set(key, { fingerprint, result })
+      const cached = { fingerprint, result, expiresAt: call.expiresAt, settled: false }
+      calls.set(key, cached)
+      const settled = () => { cached.settled = true }
+      void result.then(settled, settled)
       return result
     },
     close(): void { closed = true; lifetime.abort(); definitions.clear() }

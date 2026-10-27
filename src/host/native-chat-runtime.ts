@@ -83,7 +83,7 @@ import { prepareNativeChatInput } from './native-chat-input.ts'
 import { createNativeQuotedContext } from './native-quoted-context.ts'
 import { readScopedProtocolMessage } from './native-protocol-message.ts'
 import { normalizeContent } from '../core/content.ts'
-import { createNativeInbox } from './native-inbox.ts'
+import { createNativeInbox, type NativeInboxEntry } from './native-inbox.ts'
 import { createNativeMediaRegistry } from './native-media.ts'
 import { analyzeNativeConfigurationImpact } from './native-configuration-impact.ts'
 import { createNativeConfigurationGuard } from './native-configuration-guard.ts'
@@ -111,6 +111,7 @@ import { createOneBotStickerPort } from '../adapters/onebot-stickers.ts'
 import { createNativeStickerService, NATIVE_STICKER_TOOLS } from './native-sticker-tools.ts'
 import { createOneBotConversationPort } from '../adapters/onebot-conversation.ts'
 import { createNativeConversationService, NATIVE_CONVERSATION_TOOLS } from './native-conversation-tools.ts'
+import { createNativeReplyEffects, NATIVE_REPLY_TOOLS } from './native-reply-tools.ts'
 import { createNativeServicesPackage } from './native-services.ts'
 
 export interface NativeChatDeploymentResolution {
@@ -845,6 +846,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             ...(accountScope ? { protocolId: accountScope.protocolId, accountId: accountScope.accountId } : {}) } })
         } })
         const agent = createNativeAgentCoordinator({ sourceAgent, dsh, store, controller, definition, configuration, identity,
+          onReplyAttempted: requestId => Boolean(host?.deliveryForRequest(requestId)),
           presetBindings: selected.deployment.presetBindings, activity, bindingForSession, admittedAt: inbound.admittedAt, checkpoint, guard,
           onReplySuppressed: requestId => workFeedback?.suppressed(requestId),
           onReplyFailed: (requestId, known) => workFeedback?.delivered(requestId, { status: known ? 'rejected' : 'unknown' }),
@@ -934,8 +936,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           register: (asset, signal) => { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.register(asset, signal) },
           selfId, store: store!, sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+        const replyEffects = createNativeReplyEffects({ sources: () => messageSources?.reader,
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
         const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
-        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', ...Object.keys(conversationEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
+        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', ...Object.keys(conversationEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
           failure('NATIVE_CHAT_RESERVED_CAPABILITY')
         }
         if ([...ONEBOT_PROTOCOL_EVENT_TYPES, NATIVE_TOOL_EVENT, ...Object.keys(reminderService.eventValidators)].some(type => bootstrapMount?.bridgeOptions.eventValidators?.[type])) {
@@ -951,7 +955,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           onAgentDelivery: (requestId, receipt) => workFeedback?.delivered(requestId, receipt),
           shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
-          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects,
+          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...replyEffects,
             'native.stickers.list': { execute(request) {
               if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE')
               return stickers.list.execute(request)
@@ -968,26 +972,32 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               const history = host.history.snapshot(event.conversationId, { afterSequence: 0, limit: 100 })
               const unread = host.history.snapshot(event.conversationId, { limit: 100 })
               // Inputs queued after this batch belong to a later submission, not this read cursor.
-              const through = history.messages.find(item => item.id === event.id)?.sequence ?? history.latestSequence
+              const source = history.messages.find(item => item.id === event.id)
+              const through = inbound.inputSequence(digest([event.conversationId, event.id, 'prompt'])) ?? source?.sequence
+              if (through === undefined) failure('NATIVE_CHAT_INPUT_HISTORY_UNAVAILABLE')
               const visibleHistory = history.messages.filter(item => item.sequence <= through)
+              const historyPartial = unread.partial || history.partial || source?.sequence !== through
               const binding = host.sessions.get(event.conversationId)
               const unsentReplyMessageIds = binding && event.userId
-                ? replyFreshness?.prepare(binding, event.userId, event.id) : undefined
+                ? replyFreshness?.prepare(binding, event.userId, event.id,
+                  ['direct', 'reply'].includes(inbound.participation(digest([event.conversationId, event.id, 'prompt'])) ?? '')
+                  || inbound.groupWake(digest([event.conversationId, event.id, 'prompt']))?.some(item => ['direct', 'reply'].includes(item.reason)) === true) : undefined
               const owner = active.access.owner
               const quotedMessages = await quotedContext?.read({ conversationId: event.conversationId,
                 content: normalizeContent(event.data.content) }, visibleHistory, execution.signal)
               inbound.preparedReadCursor(digest([event.conversationId, event.id, 'prompt']), through)
-              return prepareNativeChatInput(event, visibleHistory, { owner, partial: unread.partial, unsentReplyMessageIds,
+              return prepareNativeChatInput(event, visibleHistory, { owner, partial: historyPartial, unsentReplyMessageIds,
                 sentWhileQueued: history.messages.filter(item => item.actor === 'assistant' && item.sequence > through).slice(-4),
                 attachImages: active.deployment.modelSettings?.inputModalities?.includes('image') !== false,
                 unread: { ids: unread.messages.filter(item => item.sequence <= through && item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
-                  through, partial: unread.partial },
+                  through, partial: historyPartial },
                 quotedMessages, tools: await frameworkTools?.context(event.conversationId, execution.signal),
                 output: { ...await output.context(execution.signal), forwardAuthorized: !host.policy.describe().paused && host.policy.describe().grants.some(grant =>
                   grant.active && grant.featureId === 'agent-relay' && grant.conversationId === event.conversationId
                   && grant.capabilities.includes('messaging.forward') && (grant.expiresAt === null || grant.expiresAt > Date.now())
                   && (grant.maxUses['messaging.forward'] === null || (grant.maxUses['messaging.forward'] ?? 0) > (grant.used['messaging.forward'] ?? 0))) },
-                participation: inbound.participation(digest([event.conversationId, event.id, 'prompt'])) })
+                participation: inbound.participation(digest([event.conversationId, event.id, 'prompt'])),
+                groupWake: inbound.groupWake(digest([event.conversationId, event.id, 'prompt'])) })
             } },
             ...(bootstrapMount?.bridgeOptions.agentInputPreparation
               ? [{ id: 'bootstrap-input', order: 100, ...bootstrapMount.bridgeOptions.agentInputPreparation }] : [])
@@ -1186,9 +1196,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') }),
             onFault(code) { lastError = code; activity.record('error') } })
         }
+        if (plugin.frameworkToolProtocol !== 'qq-agent-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
         if (plugin.frameworkToolProtocol === 'qq-agent-framework.tools/1' && dsh.frameworkTools) {
           frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
-            tools: [...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
+            tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
             async toolDescriptions(signal): Promise<Readonly<Record<string, string>>> {
               const identity = await options.readWorkIdentity?.(signal)
               signal.throwIfAborted()
@@ -1282,36 +1293,51 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           },
           async deliver(entries) {
             const entry = entries.at(-1)!
+            const historySequence = entry.historySequence ?? host?.history.snapshot(entry.message.conversationId,
+              { afterSequence: 0, limit: 100 }).messages.find(item => item.id === entry.message.id)?.sequence
+            if (historySequence === undefined) return { status: 'rejected', errorCode: 'NATIVE_CHAT_INPUT_HISTORY_UNAVAILABLE' }
             const definition = active ? configuredDefinition(active) : undefined
             const persona = active?.personas.find(value => value.id === definition?.personaId)
             const { effective } = await inbound.readInputConfiguration(entry.message.conversationId, persona?.name)
-            const mandatory = entries.some(item => item.trigger === 'mention' || item.message.conversationId.startsWith('private:'))
-            if (!mandatory && entries.some(item => item.trigger === 'reply' && !effective.wakeOnReply
-              || item.trigger === 'continuation' && effective.continuationMs === 0
-              || item.trigger === 'nickname' && !effective.names.some(name => item.message.content.some(part =>
-                part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase()))))) {
+            const enabled = entries.filter(item => item.message.conversationId.startsWith('private:')
+              || item.trigger === 'mention' || item.trigger === 'private'
+              || item.trigger === 'observation'
+              || item.trigger === 'reply' && effective.wakeOnReply
+              || item.trigger === 'continuation' && effective.continuationMs > 0
+              || item.trigger === 'nickname' && effective.names.some(name => item.message.content.some(part =>
+                part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase()))))
+            if (!enabled.length) {
               return { status: 'rejected', errorCode: 'NATIVE_CHAT_INPUT_DISABLED' }
             }
             const admittedAt = Math.min(...entries.map(item => item.admittedAt))
-            const trigger = entries.find(item => item.trigger === 'mention' || item.trigger === 'private')?.trigger
-              ?? entries.find(item => item.trigger === 'nickname' || item.trigger === 'reply')?.trigger ?? 'continuation'
-            inbound.setParticipation(digest([entry.message.conversationId, entry.message.id, 'prompt']),
-              trigger === 'mention' || trigger === 'private' ? 'direct' : trigger)
-            return inbound.dispatchIncoming(entry.message, entry.message, admittedAt, controller.signal)
+            const trigger = entry.trigger ?? 'continuation'
+            const requestId = digest([entry.message.conversationId, entry.message.id, 'prompt'])
+            inbound.setParticipation(requestId, trigger === 'mention' || trigger === 'private' ? 'direct'
+              : trigger === 'observation' ? 'ambient' : trigger)
+            if (entry.message.conversationId.startsWith('group:')) inbound.setGroupWake(requestId, enabled.map(item => ({
+              messageId: item.message.id, actor: item.message.userId,
+              reason: item.trigger === 'mention' || item.trigger === 'private' ? 'direct'
+                : item.trigger === 'observation' ? 'ambient' : item.trigger ?? 'continuation'
+            })))
+            return inbound.dispatchIncoming(entry.message, entry.message, admittedAt, controller.signal, historySequence)
           },
           onFault: executionFault,
         })
         inbox.recover()
         replyFreshness = createNativeReplyFreshness({ host, store,
-          async hasWaitingFrom(conversationId, userId, messageId) {
-            if (!inbox?.hasWaitingFrom(conversationId, userId, messageId)) return false
+          async hasWaitingFrom(conversationId, userId, messageId, mode) {
+            const hasWaiting = (eligible?: (entry: NativeInboxEntry) => boolean) =>
+              (mode === 'group-observation' ? inbox?.hasWaitingAfter(conversationId, messageId, eligible)
+                : inbox?.hasWaitingFrom(conversationId, userId, messageId, eligible)) ?? false
+            if (!hasWaiting()) return false
             const { effective } = await inbound.readInputConfiguration(conversationId)
-            return inbox?.hasWaitingFrom(conversationId, userId, messageId, entry =>
+            return hasWaiting(entry =>
               conversationId.startsWith('private:') || entry.trigger === 'mention' || entry.trigger === 'private'
+              || entry.trigger === 'observation'
               || entry.trigger === 'reply' && effective.wakeOnReply
               || entry.trigger === 'continuation' && effective.continuationMs > 0
               || entry.trigger === 'nickname' && effective.names.some(name => entry.message.content.some(part =>
-                part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase())))) ?? false
+                part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase()))))
           },
           onDeferred: conversationId => activity.record('reply_deferred', conversationId) })
         workFeedback = createNativeWorkFeedback({ host, store, signal: controller.signal,

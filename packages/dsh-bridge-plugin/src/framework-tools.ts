@@ -35,6 +35,7 @@ interface Lease {
   readonly names: readonly string[]
   readonly disposers: (() => void)[]
   readonly seen: Set<string>
+  readonly roots: Map<string, Claim & { readonly name: string }>
 }
 interface Pending {
   readonly lease: Lease
@@ -64,8 +65,19 @@ function json(value: unknown, maxBytes = 262144): JsonValue {
   return JSON.parse(text) as JsonValue
 }
 
+/** A real delivery decision ends its tool step; validation failures remain repairable. */
+function replyConcludesTurn(result: unknown): boolean {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || !('status' in result)) return false
+  if (result.status === 'unknown') return true
+  if (result.status !== 'confirmed' || !('value' in result) || !result.value || typeof result.value !== 'object' || Array.isArray(result.value)) return false
+  const value = result.value
+  return 'status' in value && (value.status === 'sent' || value.status === 'confirmed' || value.status === 'unknown'
+    || value.status === 'rejected' && 'errorCode' in value && value.errorCode === 'AGENT_MESSAGE_SUPPRESSED')
+}
+
 /** The owner RPC transports calls; only the real SDK agent/tool pipeline can originate them. */
-export function createFrameworkToolChannel(options: { issuerEpoch: string; getAgent(sessionId: string): Agent | undefined }) {
+export function createFrameworkToolChannel(options: { issuerEpoch: string; getAgent(sessionId: string): Agent | undefined;
+  readonly onReplyAttempt?: (agent: Agent, claim: Claim) => void }) {
   const leases = new Map<string, Lease>()
   const claims = new WeakMap<Agent, Claim>()
   const pending = new Map<string, Pending>()
@@ -86,9 +98,34 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
     recordClaim(agent: Agent, claim: Claim): void {
       if (options.getAgent(agent.id) !== agent || !validIdentifier(claim.requestId) || !validIdentifier(claim.userMessageId)
         || !Number.isSafeInteger(claim.turn) || claim.turn < 0) return
+      const prior = claims.get(agent)
+      if (!prior || prior.turn !== claim.turn || prior.requestId !== claim.requestId || prior.userMessageId !== claim.userMessageId) {
+        const lease = leases.get(agent.id)
+        if (lease?.agent === agent) { lease.seen.clear(); lease.roots.clear() }
+      }
       claims.set(agent, Object.freeze({ ...claim }))
     },
-    clearClaim(agent: Agent): void { claims.delete(agent) },
+    recordToolCalls(agent: Agent, turn: number, content: unknown): void {
+      const claim = claims.get(agent)
+      const lease = leases.get(agent.id)
+      if (!claim || claim.turn !== turn || lease?.agent !== agent || !Array.isArray(content)) return
+      for (const block of content) {
+        if (block && typeof block === 'object' && !Array.isArray(block) && block.type === 'tool-call'
+          && validIdentifier(block.id) && typeof block.name === 'string' && lease.roots.size < 4096)
+          lease.roots.set(block.id, { ...claim, name: block.name })
+      }
+    },
+    clearClaim(agent: Agent): void {
+      claims.delete(agent)
+      const lease = leases.get(agent.id)
+      if (lease?.agent === agent) { lease.seen.clear(); lease.roots.clear() }
+    },
+    endTurn(agent: Agent, turn: number): void {
+      if (claims.get(agent)?.turn !== turn) return
+      claims.delete(agent)
+      const lease = leases.get(agent.id)
+      if (lease?.agent === agent) { lease.seen.clear(); lease.roots.clear() }
+    },
     install(request: FrameworkToolInstall) {
       epoch(request.issuerEpoch)
       if (!validIdentifier(request.sessionId) || !Number.isSafeInteger(request.generation) || request.generation < 1
@@ -106,7 +143,8 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
         return { ...spec, parameters }
       })
       if (new Set(specs.map(spec => spec.name)).size !== specs.length) throw new TypeError('Duplicate framework tool definition')
-      const lease: Lease = { id: randomUUID(), agent, generation: request.generation, names: specs.map(spec => spec.name), disposers: [], seen: new Set() }
+      const lease: Lease = { id: randomUUID(), agent, generation: request.generation, names: specs.map(spec => spec.name),
+        disposers: [], seen: new Set(), roots: new Map() }
       leases.set(agent.id, lease)
       try {
         const restoreTools = trimFrameworkChatTools(agent)
@@ -122,13 +160,17 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
             execute: async (args, exec): Promise<unknown> => {
               if (validateJsonSchemaValue(spec.parameters, args).length) return { status: 'rejected', code: 'INVALID_TOOL_INPUT' }
               const claim = claims.get(agent)
+              const root = lease.roots.get(exec.rootCallId)
               if (leases.get(agent.id) !== lease || options.getAgent(agent.id) !== agent || exec.agent !== agent
-                || agent.status !== 'running' || !claim || exec.signal.aborted) return { status: 'rejected', code: 'TOOL_SOURCE_UNAVAILABLE' }
+                || agent.status !== 'running' || !claim || !root || root.turn !== claim.turn || root.requestId !== claim.requestId
+                || root.userMessageId !== claim.userMessageId || exec.callId === exec.rootCallId && root.name !== spec.name
+                || exec.signal.aborted) return { status: 'rejected', code: 'TOOL_SOURCE_UNAVAILABLE' }
               if (pending.size >= 128 || lease.seen.size >= 4096) return { status: 'rejected', code: 'TOOL_CALL_CAPACITY' }
               if (lease.seen.has(exec.callId)) return { status: 'unknown', code: 'TOOL_CALL_ALREADY_OBSERVED' }
               const input = json(args)
               if (Buffer.byteLength(JSON.stringify(input)) > 65536) return { status: 'rejected', code: 'TOOL_INPUT_TOO_LARGE' }
               lease.seen.add(exec.callId)
+              if (spec.name === 'qaf_reply') options.onReplyAttempt?.(agent, claim)
               return new Promise<unknown>(resolve => {
                 const ticket = randomUUID()
                 let timer: ReturnType<typeof setTimeout>
@@ -137,6 +179,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
                   if (!pending.delete(ticket)) return
                   clearTimeout(timer)
                   exec.signal.removeEventListener('abort', abort)
+                  if (spec.name === 'qaf_reply' && !exec.signal.aborted && replyConcludesTurn(result)) exec.concludeTurn()
                   resolve(result)
                 }
                 const wire = { ticket, leaseId: lease.id, call: { id: exec.callId, sessionId: agent.id, generation: lease.generation,

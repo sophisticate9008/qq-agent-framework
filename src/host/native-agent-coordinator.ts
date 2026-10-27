@@ -206,9 +206,15 @@ export function createNativeAgentCoordinator(options: {
                 const value = feedback ? object(feedback.value) : null
                 const workFeedback = value?.schema === 1 && value.conversationId === binding.conversationId
                   && value.parentSessionId === binding.sessionId && value.generation === binding.generation
+                const workRow = workFeedback && value?.final === false && typeof value.workId === 'string'
+                  ? store.read('native-work.executions', value.workId) : null
+                const currentWork = workRow ? object(workRow.value) : null
+                const staleProgress = workFeedback && value?.final === false && (!currentWork
+                  || currentWork.conversationId !== binding.conversationId || currentWork.parentSessionId !== binding.sessionId
+                  || currentWork.generation !== binding.generation || !['starting', 'running'].includes(String(currentWork.status)))
                 const decision = parseNativeReplyDecision(event.content ?? [])
-                if (!workFeedback || decision) {
-                  settleSilent(execution, decision)
+                if (!workFeedback || decision || staleProgress) {
+                  settleSilent(execution, decision ?? (staleProgress ? { state: 'silent', reason: 'no-useful-addition' } : null))
                   runtime.host?.releaseDeliveryRequest(execution.requestId)
                   return
                 }

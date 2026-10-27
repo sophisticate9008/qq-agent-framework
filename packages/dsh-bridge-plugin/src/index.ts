@@ -21,6 +21,7 @@ import { createFrameworkToolChannel, type FrameworkToolInstall, type FrameworkTo
 import { createWorkJournal } from './work-journal.js'
 import { createWorkChannel, type WorkAddress, type WorkStart, type WorkTarget } from './work.js'
 import { installWorkAttachmentTool } from './work-attachments.js'
+import { createReplyDecisionRepair } from './reply-decision-repair.js'
 
 export default class BridgePlugin extends TypertRemoteService {
   static inject = ['agents', 'agentPresets', 'tools', 'typertGateway']
@@ -32,8 +33,13 @@ export default class BridgePlugin extends TypertRemoteService {
 
   constructor(ctx: Context) {
     super(ctx, 'bridgePlugin')
+    const replyRepair = createReplyDecisionRepair({ current: agent => ctx.agents.get(SessionId(agent.id)) === agent,
+      hasReplyLease: agent => {
+        const current = ctx.agents.get(SessionId(agent.id))
+        return current === agent && this.frameworkTools.projectedNames(current).includes('qaf_reply')
+      } })
     this.frameworkTools = createFrameworkToolChannel({ issuerEpoch: this.journal.issuerEpoch,
-      getAgent: id => ctx.agents.get(SessionId(id)) })
+      getAgent: id => ctx.agents.get(SessionId(id)), onReplyAttempt: (agent, claim) => replyRepair.attempted(agent, claim) })
     function fullAccessService(agent?: Agent) {
       // This optional SDK service is deliberately not a plugin-wide default.
       const service: unknown = (agent?.ctx ?? ctx).get('permissionPresets')
@@ -104,7 +110,19 @@ export default class BridgePlugin extends TypertRemoteService {
     ctx.on('subagent/end', event => this.work.recordEnd(event))
     ctx.effect(() => () => this.work.close())
     ctx.effect(() => () => this.frameworkTools.close())
-    ctx.on('agent/status', ({ agent, status }) => { if (status === 'idle') this.frameworkTools.clearClaim(agent) })
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'idle') { this.frameworkTools.clearClaim(agent); replyRepair.clear(agent) }
+    })
+    ctx.on('session/event', (session, event) => {
+      const agent = ctx.agents.get(session.id)
+      if (!agent || agent.session !== session) return
+      if (event.type === 'assistant/message') {
+        this.frameworkTools.recordToolCalls(agent, event.data.turn, event.data.message.content)
+        replyRepair.assistant(agent, event.data.turn, event.data.message.content)
+      }
+      if (event.type === 'turn/end') { this.frameworkTools.endTurn(agent, event.data.turn); replyRepair.clear(agent) }
+    })
+    ctx.on('agent/turn-stopping', ({ agent, turn, signal }) => replyRepair.stopping(agent, turn, signal))
     this.migrations = createMigrationJournal({ directory: join(resolveDshHome(), 'storages', 'qaf-session-migrations'),
       issuerEpoch: this.journal.issuerEpoch, prepare: (request, signal) => prepareSdkMigration(ctx, request, signal) })
     this.scopeReader = createDshToolScopeReader({ sessionId: SessionId, agents: ctx.agents,
@@ -113,6 +131,7 @@ export default class BridgePlugin extends TypertRemoteService {
         return ctx.tools.schemas(agent).filter(schema => !projected.has(schema.name))
       } } })
     ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+      replyRepair.claimed(agent, message, turn)
       if (message.source?.kind === 'user' && 'rpcId' in message.source && typeof message.source.rpcId === 'string')
         this.work.recordClaim(agent.session.id, message.source.rpcId)
       if (ctx.agents.get(agent.id) !== agent || agent.session.id !== agent.id || message.source?.kind !== 'user'

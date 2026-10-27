@@ -2573,3 +2573,59 @@ for (const sourceOwner of [false, true]) test(`queued source history boundary su
   assert(unread.messages.every(message => message.id.startsWith('later-')))
   assert.equal(fake.sends.length, 0)
 })
+
+for (const stopReason of ['completed', 'failed', 'running'] as const) test(stopReason === 'running'
+  ? 'work feedback preserves current progress while its work is still running'
+  : `work feedback suppresses in-flight stale progress after ${stopReason} and releases the pending final`, async context => {
+  const fake = await fixture(context, { workChannel: true })
+  await fake.configure(); await fake.start(); fake.message(5001)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
+  fake.toolCalls.push({ ticket: 'stale-progress-work', leaseId: fake.toolLeases.get(sessionId)!.leaseId,
+    call: { id: 'stale-progress-work', name: 'qaf_work_start', input: { task: '整理一份报告', context: '' },
+      sessionId, requestId, generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+  await until(() => fake.toolResults.has('stale-progress-work'))
+  assert.equal(fake.toolResults.get('stale-progress-work')?.status, 'confirmed')
+  const [id, work] = [...fake.works][0]
+  fake.rawFinal(1)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
+  fake.works.set(id, { ...work, progress: [{ id: 'assistant/message:seq:1', at: Date.now(), text: '正在检查第一份材料。' }] })
+  await awaitCondition(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2,
+    { timeoutMs: 6000, message: 'the progress narrator must be admitted before the work settles' })
+  const progressPrompt = fake.rpc.filter(call => call.method === 'session/prompt')[1]!.request
+  assert.match(JSON.stringify(progressPrompt.content), /正在检查第一份材料/)
+  if (stopReason === 'running') {
+    fake.agentEvent('assistant/message', { turn: 2, message: { id: 'current-progress', role: 'assistant',
+      content: [{ type: 'text', text: '已检查第一份材料，接着核对其余两份。' }] } })
+    fake.agentEvent('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    await until(() => fake.sends.length === 1)
+    assert.match(JSON.stringify(fake.sends), /已检查第一份材料/)
+    assert.equal(fake.runtime().readWork(id)?.status, 'running')
+    return
+  }
+  const finalText = stopReason === 'completed' ? '报告已经完成，共有三项结果。' : '材料缺失，报告未能完成。'
+  fake.works.set(id, { ...work, state: 'completed', result: { stopReason, output: [{ type: 'text', text: finalText }] } })
+  await until(() => fake.runtime().readWork(id)?.status === (stopReason === 'completed' ? 'completed' : 'failed'))
+  assert.equal(fake.runtime().readWork(id)?.delivery, 'delivering')
+  fake.agentEvent('assistant/message', { turn: 2, message: { id: 'obsolete-progress', role: 'assistant',
+    content: [{ type: 'text', text: '我还在检查第一份材料，请再等一下。' }] } })
+  fake.agentEvent('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
+  assert.equal(fake.sends.length, 0, 'settled work must not publish the old running progress')
+  const finalPrompt = fake.rpc.filter(call => call.method === 'session/prompt')[2]!.request
+  assert.match(JSON.stringify(finalPrompt.content), new RegExp(finalText))
+  const reader = createSqliteStore({ filename: join(fake.directory, 'native-chat.sqlite'), requireExisting: true })
+  try {
+    const progress = reader.list('native-work.feedback', { limit: 10 }).find(row => isRecord(row.value) && row.value.final === false)
+    assert(progress && isRecord(progress.value))
+    assert.equal(progress.value.status, 'rejected', 'old narration is explicitly settled, allowing pending final feedback')
+  } finally { reader.close() }
+  fake.agentEvent('assistant/message', { turn: 3, message: { id: 'current-final', role: 'assistant',
+    content: [{ type: 'text', text: finalText }] } })
+  fake.agentEvent('turn/end', { turn: 3, reason: { kind: 'completed' } })
+  await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
+  assert.equal(fake.sends.length, 1)
+  assert.match(JSON.stringify(fake.sends), new RegExp(finalText))
+  assert.doesNotMatch(JSON.stringify(fake.sends), /还在检查第一份材料/)
+})

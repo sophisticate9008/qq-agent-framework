@@ -2,7 +2,7 @@
 
 `scripts/simulate-qq.ts` 用命令行输入替代 QQ 入站，运行现有原生聊天、白名单、人设唤醒、模型调用、框架工具、后台助手和出站代码。每次启动都建立新的私有运行目录与 DSH 进程。模型调用使用当前配置的真实渠道，会产生真实用量。
 
-框架 bridge 插件链接当前工作树的 `packages/dsh-bridge-plugin`，需要先构建该包；不会复用生产 profile 中的旧插件安装。框架运行也使用当前工作树源码。
+框架 bridge 插件复制当前工作树的 `packages/dsh-bridge-plugin` 构建结果，需要先构建该包；每轮固定插件代码，不复用生产 profile 中的旧插件安装。框架运行使用当前工作树源码。
 
 先准备目录：
 
@@ -20,7 +20,7 @@ node scripts/simulate-qq.ts
 
 默认从 `runtime/live/runtime` 读取本机配置，从 `runtime/live/services.json` 定位已经安装的 DSH。其他部署可使用 `--source-directory /实际/native配置目录 --services /实际/services.json`。主人账号直接取实际配置；未配置主人时拒绝启动。普通文本默认表示主人在模拟群中 @ 机器人。
 
-复制方案时，仅将与已登记旧版内置完全一致的操作规则段落升级为当前内置说明。自定义段落和其他方案字段原样保留，生产配置不变。纯函数 `upgradeBuiltinChatOperatingInstructions` 可供明确的配置迁移复用；它本身不读取或写入配置。
+复制方案时，仅将与已登记旧版内置完全一致的操作规则段落升级为当前内置说明；人设只替换两处旧版“被提到昵称就回嘴”的原句。自定义内容和其他字段原样保留，生产配置不变。纯函数 `upgradeBuiltinChatOperatingInstructions` 与 `upgradeBuiltinPersonaParticipation` 本身不读取或写入配置。
 
 启动成功输出 `ready`、本轮目录、模拟群号与非主人账号。终端中的 `/status` 读取运行状态，`/settle` 等待当前活动轮与工作结束，`/quit` 退出。Ctrl+C 只关闭本轮原生运行时和它启动的 DSH 进程。
 

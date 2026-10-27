@@ -18,7 +18,7 @@ import RemoteAccess from '@deepseek-ai/dsh-api-remote-access'
 import * as Connection from '@deepseek-ai/dsh-client-connection'
 import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import Llm, { LlmAdapter, ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import Llm, { LlmAdapter, ReasoningEffortId, ToolCallId, createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import Sessions, { SessionId } from '@deepseek-ai/dsh-session'
 import Projections from '@deepseek-ai/dsh-session-projection'
@@ -515,9 +515,17 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
       let callStarted = false
       let sdkCallId = 'actual-tool-call'
       let toolSignal = signal
+      const errors = agent.ctx.on('agent/error', payload => { if (outcome === undefined) outcome = { fixtureError: String(payload.error) } })
       const hook = agent.ctx.on('agent/request', async (payload, next) => {
         if (!callStarted) {
           callStarted = true
+          // This focused registry fixture supplies the same committed root event
+          // that the model loop publishes before dispatching its tool pipeline.
+          agent.session.append('assistant/message', { turn: payload.turn, step: payload.step, message: createAssistantMessage({
+            source: { provider: 'local-fixture', model: 'safe-model' }, content: [{ type: 'tool-call', id: ToolCallId(sdkCallId),
+              name: 'qaf_media_inspect', arguments: '{"assetId":"opaque-asset"}' }]
+          }) }, { surfaceOp: 'append' })
+          await new Promise<void>(resolve => setImmediate(resolve))
           outcome = await agent.ctx.tools.execute({ callId: ToolCallId(sdkCallId), agent, name: 'qaf_media_inspect',
             arguments: { assetId: 'opaque-asset' }, signal: AbortSignal.any([payload.signal, toolSignal]) })
         }
@@ -531,7 +539,7 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
           if (queued.length) break
           await new Promise<void>(resolve => setTimeout(resolve, 5))
         }
-        assert.equal(queued.length, 1)
+        assert.equal(queued.length, 1, JSON.stringify({ callStarted, outcome }))
         const pending = queued[0]!
         assert.equal(pending.leaseId, installed.leaseId)
         assert.equal(pending.call.id, 'actual-tool-call')
@@ -579,7 +587,7 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
         } finally { revoke() }
         assert.deepEqual(await client.frameworkTools.poll({ issuerEpoch: description.issuerEpoch }, signal), [])
       } finally {
-        hook()
+        hook(); errors()
         await client.frameworkTools.withdraw({ issuerEpoch: description.issuerEpoch, sessionId: agent.id, leaseId: installed.leaseId }, signal)
       }
       assert.equal(ctx.tools.schemas(agent).some(schema => schema.name === 'qaf_media_inspect'), false)

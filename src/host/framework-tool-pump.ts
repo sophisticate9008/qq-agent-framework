@@ -35,10 +35,13 @@ export function createFrameworkToolPump(options: {
       if (lifetime.signal.aborted) return
       const tickets = new Set(pending.map(entry => entry.ticket))
       for (const [ticket, entry] of active) if (!tickets.has(ticket)) entry.controller.abort()
+      // Settled tickets absent from the authoritative pending page no longer need
+      // channel retention. The registry and SDK keep their own call idempotency.
+      for (const ticket of seen) if (!tickets.has(ticket) && !active.has(ticket)) seen.delete(ticket)
       for (const item of pending) {
         // Polling is shared by bridge instances. Only the lease owner may settle a ticket.
         if (seen.has(item.ticket) || !options.accepts(item)) continue
-        assert(seen.size < 4096, 'TOOL_CALL_CAPACITY', 'Restart the explicit tool projection after retained calls reach capacity.')
+        assert(seen.size < 4096, 'TOOL_CALL_CAPACITY', 'Too many live or retained pending tool tickets.')
         seen.add(item.ticket)
         const controller = new AbortController()
         const signal = AbortSignal.any([lifetime.signal, controller.signal])

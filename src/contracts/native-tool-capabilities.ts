@@ -2,7 +2,7 @@
 export const NATIVE_TOOL_CAPABILITY_CATALOG = Object.freeze([
   { capability: 'native.reply', tool: 'qaf_reply', name: '发送QQ消息',
     summary: '主动向当前QQ会话发送文字、媒体或排版内容，返回真实回执。',
-    description: '需要在QQ中说话时调用此工具。content接受文字、结构化消息数组或qaf.output/1对象；沿用Markdown转图、长文转发和分气泡。可在一轮中多次调用，每次按实际发送回执判断sent、rejected或unknown；receipts保留逐条结果，部分成功时不重复整份内容，unknown不重复发送同一内容。cached/reused表示复用了原回执，没有再次发送；sent后直接结束本轮，没有新的必要内容时不再调用。本轮若被新消息替代，结束并等待新会话快照，不改写旧内容重发。普通最终文本不会自动发送到QQ。' },
+    description: '需要在QQ中说话时调用此工具。content接受文字、结构化消息数组或qaf.output/1对象；沿用Markdown转图、长文转发和分气泡。发送成功会结束当前回合，因此先完成必要查询、读取或启动工作，再把要说的内容一次提交，不先发“稍等”再准备做事。按实际发送回执判断sent、rejected或unknown；receipts保留逐条结果，部分成功时不重复整份内容，unknown不重复发送。cached/reused表示复用了原回执，没有再次发送。本轮若被新消息替代，结束并等待新会话快照，不改写旧内容重发。普通最终文本不会自动发送到QQ。' },
   { capability: 'native.stickers.list', tool: 'qaf_sticker_list', name: '收藏表情',
     summary: '查找QQ收藏表情，登记为可读取和发送的会话图片。',
     description: '查看或搜索QQ账号收藏的表情包，返回当前会话可用的图片资源。可读取后调用qaf_reply发送；没有匹配项时返回空列表。' },

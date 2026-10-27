@@ -81,3 +81,41 @@ test('an abort rejection for a withdrawn ticket leaves the channel available for
     assert.equal(pump.status().state, 'running')
   } finally { await pump.close(signal) }
 })
+
+test('completed tickets leave channel retention so more than 4096 successive calls stay available', async () => {
+  let polls = 0
+  let completed = 0
+  const faults: string[] = []
+  const pump = createFrameworkToolPump({ issuerEpoch: 'epoch-1', pollIntervalMs: 10,
+    port: port(async () => {
+      const batch = polls++
+      return Array.from({ length: 128 }, (_, offset) => ({ ...item, ticket: `ticket-${batch}-${offset}`,
+        call: { ...item.call, id: `call-${batch}-${offset}`, expiresAt: Date.now() + 10000 } }))
+    }, async () => { completed++; return true }),
+    accepts: () => true, async execute() { return { status: 'confirmed', value: 'delivered' } }, onFault: code => faults.push(code) })
+  pump.start()
+  try {
+    await awaitCondition(() => completed >= 4224 || pump.status().state === 'unknown',
+      { message: 'completed tool tickets must not exhaust a healthy channel', timeoutMs: 3000 })
+    assert(completed >= 4224)
+    assert.deepEqual(faults, [])
+    assert.equal(pump.status().state, 'running')
+  } finally { await pump.close(signal) }
+})
+
+test('a withdrawn ticket stays retained until its in-flight host operation settles', async () => {
+  let polls = 0
+  let executions = 0
+  let finish!: (result: FrameworkToolResult) => void
+  const operation = new Promise<FrameworkToolResult>(resolve => { finish = resolve })
+  const pump = createFrameworkToolPump({ issuerEpoch: 'epoch-1', pollIntervalMs: 10,
+    port: port(async () => { polls++; return polls === 2 ? [] : [item] }, async () => true),
+    accepts: () => true, async execute() { executions++; return operation } })
+  pump.start()
+  try {
+    await awaitCondition(() => polls >= 4, { message: 'withdrawal and re-observation while execution remains unsettled', timeoutMs: 1000 })
+    assert.equal(executions, 1)
+    assert.equal(pump.status().pending, 1)
+    assert.equal(pump.status().state, 'running')
+  } finally { finish({ status: 'unknown', code: 'CANCELLED' }); await pump.close(signal) }
+})

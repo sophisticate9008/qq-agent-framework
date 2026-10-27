@@ -6,6 +6,8 @@ QQ Agent Framework is an independent TypeScript rebuild informed by the requirem
 
 This repository is not an official release, successor, or Git fork of qq-bridge, and it is not endorsed by the qq-bridge authors. It does not claim that the referenced design and operational work is wholly original to this repository. Where qq-bridge material is adapted or redistributed, the following upstream copyright and MIT license apply.
 
+The group conversation redesign reviewed on 2026-10-28 references qq-bridge revision `bdc6d09`: explicit send behavior in `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`, unread wake coalescing and recent participation cues in `src/bridge.js`, and continuation handling in `src/local/dialogue-wake.js`. This framework implements those ideas through its own typed inbox, policy and output services. Its continuation window includes all group members, and its queue preserves the actual executing sender separately from wake metadata.
+
 ## qq-bridge MIT License
 
 MIT License

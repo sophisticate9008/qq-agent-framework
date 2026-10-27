@@ -76,11 +76,15 @@ export function readNativeInboxSummary(store: DurableStore): NativeInboxSummary 
 export function createNativeInbox(options: {
   readonly store: DurableStore;
   readonly clock?: () => number;
+  readonly coalesceMs?: number;
   readonly readiness: (conversationId: string) => 'ready' | 'busy' | 'blocked';
   readonly deliver: (entries: readonly NativeInboxEntry[]) => Promise<{ readonly status: 'accepted' | 'rejected' | 'unknown'; readonly errorCode?: string | null }>;
   readonly onFault?: (code: string) => void;
 }) {
   const now = options.clock ?? Date.now;
+  const coalesceMs = options.coalesceMs ?? 0;
+  assert(Number.isSafeInteger(coalesceMs) && coalesceMs >= 0 && coalesceMs <= 500,
+    'INVALID_INBOX_OPTIONS', 'The input coalescing window must be bounded.');
   const running = new Map<string, Promise<void>>();
   let stopped = false;
   const read = (id: string) => options.store.read(namespace, digest(id));
@@ -131,6 +135,7 @@ export function createNativeInbox(options: {
     const first = queue.entries[0]!;
     const end = queue.entries.findIndex(entry => entry.message.userId !== first.message.userId);
     const batch = queue.entries.slice(0, end === -1 ? queue.entries.length : end);
+    if (now() < Math.min(first.admittedAt + 500, batch.at(-1)!.admittedAt + coalesceMs)) return;
     write(record, { ...queue, phase: 'dispatching', dispatchingIds: batch.map(entry => entry.message.id), errorCode: null });
     let result: { readonly status: 'accepted' | 'rejected' | 'unknown'; readonly errorCode?: string | null };
     try { result = await options.deliver(snapshot(batch)); }
@@ -192,6 +197,14 @@ export function createNativeInbox(options: {
       return queue.entries.some(entry => entry.message.id === messageId) || queue.receipts.some(receipt => receipt.id === messageId);
     },
     hasPending(conversationId: string) { const record = read(conversationId); return record !== null && decode(record).entries.length > 0; },
+    hasWaitingFrom(conversationId: string, userId: string, messageId: string,
+      eligible: (entry: NativeInboxEntry) => boolean = () => true) {
+      const record = read(conversationId);
+      if (!record) return false;
+      const queue = decode(record);
+      return queue.entries.some(entry => entry.message.userId === userId && entry.message.id !== messageId
+        && entry.deadlineAt > now() && !queue.dispatchingIds?.includes(entry.message.id) && eligible(entry));
+    },
     summary() { return readNativeInboxSummary(options.store); },
     list() { return snapshot(options.store.list(namespace, { limit: 256 }).map(record => decode(record))); },
     tick,

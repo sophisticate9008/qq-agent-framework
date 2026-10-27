@@ -57,6 +57,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   readonly attachImages?: boolean;
   readonly maxHistoryCharacters?: number;
   readonly participation?: NativeParticipationReason;
+  readonly unsentReplyMessageIds?: readonly string[];
   readonly quotedMessages?: readonly HistoryMessage[];
   readonly unread?: { readonly ids: readonly string[]; readonly readThrough: number; readonly through: number; readonly partial: boolean };
   readonly memory?: NativeMemoryContext;
@@ -91,6 +92,8 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
       text: full.slice(0, 300), truncated: full.length > 300 };
   });
   const envelope = (currentTruncated: boolean) => JSON.stringify({ schema: 1, conversationId: event.conversationId, messageId: event.id,
+    ...(options.unsentReplyMessageIds?.length ? { replyDelivery: { unsentFor: options.unsentReplyMessageIds,
+      note: '这些旧消息的模型回复尚未发送，因为你收到同一人的后续补充。结合最新要求重新组织回复，不把此前模型输出当作用户已收到的答复；已执行的工具动作仍有效，不重复执行。' } } : {}),
     senderId: event.userId ?? null, senderIsConfiguredOwner: options.owner !== null && event.userId === options.owner,
     participation: options.participation ?? (event.data.directed === true ? 'direct' : 'ambient'),
     unread: options.unread ? { readThrough: options.unread.readThrough, through: options.unread.through,

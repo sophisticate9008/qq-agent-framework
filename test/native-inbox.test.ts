@@ -78,3 +78,30 @@ test('concurrent arrival during dispatch survives while repeated ticks do not du
     await inbox.tick(); assert.equal(calls, 2);
   } finally { await inbox.stop(); store.close(); }
 });
+
+test('short coalescing is bounded and excludes dispatched or expired inputs from superseding replies', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  let clock = 1000;
+  const batches: string[][] = [];
+  let release: (() => void) | undefined;
+  const inbox = createNativeInbox({ store, clock: () => clock, coalesceMs: 120, readiness: () => 'ready',
+    async deliver(entries) {
+      batches.push(entries.map(item => item.message.id));
+      assert.equal(inbox.hasWaitingFrom('group:456', '123', 'old'), false);
+      await new Promise<void>(resolve => { release = resolve; });
+      return { status: 'accepted' };
+    } });
+  const add = (id: string, userId = '123') => inbox.enqueue({ ...entry(id, userId, clock), deadlineAt: clock + 5000 });
+  try {
+    add('a'); clock = 1100; add('b'); await inbox.tick(); assert.equal(batches.length, 0);
+    clock = 1190; add('c'); clock = 1280; add('d'); clock = 1390; add('e'); clock = 1490; add('f');
+    await inbox.tick(); assert.equal(batches.length, 0);
+    clock = 1500;
+    const running = inbox.tick();
+    assert.deepEqual(batches, [['a', 'b', 'c', 'd', 'e', 'f']]);
+    add('other', '789'); assert.equal(inbox.hasWaitingFrom('group:456', '123', 'f'), false);
+    add('correction'); assert.equal(inbox.hasWaitingFrom('group:456', '123', 'f'), true);
+    clock = 6500; assert.equal(inbox.hasWaitingFrom('group:456', '123', 'f'), false);
+    release!(); await running;
+  } finally { await inbox.stop(); store.close(); }
+});

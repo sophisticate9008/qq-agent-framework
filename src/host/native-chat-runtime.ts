@@ -21,6 +21,7 @@ import { createNativeExecutionReconciliation } from './native-execution-reconcil
 import { drainNativeRun, type NativeRunningRunResources } from './native-run-resources.ts'
 import { createNativeAgentCoordinator } from './native-agent-coordinator.ts'
 import { createNativeWorkFeedback } from './native-work-feedback.ts'
+import { createNativeReplyFreshness } from './native-reply-freshness.ts'
 import { createFfmpegVideoObserver } from '../adapters/ffmpeg-video.ts'
 import { validateNativeMediaConfiguration } from '../contracts/native-media-configuration.ts'
 import { createNativeOutputService, createNativeOutputPackage } from './native-output.ts'
@@ -249,6 +250,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let bootstrapUnknown = false
   let messageSources: ReturnType<typeof createNativeMessageSources> | undefined
   let workFeedback: ReturnType<typeof createNativeWorkFeedback> | undefined
+  let replyFreshness: ReturnType<typeof createNativeReplyFreshness> | undefined
   const managerDefinitions = [...(options.lifecycleHooks ?? []), ...(options.bootstrap?.lifecycleHooks ?? [])]
   const controlDefinitions = [...(options.controlCommands ?? []), ...(options.bootstrap?.controlCommands ?? [])]
   const managerHooks = createLifecycleHooks(managerDefinitions)
@@ -370,7 +372,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     get executions() { return executions }, get inbox() { return inbox }, get messageSources() { return messageSources },
     get interactionMessages() { return interactionMessages }, get quotedContext() { return quotedContext },
     get inputPackage() { return inputPackage }, feedbackBusy: conversationId => workFeedback?.busy(conversationId) ?? false
-  }, accountScope, expectedSelfId, activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode })
+  }, accountScope, expectedSelfId, activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode,
+    onDispatched: (requestId, accepted) => replyFreshness?.settled(requestId, accepted) })
   const connection = createOneBotConnectionManager({ ...inbound.handlers, ...(accountScope ? { accountId: accountScope.accountId } : {}) })
   let lastObservedConnection = ''
   function observeConnection() {
@@ -646,6 +649,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     interactionMessages = undefined
     messageSources = undefined
     workFeedback = undefined
+    replyFreshness?.clear()
+    replyFreshness = undefined
     media = undefined
     stickers = undefined
     inputPackage = undefined
@@ -944,6 +949,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         host = createBridgeHost({ store, accountScope, agent, context, persona: personaReference,
           ...bootstrapMount?.bridgeOptions,
           onAgentDelivery: (requestId, receipt) => workFeedback?.delivered(requestId, receipt),
+          shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
           effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects,
             'native.stickers.list': { execute(request) {
@@ -961,14 +967,20 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               if (!host || !active) failure('NATIVE_CHAT_STOPPED')
               const history = host.history.snapshot(event.conversationId, { afterSequence: 0, limit: 100 })
               const unread = host.history.snapshot(event.conversationId, { limit: 100 })
+              // Inputs queued after this batch belong to a later submission, not this read cursor.
+              const through = history.messages.find(item => item.id === event.id)?.sequence ?? history.latestSequence
+              const visibleHistory = history.messages.filter(item => item.sequence <= through)
+              const binding = host.sessions.get(event.conversationId)
+              const unsentReplyMessageIds = binding && event.userId
+                ? replyFreshness?.prepare(binding, event.userId, event.id) : undefined
               const owner = active.access.owner
               const quotedMessages = await quotedContext?.read({ conversationId: event.conversationId,
-                content: normalizeContent(event.data.content) }, history.messages, execution.signal)
-              inbound.preparedReadCursor(digest([event.conversationId, event.id, 'prompt']), history.latestSequence)
-              return prepareNativeChatInput(event, history.messages, { owner, partial: unread.partial,
+                content: normalizeContent(event.data.content) }, visibleHistory, execution.signal)
+              inbound.preparedReadCursor(digest([event.conversationId, event.id, 'prompt']), through)
+              return prepareNativeChatInput(event, visibleHistory, { owner, partial: unread.partial, unsentReplyMessageIds,
                 attachImages: active.deployment.modelSettings?.inputModalities?.includes('image') !== false,
-                unread: { ids: unread.messages.filter(item => item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
-                  through: unread.latestSequence, partial: unread.partial },
+                unread: { ids: unread.messages.filter(item => item.sequence <= through && item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
+                  through, partial: unread.partial },
                 quotedMessages, tools: await frameworkTools?.context(event.conversationId, execution.signal),
                 output: { ...await output.context(execution.signal), forwardAuthorized: !host.policy.describe().paused && host.policy.describe().grants.some(grant =>
                   grant.active && grant.featureId === 'agent-relay' && grant.conversationId === event.conversationId
@@ -981,6 +993,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           ]),
           agentMessagePreparation: { capabilities: bootstrapMount?.bridgeOptions.agentMessagePreparation?.capabilities ?? [],
             async prepare(execution, event) {
+              if (await replyFreshness?.hold(event)) return null
               const prepared = bootstrapMount?.bridgeOptions.agentMessagePreparation
                 ? await bootstrapMount.bridgeOptions.agentMessagePreparation.prepare(execution, event) : event.data.content
               return prepared === null ? null : output.prepare(prepared, event, execution.signal)
@@ -1241,7 +1254,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           configuration.adapters.dshAgent.auth, configuration.adapters.onebotWebhook.hmac])
         const inboxRecheckedAt = new Map<string, number>()
         const inboxRechecking = new Set<string>()
-        inbox = createNativeInbox({ store: store!,
+        inbox = createNativeInbox({ store: store!, coalesceMs: 120,
           readiness(conversationId) {
             if (state !== 'running' || controller.signal.aborted || !host || !executions) return 'blocked'
             if (workFeedback?.busy(conversationId)) return 'busy'
@@ -1279,12 +1292,27 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               return { status: 'rejected', errorCode: 'NATIVE_CHAT_INPUT_DISABLED' }
             }
             const admittedAt = Math.min(...entries.map(item => item.admittedAt))
-            inbound.continuation(digest([entry.message.conversationId, entry.message.id, 'prompt']))
+            const trigger = entries.find(item => item.trigger === 'mention' || item.trigger === 'private')?.trigger
+              ?? entries.find(item => item.trigger === 'nickname' || item.trigger === 'reply')?.trigger ?? 'continuation'
+            inbound.setParticipation(digest([entry.message.conversationId, entry.message.id, 'prompt']),
+              trigger === 'mention' || trigger === 'private' ? 'direct' : trigger)
             return inbound.dispatchIncoming(entry.message, entry.message, admittedAt, controller.signal)
           },
           onFault: executionFault,
         })
         inbox.recover()
+        replyFreshness = createNativeReplyFreshness({ host, store,
+          async hasWaitingFrom(conversationId, userId, messageId) {
+            if (!inbox?.hasWaitingFrom(conversationId, userId, messageId)) return false
+            const { effective } = await inbound.readInputConfiguration(conversationId)
+            return inbox?.hasWaitingFrom(conversationId, userId, messageId, entry =>
+              conversationId.startsWith('private:') || entry.trigger === 'mention' || entry.trigger === 'private'
+              || entry.trigger === 'reply' && effective.wakeOnReply
+              || entry.trigger === 'continuation' && effective.continuationMs > 0
+              || entry.trigger === 'nickname' && effective.names.some(name => entry.message.content.some(part =>
+                part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase())))) ?? false
+          },
+          onDeferred: conversationId => activity.record('reply_deferred', conversationId) })
         workFeedback = createNativeWorkFeedback({ host, store, signal: controller.signal,
           currentOwner: () => active?.access.owner ?? null,
           guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery'),

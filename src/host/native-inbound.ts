@@ -58,6 +58,7 @@ export function createNativeInboundController(options: {
   readonly checkpoint: (point: LifecycleCheckpoint, data: JsonObject, signal: AbortSignal) => Promise<void>
   readonly guard: (conversationId: string, signal: AbortSignal, recheck: boolean, phase: 'protocol' | 'admission') => Promise<void>
   readonly safeCode: (error: unknown) => string
+  readonly onDispatched?: (requestId: string, accepted: boolean) => void
 }) {
   const runtime = options.resources
   const { activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode } = options
@@ -179,20 +180,18 @@ export function createNativeInboundController(options: {
       }
       const incoming = { ...message, content, directed: participation !== 'ambient' }
       participationReasons.set(digest([message.conversationId, message.id, 'prompt']), participation)
-      const execution = runtime.executions?.forConversation(message.conversationId)
-      if (incoming.directed && (execution || runtime.feedbackBusy?.(message.conversationId) || runtime.inbox?.hasPending(message.conversationId) || runtime.inbox?.contains(message.conversationId, message.id))) {
+      // Release the protocol callback after durable admission, before model preparation/submission.
+      // Otherwise subsequent QQ corrections remain stuck in the WebSocket queue.
+      if (incoming.directed) {
         try {
           await guard(message.conversationId, context.signal, false, 'admission')
           if (!runtime.inbox || runtime.lifetime !== generation || generation!.signal.aborted) failure('NATIVE_CHAT_STOPPED')
-          if (execution && (execution.status === 'unknown' || execution.deadlineReached
-            || execution.externalStatus === 'unknown' || execution.cancelStatus !== 'not-requested')) failure('NATIVE_INBOX_EXECUTION_UNCONFIRMED')
           runtime.inbox.enqueue({ message: incoming, admittedAt, deadlineAt: admittedAt + configuration.execution.turnTimeoutMs,
             trigger: participation === 'direct' ? message.conversationId.startsWith('private:') ? 'private' : 'mention'
               : participation === 'ambient' ? undefined : participation })
           current.history.append(message.conversationId, { id: message.id, actor: message.userId,
             content, receivedAt: message.receivedAt })
           lastReceipt = { status: 'queued', errorCode: null }
-          activity.record('queued', message.conversationId)
         } catch (error) {
           rejected++
           lastReceipt = { status: 'rejected', errorCode: safeCode(error) }
@@ -221,6 +220,7 @@ export function createNativeInboundController(options: {
     admissionTimes.set(requestId, admissionTimes.get(requestId) ?? admittedAt)
     activeConversations.set(message.conversationId, (activeConversations.get(message.conversationId) ?? 0) + 1)
     let releaseSource: (() => void) | undefined
+    let accepted = false
     try {
       const remaining = admissionTimes.get(requestId)! + runtime.configuration!.execution.turnTimeoutMs - Date.now()
       if (remaining <= 0) {
@@ -239,6 +239,7 @@ export function createNativeInboundController(options: {
         timeoutMs: remainingAfterHooks, code: 'NATIVE_CHAT_DEADLINE_EXPIRED',
         run: signal => current.receive(incoming, { signal }) })
       const readCursor = preparedReadCursors.get(requestId)
+      accepted = receipt.status === 'accepted'
       if (receipt.status === 'accepted' && readCursor !== undefined && current === runtime.host && runtime.lifetime === generation) {
         const prior = current.history.snapshot(message.conversationId)
         current.history.markRead(message.conversationId, Math.max(prior.readThrough, readCursor))
@@ -256,6 +257,7 @@ export function createNativeInboundController(options: {
         message.conversationId, undefined, {}, lastReceipt.errorCode ?? undefined)
       return { status: 'unknown' as const, eventId: message.id, errorCode: lastReceipt.errorCode }
     } finally {
+      options.onDispatched?.(requestId, accepted)
       activity.finishRequest(requestId)
       const remainingActive = (activeConversations.get(message.conversationId) ?? 1) - 1
       if (remainingActive) activeConversations.set(message.conversationId, remainingActive)
@@ -279,7 +281,7 @@ export function createNativeInboundController(options: {
     admittedAt: (requestId: string) => admissionTimes.get(requestId),
     preparedReadCursor(requestId: string, sequence: number) { preparedReadCursors.set(requestId, sequence) },
     participation: (requestId: string) => participationReasons.get(requestId),
-    continuation(requestId: string) { participationReasons.set(requestId, 'continuation') },
+    setParticipation(requestId: string, reason: NativeParticipationReason) { participationReasons.set(requestId, reason) },
     clear() { participationReasons.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear() }
   })
 }

@@ -99,6 +99,8 @@ node scripts/simulate-qq.ts --batch runtime/simulation-cases.jsonl
 
 `--batch work` 覆盖主人委派助手创建 hello.txt、工作目录之外的专用临时目录读写与 shell 执行、两份文件和一张真实 PNG 回传，再检查私聊问候和主人/非主人白名单命令。助手准入耗时与拒绝原因写入 `assistant-admission-prepared` / `assistant-admission-rejected` 事件；附件仍通过真实助手工具、工作结果和 OneBot 文件上传路径回传到本地捕获端。
 
+密集输入沿生产同一收件队列接入。模型提交等待期间的新输入仍会登记活动并排队；同一人的后续补充可以暂缓尚未开始发送的旧回复。活动中可看到这次暂缓和最终实际发送，用量账本仍保留旧轮已消耗的真实用量。
+
 批量模式默认等待当前轮稳定后才录入下一条。`waitMs` 改为固定等待，可以安排聊天期间追加、纠正和跨会话消息：
 
 ```jsonl

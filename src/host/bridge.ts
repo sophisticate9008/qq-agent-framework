@@ -65,6 +65,7 @@ export interface BridgeHostOptions {
   splitAgentMessage?(content: readonly MessageContent[], event: FrameworkEvent): readonly (readonly MessageContent[])[];
   onFault?(code: string): void;
   onAgentDelivery?(requestId: string, receipt: DeliveryReceipt): void;
+  shouldSendAgentMessage?(event: FrameworkEvent): boolean | Promise<boolean>;
 }
 export interface InboundReceipt { status: 'accepted' | 'rejected' | 'unknown'; eventId: string; errorCode?: string }
 const inboxNamespace = 'host.inbox';
@@ -92,7 +93,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   taskTickMs = 250, maxConcurrentSends = 1, eventTimeoutMs = 30000, timeouts: timeoutInput,
   replyTimeoutMs = 30000, replyTimeoutNotice = '请求已提交，但尚未收到回复。结果尚未确认，未自动重复提交。',
   selectAgentMessage, splitAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
-  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
+  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, shouldSendAgentMessage, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
   const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
   bindAccountStore(store, accountScope);
   assert(typeof authorizeIncoming === 'function' && Number.isSafeInteger(taskTickMs) && taskTickMs >= 10 && taskTickMs <= 60000,
@@ -191,8 +192,11 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         assert(follows.get(binding.conversationId)?.binding.sessionId === binding.sessionId
           && !follows.get(binding.conversationId)?.controller.signal.aborted,
         'AGENT_FOLLOW_UNAVAILABLE', 'A live agent follow is required before submitting new work.');
-        return json(await agent.submit({ sessionId: binding.sessionId,
-          requestId: digest([request.scope.conversationId, request.scope.eventId, 'prompt']), content, signal: request.signal }));
+        replies.watch(binding, request.scope.eventId);
+        const result = await agent.submit({ sessionId: binding.sessionId,
+          requestId: digest([request.scope.conversationId, request.scope.eventId, 'prompt']), content, signal: request.signal });
+        if (result.status === 'rejected') replies.suppress(binding, request.scope.eventId);
+        return json(result);
       } finally { releaseFollowUser(conversationId); }
     } } } });
 
@@ -211,13 +215,6 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         const result = object(await execution.invoke('agent.submit', { content: json(normalizeContent(prepared)) }));
         assert(result.status === 'accepted', result.status === 'rejected' ? 'AGENT_REJECTED' : 'AGENT_UNKNOWN',
           'The agent did not confirm prompt acceptance.');
-        const binding = sessions.get(event.conversationId);
-        assert(binding, 'SESSION_STALE', 'The agent session is no longer current.');
-        try { replies.watch(binding, event.id); }
-        catch (error) {
-          fault(error);
-          throw new FrameworkError('AGENT_REPLY_TRACKING_UNKNOWN', 'Accepted agent work could not be tracked.');
-        }
       });
       services.on('agent.message', async (execution, event) => {
         const requestId = object(event.data.agentData ?? {}).nativeRequestId;
@@ -231,6 +228,8 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
           assert(Array.isArray(selected) && selected.length > 0 && selected.length <= 4,
             'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
           const messages = selected.map(message => normalizeContent(message));
+          // Decide before the first bubble; never truncate a reply already being delivered.
+          if (await shouldSendAgentMessage?.(snapshot(event)) === false) { receipt = { status: 'rejected' }; return; }
           for (const [index, message] of messages.entries()) {
             receipt = { status: 'unknown' };
             const result = await execution.send(message);

@@ -3,13 +3,14 @@ import { NATIVE_MEDIA_TOOLS } from './native-framework-tools.ts'
 import { NATIVE_WORK_TOOLS } from './native-work-tools.ts'
 import { NATIVE_STICKER_TOOLS } from './native-sticker-tools.ts'
 import { NATIVE_REPLY_TOOLS } from './native-reply-tools.ts'
+import { NATIVE_DIRECTORY_TOOLS } from './native-capability-directory.ts'
 import { NATIVE_CONVERSATION_TOOLS } from './native-conversation-tools.ts'
 
 /** Framework definitions remain visible before any DSH session has been opened. */
 export function withFrameworkToolInventory(inventory: NativeToolInventory,
   registered?: readonly { readonly name: string; readonly description: string; readonly loadedInSession: boolean; readonly registrationSource?: NativeToolRegistrationSource }[],
   sessionNames?: ReadonlySet<string>): NativeToolInventory {
-  const definitions = registered ?? [...NATIVE_MEDIA_TOOLS, ...[...NATIVE_REPLY_TOOLS, ...NATIVE_WORK_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS].map(tool => tool.definition)]
+  const definitions = registered ?? [...NATIVE_MEDIA_TOOLS, ...[...NATIVE_REPLY_TOOLS, ...NATIVE_WORK_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS].map(tool => tool.definition)]
   const framework: NativeToolInventoryItem[] = definitions.map(tool => ({ id: `framework:${tool.name}`, name: tool.name,
     description: tool.description.slice(0, 2000), sourceId: 'framework',
     ...(tool.registrationSource ? { registrationSource: tool.registrationSource } : {}), registration: registered ? 'registered' : 'declared',

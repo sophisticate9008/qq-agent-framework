@@ -56,7 +56,8 @@ export async function prepareSimulationDsh(options: {
       await mkdir(moduleDirectory, { mode: 0o700 })
       await cp(join(sourceModule, 'dist'), join(moduleDirectory, 'dist'), { recursive: true, errorOnExist: true, force: false })
       await cp(join(sourceModule, 'package.json'), join(moduleDirectory, 'package.json'), { errorOnExist: true, force: false })
-      await symlink(await realpath(join(sourceModule, 'node_modules')), join(moduleDirectory, 'node_modules'), 'dir')
+      // DSH Session has private class state: host and bridge must share the same SDK instances.
+      await symlink(await realpath(resolve(dirname(binary), '../../..')), join(moduleDirectory, 'node_modules'), 'dir')
     } else {
       let manifest: string
       try { manifest = installed.resolve(`${name}/package.json`) }

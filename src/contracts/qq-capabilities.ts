@@ -405,7 +405,7 @@ const SCHEMA_59: JsonObject = { "type": "object", "properties": SCHEMA_58, "addi
 const SCHEMA_60: JsonObject = { "type": "object", "properties": SCHEMA_58, "additionalProperties": false, "required": ["message", "group_id"] };
 const SCHEMA_61: JsonObject = { "type": "object", "properties": SCHEMA_58, "additionalProperties": false, "required": ["message"], "anyOf": [{ "required": ["group_id"] }, { "required": ["user_id"] }] };
 
-export const QQ_CAPABILITIES: readonly QqCapabilityDefinition[] = Object.freeze([
+export const QQ_CAPABILITIES: readonly QqCapabilityDefinition[] = Object.freeze<readonly QqCapabilityDefinition[]>([
   {
     "id": ".handle_quick_operation",
     "description": "处理快速操作",

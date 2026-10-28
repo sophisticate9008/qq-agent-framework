@@ -23,7 +23,11 @@ export interface WeeklyCalendarSchedule {
   hour: number;
   minute: number;
 }
-export type CalendarSchedule = DailyCalendarSchedule | WeeklyCalendarSchedule;
+export interface OnceCalendarSchedule {
+  kind: 'once';
+  at: number;
+}
+export type CalendarSchedule = OnceCalendarSchedule | DailyCalendarSchedule | WeeklyCalendarSchedule;
 export interface CalendarTriggerInput {
   id: string;
   scope: string;
@@ -36,6 +40,7 @@ export interface CalendarTriggerInput {
   enabled?: boolean;
 }
 export interface CalendarTriggerUpdate {
+  enabled?: boolean;
   scope?: string;
   timeZone?: string;
   schedule?: CalendarSchedule;
@@ -195,10 +200,14 @@ function resolveLocal(parts: LocalParts, timeZone: string, overlap: CalendarOver
 }
 
 function validateSchedule(value: unknown): CalendarSchedule {
+  if (isRecord(value) && value.kind === 'once') {
+    finiteTimestamp(value.at, 'INVALID_CALENDAR_TRIGGER');
+    return snapshot({ kind: 'once', at: value.at });
+  }
   assert(isRecord(value) && (value.kind === 'daily' || value.kind === 'weekly')
     && Number.isSafeInteger(value.hour) && Number(value.hour) >= 0 && Number(value.hour) <= 23
     && Number.isSafeInteger(value.minute) && Number(value.minute) >= 0 && Number(value.minute) <= 59,
-  'INVALID_CALENDAR_TRIGGER', 'A fixed daily or weekly calendar time is required.');
+  'INVALID_CALENDAR_TRIGGER', 'An absolute instant or fixed daily or weekly calendar time is required.');
   if (value.kind === 'weekly') {
     assert(Number.isSafeInteger(value.dayOfWeek) && Number(value.dayOfWeek) >= 1 && Number(value.dayOfWeek) <= 7,
       'INVALID_CALENDAR_TRIGGER', 'Weekly dayOfWeek must use ISO Monday=1 through Sunday=7.');
@@ -296,6 +305,9 @@ function isoDay(year: number, month: number, day: number) {
 }
 
 function scheduledBetween(value: Pick<StoredRule, 'schedule' | 'timeZone' | 'dst'>, from: number, through: number) {
+  if (value.schedule.kind === 'once') {
+    return value.schedule.at >= from && value.schedule.at <= through ? [value.schedule.at] : [];
+  }
   const first = localParts(Math.max(0, from - dayMs), value.timeZone);
   const last = localParts(through + dayMs, value.timeZone);
   const start = Date.UTC(first.year, first.month - 1, first.day);
@@ -318,6 +330,7 @@ function scheduledBetween(value: Pick<StoredRule, 'schedule' | 'timeZone' | 'dst
 export function nextCalendarTriggerAt(input: Pick<CalendarTriggerInput, 'schedule' | 'timeZone' | 'dst'>, after: number): number | null {
   finiteTimestamp(after, 'INVALID_CALENDAR_TIME')
   const value = { schedule: validateSchedule(input.schedule), timeZone: canonicalTimeZone(input.timeZone), dst: validateDst(input.dst) }
+  if (value.schedule.kind === 'once') return value.schedule.at > after ? value.schedule.at : null
   const through = after + 16 * dayMs
   finiteTimestamp(through, 'INVALID_CALENDAR_TIME')
   return scheduledBetween(value, after + 1, through)[0] ?? null
@@ -328,9 +341,10 @@ function occurrenceId(ruleId: string, generation: number, scheduledAt: number) {
 }
 
 export function createCalendarTriggerService({ store, callback, clock = Date.now, maxScan = 1000,
-  callbackTimeoutMs = 30_000, maxPendingCallbacks = 16, retentionMs = 30 * dayMs }:
+  callbackTimeoutMs = 30_000, maxPendingCallbacks = 16, retentionMs = 30 * dayMs, retainUnknown = false, isReady }:
   { store: DurableStore; callback: CalendarTriggerCallback; clock?: Clock; maxScan?: number;
-    callbackTimeoutMs?: number; maxPendingCallbacks?: number; retentionMs?: number }) {
+    callbackTimeoutMs?: number; maxPendingCallbacks?: number; retentionMs?: number; retainUnknown?: boolean;
+    isReady?: (ruleId: string) => boolean }) {
   assert(store && typeof store === 'object' && typeof callback === 'function',
     'INVALID_CALENDAR_OPTIONS', 'A durable store and callback are required.');
   assert(Number.isSafeInteger(maxScan) && maxScan >= 1 && maxScan <= 10_000
@@ -365,7 +379,7 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
     const now = currentTime();
     try {
       store.write(occurrenceNamespace, record.key, json({ ...occurrence(record), status, errorCode: failure, updatedAt: now }),
-        { expectedRevision: record.revision, expiresAt: now + retentionMs });
+        { expectedRevision: record.revision, expiresAt: retainUnknown && status === 'unknown' ? null : now + retentionMs });
     } catch (error) {
       if (errorCode(error) !== 'STORE_CONFLICT') throw error;
     }
@@ -476,12 +490,14 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
       report.scanned++;
       const value = rule(record);
       if (!value.enabled || value.cancelled || value.evaluatedThrough >= now) continue;
+      if (value.schedule.kind === 'once' && (value.schedule.at > now || value.schedule.at <= value.evaluatedThrough)) continue;
       const from = Math.max(value.activeFrom, value.evaluatedThrough + 1, now - value.windowMs + 1);
       const due = scheduledBetween(value, from, now).filter(scheduledAt => scheduledAt + value.windowMs > now);
       if (!due.length) {
         advance(record, now);
         continue;
       }
+      if (isReady && !isReady(value.id)) continue;
       const scheduledAt = due[due.length - 1];
       report.skipped += due.length - 1;
       if (pendingCallbacks >= maxPendingCallbacks) {
@@ -527,7 +543,7 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
       const previous = rule(current);
       assert(!previous.cancelled, 'CALENDAR_TRIGGER_CANCELLED', 'A cancelled calendar trigger cannot be updated.');
       const keys = Object.keys(changes);
-      assert(keys.length > 0 && keys.every(key => ['scope', 'timeZone', 'schedule', 'dst', 'misfire', 'windowMs', 'payload'].includes(key)),
+      assert(keys.length > 0 && keys.every(key => ['scope', 'timeZone', 'schedule', 'dst', 'misfire', 'windowMs', 'payload', 'enabled'].includes(key)),
         'INVALID_CALENDAR_TRIGGER', 'The calendar trigger update is invalid.');
       const value = normalizedInput({
         id,
@@ -538,7 +554,7 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
         misfire: changes.misfire ?? previous.misfire,
         windowMs: changes.windowMs ?? previous.windowMs,
         payload: changes.payload ?? previous.payload,
-        enabled: previous.enabled
+        enabled: changes.enabled ?? previous.enabled
       });
       const now = currentTime();
       store.write(ruleNamespace, id, json({ ...previous, ...value, generation: previous.generation + 1,

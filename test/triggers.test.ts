@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import type { JsonValue } from '../src/core/types.ts';
 import { FrameworkError } from '../src/core/values.ts';
-import { createCalendarTriggerService, type CalendarTriggerInput,
+import { createCalendarTriggerService, nextCalendarTriggerAt, type CalendarTriggerInput,
   type CalendarTriggerOccurrence } from '../src/host/triggers.ts';
 import type { DurableStore, WriteOptions } from '../src/host/types.ts';
 import { createSqliteStore } from '../src/storage/sqlite.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 function utc(value: string) {
   return Date.parse(value);
@@ -221,5 +224,78 @@ test('interrupted persisted intents recover to unknown and never replay', async 
   assert.equal(restarted.listOccurrences()[0].status, 'unknown');
   assert.equal((await restarted.tick()).attempted, 0);
   assert.equal(calls, 0);
+  await restarted.stop();
+});
+
+test('once instants remain exact across time zones and execute once after reopening persistent storage', async context => {
+  const directory = mkdtempSync(join(tmpdir(), 'qaf-trigger-'));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'triggers.sqlite');
+  let now = utc('2026-01-01T00:00:00Z');
+  const at = now + 60_000;
+  const input = daily('persisted-once', { timeZone: 'Asia/Shanghai', schedule: { kind: 'once', at } });
+  assert.equal(nextCalendarTriggerAt(input, now), at);
+  assert.equal(nextCalendarTriggerAt(input, at), null);
+  const firstStore = createSqliteStore({ filename, clock: () => now });
+  const first = createCalendarTriggerService({ store: firstStore, clock: () => now, callback() { assert.fail('Not yet due'); } });
+  first.register(input);
+  await first.stop();
+  firstStore.close();
+
+  now = at + 1_000;
+  const secondStore = createSqliteStore({ filename, clock: () => now });
+  context.after(() => secondStore.close());
+  const calls: CalendarTriggerOccurrence[] = [];
+  const second = createCalendarTriggerService({ store: secondStore, clock: () => now,
+    callback(occurrence) { calls.push(occurrence); } });
+  assert.equal(second.recoverInterrupted().recovered, 0);
+  assert.equal((await second.tick()).completed, 1);
+  assert.equal(calls[0].scheduledAt, at);
+  assert.equal((await second.tick()).attempted, 0);
+  now += 86_400_000;
+  assert.equal((await second.tick()).attempted, 0);
+  assert.equal(calls.length, 1);
+  await second.stop();
+});
+
+test('once windows skip stale downtime work and unknown outcomes never replay', async context => {
+  let now = utc('2026-01-01T00:00:00Z');
+  const store = storeFor(context, () => now);
+  let calls = 0;
+  const service = createCalendarTriggerService({ store, clock: () => now, callbackTimeoutMs: 10,
+    callback() { calls++; return new Promise(() => {}); } });
+  const at = now + 60_000;
+  service.register(daily('stale-once', { schedule: { kind: 'once', at }, windowMs: 60_000 }));
+  service.register(daily('unknown-once', { schedule: { kind: 'once', at: at + 60_000 }, windowMs: 60_000 }));
+  now = at + 60_000;
+  const report = await service.tick();
+  assert.equal(report.attempted, 1);
+  assert.equal(report.unknown, 1);
+  assert.equal(calls, 1);
+  await service.stop();
+  const restarted = createCalendarTriggerService({ store, clock: () => now, callback() { calls++; } });
+  assert.equal(restarted.recoverInterrupted().recovered, 0);
+  assert.equal((await restarted.tick()).attempted, 0);
+  assert.equal(calls, 1);
+  await restarted.stop();
+});
+
+test('daily plans resume only the latest eligible local day after a multi-day interruption', async context => {
+  let now = utc('2026-01-01T15:00:00Z');
+  const store = storeFor(context, () => now);
+  const initial = createCalendarTriggerService({ store, clock: () => now, callback() {} });
+  initial.register(daily('local-day-plan', { timeZone: 'Asia/Shanghai', schedule: { kind: 'daily', hour: 0, minute: 5 },
+    windowMs: 23 * 60 * 60_000, misfire: 'skip' }));
+  await initial.stop();
+  now = utc('2026-01-04T01:00:00Z');
+  const calls: CalendarTriggerOccurrence[] = [];
+  const restarted = createCalendarTriggerService({ store, clock: () => now,
+    callback(occurrence) { calls.push(occurrence); } });
+  assert.equal((await restarted.tick()).completed, 1);
+  assert.equal(calls[0].scheduledAt, utc('2026-01-03T16:05:00Z'));
+  assert.equal((await restarted.tick()).attempted, 0);
+  now = utc('2026-01-04T16:05:00Z');
+  assert.equal((await restarted.tick()).completed, 1);
+  assert.equal(calls.length, 2);
   await restarted.stop();
 });

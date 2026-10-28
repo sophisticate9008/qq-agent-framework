@@ -49,7 +49,7 @@ const result = await space.execute({
 
 ## 参数与回执
 
-`send_qzone_msg` 必须明确给出 `ugc_right`：1 公开、4 好友、16 指定好友、64 仅自己、128 排除指定好友；16/128 另需 `target_uins`。删除与详情使用发布或列表返回的真实 `tid`。评论回复的 `comment_id`、`comment_uin` 必须同时提供，编号字符串 `"0"` 有效；指定回复人还需 `reply_uin`、`reply_name`，回复评论不支持图片。
+`send_qzone_msg` 的 `content` 在有图片时可为空，支持只发图片；正文与图片不能同时为空。必须明确给出 `ugc_right`：1 公开、4 好友、16 指定好友、64 仅自己、128 排除指定好友；16/128 另需 `target_uins`。删除与详情使用发布或列表返回的真实 `tid`。评论回复的 `comment_id`、`comment_uin` 必须同时提供，编号字符串 `"0"` 有效；指定回复人还需 `reply_uin`、`reply_name`，回复评论不支持图片。
 
 图片来源为协议端支持的 `file://`、HTTP(S) 或 `base64://`。这是供可信宿主调用的低层入口，路径和资源的组织由调用方负责；远程协议端不能读取本机未共享的路径。框架不为发布图片使用模型视觉缩略压缩。
 

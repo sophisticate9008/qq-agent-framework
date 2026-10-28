@@ -20,7 +20,7 @@ export const ONEBOT_QZONE_TOOLS: readonly QzoneToolDefinition[] = snapshot([
   define('get_qzone_feeds', '好友动态', '读取好友动态；分页游标原样传回，不将缺失正文或计数补为零。', true,
     { page_num: { type: 'integer', minimum: 1, maximum: 1000 }, count: { type: 'integer', minimum: 1, maximum: 50 }, cursor: { type: 'string', minLength: 1, maxLength: 65536 } }),
   define('send_qzone_msg', '发布说说', '发布文字或多图说说，必须明确指定可见范围。', false,
-    { content: { type: 'string', minLength: 1, maxLength: 32768 }, images, ugc_right: rights, target_uins: { type: 'array', maxItems: 1000, items: userId } }, ['content', 'ugc_right']),
+    { content: { type: 'string', minLength: 0, maxLength: 32768, description: '有图片时正文可留空' }, images, ugc_right: rights, target_uins: { type: 'array', maxItems: 1000, items: userId } }, ['content', 'ugc_right']),
   define('delete_qzone_msg', '删除说说', '按真实说说编号删除当前账号的说说。', false, { tid: string }, ['tid']),
   define('set_qzone_msg_right', '修改可见范围', '修改已有说说的可见范围，指定或排除好友时需提供名单。', false,
     { tid: string, ugc_right: rights, target_uins: { type: 'array', maxItems: 1000, items: userId } }, ['tid', 'ugc_right']),

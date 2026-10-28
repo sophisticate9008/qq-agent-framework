@@ -8,6 +8,7 @@ export type QzoneResult<Value> = { readonly status: 'confirmed'; readonly data: 
   | { readonly status: 'rejected' | 'unknown'; readonly code: string };
 
 export interface QzonePublishRequest {
+  /** May be empty when at least one image is present. */
   readonly content: string;
   /** Trusted host-resolved sources, never arbitrary model-supplied paths or URLs. */
   readonly images?: readonly string[];

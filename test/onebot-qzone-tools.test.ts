@@ -118,3 +118,17 @@ test('NapCat void handlers may omit data, while publishing still requires a real
   assert.deepEqual(await port.execute({ name: 'delete_qzone_msg', input: { tid: 'real-post-id' }, signal: signal() }), { status: 'confirmed', data: null });
   assert.equal((await port.execute({ name: 'send_qzone_msg', input: { content: 'hello', ugc_right: 4 }, signal: signal() })).status, 'unknown');
 });
+
+
+test('image-only publication preserves empty text and original image sources, but rejects an entirely empty post', async () => {
+  const { port, calls } = fixture({ tid: 'image-post-id' }, ['send_qzone_msg']);
+  for (const images of [undefined, []]) {
+    assert.equal((await port.execute({ name: 'send_qzone_msg', input: { content: '', ugc_right: 4, ...(images === undefined ? {} : { images }) }, signal: signal() })).status, 'rejected');
+  }
+  assert.equal(calls.length, 0);
+  const images = ['file:///tmp/original.png'];
+  assert.equal((await port.execute({ name: 'send_qzone_msg', input: { content: '', ugc_right: 4, images }, signal: signal() })).status, 'confirmed');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input.content, '');
+  assert.deepEqual(calls[0].input.images, images);
+});

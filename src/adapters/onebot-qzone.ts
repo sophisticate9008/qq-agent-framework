@@ -34,11 +34,12 @@ function imageSource(value: unknown): value is string {
 }
 
 export function qzonePublishParams(request: QzonePublishRequest): JsonObject | null {
-  if (typeof request.content !== 'string' || request.content.trim().length === 0 || request.content.length > 32768
+  if (typeof request.content !== 'string' || request.content.length > 32768
     || !isRecord(request.visibility) || typeof request.visibility.kind !== 'string'
     || !Object.hasOwn(rights, request.visibility.kind)) return null;
   if (request.images !== undefined && (!Array.isArray(request.images) || request.images.length > 32
     || !request.images.every(imageSource))) return null;
+  if (!request.content.trim() && !request.images?.length) return null;
   const visibility = request.visibility;
   const result: JsonObject = { content: request.content, ugc_right: rights[visibility.kind] };
   if (visibility.kind === 'allow' || visibility.kind === 'deny') {

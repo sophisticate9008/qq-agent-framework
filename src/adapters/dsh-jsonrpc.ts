@@ -15,6 +15,8 @@ import { createDshSessionMigrationPort, type DshSessionMigrationPort } from './d
 import { createDshFrameworkToolPort, type DshFrameworkToolPort, type DshFrameworkToolMethod } from './dsh-framework-tools.ts'
 import { createDshWorkPort, type DshWorkPort, type DshWorkMethod } from './dsh-work.ts'
 import { prepareDshPromptContent, type DshPromptImageResolver } from './dsh-prompt-content.ts'
+import { createDshPluginModelBackend } from './dsh-plugin-model.ts'
+import type { PluginModelBackend } from '../contracts/plugin-model.ts'
 
 export type { NativeDeploymentPresetBinding as DshPresetBinding } from '../contracts/native-deployment.ts'
 import type { NativeDeploymentPresetBinding as DshPresetBinding } from '../contracts/native-deployment.ts'
@@ -33,6 +35,7 @@ export interface DshJsonRpcOptions {
 }
 
 export interface DshJsonRpcPort extends DshClientPort, DshInteractionPort {
+  readonly pluginModels: PluginModelBackend
   configureSession?(request: { readonly sessionId: string; readonly conversationId: string; readonly signal: AbortSignal }): Promise<void>
   inspectSessionStorage?(sessionId: string, signal: AbortSignal): Promise<{ sessionId: string; exists: boolean; root?: string; filename?: string }>
   readModelCatalog(signal: AbortSignal): Promise<JsonValue>
@@ -123,10 +126,13 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
   })
   const lifetime = new AbortController()
   const follows = new Map<string, () => Promise<void>>()
+  const pluginFollows = new Map<string, () => Promise<void>>()
   const { limited, authenticate, rpc } = createDshUnaryTransport({ base, auth, initialCookie: cookie, authenticationProvider, timeoutMs, maxBytes, lifetime })
 
   const callbacks = createDshCallbackBudget(maxFollows, limited)
   const follow = createDshSessionFollower({ base, timeoutMs, idleMs, maxPendingEvents, maxFollows, maxBytes, lifetime, follows, callbacks, authenticate })
+  const pluginFollow = createDshSessionFollower({ base, timeoutMs, idleMs, maxPendingEvents, maxFollows, maxBytes, lifetime,
+    follows: pluginFollows, callbacks, authenticate })
   const interactions = createDshInteractionChannel({ base, timeoutMs, maxPendingEvents, maxFollows, maxBytes, lifetime, callbacks, authenticate, rpc })
 
   const bridgePlugin = createDshBridgePluginPort(async (method, request, signal) => {
@@ -150,7 +156,12 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
     if (!result.ok) throw failure('DSH_WORK_CHANNEL_UNAVAILABLE')
     return result.value
   })
-  return Object.freeze({
+  const pluginModels = createDshPluginModelBackend({ client: {
+    createSession: request => port.createSession(request), prompt: request => port.prompt(request),
+    follow: request => pluginFollow(request), cancel: request => port.cancel(request),
+  }, invoke: (method, input, signal) => rpc(method, input, signal) })
+  const port: DshJsonRpcPort = Object.freeze({
+    pluginModels,
     bridgePlugin,
     async configureSession(request: { readonly sessionId: string; readonly conversationId: string; readonly signal: AbortSignal }) {
       if (!identifier(request.sessionId)) throw failure('DSH_INVALID_SESSION')
@@ -236,7 +247,8 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
     async close() {
       await interactions.close()
       lifetime.abort()
-      await Promise.all([...follows.values()].map(stop => stop()))
+      await Promise.all([...follows.values(), ...pluginFollows.values()].map(stop => stop()))
     },
   } satisfies DshJsonRpcPort)
+  return port
 }

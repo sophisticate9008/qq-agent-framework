@@ -22,6 +22,7 @@ import { createWorkJournal } from './work-journal.js'
 import { createWorkChannel, type WorkAddress, type WorkStart, type WorkTarget } from './work.js'
 import { installWorkAttachmentTool } from './work-attachments.js'
 import { createReplyDecisionRepair } from './reply-decision-repair.js'
+import { createPluginModelChannel } from './plugin-model.js'
 
 export default class BridgePlugin extends TypertRemoteService {
   static inject = ['agents', 'agentPresets', 'tools', 'typertGateway']
@@ -30,9 +31,12 @@ export default class BridgePlugin extends TypertRemoteService {
   private readonly migrations
   private readonly frameworkTools
   private readonly work
+  private readonly pluginModels
 
   constructor(ctx: Context) {
     super(ctx, 'bridgePlugin')
+    this.pluginModels = createPluginModelChannel(ctx)
+    ctx.effect(() => () => this.pluginModels.close())
     const replyRepair = createReplyDecisionRepair({ current: agent => ctx.agents.get(SessionId(agent.id)) === agent,
       hasReplyLease: agent => {
         const current = ctx.agents.get(SessionId(agent.id))
@@ -162,7 +166,8 @@ export default class BridgePlugin extends TypertRemoteService {
         'bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration',
         'bridgePlugin/installFrameworkTools', 'bridgePlugin/withdrawFrameworkTools',
         'bridgePlugin/pollFrameworkTools', 'bridgePlugin/completeFrameworkTool', 'bridgePlugin/inspectFrameworkTools',
-        'bridgePlugin/verifyWork', 'bridgePlugin/startWork', 'bridgePlugin/inspectWork', 'bridgePlugin/followupWork', 'bridgePlugin/interruptWork', 'bridgePlugin/readWorkAsset', 'bridgePlugin/inspectExecution', 'bridgePlugin/inspectSessionStorage'],
+        'bridgePlugin/verifyWork', 'bridgePlugin/startWork', 'bridgePlugin/inspectWork', 'bridgePlugin/followupWork', 'bridgePlugin/interruptWork', 'bridgePlugin/readWorkAsset', 'bridgePlugin/inspectExecution', 'bridgePlugin/inspectSessionStorage',
+        'bridgePlugin/pluginModels', 'bridgePlugin/createPluginModelSession', 'bridgePlugin/inspectPluginModelSession', 'bridgePlugin/startPluginModel', 'bridgePlugin/waitPluginModelIdle'],
       claimMeaning: 'inbox-claimed-not-completed', durableReceipts: false, externalToolAuthorizationVerified: false }
   }
 
@@ -170,6 +175,29 @@ export default class BridgePlugin extends TypertRemoteService {
   inspectToolInventory() {
     this.assertOperator()
     return { protocol: BRIDGE_PLUGIN_PROTOCOL, issuerEpoch: this.journal.issuerEpoch, ...inspectRegisteredToolInventory(this.ctx) }
+  }
+
+  @Remote('pluginModels')
+  pluginModelCatalog() { const invocation = this.assertOperator(); return this.pluginModels.models(invocation.signal) }
+
+  @Remote('createPluginModelSession')
+  createPluginModelSession(request: Parameters<ReturnType<typeof createPluginModelChannel>['create']>[0]) {
+    const invocation = this.assertOperator(); return this.pluginModels.create(request, invocation.signal)
+  }
+
+  @Remote('inspectPluginModelSession')
+  inspectPluginModelSession(request: { sessionId: string }) {
+    const invocation = this.assertOperator(); return this.pluginModels.inspect(request, invocation.signal)
+  }
+
+  @Remote('startPluginModel')
+  startPluginModel(request: Parameters<ReturnType<typeof createPluginModelChannel>['start']>[0]) {
+    const invocation = this.assertOperator(); return this.pluginModels.start(request, invocation.signal)
+  }
+
+  @Remote('waitPluginModelIdle')
+  waitPluginModelIdle(request: { sessionId: string; requestId: string }) {
+    const invocation = this.assertOperator(); return this.pluginModels.waitIdle(request, invocation.signal)
   }
 
   @Remote('inspectSessionStorage')

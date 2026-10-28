@@ -40,3 +40,6 @@ export type { NativeAccounts, NativeAccountProtocol, NativeAccountRuntime, Nativ
 export { normalizeAccountScope, assertAccountScope } from '../core/account-scope.ts';
 
 export { createQzoneNativePackage, NATIVE_QZONE_SERVICE_ID, NATIVE_QZONE_SERVICE_VERSION } from '../host/native-qzone.ts';
+export { createPluginModelService } from '../host/plugin-model-service.ts';
+export type { PluginModelService, PluginModelServiceOptions } from '../host/plugin-model-service.ts';
+export type * from '../contracts/plugin-model.ts';

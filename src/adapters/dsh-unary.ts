@@ -4,6 +4,7 @@ import type { JsonObject, JsonValue } from '../contracts/data.ts'
 import { DshAdapterError, type DshPortResult } from './dsh.ts'
 import type { DshFrameworkToolMethod } from './dsh-framework-tools.ts'
 import type { DshWorkMethod } from './dsh-work.ts'
+import type { DshPluginModelMethod } from './dsh-plugin-model.ts'
 import { dshFailure as failure, dshRecord as record } from './dsh-stream-common.ts'
 
 export function createDshUnaryTransport(options: { readonly base: URL; readonly auth: string; readonly initialCookie: string | undefined;
@@ -104,7 +105,7 @@ export function createDshUnaryTransport(options: { readonly base: URL; readonly 
     return limited(async () => pending!, signal)
   }
 
-  const rpc = async (method: DshWorkMethod | DshFrameworkToolMethod | '$events/result' | 'session/create' | 'session/selectModel' | 'session/modelCatalog' | 'session/prompt' | 'session/cancel' | 'settings/describe' | 'agentPresets/list' | 'agentPresets/read' | 'credentials/describe' | 'bridgePlugin/inspectToolInventory' | 'bridgePlugin/describe' | 'bridgePlugin/inspectScope' | 'bridgePlugin/claimReceipts' | 'bridgePlugin/forkPreview' | 'bridgePlugin/forkWithPreset' | 'bridgePlugin/inspectMigration' | 'bridgePlugin/inspectExecution' | 'bridgePlugin/inspectSessionStorage', input: JsonObject | undefined, signal: AbortSignal, direct = false): Promise<DshPortResult<JsonValue>> => {
+  const rpc = async (method: DshPluginModelMethod | DshWorkMethod | DshFrameworkToolMethod | '$events/result' | 'session/create' | 'session/selectModel' | 'session/modelCatalog' | 'session/prompt' | 'session/cancel' | 'settings/describe' | 'agentPresets/list' | 'agentPresets/read' | 'credentials/describe' | 'bridgePlugin/inspectToolInventory' | 'bridgePlugin/describe' | 'bridgePlugin/inspectScope' | 'bridgePlugin/claimReceipts' | 'bridgePlugin/forkPreview' | 'bridgePlugin/forkWithPreset' | 'bridgePlugin/inspectMigration' | 'bridgePlugin/inspectExecution' | 'bridgePlugin/inspectSessionStorage', input: JsonObject | undefined, signal: AbortSignal, direct = false): Promise<DshPortResult<JsonValue>> => {
     if (pendingRpc >= 32) throw failure('DSH_RPC_BACKPRESSURE')
     pendingRpc += 1
     try {

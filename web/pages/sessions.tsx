@@ -1,5 +1,6 @@
 import { AutomaticMaintenanceStatus } from '../components/automatic-maintenance-status.tsx';
 import { WorkRecords } from '../components/work-records.tsx';
+import { SessionBindDialog } from '../components/session-bind-dialog.tsx';
 import { PluginSessions } from '../components/plugin-sessions.tsx';
 import { SimulationSessions } from '../components/simulation-sessions.tsx';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.tsx';
@@ -61,6 +62,7 @@ export function SessionsPage(props: PageProps) {
   const inbox = useReadResource(api, '/api/chat/inbox', connected, parseNativeInboxSummary, { intervalMs: 5_000 });
   const inboxItems = useMemo(() => new Map(inbox.snapshot?.items.map(item => [item.conversationId, item]) ?? []), [inbox.snapshot]);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
+  const [bindTarget, setBindTarget] = useState<ManagedSession | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ManagedSession | null>(null);
   const [diagnosticKey, setDiagnosticKey] = useState<string | null>(null);
   const [mediaKey, setMediaKey] = useState<string | null>(null);
@@ -115,6 +117,7 @@ export function SessionsPage(props: PageProps) {
     setMoreError('');
     setPagingBlocked(false);
     setResetTarget(null);
+    setBindTarget(null);
     setDiagnosticKey(null);
     setMediaKey(null);
     setDetailTarget(null);
@@ -388,7 +391,7 @@ export function SessionsPage(props: PageProps) {
                   <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground">{inbox.error || !inbox.snapshot ? '状态待更新' : inboxStateLabel(queue)}</td>
                   <td className="px-2 py-0.5 tabular-nums text-muted-foreground">{inbox.error || !inbox.snapshot ? '未知' : queue?.pending ?? 0}</td>
                   <td className="whitespace-nowrap px-2 py-0.5 text-muted-foreground" title="会话绑定未提供最近记录时间，请查看执行日志">未提供</td>
-                  <td className="px-2 py-0.5"><div className="flex items-center justify-end gap-0.5 [&>button]:h-6 [&>button]:px-1.5 [&>button]:text-[11px]"><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); setDiagnosticKey(session.key); }}>检查未回复</Button><Button size="sm" variant="ghost" onClick={() => setMediaKey(session.key)}>媒体</Button><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); setDetailTarget(session); }}>详情</Button><Button id={selectedKey === session.key ? 'session-reset-open' : undefined} size="sm" variant="ghost" className="text-destructive" disabled={snapshot.resetAvailable !== true || !hasSessionResetTarget(session) || selectionUnconfirmed || loading || moreLoading || resetState === 'saving'} onClick={() => { setSelectedKey(session.key); openReset(session); }}><RotateCcw className="size-3.5" />解除绑定</Button><Button size="sm" variant="ghost" className="text-destructive" disabled title="请到 DSH 删除模型会话">删除</Button></div></td>
+                  <td className="px-2 py-0.5"><div className="flex items-center justify-end gap-0.5 [&>button]:h-6 [&>button]:px-1.5 [&>button]:text-[11px]"><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); setDiagnosticKey(session.key); }}>检查未回复</Button><Button size="sm" variant="ghost" onClick={() => setMediaKey(session.key)}>媒体</Button><Button size="sm" variant="ghost" onClick={() => { setSelectedKey(session.key); setDetailTarget(session); }}>详情</Button><Button size="sm" variant="ghost" disabled={snapshot.source === 'imported' || !hasSessionResetTarget(session) || loading || moreLoading || resetState === 'saving'} onClick={() => setBindTarget(session)}>更换绑定</Button><Button id={selectedKey === session.key ? 'session-reset-open' : undefined} size="sm" variant="ghost" className="text-destructive" disabled={snapshot.resetAvailable !== true || !hasSessionResetTarget(session) || selectionUnconfirmed || loading || moreLoading || resetState === 'saving'} onClick={() => { setSelectedKey(session.key); openReset(session); }}><RotateCcw className="size-3.5" />解除绑定</Button><Button size="sm" variant="ghost" className="text-destructive" disabled title="请到 DSH 删除模型会话">删除</Button></div></td>
                 </tr>;
               }}</VirtualTableBody></table></div>}
           <div className="flex flex-wrap items-center gap-2 bg-muted/20 px-2.5 py-2" data-session-pagination><p className="mr-auto text-xs leading-5 text-muted-foreground">搜索仅筛选已加载的会话。删除模型会话请到 DSH。</p>{snapshot.next && <Button id="session-load-more" size="sm" variant="outline" disabled={loading || moreLoading || pagingBlocked} onClick={() => void loadMore()}>{moreLoading && <LoaderCircle className="size-3.5 animate-spin" />}{moreLoading ? "正在加载下一批" : "继续加载会话"}</Button>}{moreLoading && <Button id="session-load-cancel" size="sm" variant="ghost" onClick={cancelMore}>取消加载</Button>}</div>
@@ -407,6 +410,7 @@ export function SessionsPage(props: PageProps) {
         <TabsContent value="work" keepMounted className="[&[hidden]]:hidden"><WorkRecords api={api} connected={connected} embedded /></TabsContent>
       </Tabs>
     </Section>
+    <SessionBindDialog api={api} connected={connected} target={bindTarget} onClose={() => setBindTarget(null)} onBound={reload} />
     <SessionDeleteDialog api={api} target={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={reload} />
     <Dialog open={resetTarget !== null} onOpenChange={open => { if (!open) closeReset(); }}>
       <DialogContent showCloseButton={resetState !== 'saving' && resetState !== 'conflict' && resetState !== 'unknown'}>

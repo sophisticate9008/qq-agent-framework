@@ -95,6 +95,7 @@ test('native runtime exposes empty editable resources without fabricating a conn
   assert.equal(new Set(paths).size, paths.length)
   assert.deepEqual(paths.sort(), [
     'GET /api/chat/assistant', 'POST /api/chat/assistant', 'GET /api/chat/model-capabilities',
+    'POST /api/chat/model-capabilities', 'GET /api/chat/provider-model-capabilities',
     'GET /api/chat/activity',
     'GET /api/chat/plans', 'POST /api/chat/plans',
     'GET /api/chat/personas', 'POST /api/chat/personas',

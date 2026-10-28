@@ -10,15 +10,17 @@ import { FrameworkError, isRecord, snapshot } from '../core/values.ts'
 import type { NativeChatConfiguration } from './native-chat-configuration.ts'
 import { modelProviderApi } from './model-provider-protocols.ts'
 import type { NativeModelProvider } from './model-providers.ts'
+import { createProviderModelCapabilityCache } from './provider-model-capability-cache.ts'
 
 type DeploymentTarget = NonNullable<NativeChatConfiguration['deployment']['target']>
 export interface LocalDshModelSettings {
   readonly modelSettings: DshDeploymentModelSettings
-  readonly source: 'profile' | 'saved'
+  readonly source: 'profile' | 'saved' | 'cache' | 'provider'
   readonly profilePath: string | null
 }
 
 export interface LocalDshModelCapabilities {
+  readonly cache?: { readonly source: 'dsh' | 'provider'; readonly updatedAt: number }
   readonly capacity?: ChatCapacityRecommendation | null
   readonly provider: string
   readonly model: string
@@ -164,12 +166,10 @@ export async function readLocalDshModelCapabilities(provider: NativeModelProvide
   }
 }
 
-export async function resolveLocalDshModelSettings(configuration: NativeChatConfiguration, target: DeploymentTarget,
-  signal?: AbortSignal): Promise<LocalDshModelSettings> {
+export async function readLocalDshModelMetadata(provider: NativeModelProvider, modelId: string, target: DeploymentTarget,
+  signal?: AbortSignal): Promise<DshDeploymentModelSettings | null> {
   signal?.throwIfAborted()
-  const plan = configuration.catalog.plans.find(value => value.id === configuration.catalog.activePlanId)
-  const provider = configuration.providers.find(value => value.id === plan?.provider)
-  if (!plan || !provider?.enabled || !provider.models.some(value => value.id === plan.model)) missing()
+  if (!provider.enabled || !provider.models.some(value => value.id === modelId)) return null
   try {
     if (target.schemaVersion !== '0.2.1-rc.2' || basename(target.profilePath) !== 'cordis.patch.yml'
       || (target.layerPaths?.length ?? 0) > 16) missing()
@@ -188,11 +188,11 @@ export async function resolveLocalDshModelSettings(configuration: NativeChatConf
       if (generatedRoutes.has(routeId)) continue
       if (!isRecord(route) || canonicalBase(route.baseURL) !== base || !Array.isArray(route.models)) continue
       for (const model of route.models) {
-        if (!isRecord(model) || model.id !== plan.model) continue
+        if (!isRecord(model) || model.id !== modelId) continue
         let selected = model
         if (route.modelOverrides !== undefined) {
           if (!isRecord(route.modelOverrides)) missing()
-          const override = route.modelOverrides[plan.model]
+          const override = route.modelOverrides[modelId]
           if (override !== undefined) {
             if (!isRecord(override) || Object.hasOwn(override, 'id')) missing()
             selected = { ...model, ...override }
@@ -226,15 +226,40 @@ export async function resolveLocalDshModelSettings(configuration: NativeChatConf
       reasoningMissing()
     }
     if (resolved.some(settings => !isDeepStrictEqual(settings, resolved[0]))) reasoningMissing()
-    return snapshot({ modelSettings: resolved[0]!, source: 'profile' as const, profilePath: target.profilePath })
+    return snapshot(resolved[0]!)
   } catch (error) {
     signal?.throwIfAborted()
     if (error instanceof FrameworkError && error.code === 'LOCAL_DSH_MODEL_INPUT_UNAVAILABLE') throw error
-    if (configuration.deployment.modelSettings !== null) {
-      const settings = validateDshModelSettings(configuration.deployment.modelSettings)
-      return snapshot({ modelSettings: settings, source: 'saved' as const, profilePath: null })
-    }
     if (error instanceof FrameworkError) throw error
     missing()
   }
+}
+
+/** Project only supported public controls; retain complete model metadata in the private cache. */
+export function modelSettingsCapabilities(provider: string, model: string, settings: DshDeploymentModelSettings,
+  cache?: LocalDshModelCapabilities['cache']): LocalDshModelCapabilities {
+  const validated = validateDshModelSettings(settings)
+  const declared = validated.reasoningEfforts
+  return snapshot({ provider, model, state: 'available',
+    reasoningEfforts: declared === false ? ['off']
+      : publicReasoningEfforts.filter(level => Object.hasOwn(declared, level)),
+    missingReasons: [], capacity: recommendChatCapacity(validated)!, ...(cache ? { cache } : {}) })
+}
+
+export async function resolveLocalDshModelSettings(configuration: NativeChatConfiguration, target: DeploymentTarget,
+  signal?: AbortSignal, directory?: string): Promise<LocalDshModelSettings> {
+  signal?.throwIfAborted()
+  const plan = configuration.catalog.plans.find(value => value.id === configuration.catalog.activePlanId)
+  const provider = configuration.providers.find(value => value.id === plan?.provider)
+  if (!plan || !provider?.enabled || !provider.models.some(value => value.id === plan.model)) missing()
+  if (directory !== undefined) {
+    const cached = await createProviderModelCapabilityCache(directory).resolve({ provider, model: plan.model,
+      providersRevision: configuration.revisions.providers, signal,
+      loadDsh: () => readLocalDshModelMetadata(provider, plan.model, target, signal) })
+    if (!cached) missing()
+    return snapshot({ modelSettings: cached.modelSettings, source: 'cache' as const, profilePath: null })
+  }
+  const modelSettings = await readLocalDshModelMetadata(provider, plan.model, target, signal)
+  if (!modelSettings) missing()
+  return snapshot({ modelSettings, source: 'profile' as const, profilePath: target.profilePath })
 }

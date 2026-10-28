@@ -186,7 +186,7 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
       catalog: { activePlanId: plan.id, plans: [plan] },
       personas: [{ id: 'assistant-work', name: '独立工作助手', identity: '处理用户明确委派的独立任务。', style: '准确、清晰，保留真实的完成状态与不确定性。' }],
       deployment: { ...original.deployment, namespace: options.deploymentNamespace ?? 'qqafwork', target, modelSettings: null, capabilityApproval: null } }
-    const metadata = await resolveLocalDshModelSettings(metadataConfiguration, target, signal)
+    const metadata = await resolveLocalDshModelSettings(metadataConfiguration, target, signal, options.directory)
     const configuration: NativeChatConfiguration = { ...metadataConfiguration,
       catalog: { activePlanId: plan.id, plans: [{ ...plan, contextLimits: { group: metadata.modelSettings.contextWindow, private: metadata.modelSettings.contextWindow } }] },
       deployment: { ...metadataConfiguration.deployment, modelSettings: metadata.modelSettings } }

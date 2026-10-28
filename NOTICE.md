@@ -63,4 +63,8 @@ The shared QQ Space adapter is independently implemented against the wire interf
 
 References reviewed on 2026-10-27. Installed gateway versions and enabled extensions determine actual availability.
 
+### Provider Model Metadata References
+
+The provider metadata reader uses the declared fields described in the [DeepSeek model catalog](https://api-docs.deepseek.com/api/list-models/) and the [Chat Completions reasoning parameter](https://api-docs.deepseek.com/api/create-chat-completion/). Reviewed on 2026-10-28. The `off` to `none` mapping implied by that documentation is restricted to the official DeepSeek OpenAI-compatible endpoint; other providers must explicitly declare their mapping.
+
 QQ Agent Framework's own source is distributed under the MIT license in [LICENSE](LICENSE). Dependencies and separately obtained protocol gateways, agent runtimes, models, or services remain subject to their own licenses and terms. This notice does not grant rights to third-party software and does not imply affiliation with Tencent, QQ, DeepSeek, SnowLuma, or the qq-bridge authors.

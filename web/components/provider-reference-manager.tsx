@@ -5,7 +5,7 @@ import { errorMessage } from '../lib/api.ts';
 import { parseChatAssistant } from '../lib/chat-assistant.ts';
 import { parsePlanCatalog } from '../lib/chat-plans.ts';
 import { providerReferences, type ProviderReference } from '../lib/provider-references.ts';
-import { modelReasoningEffortLabel, parseModelCapabilities } from '../lib/model-capabilities.ts';
+import { modelReasoningEffortLabel, modelCapabilitiesUnavailableMessage, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
 import { isChatPlanReasoningEffort } from '../../src/contracts/chat-plans.ts';
 import { useReadResource } from '../lib/use-read-resource.ts';
 import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.ts';
@@ -25,11 +25,12 @@ const referenceDraftKey = createDraftKey<{ readonly providerId: string; readonly
 
 export function retainedProviderReferenceId(api: ApiClient): string | undefined { return retainedDraft(api, referenceDraftKey)?.providerId; }
 
-export function ProviderReferenceManager({ api, connected, providerId, revision, providers, disabled, onSaved, onEditingChange, setDirty }: {
+export function ProviderReferenceManager({ api, connected, providerId, revision, providers, disabled, onSaved, onEditingChange, setDirty, onManageCapabilities }: {
   readonly api: ApiClient; readonly connected: boolean; readonly providerId: string; readonly revision: string;
   readonly providers: readonly ProviderChoice[]; readonly disabled: boolean; readonly onSaved?: () => void;
   readonly onEditingChange: (editing: boolean) => void;
   readonly setDirty: (dirty: boolean, scope: string) => void;
+  readonly onManageCapabilities?: (provider: string, model: string, updated: (capabilities: ModelCapabilities) => void) => void;
 }) {
   const plans = useReadResource(api, '/api/chat/plans', connected, parsePlanCatalog);
   const assistant = useReadResource(api, '/api/chat/assistant', connected, parseChatAssistant);
@@ -43,6 +44,7 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
   const [unlink, setUnlink] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
+  const [capabilityUpdate, setCapabilityUpdate] = useState<{ readonly api: ApiClient; readonly value: ModelCapabilities } | null>(null);
   const request = useRef<AbortController | null>(null);
   const draftOwner = useRef<{ readonly api: ApiClient; readonly providerId: string } | null>(null);
   const choices = providers.filter(provider => provider.enabled).flatMap(provider => provider.models.map(model => ({
@@ -51,8 +53,11 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
   const choice = choices.find(choice => choice.key === target);
   const capabilities = useReadResource(api, `/api/chat/model-capabilities?${new URLSearchParams({ provider: choice?.provider ?? '', model: choice?.model ?? '' })}`,
     connected && choice !== undefined && !unlink, parseModelCapabilities);
-  const knownCapabilities = capabilities.snapshot?.provider === choice?.provider && capabilities.snapshot?.model === choice?.model
-    && capabilities.snapshot?.state === 'available' && capabilities.error === null ? capabilities.snapshot : null;
+  const updatedCapabilities = capabilityUpdate?.api === api && capabilityUpdate.value.provider === choice?.provider
+    && capabilityUpdate.value.model === choice?.model ? capabilityUpdate.value : null;
+  const observedCapabilities = updatedCapabilities ?? capabilities.snapshot;
+  const knownCapabilities = observedCapabilities?.provider === choice?.provider && observedCapabilities?.model === choice?.model
+    && observedCapabilities?.state === 'available' && (updatedCapabilities !== null || capabilities.error === null) ? observedCapabilities : null;
   const references = providerReferences(providerId, plans.snapshot, assistant.snapshot);
   const recovery = editing?.kind === 'assistant' ? assistantRecovery : planRecovery;
   const unavailable = plans.loading || assistant.loading || plans.error !== null || assistant.error !== null
@@ -137,8 +142,8 @@ export function ProviderReferenceManager({ api, connected, providerId, revision,
         {editing.kind === 'assistant' && <label className="flex gap-2"><input type="checkbox" checked={unlink} disabled={locked} onChange={event => { setUnlink(event.target.checked); setConfirmed(false); }} />停用独立助手并清除其模型引用</label>}
         {!unlink && <>
           <Field label="更换到模型"><select className="h-[27px] w-full rounded-md border bg-background px-2 text-sm" value={target} disabled={locked} onChange={event => { setTarget(event.target.value); setEffort(''); setConfirmed(false); }}><option value="">选择其他提供方或模型</option>{choices.filter(choice => choice.provider !== editing.provider || choice.model !== editing.model).map(choice => <option key={choice.key} value={choice.key}>{choice.label}</option>)}</select></Field>
-          <Field label="新模型思考强度" description={choice && !knownCapabilities ? '需要读取新模型实际支持的档位，未知时不能保存。' : '明确选择新模型支持的档位，原方案的其他配置保持。'}><select className="h-[27px] w-full rounded-md border bg-background px-2 text-sm" value={effort} disabled={locked || !knownCapabilities} onChange={event => { setEffort(event.target.value); setConfirmed(false); }}><option value="">选择已确认支持的档位</option>{knownCapabilities?.reasoningEfforts.map(value => <option key={value} value={value}>{modelReasoningEffortLabel(value)}</option>)}</select></Field>
-          {choice && !knownCapabilities && <Button size="sm" variant="outline" disabled={capabilities.loading || locked} onClick={capabilities.refresh}>重新读取模型支持情况</Button>}
+          <Field label="新模型思考强度" description={choice && !knownCapabilities ? '供应商能力缓存尚待核对，未知时不能保存。' : '明确选择新模型支持的档位，原方案的其他配置保持。'}><select className="h-[27px] w-full rounded-md border bg-background px-2 text-sm" value={effort} disabled={locked || !knownCapabilities} onChange={event => { setEffort(event.target.value); setConfirmed(false); }}><option value="">选择已确认支持的档位</option>{knownCapabilities?.reasoningEfforts.map(value => <option key={value} value={value}>{modelReasoningEffortLabel(value)}</option>)}</select></Field>
+          {choice && !knownCapabilities && <p className="text-xs text-muted-foreground">{modelCapabilitiesUnavailableMessage(observedCapabilities?.missingReasons ?? [])}</p>}{choice && <Button size="sm" variant="outline" disabled={locked || !onManageCapabilities} onClick={() => onManageCapabilities?.(choice.provider, choice.model, value => setCapabilityUpdate({ api, value }))}>管理能力缓存</Button>}
         </>}
         <label className="flex gap-2"><input type="checkbox" checked={confirmed} disabled={locked} onChange={event => setConfirmed(event.target.checked)} />确认单独保存这项引用更改</label>
         <div className="flex flex-wrap gap-2"><Button size="sm" disabled={locked || unavailable || !confirmed || !unlink && (!choice || !knownCapabilities || !isChatPlanReasoningEffort(effort) || !knownCapabilities.reasoningEfforts.includes(effort))} onClick={() => void save()}>{saving ? '正在保存引用' : '保存引用更改'}</Button><Button size="sm" variant="ghost" disabled={saving} onClick={() => setEditing(null)}>取消修改</Button></div>

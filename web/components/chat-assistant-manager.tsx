@@ -11,7 +11,7 @@ import { Button } from './ui/button.tsx';
 import { SettingsWindow } from './settings-window.tsx';
 import { HelpTip } from './help-tip.tsx';
 import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
-import { modelReasoningEffortLabel, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
+import { modelCapabilitiesUnavailableMessage, modelReasoningEffortLabel, parseModelCapabilities, type ModelCapabilities } from '../lib/model-capabilities.ts';
 
 interface AssistantCapabilities {
   readonly api: ApiClient;
@@ -39,10 +39,11 @@ interface AssistantView {
 
 const assistantDraftKey = createDraftKey<{ readonly snapshot: ChatAssistantSnapshot; readonly draft: ChatAssistantConfiguration }>('chat-assistant');
 
-export function ChatAssistantManager({ api, connected, setDirty }: {
+export function ChatAssistantManager({ api, connected, setDirty, onManageCapabilities }: {
   readonly api: ApiClient;
   readonly connected: boolean;
   readonly setDirty?: (value: boolean, scope?: string) => void;
+  readonly onManageCapabilities?: () => void;
 }) {
   const recovery = useNativeCatalogOperation(api, 'assistant');
   const [view, setView] = useState<AssistantView | null>(null);
@@ -57,7 +58,6 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
   dirtyCallback.current = setDirty;
   const refresh = useRef<() => void>(() => undefined);
   const [capabilities, setCapabilities] = useState<AssistantCapabilities | null>(null);
-  const [capabilitiesReload, setCapabilitiesReload] = useState(0);
   const capabilitiesEpoch = useRef(0);
 
   useEffect(() => {
@@ -133,7 +133,7 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
         if (owns()) setCapabilities({ api, generation, provider: targetProvider, model: targetModel, value: null, loading: false });
       });
     return () => { controller.abort(); capabilitiesEpoch.current++; };
-  }, [api, connected, targetProvider, targetModel, settingsGeneration, settingsLoading, capabilitiesReload]);
+  }, [api, connected, targetProvider, targetModel, settingsGeneration, settingsLoading]);
   const currentCapabilities = capabilities?.api === api && capabilities.generation === capabilitiesEpoch.current
     && capabilities.provider === targetProvider && capabilities.model === targetModel ? capabilities : null;
   const dirty = current?.snapshot != null && current.draft != null && !sameAssistantConfiguration(current.snapshot.configuration, current.draft);
@@ -267,8 +267,8 @@ export function ChatAssistantManager({ api, connected, setDirty }: {
               <option value="">使用模型默认</option>
               {draft.reasoningEffort !== null && !effortSupported && <option value="unconfirmed" disabled>原有等级待核对</option>}
               {supportedEfforts.map(effort => <option key={effort} value={effort}>{modelReasoningEffortLabel(effort)}</option>)}
-            </select><Button size="sm" variant="outline" disabled={locked || !draft.model || !provider?.enabled || currentCapabilities?.loading === true} onClick={() => setCapabilitiesReload(value => value + 1)}>刷新等级</Button></div>
-            {(!draft.provider || !draft.model || currentCapabilities?.loading || currentCapabilities?.value?.state !== 'available') && <p className="text-xs text-muted-foreground" role="status">{!draft.provider || !draft.model ? '先选择执行提供方和模型。' : currentCapabilities?.loading ? '正在读取思考等级…' : '支持等级待确认，可用模型默认或刷新。'}</p>}
+            </select><Button size="sm" variant="outline" disabled={locked || !onManageCapabilities} onClick={onManageCapabilities}>管理能力缓存</Button></div>
+            {(!draft.provider || !draft.model || currentCapabilities?.loading || currentCapabilities?.value?.state !== 'available') && <p className="text-xs text-muted-foreground" role="status">{!draft.provider || !draft.model ? '先选择执行提供方和模型。' : currentCapabilities?.loading ? '正在读取思考等级…' : modelCapabilitiesUnavailableMessage(currentCapabilities?.value?.missingReasons ?? [])}</p>}
             {draft.reasoningEffort !== null && !effortSupported && <p className="text-muted-foreground">原值“{modelReasoningEffortLabel(draft.reasoningEffort)}”已保留，不会自动改档。</p>}
           </Field></div></>}{saveControls}</div></SettingsWindow>{stateControls}<span className="push small muted">{dirty ? '未保存草稿' : current?.message || '设置已载入'}</span></div></>}
       {current?.blocked && <div className="flex flex-wrap items-center gap-2 rounded bg-amber-500/10 px-2 py-1.5 text-xs"><p>重新读取只核对状态，不会再次保存，草稿仍保留。</p><Button size="sm" variant="outline" disabled={!current.reviewed || current.loading || current.saving} onClick={() => {

@@ -321,7 +321,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
       if (!parsed || parsed.provider !== provider || parsed.model !== model) throw new Error('invalid_model_capabilities');
       setCapabilitiesView({ api, generation, provider, model, value: parsed, loading: false, error: '' });
     }).catch(() => {
-      if (current()) setCapabilitiesView({ api, generation, provider, model, value: null, loading: false, error: '暂时无法读取当前模型支持的档位，请重新读取。' });
+      if (current()) setCapabilitiesView({ api, generation, provider, model, value: null, loading: false, error: '暂时无法读取供应商能力缓存，请到模型服务中核对并刷新能力。' });
     }).finally(() => {
       if (capabilitiesController.current === controller) capabilitiesController.current = null;
     });
@@ -629,7 +629,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
           <PlanField id="chat-plan-reasoning" label={nativeFormMetadata.plan.fields.reasoning} tip={reasoningSupport}><div className="flex items-center gap-2"><select id="chat-plan-reasoning" className="h-[27px] min-w-0 flex-1 rounded-md border bg-background px-2 text-sm" value={draft.reasoningEffort} disabled={editingDisabled || !registeredSelection || supportedEfforts.length === 0} onChange={event => chooseReasoningEffort(event.target.value)}>
             <option value="" disabled>{supportedEfforts.length === 0 ? '尚无已确认档位' : '选择当前模型支持的档位'}</option>
             {reasoningOptions.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
-          </select><Button type="button" size="sm" variant="ghost" aria-label="重新读取支持情况" disabled={editingDisabled || !draft.provider || !draft.model || currentCapabilities?.loading === true} onClick={invalidateCapabilities}><RefreshCw className={currentCapabilities?.loading ? 'size-3.5 animate-spin' : 'size-3.5'} />重读</Button></div></PlanField>
+          </select><Button type="button" size="sm" variant="ghost" aria-label="管理供应商能力缓存" disabled={editingDisabled} onClick={() => navigate('providers')}><RefreshCw className={currentCapabilities?.loading ? 'size-3.5 animate-spin' : 'size-3.5'} />管理能力缓存</Button></div></PlanField>
         </div>
         <div className="mt-2 grid gap-2 border-t pt-2">
           <div className="row small muted"><span>{currentCapabilities?.loading ? '正在读取模型支持情况' : capacity ? `模型窗口 ${capacity.contextWindow.toLocaleString()} token · 最大输出 ${capacity.maxTokens.toLocaleString()} token` : '尚无实际模型容量元数据'}</span><HelpTip label="上下文建议">建议取模型窗口的群聊 40%、私聊 70%，向下取整；至少留出最大输出预算和输入空间。保存并应用方案后生效。</HelpTip></div>

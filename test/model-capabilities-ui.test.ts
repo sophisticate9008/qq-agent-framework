@@ -25,10 +25,10 @@ test('restored real metadata unlocks only declared efforts and retains an unsupp
 });
 
 test('missing model capabilities explain actionable bounded reasons without exposing raw diagnostics', () => {
-  assert.match(modelCapabilitiesUnavailableMessage(['model_metadata_not_observed']), /服务地址和模型匹配/);
+  assert.match(modelCapabilitiesUnavailableMessage(['model_metadata_not_observed']), /供应商.*能力声明/);
   assert.match(modelCapabilitiesUnavailableMessage(['local_dsh_connection_required']), /自动连接/);
   const unknown = modelCapabilitiesUnavailableMessage(['unknown-private-path:/private/secret', '__proto__']);
-  assert.match(unknown, /不会据此认定模型不支持/);
+  assert.match(unknown, /模型能力缓存/);
   assert.doesNotMatch(unknown, /private|secret|__proto__/);
   const bounded = modelCapabilitiesUnavailableMessage(['model_capabilities_timeout', 'model_capabilities_timeout', 'model_metadata_conflict', 'model_not_configured']);
   assert.match(bounded, /超时/);

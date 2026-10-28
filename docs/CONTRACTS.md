@@ -62,6 +62,12 @@
 
 写操作使用明确的期望版本和 CAS。无关目录编辑不应阻断当前聊天；当前选中的定义、主人、工具或部署依赖改变时必须重新核验。保存成功、部署已应用、运行中快照是不同状态。
 
+`GET /api/chat/model-capabilities?provider=...&model=...` 优先读取独立持久化的供应商模型能力缓存；无缓存时核对 DSH 原始声明，再尝试所选服务的 `/models` 元数据，不发送推理请求。缓存记录完整容量、思考映射和已声明的输入模态，公开响应可附带 `cache: { source: "dsh" | "provider", updatedAt }`。缓存键包含供应商标识、规范服务地址、API、模型标识及凭据指纹；缓存命中不依赖 DSH 在线，不沿用其他地址或模型的声明，写缓存不改变供应商配置 revision。
+
+`GET /api/chat/provider-model-capabilities?provider=...` 仅查看当前供应商的缓存，返回 `{ provider, providersRevision, models }`，不触发远端读取。`POST /api/chat/model-capabilities` 接受 `{ provider, model, action: "refresh" | "clear", providersRevision }`，核对当前供应商版本后刷新或清除单模型记录，返回 `{ ok, action, providersRevision, capabilities, error? }`。刷新失败保留旧缓存，通过 `ok: false` 与 `error` 表示；不能把旧缓存冒充此次成功读取。清除不修改聊天方案、DSH 配置或正在运行的模型会话，之后首次查询可重新填充缓存。缓存有界保存最多 512 条、文件最多 1 MiB；配置身份变化或并发维护冲突时不提交旧读取结果。
+
+聊天应用与独立助手使用同一模型能力缓存。聊天切换模型时，仅保留先前已保存的输出预算数值，并限制为不超过新模型声明的最大输出；新窗口、思考映射和输入模态均取新模型声明。旧部署的全局 `modelSettings` 不能作为另一模型缺失能力的回退。
+
 消息热路径仅读取当前框架配置，检查白名单、配置兼容性、会话与执行归属。全量 DSH 配置解析、本机发现和部署核验在启动、应用及明确的部署诊断中执行，不随每条消息、工具准备或每个回复气泡重复。运行中状态查询使用启动时核验的部署快照，并另行显示当前连接和配置变化；直接修改 DSH 配置后需应用或重启聊天重新核验。
 
 OneBot 连接状态区分 WebSocket 连通和 QQ 账号在线。已鉴权心跳提供可选的 `accountOnline`、`accountGood`（布尔值或 `null`），明确离线或异常时 `chatReady` 与 `protocolConnected` 为 `false`，控制台提示重新登录或检查协议端；WebSocket `state` 保留实际连接状态。未报告账号状态的协议保留兼容行为，断连时清除旧心跳状态；不为每条消息增加 HTTP 状态请求。

@@ -15,7 +15,8 @@ import {
   validateChatPersonas,
   type ChatPlanReasoningEffort
 } from '../host/chat-plans.ts'
-import { publicModelProviders } from '../host/model-providers.ts'
+import { publicModelProviders, type NativeModelProvider } from '../host/model-providers.ts'
+import { createProviderModelCapabilityCache, type ProviderModelCapabilityCacheEntry } from '../host/provider-model-capability-cache.ts'
 import {
   publicAdapterConfiguration,
   type AdapterConnectionStatus,
@@ -53,7 +54,7 @@ import { readImportedChatSessions } from '../host/imported-chat-sessions.ts'
 import { createNativeToolsRoutes, type NativeToolsReader } from './native-tools.ts'
 import { discoverLocalDsh } from '../host/local-dsh-discovery.ts'
 import { discoverLocalDshDeployment } from '../host/local-dsh-deployment.ts'
-import { readLocalDshModelCapabilities, resolveLocalDshModelSettings, type LocalDshModelCapabilities } from '../host/local-dsh-model-settings.ts'
+import { readLocalDshModelMetadata, modelSettingsCapabilities, resolveLocalDshModelSettings, type LocalDshModelCapabilities } from '../host/local-dsh-model-settings.ts'
 import { validateChatAssistantConfiguration,
   chatAssistantConfigurationResponse, type ChatAssistantConfiguration } from '../host/chat-assistant-configuration.ts'
 import { createNativeSessionMigrationRoutes } from './native-session-migration.ts'
@@ -372,33 +373,51 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
       missingReasons: executionAvailable ? [] : missingReasons.length > 0 ? missingReasons : ['assistant_target_unavailable'] }
   }
 
+  const capabilityCache = createProviderModelCapabilityCache(directory)
+  function unavailableCapabilities(provider: string, model: string, reason: string): LocalDshModelCapabilities {
+    return { provider, model, state: 'unavailable', reasoningEfforts: [], missingReasons: [reason] }
+  }
+  function cachedCapabilities(entry: ProviderModelCapabilityCacheEntry): LocalDshModelCapabilities {
+    return modelSettingsCapabilities(entry.provider, entry.model, entry.modelSettings,
+      { source: entry.source, updatedAt: entry.updatedAt })
+  }
+  async function loadDshMetadata(provider: NativeModelProvider, model: string, signal: AbortSignal) {
+    const localSignal = AbortSignal.any([signal, AbortSignal.timeout(4_000)])
+    const adapters = await repository.readAdapterDocument()
+    const adapter = adapters.value.adapters.dshAgent
+    if (!adapter.enabled || !adapter.localCredentialsPath) return null
+    const target = await discoverLocalDshDeployment({ endpoint: adapter.endpoint,
+      localCredentialsPath: adapter.localCredentialsPath, signal: localSignal })
+    const settings = await readLocalDshModelMetadata(provider, model, target, localSignal)
+    const latest = await repository.readAdapterDocument()
+    if (latest.revision !== adapters.revision) throw new FrameworkError('MODEL_CAPABILITY_CONFIGURATION_CHANGED', 'The local metadata source changed.')
+    return settings
+  }
   async function modelCapabilities(provider: string, model: string, signal: AbortSignal): Promise<LocalDshModelCapabilities> {
-    const unavailable = (reason: string): LocalDshModelCapabilities => ({ provider, model,
-      state: 'unavailable', reasoningEfforts: [], missingReasons: [reason] })
-    const deadline = AbortSignal.timeout(5_000)
+    const deadline = AbortSignal.timeout(15_000)
     const controlSignal = AbortSignal.any([signal, deadline])
     try {
       controlSignal.throwIfAborted()
       const providers = await repository.readProviders()
       const selected = providers.value.providers.find(candidate => candidate.id === provider)
-      if (!selected?.enabled) return unavailable('model_provider_unavailable')
-      if (!selected.models.some(candidate => candidate.id === model)) return unavailable('model_not_configured')
-      const adapters = await repository.readAdapterDocument()
-      const adapter = adapters.value.adapters.dshAgent
-      if (!adapter.enabled || !adapter.localCredentialsPath) return unavailable('local_dsh_connection_required')
-      const target = await discoverLocalDshDeployment({ endpoint: adapter.endpoint,
-        localCredentialsPath: adapter.localCredentialsPath, signal: controlSignal })
-      const capabilities = await readLocalDshModelCapabilities(selected, model, target, controlSignal)
-      const currentProviders = await repository.readProviders()
-      const currentAdapters = await repository.readAdapterDocument()
-      controlSignal.throwIfAborted()
-      if (providers.revision !== currentProviders.revision || adapters.revision !== currentAdapters.revision) {
-        return unavailable('chat_configuration_changed')
+      if (!selected?.enabled) return unavailableCapabilities(provider, model, 'model_provider_unavailable')
+      if (!selected.models.some(candidate => candidate.id === model)) return unavailableCapabilities(provider, model, 'model_not_configured')
+      let entry: ProviderModelCapabilityCacheEntry | null
+      try {
+        entry = await capabilityCache.resolve({ provider: selected, model, providersRevision: providers.revision,
+          signal: controlSignal, loadDsh: () => loadDshMetadata(selected, model, controlSignal) })
+      } catch (error) {
+        if (!isRecord(error) || error.code !== 'MODEL_CAPABILITY_CACHE_CONFLICT') throw error
+        entry = capabilityCache.find(await capabilityCache.read(), selected, model)
+        if (!entry) throw error
       }
-      return capabilities
+      const currentProviders = await repository.readProviders()
+      controlSignal.throwIfAborted()
+      if (providers.revision !== currentProviders.revision) return unavailableCapabilities(provider, model, 'chat_configuration_changed')
+      return entry ? cachedCapabilities(entry) : unavailableCapabilities(provider, model, 'model_metadata_not_observed')
     } catch {
       if (signal.aborted) requestError(499, 'request_aborted')
-      return unavailable(deadline.aborted ? 'model_capabilities_timeout' : 'model_capabilities_read_failed')
+      return unavailableCapabilities(provider, model, deadline.aborted ? 'model_capabilities_timeout' : 'model_capabilities_read_failed')
     }
   }
 
@@ -456,6 +475,67 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
           || provider === null || model === null || !reference(provider) || !reference(model)
           || provider.length > 128 || model.length > 128) requestError(400, 'invalid_query')
         return modelCapabilities(provider, model, signal)
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/chat/provider-model-capabilities', maxResponseBytes: 1_048_576,
+      async handle({ query, signal }) {
+        const id = query.get('provider')
+        if (query.size !== 1 || query.getAll('provider').length !== 1 || !reference(id) || id.length > 128) requestError(400, 'invalid_query')
+        const providers = await repository.readProviders()
+        const provider = providers.value.providers.find(entry => entry.id === id)
+        if (!provider) requestError(404, 'model_provider_not_found')
+        const document = await capabilityCache.read()
+        signal.throwIfAborted()
+        const models = provider.models.map(model => {
+          const cached = capabilityCache.find(document, provider, model.id)
+          return cached ? cachedCapabilities(cached) : unavailableCapabilities(id, model.id, 'model_capability_cache_empty')
+        })
+        if ((await repository.readProviders()).revision !== providers.revision) requestError(409, 'chat_revision_conflict')
+        return { provider: id, providersRevision: providers.revision, models }
+      }
+    },
+    {
+      method: 'POST', pathname: '/api/chat/model-capabilities', maxRequestBytes: 4096,
+      async handle({ body, query, signal }) {
+        requireEmptyQuery(query)
+        if (!isRecord(body) || !hasExactKeys(body, ['provider', 'model', 'action', 'providersRevision'])
+          || !reference(body.provider) || body.provider.length > 128 || !reference(body.model) || body.model.length > 128
+          || body.action !== 'refresh' && body.action !== 'clear'
+          || typeof body.providersRevision !== 'string' || !NATIVE_REVISION_PATTERN.test(body.providersRevision)) {
+          requestError(400, 'invalid_model_capability_request')
+        }
+        const { provider: providerId, model, action, providersRevision } = body
+        const providers = await repository.readProviders()
+        if (providers.revision !== providersRevision) requestError(409, 'chat_revision_conflict')
+        const provider = providers.value.providers.find(entry => entry.id === providerId)
+        if (!provider || !provider.models.some(entry => entry.id === model)) requestError(404, 'model_not_configured')
+        const deadline = AbortSignal.timeout(15_000)
+        const combined = AbortSignal.any([signal, deadline])
+        const retained = capabilityCache.find(await capabilityCache.read(), provider, model)
+        let capabilities = retained ? cachedCapabilities(retained) : unavailableCapabilities(providerId, model, 'model_capability_cache_empty')
+        let ok = false
+        let failure: string | undefined
+        try {
+          if (action === 'clear') {
+            await capabilityCache.clear(provider, model, providersRevision, combined)
+            capabilities = unavailableCapabilities(providerId, model, 'model_capability_cache_empty')
+            ok = true
+          } else {
+            const resolved = await capabilityCache.resolve({ provider, model, providersRevision, refresh: true,
+              signal: combined, loadDsh: () => loadDshMetadata(provider, model, combined) })
+            if (resolved) { capabilities = cachedCapabilities(resolved); ok = true }
+            else failure = 'model_metadata_unavailable'
+          }
+        } catch (error) {
+          if (signal.aborted) requestError(499, 'request_aborted')
+          if (isRecord(error) && ['MODEL_CAPABILITY_CONFIGURATION_CHANGED', 'MODEL_CAPABILITY_CACHE_CONFLICT',
+            'model_capability_cache_conflict'].includes(String(error.code))) requestError(409, 'model_capability_revision_conflict')
+          if (isRecord(error) && error.code === 'model_capability_cache_write_unknown') requestError(503, 'model_capability_cache_write_unknown')
+          failure = deadline.aborted ? 'model_capabilities_timeout' : 'model_capability_update_failed'
+        }
+        if ((await repository.readProviders()).revision !== providersRevision) requestError(409, 'chat_revision_conflict')
+        return { ok, action, providersRevision, capabilities, ...(failure ? { error: failure } : {}) }
       }
     },
     {
@@ -1065,8 +1145,11 @@ export function createNativeRuntimeApplicationPorts(options: {
         try {
           const target = await discoverLocalDshDeployment({ endpoint: adapter.endpoint,
             localCredentialsPath: adapter.localCredentialsPath, signal })
-          const resolved = await resolveLocalDshModelSettings(configuration, target, signal)
-          deployment = { ...configuration.deployment, target, modelSettings: resolved.modelSettings }
+          const resolved = await resolveLocalDshModelSettings(configuration, target, signal, directory)
+          const previousOutputBudget = configuration.deployment.modelSettings?.maxTokens
+          const modelSettings = previousOutputBudget === undefined ? resolved.modelSettings
+            : { ...resolved.modelSettings, maxTokens: Math.min(resolved.modelSettings.maxTokens, previousOutputBudget) }
+          deployment = { ...configuration.deployment, target, modelSettings }
         } catch (error) {
           if (signal.aborted) requestError(499, 'request_aborted')
           if (isRecord(error) && error.code === 'LOCAL_DSH_MODEL_SETTINGS_MISSING') requestError(422, 'local_dsh_model_settings_missing')

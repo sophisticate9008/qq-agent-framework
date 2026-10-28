@@ -24,7 +24,7 @@ interface ModelRun {
   readonly owner: string
   readonly idle: Promise<void>
 }
-interface UsageStep {
+export interface UsageStep {
   readonly eventId: string
   readonly turn: number
   readonly step: number

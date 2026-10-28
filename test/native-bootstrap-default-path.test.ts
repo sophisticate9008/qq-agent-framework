@@ -80,14 +80,14 @@ test('default administrator CLI mounts source-approved work, scoped presentation
     const first = (await evidence()).find(row => row.event === 'manifest-only');
     assert(first);
     assert.equal(object(first.outcome).errorCode, 'POLICY_DENIED');
-    assert.equal(first.grants, 1);
+    assert.equal(first.grants, 2);
     inbound(501, { message_type: 'group', group_id: 7001, user_id: 42, time: Math.floor(Date.now() / 1000), message: [
       { type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '/后台整理 同意: # 原会话后台文档' } }
     ] });
     await until(() => sends.some(send => JSON.stringify(send).includes('原会话后台文档')));
     assert(sends.every(send => send.group_id === 7001));
     const scopedMessage = (id: number, text: string) => inbound(id, { message_type: 'group', group_id: 7001, user_id: 42,
-      time: id + 1000, message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: `/后台整理 同意: ${text}` } }] });
+      time: Math.floor(Date.now() / 1000), message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: `/后台整理 同意: ${text}` } }] });
     const beforeCancelledWork = sends.length;
     scopedMessage(502, 'fixture-cancel-work');
     await until(async () => (await evidence()).some(row => row.event === 'cancel-work-started'));

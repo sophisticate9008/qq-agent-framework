@@ -33,7 +33,7 @@ async function complete(fixture: Fixture, messageId: number) {
   const turn = prompts(fixture).filter(call => call.input.sessionId === sessionId).length
   const stream = fixture.streams.findLast(stream => stream.sessionId === sessionId && stream.socket.readyState === 1)!
   fixture.event('turn/start', { turn }, stream)
-  fixture.event('assistant/message', { turn, message: { role: 'assistant', content: [{ type: 'text', text: 'Synthetic visible reply.' }] } }, stream)
+  await fixture.reply('Synthetic visible reply.', stream)
   fixture.event('turn/end', { turn, reason: { kind: 'completed' } }, stream)
 }
 
@@ -141,8 +141,8 @@ test('actual timeout observation keeps unknown execution isolated and never repl
   const journal = await fixture.api('/api/chat/executions')
   assert(Array.isArray(journal.items) && journal.items.map(object).some(entry => entry.deadlineReached === true && entry.isolated === true))
   fixture.inbound(2)
-  await until(async () => (await entries(fixture)).some(entry => entry.type === 'processed' && entry.level === 'warning'),
-    'Expected isolated-session rejection observation')
+  await until(async () => object(object((await fixture.status()).ingress).lastReceipt).status === 'queued',
+    'New input waits behind the unresolved execution without replay')
   assert.equal(prompts(fixture).length, 1)
   assert.equal(fixture.sends.length, 0)
   assert.equal(fixture.calls.filter(call => call.method === 'session/cancel').length, 0)

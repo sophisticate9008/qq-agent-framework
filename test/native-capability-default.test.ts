@@ -11,7 +11,9 @@ function prompts(fixture: Fixture) { return fixture.calls.filter(call => call.me
 async function settled(fixture: Fixture, received: number, failures = received) {
   await until(async () => {
     const ingress = object((await fixture.status()).ingress)
-    return Number(ingress.received) >= received && Number(ingress.rejected) + Number(ingress.unknown) >= failures
+    const queue = object(ingress.queue)
+    const blocked = Array.isArray(queue.items) && queue.items.some(raw => object(raw).state === 'blocked' || object(raw).lastError !== null)
+    return Number(ingress.received) >= received && (Number(ingress.rejected) + Number(ingress.unknown) >= failures || blocked)
   }, 'Native admission did not settle')
 }
 
@@ -29,11 +31,17 @@ async function deploy(fixture: Fixture, capabilities = true, toolDelegationUses?
 }
 
 async function finish(fixture: Fixture, sends: number) {
-  fixture.event('turn/start', { turn: 1 })
-  fixture.event('assistant/message', { turn: 1, step: 1, message: { role: 'assistant',
-    content: [{ type: 'text', text: 'Synthetic final answer.' }] } })
-  fixture.event('turn/end', { turn: 1, reason: { kind: 'completed' } })
-  await until(() => fixture.sends.length === sends, 'Actual native final-only reply was not emitted')
+  const sessionId = prompts(fixture).at(-1)!.input.sessionId
+  const turn = prompts(fixture).filter(call => call.input.sessionId === sessionId).length
+  fixture.event('turn/start', { turn })
+  const result = await fixture.reply('Synthetic final answer.')
+  assert.equal(result.status, 'confirmed')
+  fixture.event('turn/end', { turn, reason: { kind: 'completed' } })
+  await until(() => fixture.sends.length === sends, 'Explicit native reply was not emitted')
+  await until(async () => {
+    const journal = await fixture.api('/api/chat/executions')
+    return Array.isArray(journal.items) && journal.items.map(object).filter(row => row.status === 'completed').length === sends
+  }, 'Native terminal must settle before the next input')
 }
 
 test('default authenticated capability approval route persists the actual preview receipt and CAS before any native session', { timeout: 45_000 }, async context => {
@@ -186,7 +194,7 @@ test('default operator revocation freezes an existing native binding without rep
 })
 
 for (const mode of ['source-revision', 'source-read', 'source-ambiguous', 'live-plugins'] as const) {
-  test(`default stable ${mode} drift after start blocks first session and prompt without rewriting files`, { timeout: 60_000 }, async context => {
+  test(`default stable ${mode} drift is not reread during a verified runtime turn`, { timeout: 60_000 }, async context => {
     const fixture = await createNativeCapabilityRuntimeFixture(context)
     await deploy(fixture)
     const before = await readFile(fixture.profilePath, 'utf8')
@@ -195,11 +203,10 @@ for (const mode of ['source-revision', 'source-read', 'source-ambiguous', 'live-
     if (mode === 'source-ambiguous') fixture.documents.set('operator-work', '- id: a\n  id: b\n')
     if (mode === 'live-plugins') fixture.controls.livePluginDrift = true
     fixture.inbound(1)
-    await settled(fixture, 1)
-    assert.equal(prompts(fixture).length, 0)
-    assert.equal(fixture.controls.creates, 0)
+    await until(() => prompts(fixture).length === 1, 'An already verified startup must not repeat deployment reads on each turn')
+    assert.equal(fixture.controls.creates, 1)
     assert.equal(await readFile(fixture.profilePath, 'utf8'), before)
-    assert.equal((await fixture.status()).chatReady, false)
+    assert.equal((await fixture.status()).chatReady, true)
     assert.deepEqual(fixture.errors, [])
   })
 }

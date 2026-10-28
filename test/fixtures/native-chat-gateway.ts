@@ -98,6 +98,7 @@ export async function createNativeChatGatewayFixture(context: TestContext, optio
       for await (const chunk of request) body += String(chunk)
       if (url.pathname === '/onebot/get_login_info') response.end(JSON.stringify({
         ...(httpLoginStatus === null ? {} : { status: httpLoginStatus }), retcode: 0, data: { user_id: 999 } }))
+      else if (url.pathname === '/onebot/get_version_info') response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { app_name: 'SyntheticOneBot', app_version: '1.0.0' } }))
       else {
         sends.push(object(JSON.parse(body)))
         sendActions.push(url.pathname)
@@ -281,7 +282,7 @@ export async function createNativeChatGatewayFixture(context: TestContext, optio
   function inbound(id: number, extra: Value = {}) {
     assert(onebots.size > 0)
     for (const socket of onebots) socket.send(JSON.stringify({ post_type: 'message', self_id: 999,
-      message_type: 'private', user_id: 123, message_id: id, time: id + 1_000,
+      message_type: 'private', user_id: 123, message_id: id, time: Math.floor(Date.now() / 1000),
       message: [{ type: 'text', data: { text: `Fixture input ${id}` } }], ...extra }))
   }
   function event(type: string, data: Value, index = streams.length - 1) {
@@ -291,8 +292,14 @@ export async function createNativeChatGatewayFixture(context: TestContext, optio
     if (stream.socket.readyState === 1) stream.socket.send(JSON.stringify({ type: 'item', streamId: stream.streamId,
       value: { type: 'event', event: { type, data, seq } } }))
   }
+  async function reply(content: string, index = streams.length - 1) {
+    const stream = streams[index]!
+    const ticket = plugin.queue(stream.sessionId, 'qaf_reply', { content })
+    await awaitCondition(() => plugin.result(ticket) !== undefined, { message: 'Explicit reply tool did not settle', timeoutMs: 10_000 })
+    return plugin.result(ticket)!
+  }
   return { directory, configurationFile, bootstrapFile, lifecycleFile, profilePath, credentialsPath, base,
-    calls, sends, sendActions, streams, selected, onebots, api, save, runtime, start, inbound, event, launch, shutdown,
+    calls, sends, sendActions, streams, selected, onebots, api, save, runtime, start, inbound, event, reply, launch, shutdown,
     controls: {
       get creates() { return creates },
       get loginRequests() { return loginRequests },

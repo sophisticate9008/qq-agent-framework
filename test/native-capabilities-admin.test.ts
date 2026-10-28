@@ -267,6 +267,12 @@ test('default gateway authenticates catalog and persists counted approval for ac
   const origin = `http://127.0.0.1:${service.address.port}`
   assert.equal((await fetch(`${origin}/api/chat/capabilities`)).status, 401)
   const headers = { authorization: `Bearer ${token}`, origin, 'content-type': 'application/json' }
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const current = object(await (await fetch(`${origin}/api/chat/runtime`, { headers })).json())
+    const lifecycle = object(current.lifecycle)
+    if (!['not-attempted', 'checking'].includes(String(object(lifecycle.restoration).state))) break
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
   const adaptersResponse = await fetch(`${origin}/api/chat/adapters`, { headers })
   const adapters = object(await adaptersResponse.json())
   const response = await fetch(`${origin}/api/chat/adapters`, { method: 'POST', headers,

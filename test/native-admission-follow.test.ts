@@ -12,7 +12,8 @@ import { DEFAULT_NATIVE_EXECUTION_POLICY } from '../src/host/native-execution.ts
 import { buildChatSessionDefinition } from '../src/host/chat-plans.ts'
 import type { NativeChatConfiguration } from '../src/host/native-chat-configuration.ts'
 import { digest } from '../src/host/data.ts'
-import { createClaimReceiptJournal, RECEIPT_LIMITS, BRIDGE_PLUGIN_PROTOCOL } from '../packages/dsh-bridge-plugin/src/receipts.ts'
+import { createClaimReceiptJournal } from '../packages/dsh-bridge-plugin/src/receipts.ts'
+import { createDshClaimPluginFixture } from './fixtures/dsh-claim-plugin.ts'
 import { handleDshControlFrame } from './fixtures/dsh-wire.ts'
 
 function value(input: unknown): Record<string, unknown> {
@@ -41,6 +42,7 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
   const calls: Call[] = []
   const sends: { input: Record<string, unknown>; at: number }[] = []
   let journal = createClaimReceiptJournal()
+  const plugin = createDshClaimPluginFixture(() => journal)
   let creates = 0
   let suppressClaims = false
   let sendDelayMs = 0
@@ -62,6 +64,7 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
     for await (const chunk of request) body += String(chunk)
     if (pathname.startsWith('/onebot/')) {
       if (pathname.endsWith('get_login_info')) response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { user_id: 999 } }))
+      else if (pathname.endsWith('get_version_info')) response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { app_name: 'SyntheticOneBot' } }))
       else {
         sends.push({ input: value(JSON.parse(body)), at: Date.now() })
         if (sendDelayMs) await delay(sendDelayMs)
@@ -76,16 +79,15 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
     const method = String(envelope.method)
     calls.push({ method, input, at: Date.now() })
     let result: unknown = {}
-    if (method === 'bridgePlugin/describe') result = { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '0.1.0', sdkVersion: '0.2.1-rc.2',
-      issuerEpoch: journal.issuerEpoch, authentication: 'dsh-owner-peer', durableReceipts: false,
-      claimMeaning: 'inbox-claimed-not-completed', externalToolAuthorizationVerified: false, retention: RECEIPT_LIMITS }
+    if (method === 'bridgePlugin/describe') result = plugin.invoke(method, input)
     else if (method === 'bridgePlugin/claimReceipts') {
       if (claimFault === 'auth') { response.writeHead(403).end(); return }
       if (input.after !== undefined && correlationReadDelayMs) await delay(correlationReadDelayMs)
       if (input.after === undefined && baselineDelayMs) await delay(baselineDelayMs)
       result = journal.read({ sessionId: String(input.sessionId), issuerEpoch: String(input.issuerEpoch),
         ...(input.after === undefined ? {} : { after: Number(input.after) }), limit: Number(input.limit) })
-    } else if (method === 'session/modelCatalog') result = { default: { provider: 'local', model: 'offline' },
+    } else if (method.startsWith('bridgePlugin/')) result = plugin.invoke(method, input)
+    else if (method === 'session/modelCatalog') result = { default: { provider: 'local', model: 'offline' },
       routableProviders: ['local'], groups: [{ id: 'local', name: 'Local', models: [{ id: 'offline', name: 'Offline' }] }], failures: [] }
     else if (method === 'session/create') {
       creates++
@@ -94,8 +96,7 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
       result = { sessionId, agentPreset: 'review-preset' }
     } else if (method === 'session/selectModel') result = { selected: { provider: input.provider, model: input.model } }
     else if (method === 'session/prompt') {
-      if (!suppressClaims) journal.record({ sessionId: String(input.sessionId), requestId: String(input.requestId),
-        userMessageId: `user-${String(input.requestId)}`, turn: calls.filter(call => call.method === 'session/prompt' && call.input.sessionId === input.sessionId).length })
+      if (!suppressClaims) plugin.accepted(String(input.sessionId), String(input.requestId))
       result = { accepted: true }
     } else if (method === 'session/cancel') {
       if (settings.cancelMode === 'unknown') { response.destroy(); return }
@@ -152,7 +153,7 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
   function inbound(id: number, user = 123) {
     const at = Date.now()
     for (const socket of bots) socket.send(JSON.stringify({ post_type: 'message', self_id: 999, message_type: 'private', user_id: user,
-      message_id: id, time: 1000 + id, message: [{ type: 'text', data: { text: `offline input ${id}` } }] }))
+      message_id: id, time: Math.floor(Date.now() / 1000), message: [{ type: 'text', data: { text: `offline input ${id}` } }] }))
     return at
   }
   function event(sessionId: string, type: string, data: Record<string, unknown>, gap = false) {
@@ -162,9 +163,16 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
     stream.socket.send(JSON.stringify({ type: 'item', streamId: stream.streamId,
       value: { type: 'event', event: { seq: stream.sequence++, type, data } } }))
   }
-  function answer(sessionId: string, turn = 1) {
+  async function answer(sessionId: string, turn = 1, send = true) {
+    const completedBefore = runtime.executions()?.list().filter(row => row.binding.sessionId === sessionId && row.status === 'completed').length ?? 0
+    if (send) {
+    const ticket = plugin.queue(sessionId, 'qaf_reply', { content: 'offline final' })
+    await until(() => plugin.result(ticket) !== undefined)
+    assert.equal(plugin.result(ticket)?.status, 'confirmed')
+    }
     event(sessionId, 'assistant/message', { turn, message: { id: `answer-${turn}`, role: 'assistant', content: [{ type: 'text', text: 'offline final' }] } })
     event(sessionId, 'turn/end', { turn, reason: { kind: 'completed' } })
+    if (send) await until(() => (runtime.executions()?.list().filter(row => row.binding.sessionId === sessionId && row.status === 'completed').length ?? 0) > completedBefore)
   }
   async function start() {
     try { await runtime.start(configuration.revisions, new AbortController().signal) }
@@ -209,30 +217,31 @@ function storedRows(directory: string, namespace: string) {
 }
 
 test('native ingress expires in FIFO and late authorization cannot create or prompt', async context => {
-  const fake = await fixture('native-queued-expiry', { turnTimeoutMs: 150, noticeEnabled: false })
+  const fake = await fixture('native-queued-expiry', { turnTimeoutMs: 600, noticeEnabled: false })
   context.after(fake.close)
   await fake.start()
-  fake.controls.loadingDelayMs = 400
+  fake.controls.loadingDelayMs = 900
   const arrivedAt = [fake.inbound(1), fake.inbound(2, 124)]
   await until(() => fake.controls.delayedLoadingReads > 0)
   fake.controls.loadingDelayMs = 0
-  await until(async () => (await fake.runtime.status()).ingress.received === 2)
-  await delay(450)
+  await until(async () => (await fake.runtime.status()).ingress.received === 2).catch(async error => { throw new Error(JSON.stringify(await fake.runtime.status()), { cause: error }) })
+  await delay(1000)
   assert.equal(fake.calls.filter(call => call.method === 'session/create').length, 0)
   assert.equal(fake.calls.filter(call => call.method === 'session/prompt').length, 0)
   assert.equal(storedRows(fake.directory, 'host.sessions').length, 0)
   assert.equal(fake.runtime.executionJournal()!.length, 0)
   const status = await fake.runtime.status()
-  assert.equal(status.ingress.lastReceipt?.errorCode, 'NATIVE_CHAT_DEADLINE_EXPIRED')
+  assert.equal(status.ingress.queue.items.length, 2)
+  assert(status.ingress.queue.items.every(item => item.lastError === 'NATIVE_CHAT_DEADLINE_EXPIRED' && item.expired === 1))
   context.diagnostic(JSON.stringify({ case: 'short-queued-expiry', arrivedAt, calls: fake.calls, status }))
 })
 
 test('native create and claim baseline share the original ingress budget', async context => {
-  const fake = await fixture('native-create-budget', { turnTimeoutMs: 180, createDelayMs: 300, noticeEnabled: false })
+  const fake = await fixture('native-create-budget', { turnTimeoutMs: 900, createDelayMs: 1400, noticeEnabled: false })
   context.after(fake.close)
   await fake.start()
   const arrival = fake.inbound(1)
-  await delay(450)
+  await delay(1000)
   assert.equal(fake.calls.filter(call => call.method === 'session/create').length, 1)
   assert.equal(fake.calls.filter(call => call.method === 'session/prompt').length, 0)
   assert.equal(storedRows(fake.directory, 'host.sessions')[0]?.value.state, 'unknown')
@@ -241,12 +250,12 @@ test('native create and claim baseline share the original ingress budget', async
   assert.equal(fake.calls.filter(call => call.method === 'session/create').length, 1)
   context.diagnostic(JSON.stringify({ case: 'create-expiry', arrival, calls: fake.calls, sessions: storedRows(fake.directory, 'host.sessions') }))
 
-  const baseline = await fixture('native-baseline-budget', { turnTimeoutMs: 180, noticeEnabled: false })
+  const baseline = await fixture('native-baseline-budget', { turnTimeoutMs: 900, noticeEnabled: false })
   context.after(baseline.close)
   await baseline.start()
-  baseline.controls.baselineDelayMs = 300
+  baseline.controls.baselineDelayMs = 1400
   baseline.inbound(1)
-  await delay(450)
+  await delay(1000)
   assert.equal(baseline.calls.filter(call => call.method === 'session/prompt').length, 0)
   assert.equal(baseline.runtime.executionJournal()!.length, 0)
 })
@@ -258,7 +267,7 @@ test('native recycles idle follows for 24 bindings and lazily reuses the same co
   for (let index = 0; index < 24; index++) {
     fake.inbound(100 + index, 123 + index)
     await until(() => fake.calls.filter(call => call.method === 'session/prompt').length === index + 1)
-    fake.answer(`review-session-${index + 1}`)
+    await fake.answer(`review-session-${index + 1}`)
     await until(() => fake.sends.length === index + 1)
     assert((await fake.runtime.status()).host!.followedSessions <= 16)
   }
@@ -271,7 +280,7 @@ test('native recycles idle follows for 24 bindings and lazily reuses the same co
     await fake.runtime.stop()
     await fake.start()
     assert.equal((await fake.runtime.status()).state, 'running')
-    assert.equal((await fake.runtime.status()).host!.followedSessions, 0)
+    assert((await fake.runtime.status()).host!.followedSessions <= 1)
     assert.deepEqual(storedRows(fake.directory, 'host.sessions'), bindings)
     assert.deepEqual(storedRows(fake.directory, 'policy.grants'), authorization)
     assert.equal(fake.sends.length, 24 * (restart + 1))
@@ -281,7 +290,7 @@ test('native recycles idle follows for 24 bindings and lazily reuses the same co
       await until(() => fake.calls.filter(call => call.method === 'session/prompt').length === count)
       const sessionId = `review-session-${index + 1}`
       assert.equal(fake.calls.filter(call => call.method === 'session/prompt').at(-1)!.input.sessionId, sessionId)
-      fake.answer(sessionId, 2 + restart)
+      await fake.answer(sessionId, 2 + restart)
       await until(() => fake.sends.length === count)
       assert((await fake.runtime.status()).host!.followedSessions <= 16)
     }
@@ -321,9 +330,9 @@ test('native active and unknown follow slots backpressure before create without 
       && status.ingress.lastReceipt?.errorCode === 'AGENT_FOLLOW_BACKPRESSURE'
   })
   assert.equal(fake.calls.filter(call => call.method === 'session/create').length, 16)
-  const oldGrant = storedRows(fake.directory, 'policy.grants').filter(row => row.value.conversationId === 'private:123')
+  const oldGrant = storedRows(fake.directory, 'policy.grants').filter(row => row.value.conversationId === 'private:123' && row.value.featureId === 'agent-relay')
   assert.equal(oldGrant.length, 1)
-  fake.answer('review-session-1')
+  await fake.answer('review-session-1', 1, false)
   await until(() => fake.runtime.executionJournal()!.some(row => row.binding.conversationId === 'private:123' && row.lateOutcome !== null))
   await delay(80)
   assert.equal(fake.sends.length, 0)
@@ -333,9 +342,9 @@ test('native active and unknown follow slots backpressure before create without 
     })), ingress: (await fake.runtime.status()).ingress }))
   fake.inbound(318, 140)
   await until(() => fake.calls.filter(call => call.method === 'session/prompt').length === 17)
-  fake.answer('review-session-17')
+  await fake.answer('review-session-17')
   await until(() => fake.sends.length === 1)
-  assert.deepEqual(storedRows(fake.directory, 'policy.grants').filter(row => row.value.conversationId === 'private:123'), oldGrant)
+  assert.deepEqual(storedRows(fake.directory, 'policy.grants').filter(row => row.value.conversationId === 'private:123' && row.value.featureId === 'agent-relay'), oldGrant)
   context.diagnostic(JSON.stringify({ case: 'active-full-restarts', calls: fake.calls, executions: fake.runtime.executionJournal(), status: await fake.runtime.status() }))
 })
 

@@ -1,4 +1,4 @@
-import { createDshAdapter, DshAdapterError, type DshClientPort, type DshPortResult } from './dsh.ts'
+import { createDshAdapter, DshAdapterError, type DshClientPort, type DshPortResult, type DshSessionEvent } from './dsh.ts'
 import { isRecord } from '../contracts/values.ts'
 import { parsePluginModelSelection, pluginModelIdentifier } from '../contracts/plugin-model.ts'
 import type { PluginModelBackend, PluginModelDescription } from '../contracts/plugin-model.ts'
@@ -11,7 +11,6 @@ export function createDshPluginModelBackend(options: {
   readonly client: DshClientPort
   readonly invoke: (method: DshPluginModelMethod, input: JsonObject, signal: AbortSignal) => Promise<DshPortResult<JsonValue>>
 }): PluginModelBackend {
-  const adapter = createDshAdapter(options.client)
   const invoke = async (method: DshPluginModelMethod, input: JsonObject, signal: AbortSignal) => {
     const result = await options.invoke(method, input, signal)
     if (!result.ok || !isRecord(result.value)) throw new DshAdapterError('DSH_PLUGIN_MODEL_UNAVAILABLE', 'DSH 插件模型服务不可用。')
@@ -47,7 +46,41 @@ export function createDshPluginModelBackend(options: {
         return isRecord(result.value) && result.value.accepted === true ? { status: 'accepted' } : { status: 'unknown' }
       } catch { return { status: 'unknown' } }
     },
-    follow: request => adapter.follow(request),
+    follow(request) {
+      if (!pluginModelIdentifier(request.owner) || !pluginModelIdentifier(request.requestId)) throw new TypeError('Invalid plugin model follow identity')
+      let currentTurn: string | number | undefined
+      let matchedTurn: string | number | undefined
+      let pendingStart: DshSessionEvent | undefined
+      const adapter = createDshAdapter({
+        createSession: input => options.client.createSession(input), prompt: input => options.client.prompt(input),
+        cancel: input => options.client.cancel(input),
+        follow: input => options.client.follow({ ...input, async onEvent(frame) {
+          if (frame.type === 'stream/error') { await input.onEvent(frame); return }
+          if (frame.type !== 'session/event') {
+            if (matchedTurn !== undefined) await input.onEvent(frame)
+            return
+          }
+          const { type, data } = frame.event
+          if (type === 'turn/start') {
+            const turn = data?.turn
+            currentTurn = typeof turn === 'number' && Number.isSafeInteger(turn) && turn >= 0
+              || typeof turn === 'string' && turn.length > 0 && turn.length <= 256 ? turn : undefined
+            pendingStart = currentTurn === undefined ? undefined : frame
+            return
+          }
+          if (type === 'user/message' && currentTurn !== undefined && isRecord(data?.source)
+            && data.source.kind === 'qaf-plugin' && data.source.owner === request.owner && data.source.requestId === request.requestId) {
+            matchedTurn = currentTurn
+            if (pendingStart) await input.onEvent(pendingStart)
+            pendingStart = undefined
+            await input.onEvent(frame)
+            return
+          }
+          if (matchedTurn !== undefined && (data?.turn === matchedTurn || type === 'session/error')) await input.onEvent(frame)
+        } }),
+      })
+      return adapter.follow(request)
+    },
     async waitForIdle(sessionId, requestId, signal) {
       const result = await invoke('bridgePlugin/waitPluginModelIdle', { sessionId, requestId }, signal)
       if (result.sessionId !== sessionId || result.requestId !== requestId || result.idle !== true) throw new DshAdapterError('DSH_PLUGIN_MODEL_IDLE_UNKNOWN', 'DSH 插件会话尚未排空。')
@@ -59,6 +92,6 @@ export function createDshPluginModelBackend(options: {
         || !isRecord(result.usage)) throw new DshAdapterError('DSH_PLUGIN_MODEL_INVALID', 'DSH 插件执行状态无效。')
       return { state: result.state as 'running' | 'completed' | 'failed' | 'unknown', idle: result.idle, usage: result.usage as JsonObject }
     },
-    cancel: request => adapter.cancel!(request),
+    cancel: request => createDshAdapter(options.client).cancel!(request),
   })
 }

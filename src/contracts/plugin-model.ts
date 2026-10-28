@@ -70,7 +70,7 @@ export interface PluginModelBackend {
   create(request: { readonly sessionId: string; readonly owner: string; readonly model: PluginModelSelection; readonly signal: AbortSignal }): Promise<void>
   start(request: { readonly sessionId: string; readonly requestId: string; readonly owner: string; readonly prompt: string;
     readonly model?: PluginModelSelection; readonly signal: AbortSignal }): Promise<{ readonly status: 'accepted' | 'rejected' | 'unknown' }>
-  follow: AgentAdapter['follow']
+  follow: (request: Parameters<AgentAdapter['follow']>[0] & { readonly requestId: string; readonly owner: string }) => ReturnType<AgentAdapter['follow']>
   /** Resolves after the loop is idle and the model-only tool restriction has been removed. */
   waitForIdle(sessionId: string, requestId: string, signal: AbortSignal): Promise<void>
   inspectRun(request: { readonly sessionId: string; readonly requestId: string; readonly owner: string; readonly signal: AbortSignal }): Promise<{

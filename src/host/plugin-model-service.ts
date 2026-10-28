@@ -224,13 +224,14 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
           active.throwIfAborted()
           if (!(await options.backend.inspect(target.sessionId, active)).exists) failure('PLUGIN_MODEL_SESSION_NOT_FOUND')
           const model = request.model ? await selectModel(request.model, active) : target.model ?? undefined
-          stop = await options.backend.follow({ sessionId: target.sessionId, signal: active, onEvent(event) {
+          stop = await options.backend.follow({ sessionId: target.sessionId, requestId, owner, signal: active, onEvent(event) {
             if (!submitted) return
             if (event.type === 'message') {
               text = (event.content ?? []).flatMap(content => content.type === 'text' ? [content.text] : []).join('\n')
               if (text.length > maxOutput || Buffer.byteLength(text) > 262_144) { outputExceeded = true; text = '' }
             }
-            if (event.type === 'completed' || event.type === 'failed') settle(event)
+            if (event.type === 'failed' && event.data?.terminal === true) reject(new FrameworkError('PLUGIN_MODEL_EXECUTION_UNKNOWN', '插件模型事件连接中断，执行结果尚未确认。'))
+            else if (event.type === 'completed' || event.type === 'failed') settle(event)
             if (event.type === 'approval' || event.type === 'question') reject(new FrameworkError('PLUGIN_MODEL_INTERACTION_FORBIDDEN', '纯模型生成不接收工具审批或提问。'))
           } })
           options.store.write(EXECUTIONS, target.sessionId, json({ schema: 1, owner, requestId, sessionId: target.sessionId,

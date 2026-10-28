@@ -99,7 +99,7 @@ npm pack ./packages/framework-sdk --pack-destination /tmp
 # 在一个新的外部目录中
 npm init -y
 npm pkg set type=module
-npm install --ignore-scripts /tmp/qq-agent-framework-sdk-1.0.0.tgz
+npm install --ignore-scripts /tmp/qq-agent-framework-sdk-1.1.0.tgz
 npm install --save-dev typescript@5.9.3
 ```
 

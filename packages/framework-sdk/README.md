@@ -14,7 +14,7 @@ npm pack ./packages/framework-sdk --ignore-scripts --pack-destination "$artifact
 printf '安装包目录：%s\n' "$artifact_dir"
 ```
 
-在独立扩展项目中安装生成的 `qq-agent-framework-sdk-1.0.0.tgz`。本版本通过本地 tarball 使用，不要求从 npm 公共注册表安装同名包。运行环境为 Node.js 24.12.0 或更新版本。
+在独立扩展项目中安装生成的 `qq-agent-framework-sdk-1.1.0.tgz`。本版本通过本地 tarball 使用，不要求从 npm 公共注册表安装同名包。运行环境为 Node.js 24.12.0 或更新版本。
 
 ## 导出入口
 

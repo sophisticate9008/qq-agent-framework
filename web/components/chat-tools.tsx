@@ -7,6 +7,7 @@ import { errorMessage } from '../lib/api.ts';
 import { ReadOnlyDetails, TechnicalDetails } from './read-only-details.tsx';
 import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
+import { directoryToolLabel, toolPackage, toolPackageSearchText, ToolPackages } from './tool-packages.tsx';
 import { StatusPill } from './management.tsx';
 
 type InventoryTool = NativeToolInventory['items'][number];
@@ -60,12 +61,21 @@ function toolDescription(tool: PresentedInventoryTool): string {
 }
 export function registrationLabel(tool: Pick<InventoryTool, 'registration'>): string { return tool.registration === 'registered' ? '已注册' : '已声明'; }
 export function toolLoadedLabel(tool: PresentedInventoryTool): string {
+  if (toolPackage(tool)) return '通过目录按需调用';
   return tool.registrations.some(registration => registration.loadedInSession !== tool.registrations[0]?.loadedInSession)
     ? '加载状态待核对' : loadedLabel(tool.loadedInSession);
 }
 function inventoryStateLabel(state: NativeToolInventory['state']): string {
   return { available: '已读取注册清单', partial: '部分注册范围未读取', 'not-connected': 'DSH 未连接', unavailable: '注册清单读取失败' }[state];
 }
+
+function ToolDetails({ tool, sources, error }: { readonly tool: PresentedInventoryTool; readonly sources: ReadonlyMap<string, InventorySource>; readonly error: unknown }) {
+  return <div className="grid gap-3"><p className="whitespace-pre-wrap leading-relaxed">{tool.description || toolDescription(tool)}</p><TechnicalDetails fields={[{ label: '工具名称', value: tool.name }, { label: '注册状态', value: registrationLabel(tool) }, { label: '当前会话', value: error ? '状态待核对' : toolLoadedLabel(tool) }, { label: '提供来源', value: registrationOriginLabel(tool.registrationSource) }, { label: '所属组件', value: tool.category.label }, { label: '归属标识', value: tool.registrationSource?.ownerId }, { label: '归属名称', value: tool.registrationSource?.ownerName }, { label: '接入方式', value: registrationTransportLabel(tool.registrationSource) }, { label: '名称命名空间', value: toolNameNamespace(tool.name) }, { label: '注册记录', value: tool.registrations.length }]} /><h3 className="text-xs font-medium">注册与加载证据</h3>{tool.registrations.map(registration => {
+              const source = sources.get(registration.sourceId);
+              return <div key={registration.id} className="grid gap-1.5 rounded border p-2"><TechnicalDetails fields={[{ label: '注册范围名称', value: source?.label }, { label: '注册归属', value: inventoryToolCategory(registration, source).label }, { label: '归属标识', value: registration.registrationSource?.ownerId }, { label: '接入方式', value: registrationTransportLabel(registration.registrationSource) }, { label: '注册范围', value: source?.kind === 'dsh-global' ? 'DSH 全局' : source?.kind === 'dsh-preset' ? 'DSH 预设' : source?.kind === 'framework' ? '框架桥投影' : null }, { label: '关联预设', value: source?.agentPreset }, { label: '注册状态', value: registrationLabel(registration) }, { label: '当前会话', value: error ? '状态待核对' : loadedLabel(registration.loadedInSession) }]} />{source && source.modules.length > 0 && <><p className="text-xs text-muted-foreground">此范围已配置或已加载的模块；工具的注册归属与接入方式按各自元数据单独记录。</p><SourceModules source={source} /></>}</div>;
+            })}<TechnicalDetails fields={[{ label: '原始注册记录', value: tool.registrations }]} /><p className="text-xs text-muted-foreground">{toolPackage(tool) ? '通过能力目录查询参数和调用；权限由实际调用入口核验。' : '工具实际调用按所属会话权限核验。当前会话尚未观察时，可在 QQ 开始对话后刷新清单。'}</p></div>;
+}
+const displayLabel = (tool: PresentedInventoryTool) => directoryToolLabel(tool) ?? toolLabel(tool.name, tool.registrationSource);
 
 export function ChatTools({ connected, inventory, error, loading, refresh, title, showHeading = false, sectionId }: {
   readonly connected: boolean; readonly inventory: NativeToolInventory | null;
@@ -87,11 +97,13 @@ export function ChatTools({ connected, inventory, error, loading, refresh, title
   const items = useMemo(() => presentation.items.filter(tool => {
     const registrationSources = tool.registrations.map(registration => sources.get(registration.sourceId)?.label ?? '').join(' ');
     return (selectedCategory === 'all' || tool.category.id === selectedCategory)
-      && (loadingFilter === 'all' || loadingFilter === 'loaded' && tool.loadedInSession === true || loadingFilter === 'unloaded' && tool.loadedInSession === false || loadingFilter === 'unobserved' && tool.loadedInSession === null)
-      && (!normalize(deferredQuery) || normalize(`${toolLabel(tool.name, tool.registrationSource)} ${tool.name} ${toolDescription(tool)} ${tool.category.label} ${registrationSources} ${registrationLabel(tool)} ${toolLoadedLabel(tool)}`).includes(normalize(deferredQuery)));
+      && (loadingFilter === 'all' || loadingFilter === 'directory' && toolPackage(tool) !== null || loadingFilter === 'loaded' && tool.loadedInSession === true || loadingFilter === 'unloaded' && !toolPackage(tool) && tool.loadedInSession === false || loadingFilter === 'unobserved' && tool.loadedInSession === null)
+      && (!normalize(deferredQuery) || normalize(`${displayLabel(tool)} ${tool.name} ${toolDescription(tool)} ${tool.category.label} ${toolPackageSearchText(tool)} ${registrationSources} ${registrationLabel(tool)} ${toolLoadedLabel(tool)}`).includes(normalize(deferredQuery)));
   }), [presentation, sources, selectedCategory, loadingFilter, deferredQuery]);
   const visibleLimit = page.items === items ? page.limit : TOOL_PAGE_SIZE;
-  const visibleItems = items.slice(0, visibleLimit);
+  const directItems = items.filter(tool => !toolPackage(tool));
+  const packageItems = items.filter(tool => toolPackage(tool));
+  const visibleItems = directItems.slice(0, visibleLimit);
   const registeredCount = presentation.items.filter(tool => tool.registration === 'registered').length;
   const declaredCount = presentation.items.length - registeredCount;
   const loadedCount = presentation.items.filter(tool => tool.loadedInSession === true).length;
@@ -106,9 +118,9 @@ export function ChatTools({ connected, inventory, error, loading, refresh, title
     {showHeading && <div className="px-0.5 pt-1"><h2 className="text-sm font-semibold">{title}</h2></div>}
     <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-2.5 py-1.5 text-xs">
       {!showHeading && <h2 className="sr-only">{title}</h2>}
-      <Input className="min-w-0 max-w-80 flex-1 basis-48" aria-label="搜索聊天工具" placeholder="搜索工具名、用途或注册归属" value={query} onChange={event => setQuery(event.target.value)} />
+      <Input className="min-w-0 max-w-80 flex-1 basis-48" aria-label="搜索聊天工具" placeholder="搜索能力包、工具名或用途" value={query} onChange={event => setQuery(event.target.value)} />
       <select aria-label="所属组件" className="h-[27px] max-w-full rounded border bg-background px-2 text-xs text-foreground" value={selectedCategory} onChange={event => setCategoryId(event.target.value)}><option value="all">全部组件</option>{presentation.categories.map(category => <option key={category.id} value={category.id}>{category.label}（{category.count}）</option>)}</select>
-      <select aria-label="工具加载状态" className="h-[27px] max-w-full rounded border bg-background px-2 text-xs text-foreground" value={loadingFilter} onChange={event => setLoadingFilter(event.target.value)}><option value="all">全部加载状态</option><option value="loaded">当前已加载</option><option value="unloaded">当前未加载</option><option value="unobserved">尚未观察／待核对</option></select>
+      <select aria-label="工具加载状态" className="h-[27px] max-w-full rounded border bg-background px-2 text-xs text-foreground" value={loadingFilter} onChange={event => setLoadingFilter(event.target.value)}><option value="all">全部调用方式与状态</option><option value="directory">通过目录按需调用</option><option value="loaded">当前已加载</option><option value="unloaded">当前未加载</option><option value="unobserved">尚未观察／待核对</option></select>
       <span className="mr-auto whitespace-nowrap text-muted-foreground" aria-live="polite">{snapshot ? `${items.length} / ${presentation.items.length} 项工具` : '清单待读取'}</span>
       <ReadOnlyDetails title="工具来源与插件" label="来源详情" description="查看工具提供方、插件及完整注册范围。"><div className="grid gap-3"><p>框架提供的功能分为内置与后续扩展。DSH 自带工具在独立页签中展示。MCP 与原生接入只表示接入方式，归属、组件和注册位置在详情中记录。</p><p>同归属、同名、说明和接入方式一致的登记合并展示，分别保留注册与加载记录。已注册表示工具定义已经登记；已声明表示已有定义，运行注册尚未确认。会话已加载与未加载来自实际观察；缺少观察时显示尚未观察，多条记录不一致时显示加载状态待核对。</p><p>清单只读取已登记的工具与模块。注册范围中的模块记录独立保留，具体工具归属使用自身的来源元数据；注册与加载状态不代表调用已经通过权限核验。</p><h3 className="text-xs font-medium">完整注册范围</h3>{snapshot?.sources.map(source => <div key={source.id} className="grid gap-1.5"><div className="flex items-center justify-between gap-2 text-xs"><h4 className="font-medium">{source.label}</h4><span className="text-muted-foreground">{countsBySource.get(source.id) ?? 0} 条登记</span></div><TechnicalDetails fields={[{ label: '注册范围', value: source.kind === 'dsh-global' ? 'DSH 全局' : source.kind === 'dsh-preset' ? 'DSH 预设' : '框架桥投影' }, { label: '关联预设', value: source.agentPreset }]} /><SourceModules source={source} /></div>)}<TechnicalDetails fields={[{ label: '读取状态', value: snapshot ? inventoryStateLabel(snapshot.state) : null }, { label: '已注册工具', value: snapshot ? registeredCount : null }, { label: '仅声明工具', value: snapshot ? declaredCount : null }, { label: resource.error ? '上次观察已加载' : '当前已加载', value: snapshot ? loadedCount : null }, { label: '尚未观察或待核对', value: snapshot ? unobservedCount : null }, { label: '原始登记数量', value: snapshot?.items.length }, { label: '结果截断', value: snapshot?.limited }, { label: '注册范围记录', value: snapshot?.sources }, { label: '待核对原因', value: snapshot?.missingReasons }, { label: '读取错误', value: resource.error ? errorMessage(resource.error) : null }]} /></div></ReadOnlyDetails>
       <Button variant="outline" size="xs" disabled={!connected || resource.loading} onClick={resource.refresh}><RefreshCw className={resource.loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新清单</Button>
@@ -118,9 +130,11 @@ export function ChatTools({ connected, inventory, error, loading, refresh, title
     <div className="min-h-0" data-chat-tools-scroll role="region" aria-label="聊天工具清单" aria-busy={resource.loading}>
       {!connected ? <p className="p-2.5 text-xs text-muted-foreground" role="status">连接工作台后查看工具清单。</p> : !snapshot ? !resource.error && <p className="p-2.5 text-xs text-muted-foreground" role="status">正在读取工具清单…</p>
         : items.length === 0 ? <p className="p-2.5 text-xs text-muted-foreground">{snapshot.items.length ? '没有匹配的工具，试试调整来源、加载状态或搜索词。' : snapshot.state === 'not-connected' ? 'DSH 尚未连接，连接后刷新注册工具。' : snapshot.state === 'unavailable' ? '注册清单暂时无法读取，可在详情查看原因。' : '当前分类没有已登记工具。'}</p>
-          : <>
+          : <div className="grid gap-3">
+            {packageItems.length > 0 && <div><ToolPackages items={packageItems} allItems={presentation.items} label={displayLabel} renderDetails={tool => <ToolDetails tool={tool} sources={sources} error={resource.error} />} /></div>}
+            {packageItems.length > 0 && directItems.length > 0 && <h3 className="px-0.5 text-xs font-semibold">直接提供的工具 <span className="ml-1 font-normal text-muted-foreground">{directItems.length} 项</span></h3>}
             <div role="list" className="grid grid-cols-1 items-start gap-3 @min-[570px]:grid-cols-2 @min-[860px]:grid-cols-3 @min-[1150px]:grid-cols-4">{visibleItems.map(tool => {
-              const label = toolLabel(tool.name, tool.registrationSource);
+              const label = displayLabel(tool);
               const framework = tool.category.kind === 'framework';
               const Icon = framework ? Blocks : Wrench;
               return <article key={tool.id} role="listitem" data-chat-tool-name={tool.name} className="min-w-0 rounded-lg border bg-card p-3 shadow-xs">
@@ -133,15 +147,12 @@ export function ChatTools({ connected, inventory, error, loading, refresh, title
                 <p className="mt-1.5 truncate text-[11px] text-muted-foreground/80" title={tool.category.label}>{tool.category.label}</p>
                 <div className="mt-2.5 flex items-center justify-between gap-1 border-t pt-2">
                   <StatusPill tone={!resource.error && tool.loadedInSession === true ? 'success' : 'neutral'}>{resource.error ? '状态待核对' : toolLoadedLabel(tool)}</StatusPill>
-                  <ReadOnlyDetails title={label} label="说明" description="工具完整说明、注册归属、接入方式与当前加载状态。"><div className="grid gap-3"><p className="whitespace-pre-wrap leading-relaxed">{tool.description || toolDescription(tool)}</p><TechnicalDetails fields={[{ label: '工具名称', value: tool.name }, { label: '注册状态', value: registrationLabel(tool) }, { label: '当前会话', value: resource.error ? '状态待核对' : toolLoadedLabel(tool) }, { label: '提供来源', value: registrationOriginLabel(tool.registrationSource) }, { label: '所属组件', value: tool.category.label }, { label: '归属标识', value: tool.registrationSource?.ownerId }, { label: '归属名称', value: tool.registrationSource?.ownerName }, { label: '接入方式', value: registrationTransportLabel(tool.registrationSource) }, { label: '名称命名空间', value: toolNameNamespace(tool.name) }, { label: '注册记录', value: tool.registrations.length }]} /><h3 className="text-xs font-medium">注册与加载证据</h3>{tool.registrations.map(registration => {
-              const source = sources.get(registration.sourceId);
-              return <div key={registration.id} className="grid gap-1.5 rounded border p-2"><TechnicalDetails fields={[{ label: '注册范围名称', value: source?.label }, { label: '注册归属', value: inventoryToolCategory(registration, source).label }, { label: '归属标识', value: registration.registrationSource?.ownerId }, { label: '接入方式', value: registrationTransportLabel(registration.registrationSource) }, { label: '注册范围', value: source?.kind === 'dsh-global' ? 'DSH 全局' : source?.kind === 'dsh-preset' ? 'DSH 预设' : source?.kind === 'framework' ? '框架桥投影' : null }, { label: '关联预设', value: source?.agentPreset }, { label: '注册状态', value: registrationLabel(registration) }, { label: '当前会话', value: resource.error ? '状态待核对' : loadedLabel(registration.loadedInSession) }]} />{source && source.modules.length > 0 && <><p className="text-xs text-muted-foreground">此范围已配置或已加载的模块；工具的注册归属与接入方式按各自元数据单独记录。</p><SourceModules source={source} /></>}</div>;
-            })}<TechnicalDetails fields={[{ label: '原始注册记录', value: tool.registrations }]} /><p className="text-xs text-muted-foreground">工具实际调用按所属会话权限核验。当前会话尚未观察时，可在 QQ 开始对话后刷新清单。</p></div></ReadOnlyDetails>
+                  <ReadOnlyDetails title={label} label="说明" description="工具完整说明、注册归属、接入方式与当前加载状态。"><ToolDetails tool={tool} sources={sources} error={resource.error} /></ReadOnlyDetails>
                 </div>
               </article>;
             })}</div>
-            {visibleItems.length < items.length && <div className="flex items-center justify-center gap-3 border-t px-2.5 py-2 text-xs"><span className="text-muted-foreground">已显示 {visibleItems.length} / {items.length} 项</span><Button variant="outline" size="xs" onClick={() => setPage({ items, limit: visibleLimit + TOOL_PAGE_SIZE })}>加载更多（{Math.min(TOOL_PAGE_SIZE, items.length - visibleItems.length)}）</Button></div>}
-          </>}
+            {visibleItems.length < directItems.length && <div className="flex items-center justify-center gap-3 border-t px-2.5 py-2 text-xs"><span className="text-muted-foreground">已显示 {visibleItems.length} / {directItems.length} 项</span><Button variant="outline" size="xs" onClick={() => setPage({ items, limit: visibleLimit + TOOL_PAGE_SIZE })}>加载更多（{Math.min(TOOL_PAGE_SIZE, directItems.length - visibleItems.length)}）</Button></div>}
+          </div>}
     </div>
   </section>;
 }

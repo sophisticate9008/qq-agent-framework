@@ -3,7 +3,19 @@ import { createServer } from 'node:http'
 import test from 'node:test'
 import { createDshJsonRpcPort } from '../src/adapters/dsh-jsonrpc.ts'
 import { BRIDGE_PLUGIN_PROTOCOL, RECEIPT_LIMITS, createClaimReceiptJournal } from '../packages/dsh-bridge-plugin/src/receipts.ts'
-import type { ClaimReceiptQuery } from '../src/adapters/dsh-tool-scope.ts'
+import { createDshBridgePluginPort, type ClaimReceiptQuery } from '../src/adapters/dsh-tool-scope.ts'
+
+test('bridge descriptions accept released versions and reject unrecognized versions', async () => {
+  const journal = createClaimReceiptJournal()
+  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0', '2.0.0']) {
+    const port = createDshBridgePluginPort(async () => ({ protocol: BRIDGE_PLUGIN_PROTOCOL,
+      issuerEpoch: journal.issuerEpoch, pluginVersion, sdkVersion: '0.2.1-rc.2',
+      authentication: 'dsh-owner-peer', durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed',
+      externalToolAuthorizationVerified: false, retention: RECEIPT_LIMITS }))
+    if (pluginVersion === '2.0.0') await assert.rejects(port.describe(new AbortController().signal), /DSH_PLUGIN_INVALID_RESPONSE/)
+    else assert.equal((await port.describe(new AbortController().signal)).pluginVersion, pluginVersion)
+  }
+})
 
 test('optional plugin client uses the authenticated fixed network port, verifies pages and fails closed on forged evidence', async context => {
   let journal = createClaimReceiptJournal()

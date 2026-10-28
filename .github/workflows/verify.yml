@@ -51,6 +51,8 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: 依赖安全审计
+        run: npm audit --audit-level=high
       - run: npm run check
       - run: npm test
       - run: npm run test:sdk
@@ -92,6 +94,8 @@ jobs:
         working-directory: .
         run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: 插件依赖安全审计
+        run: npm audit --audit-level=high
       - run: npm test
       - name: 框架客户端与真实离线 DSH SDK 集成
         run: npm run test:framework

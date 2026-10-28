@@ -30,8 +30,11 @@ try {
   assert(Array.isArray(files) && files.length <= 64)
   assert(files.every(file => {
     const path = object(file).path
-    return typeof path === 'string' && (['package.json', 'README.md'].includes(path) || /^dist\/[a-z0-9-]+\.(?:js|d\.ts)$/.test(path))
-  }), 'The release tarball may contain only its public manifest, README and compiled plugin')
+    return typeof path === 'string' && (['package.json', 'README.md', 'LICENSE', 'NOTICE.md'].includes(path) || /^dist\/[a-z0-9-]+\.(?:js|d\.ts)$/.test(path))
+  }), 'The release tarball may contain only its public manifest, README, licenses and compiled plugin')
+  for (const required of ['LICENSE', 'NOTICE.md']) {
+    assert(files.some(file => object(file).path === required), `Missing release license: ${required}`)
+  }
   const tarball = join(temporary, filename)
   const name = 'dsh-bridge-plugin-isolated-install-fixture'
   const dependencies = { '@qq-agent-framework/dsh-bridge-plugin': `file:${tarball}` }

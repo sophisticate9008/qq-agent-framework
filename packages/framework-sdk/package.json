@@ -1,18 +1,53 @@
 {
   "name": "@qq-agent-framework/sdk",
-  "version": "0.1.0",
-  "description": "Typed feature, bootstrap, lifecycle and storage contracts for QQ Agent Framework extensions.",
+  "version": "1.0.0",
+  "description": "QQ Agent Framework 扩展的类型化功能、宿主、生命周期与存储契约。",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=24.12.0" },
-  "files": ["dist", "LICENSE"],
-  "dependencies": { "@types/node": "24.19.2" },
+  "engines": {
+    "node": ">=24.12.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "dependencies": {
+    "@types/node": "24.19.2"
+  },
   "exports": {
-    "./adapters": { "types": "./dist/sdk/adapters.d.ts", "import": "./dist/sdk/adapters.js" },
-    ".": { "types": "./dist/sdk/index.d.ts", "import": "./dist/sdk/index.js" },
-    "./core": { "types": "./dist/sdk/core.d.ts", "import": "./dist/sdk/core.js" },
-    "./host": { "types": "./dist/sdk/host.d.ts", "import": "./dist/sdk/host.js" },
-    "./contracts": { "types": "./dist/sdk/contracts.d.ts", "import": "./dist/sdk/contracts.js" },
-    "./storage": { "types": "./dist/sdk/storage.d.ts", "import": "./dist/sdk/storage.js" }
+    "./adapters": {
+      "types": "./dist/sdk/adapters.d.ts",
+      "import": "./dist/sdk/adapters.js"
+    },
+    ".": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js"
+    },
+    "./core": {
+      "types": "./dist/sdk/core.d.ts",
+      "import": "./dist/sdk/core.js"
+    },
+    "./host": {
+      "types": "./dist/sdk/host.d.ts",
+      "import": "./dist/sdk/host.js"
+    },
+    "./contracts": {
+      "types": "./dist/sdk/contracts.d.ts",
+      "import": "./dist/sdk/contracts.js"
+    },
+    "./storage": {
+      "types": "./dist/sdk/storage.d.ts",
+      "import": "./dist/sdk/storage.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sophisticate9008/qq-agent-framework.git",
+    "directory": "packages/framework-sdk"
+  },
+  "homepage": "https://github.com/sophisticate9008/qq-agent-framework#readme",
+  "bugs": {
+    "url": "https://github.com/sophisticate9008/qq-agent-framework/issues"
   }
 }

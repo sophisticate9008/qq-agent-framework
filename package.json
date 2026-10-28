@@ -1,8 +1,8 @@
 {
   "name": "qq-agent-framework",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "An independent, capability-oriented bridge engine with separated persona, preferences and policy.",
+  "description": "面向 QQ 会话的可扩展智能体框架，提供中文控制台、连续聊天与受控工具执行。AI许愿生成的，目前自用",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -52,7 +52,6 @@
     "@types/react-dom": "19.3.0",
     "@types/ws": "8.18.2",
     "@vitejs/plugin-react": "6.1.2",
-    "shadcn": "4.22.1",
     "tailwindcss": "4.3.3",
     "vite": "8.3.5"
   },
@@ -79,5 +78,13 @@
     "typescript": "5.9.3",
     "ws": "8.22.0",
     "yaml": "2.9.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sophisticate9008/qq-agent-framework.git"
+  },
+  "homepage": "https://github.com/sophisticate9008/qq-agent-framework#readme",
+  "bugs": {
+    "url": "https://github.com/sophisticate9008/qq-agent-framework/issues"
   }
 }

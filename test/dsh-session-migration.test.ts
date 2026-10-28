@@ -39,11 +39,13 @@ function fixture(reply: (method: DshSessionMigrationMethod, input: Record<string
 }
 
 test('migration preview and commit preserve every reference and expected constraint without other RPCs', async () => {
-  const fake = fixture(method => method === 'bridgePlugin/forkPreview' ? preview() : receipt(), description({ pluginVersion: '0.2.0' }))
-  assert.deepEqual(await fake.port.forkPreview(previewRequest, signal()), preview())
-  assert.deepEqual(await fake.port.forkWithPreset(request, signal()), receipt())
-  assert.deepEqual(fake.calls, [{ method: 'bridgePlugin/forkPreview', input: previewRequest },
-    { method: 'bridgePlugin/forkWithPreset', input: request }])
+  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0'] as const) {
+    const fake = fixture(method => method === 'bridgePlugin/forkPreview' ? preview() : receipt(), description({ pluginVersion }))
+    assert.deepEqual(await fake.port.forkPreview(previewRequest, signal()), preview())
+    assert.deepEqual(await fake.port.forkWithPreset(request, signal()), receipt())
+    assert.deepEqual(fake.calls, [{ method: 'bridgePlugin/forkPreview', input: previewRequest },
+      { method: 'bridgePlugin/forkWithPreset', input: request }])
+  }
 })
 
 test('blocked preview retains unknown facts as null and never forks a child', async () => {

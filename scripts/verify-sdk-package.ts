@@ -17,7 +17,7 @@ try {
     && /^[a-z0-9.-]+\.tgz$/.test(packed.filename) && 'files' in packed && Array.isArray(packed.files));
   for (const file of packed.files) {
     assert(file && typeof file === 'object' && 'path' in file && typeof file.path === 'string');
-    assert(['package.json', 'LICENSE'].includes(file.path) || /^dist\/[a-z0-9./-]+\.(?:js|d\.ts)$/.test(file.path),
+    assert(['package.json', 'LICENSE', 'NOTICE.md', 'README.md'].includes(file.path) || /^dist\/[a-z0-9./-]+\.(?:js|d\.ts)$/.test(file.path),
       `Unexpected SDK archive member: ${file.path}`);
     assert(!/(?:^|\/)(?:runtime|test|admin|web|scripts)(?:\/|$)/.test(file.path));
   }

@@ -84,7 +84,7 @@ test('private self-authored messages recover their peer from confirmed scoped ou
   assert.equal(protocolReads, 1, 'An unresolved send is not proof of outgoing ownership');
 });
 
-test('ordinary conversation queries remain available to non-owners while account directories and recall require the real configured owner', async context => {
+test('ordinary conversation queries remain available to non-owners while account directories require the real configured owner', async context => {
   const store = createSqliteStore({ filename: ':memory:' }); context.after(() => store.close());
   const setup = sourceFixture(); context.after(() => setup.lifetime.abort());
   const actions: string[] = [];
@@ -101,12 +101,58 @@ test('ordinary conversation queries remain available to non-owners while account
   assert.equal(asObject(await effects['native.conversation.query']!.execute(nonOwner)).status, 'confirmed');
   await assert.rejects(async () => effects['native.conversation.query']!.execute({ ...nonOwner, input: { kind: 'directories', directory: 'friends' } }),
     { code: 'NATIVE_MESSAGE_SOURCE_NOT_OWNER' });
-  await assert.rejects(async () => effects['native.conversation.recall']!.execute({ ...nonOwner, input: { messageId: '-16' } }),
-    { code: 'NATIVE_MESSAGE_SOURCE_NOT_OWNER' });
   assert.deepEqual(actions, ['get_group_info'], 'Rejected operations must not inspect or mutate protocol data');
   const owner = setup.request('123', { kind: 'directories', directory: 'friends' }, 'actual-owner-message');
   assert.equal(asObject(await effects['native.conversation.query']!.execute(owner)).status, 'confirmed');
   assert.deepEqual(actions, ['get_group_info', 'get_friend_list']);
+});
+
+for (const outcome of ['confirmed', 'unknown'] as const) test(`autonomous recall of a verified bot message retains its ${outcome} receipt without repeating the write`, async context => {
+  const store = createSqliteStore({ filename: ':memory:' }); context.after(() => store.close());
+  const setup = sourceFixture(); context.after(() => setup.lifetime.abort());
+  const actions: string[] = [];
+  const fetch: typeof globalThis.fetch = async input => {
+    const action = actionOf(input); actions.push(action);
+    if (action === 'get_msg') return confirmed({ message_type: 'group', message_id: -16, group_id: 456, user_id: 999,
+      sender: { user_id: 999 }, message: [{ type: 'text', data: { text: 'Bot message' } }] });
+    assert.equal(action, 'delete_msg');
+    if (outcome === 'unknown') throw new Error('Transport ended after dispatch');
+    return confirmed(null);
+  };
+  const options = { port: createOneBotConversationPort({ endpoint, fetch }),
+    messagePort: createOneBotActionPort({ endpoint, fetch }), store, selfId: '999', sources: () => setup.sources.reader,
+    register: () => { throw new Error('Recall has no media'); }, async authorize() {} };
+  const request = setup.request('124', { messageId: '-16' });
+  const first = await createNativeConversationService(options)['native.conversation.recall']!.execute(request);
+  assert.equal(asObject(first).status, outcome);
+  const second = await createNativeConversationService(options)['native.conversation.recall']!.execute(request);
+  assert.deepEqual(second, first);
+  assert.deepEqual(actions, ['get_msg', 'delete_msg'], 'A retained receipt must prevent another read or recall after service recreation');
+});
+
+test('autonomous recall rejects another sender or conversation before deleting any message', async context => {
+  const store = createSqliteStore({ filename: ':memory:' }); context.after(() => store.close());
+  const setup = sourceFixture(); context.after(() => setup.lifetime.abort());
+  const actions: string[] = [];
+  let sender = 124;
+  let group = 456;
+  const fetch: typeof globalThis.fetch = async input => {
+    const action = actionOf(input); actions.push(action);
+    assert.equal(action, 'get_msg', 'Rejected recalls must never delete protocol data');
+    return confirmed({ message_type: 'group', message_id: -16, group_id: group, user_id: sender,
+      sender: { user_id: sender }, message: [{ type: 'text', data: { text: 'Scoped message' } }] });
+  };
+  const effects = createNativeConversationService({ port: createOneBotConversationPort({ endpoint, fetch }),
+    messagePort: createOneBotActionPort({ endpoint, fetch }), store, selfId: '999', sources: () => setup.sources.reader,
+    register: () => { throw new Error('Recall has no media'); }, async authorize() {} });
+  const request = setup.request('124', { messageId: '-16' });
+  await assert.rejects(async () => effects['native.conversation.recall']!.execute(request), { code: 'RECALL_MESSAGE_SCOPE_MISMATCH' });
+  sender = 999; group = 457;
+  const wrongConversation = asObject(await effects['native.conversation.recall']!.execute(request));
+  assert.equal(wrongConversation.status, 'unknown');
+  assert.equal(wrongConversation.code, 'ONEBOT_ACTION_INVALID_RESPONSE');
+  assert.deepEqual(actions, ['get_msg', 'get_msg']);
+  assert.equal(store.list('native-chat.protocol-writes').length, 0, 'Unverified messages must not produce recall dispatch records');
 });
 
 for (const outcome of ['confirmed', 'unknown'] as const) test(`protocol ${outcome} writes are durably observed and the same event never sends a second poke`, async context => {

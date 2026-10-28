@@ -23,7 +23,7 @@ export interface PluginModelServiceOptions {
   /** Reserve the concrete session across QQ, assistant and plugin writers for the complete callback. */
   readonly withSessionLease: <Value>(sessionId: string, signal: AbortSignal, operation: () => Promise<Value>) => Promise<Value>
   readonly onUsage?: (event: { readonly owner: string; readonly requestId: string; readonly sessionId: string;
-    readonly conversationId: string | null; readonly data: JsonObject }) => void | Promise<void>
+    readonly conversationId: string | null; readonly status: 'completed' | 'failed'; readonly data: JsonObject }) => void | Promise<void>
 }
 
 function failure(code: string): never { throw new FrameworkError(code, '插件模型服务未能安全完成操作。') }
@@ -250,7 +250,8 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
           options.store.write(EXECUTIONS, target.sessionId, json({ schema: 1, owner, requestId,
             state: event.type, updatedAt: Date.now(), usage: data }))
           submitted = false
-          if (options.onUsage) await options.onUsage({ owner, requestId, sessionId: target.sessionId, conversationId: target.conversationId, data })
+          if (options.onUsage) await options.onUsage({ owner, requestId, sessionId: target.sessionId, conversationId: target.conversationId,
+            status: event.type === 'completed' ? 'completed' : 'failed', data })
           if (outputExceeded) failure('PLUGIN_MODEL_OUTPUT_LIMIT')
           if (event.type !== 'completed') failure('PLUGIN_MODEL_FAILED')
           const latest = read(owner, request)
@@ -307,7 +308,8 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
             if (!observed.idle || !['completed', 'failed'].includes(observed.state)) return current.value
             signal.throwIfAborted()
             if (options.onUsage) await options.onUsage({ owner: previous.value.owner, requestId: previous.value.requestId,
-              sessionId: current.value.sessionId, conversationId: current.value.conversationId, data: observed.usage })
+              sessionId: current.value.sessionId, conversationId: current.value.conversationId,
+              status: observed.state === 'completed' ? 'completed' : 'failed', data: observed.usage })
             signal.throwIfAborted()
             options.store.write(EXECUTIONS, current.value.sessionId, json({ ...previous.value, state: observed.state,
               usage: observed.usage, reconciledAt: Date.now(), updatedAt: Date.now() }), { expectedRevision: previous.revision })

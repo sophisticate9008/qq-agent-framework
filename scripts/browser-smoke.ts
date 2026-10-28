@@ -31,7 +31,7 @@ try {
   await page.locator('#connect').click();
   await page.getByRole('button', { name: '断开连接' }).waitFor();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
-  await page.getByRole('heading', { name: '工作台概览' }).waitFor();
+  await page.getByRole('heading', { name: '连接与概览' }).waitFor();
   const sessionCookies = (await context.cookies(sessionUrl)).filter(cookie => cookie.httpOnly && cookie.path === '/api');
   assert.equal(sessionCookies.length, 1);
   const sessionCookie = sessionCookies[0]!;
@@ -48,7 +48,7 @@ try {
   await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
   await page.screenshot({ path: new URL('desktop-dark.png', directory).pathname, fullPage: true, animations: 'disabled' });
   await page.reload();
-  await page.getByRole('heading', { name: '工作台概览' }).waitFor();
+  await page.getByRole('heading', { name: '连接与概览' }).waitFor();
   await page.getByRole('button', { name: '断开连接' }).waitFor();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
   assert.equal(await page.locator('html').getAttribute('data-theme'), 'dark');
@@ -89,7 +89,7 @@ try {
   }));
   await navigateConsolePage(page, 'persona');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
-  await page.getByRole('heading', { name: '人设与形象', exact: true }).waitFor();
+  await page.getByRole('heading', { name: '人设与唤醒', exact: true }).waitFor();
   await theme.selectOption('dark');
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: new URL('mobile-dark.png', directory).pathname, fullPage: true, animations: 'disabled' });

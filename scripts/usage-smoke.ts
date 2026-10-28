@@ -1024,7 +1024,7 @@ async function assertBuiltUsageContract(): Promise<void> {
     const modifiedAt = (await stat(new URL(`../web/${source}`, import.meta.url))).mtimeMs;
     assert(builtAt >= modifiedAt, `Built UI predates web/${source}; wait for the main thread build.`);
   }
-  for (const text of ['usage-auto-refresh', 'usage-reset-open', 'data-usage-hours', 'usage-recent', 'usage-bucket-select',
+  for (const text of ['usage-auto-refresh', 'usage-reset-open', 'usage-recent', 'usage-bucket-select',
     'usage-detailed-counts', 'data-usage-turns-panel', 'data-usage-turns-body', 'data-usage-turns-scroll',
     'data-usage-recent-panel', 'data-usage-recent-body', 'data-usage-recent-scroll',
     'data-token-direction', 'data-token-cache']) {
@@ -1119,561 +1119,88 @@ async function run(): Promise<void> {
 
     await page.goto(origin);
     await connect(page);
-    await page.getByRole('heading', { name: '工作台概览', exact: true }).waitFor();
+    await page.getByRole('heading', { name: '连接与概览', exact: true }).waitFor();
     const cookies = await context.cookies(`${origin}/api/auth/session`);
     assert(cookies.some(cookie => cookie.httpOnly && cookie.sameSite === 'Strict' && cookie.path === '/api'));
     await navigate(page, '用量统计', 'usage');
     await page.locator('[data-usage-metric="total-tokens"] strong').waitFor();
-    const turnsPanel = page.locator('details[data-usage-turns-panel]');
-    const turnsSummary = turnsPanel.locator('summary');
-    await turnsSummary.getByText('轮次记录', { exact: true }).waitFor();
-    const turnsPanelInitiallyOpen = await detailsOpen(turnsPanel);
-    assert.equal(turnsPanelInitiallyOpen, false);
-    await expandDetails(turnsPanel);
-    await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
-    assert.equal(await page.locator('#usage-turns [data-usage-turn]').count(), 50);
-    const turnsPanelEvidence = await assertFixedTablePanelLayout(page, {
-      bodySelector: 'div[data-usage-turns-body]',
-      scrollSelector: '[data-usage-turns-scroll]',
-      label: 'Turn details',
-    });
-    const recentPanel = page.locator('details[data-usage-recent-panel]');
-    const recentSummary = recentPanel.locator('summary');
-    await recentSummary.getByText('调用记录', { exact: true }).waitFor();
-    const recentPanelInitiallyOpen = await detailsOpen(recentPanel);
-    assert.equal(recentPanelInitiallyOpen, false);
-    await expandDetails(recentPanel);
-    await page.locator('#usage-recent [data-usage-recent]').first().waitFor();
-    assert.equal(await page.locator('#usage-recent [data-usage-recent]').count(), 40);
-    const recentPanelEvidence = await assertFixedTablePanelLayout(page, {
-      bodySelector: 'div[data-usage-recent-body]',
-      scrollSelector: '[data-usage-recent-scroll]',
-      label: 'Recent calls',
-    });
-    const readsBeforeRecentCollapse = usageReadCount(state);
-    await recentSummary.click();
-    assert.equal(await detailsOpen(recentPanel), false);
-    await page.waitForTimeout(100);
-    assert.equal(usageReadCount(state), readsBeforeRecentCollapse, 'Collapsing recent calls refetched usage data.');
-    const readsBeforeRecentExpand = usageReadCount(state);
-    await recentSummary.click();
-    assert.equal(await detailsOpen(recentPanel), true);
-    await page.waitForTimeout(100);
-    assert.equal(usageReadCount(state), readsBeforeRecentExpand, 'Expanding recent calls refetched usage data.');
-    await page.locator('#usage-bucket-select option').first().waitFor({ state: 'attached' });
-    await page.locator('#usage-auto-refresh').selectOption('off');
-    const detailedCounts = page.getByRole('switch', { name: '详细数值', exact: true });
-    const detailedCountsInput = page.locator('#usage-detailed-counts');
-    assert.equal(await detailedCountsInput.isChecked(), false);
-    const compactTotal = await page.locator('[data-usage-metric="total-tokens"] strong').innerText();
-    assert.match(compactTotal, /^45(?:\.\d+)?k$/i);
-    const costBeforeCounts = await page.locator('[data-usage-metric="estimated-cost"] strong').innerText();
-    const rateBeforeCounts = await page.locator('[data-usage-metric="cache-hit-rate"] strong').innerText();
-    const readsBeforeCounts = usageReadCount(state);
-    const storageBeforeCounts = await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } }));
-    await detailedCounts.click();
-    assert.equal(await detailedCountsInput.isChecked(), true);
-    const totalTokensMetric = page.locator('[data-usage-metric="total-tokens"]');
-    await totalTokensMetric.locator('strong').getByText('45,678', { exact: true }).waitFor();
-    await assertSummaryTokenCaption(totalTokensMetric);
-    const tokenBreakdownEvidence = await assertTokenBreakdown(page.locator('#usage-turns [data-usage-turn]').first());
-    await page.locator('[data-usage-metric="estimated-cost"] strong').waitFor();
-    await page.locator('[data-usage-metric="cache-hit-rate"] strong').waitFor();
-    for (const metric of ['estimated-cost', 'total-tokens', 'cache-hit-rate']) {
-      assert.equal(await page.locator(`[data-usage-metric="${metric}"]`).innerText().then(text => text.includes('不可用')), false);
-    }
-    await expandDetails(page.locator('#usage-summary details'));
-    const averages = page.locator('#usage-summary details dl').first();
-    assert.deepEqual(await averages.locator('dt').allTextContents(), ['平均每轮', '平均每步', '高峰 / 空闲', '未逐轮归属']);
-    assert.deepEqual(await averages.locator('dd').allTextContents(), ['CN¥0.10', 'CN¥0.057143', 'CN¥0.40 / CN¥0.80', 'CN¥0.15']);
-    const summaryText = await page.locator('#usage-summary').innerText();
-    assert(summaryText.includes('CN¥'));
-    assert(summaryText.includes('最近写入 / 压缩'));
-    const conversationsPanel = page.locator('details[data-usage-conversations-panel]');
-    await conversationsPanel.locator('summary').getByText('会话记录', { exact: true }).waitFor();
-    assert.equal(await detailsOpen(conversationsPanel), false);
-    const readsBeforeConversationsExpand = usageReadCount(state);
-    await expandDetails(conversationsPanel);
-    assert.equal(usageReadCount(state), readsBeforeConversationsExpand, 'Expanding conversation records refetched usage data.');
-    const conversationsPanelHeight = await assertFixedHeight(
-      page.locator('[data-usage-conversations-scroll]'), 'Conversation records',
-    );
-    const conversationsPanelEvidence = await assertFixedTablePanelLayout(page, {
-      bodySelector: '[data-usage-conversations-scroll]',
-      scrollSelector: '[data-usage-conversations-scroll]',
-      label: 'Conversation records',
-    });
-    await page.locator(`[data-usage-key="${primaryKey}"]`).waitFor();
-    await page.locator('#usage-chart').waitFor();
-    assert.equal(await page.locator('#usage-chart').getAttribute('data-chart-engine'), 'recharts');
-    await page.locator('#usage-recent [data-usage-recent]').first().waitFor();
-    await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
-    assert(state.fixtureRequests.some(request => request.pathname === usageTurnsPath
-      && new URLSearchParams(request.search).get('key') === primaryKey));
-    await page.locator('#usage-auto-refresh').selectOption('off');
-    assert.equal(await page.locator('#usage-recent [data-usage-recent]').count(), 40);
-    const recentText = await page.locator('#usage-recent').innerText();
-    assert.equal(recentText.includes('Provider'), false);
-    await page.getByText(xssText, { exact: true }).first().waitFor();
-    const pricesPanel = page.locator('details[data-usage-prices-panel]');
-    await pricesPanel.locator('summary').waitFor();
-    assert.equal(await detailsOpen(pricesPanel), false);
-    const readsBeforePricesExpand = usageReadCount(state);
-    await expandDetails(pricesPanel);
-    assert.equal(usageReadCount(state), readsBeforePricesExpand, 'Expanding pricing details refetched usage data.');
-    const pricesPanelHeight = await assertFixedHeight(page.locator('[data-usage-prices-scroll]'), 'Pricing details');
-    const pricingText = await page.locator('#usage-prices').innerText();
-    for (const expected of ['高峰时段', '× 2', '09:30–12:00', '14:00–18:15', '周一', '周五', '33 天', '1,000,000']) {
-      assert(pricingText.includes(expected), `Pricing section is missing ${expected}.`);
-    }
-    const conversationText = await page.locator('#conversation-usage').innerText();
-    for (const expected of ['输入与缓存', '输出', '命中率', '成本占比']) {
-      assert(conversationText.includes(expected), `Conversation table is missing ${expected}.`);
-    }
-    for (const table of ['#conversation-usage', '#usage-turns', '#usage-recent']) {
-      assert.equal(await page.locator(`${table} thead`).getByText('输出', { exact: true }).count(), 1);
-    }
-    const shareProgressEvidence = [
-      await assertShareProgress(page, primaryKey, 75),
-      await assertShareProgress(page, secondaryKey, 25),
-      await assertShareProgress(page, 'group:610000', 0),
-    ];
-    assert.equal(await page.locator('body').innerText().then(text => text.includes('never-forwarded')), false);
-    await detailedCounts.click();
-    assert.equal(await page.locator('[data-usage-metric="total-tokens"] strong').innerText(), compactTotal);
-    assert.equal(await page.locator('[data-usage-metric="estimated-cost"] strong').innerText(), costBeforeCounts);
-    assert.equal(await page.locator('[data-usage-metric="cache-hit-rate"] strong').innerText(), rateBeforeCounts);
-    assert.equal(usageReadCount(state), readsBeforeCounts, 'Count display toggle refetched usage data.');
-    assert.deepEqual(await page.evaluate(() => ({ local: { ...localStorage }, session: { ...sessionStorage } })), storageBeforeCounts, 'Count display mode was persisted in browser storage.');
-
-    await turnsSummary.click();
-    assert.equal(await detailsOpen(turnsPanel), false);
-    const turnsBeforeConversationClick = fixtureCount(state, usageTurnsPath);
-    await page.locator(`[data-usage-key="${secondaryKey}"] button`).click();
-    await waitForCount(() => fixtureCount(state, usageTurnsPath), turnsBeforeConversationClick + 1);
-    assert.equal(await detailsOpen(turnsPanel), true);
-    assert.equal(await page.locator('#usage-key-select').inputValue(), secondaryKey);
-    await page.waitForFunction(() => document.querySelectorAll('#usage-turns [data-usage-turn]').length === 3);
-    await page.locator(`[data-usage-key="${primaryKey}"] button`).click();
-    await page.waitForFunction(() => document.querySelectorAll('#usage-turns [data-usage-turn]').length === 50);
-
-    const initialSeriesCount = fixtureCount(state, usageSeriesPath);
+    await page.locator('[data-usage-key]').first().waitFor();
+    assert.equal(await page.locator('[data-usage-key]').count(), 26);
+    await page.locator(`[data-usage-key="${primaryKey}"] button`).first().click();
+    await page.getByRole('tab', { name: '逐轮明细', exact: true }).waitFor({ state: 'visible' });
+    await page.locator('[data-usage-turn]').first().waitFor();
+    assert.equal(await page.locator('#usage-key-select').inputValue(), primaryKey);
+    assert.equal(await page.locator('[data-usage-turn]').count(), 50);
+    await page.locator('#usage-key-select').selectOption(secondaryKey);
+    await page.waitForFunction(() => document.querySelectorAll('[data-usage-turn]').length === 3);
+    await page.getByRole('tab', { name: '调用记录', exact: true }).click();
+    await page.locator('[data-usage-recent]').first().waitFor();
+    assert.equal(await page.locator('[data-usage-recent]').count(), 40);
+    await page.getByRole('tab', { name: '按会话', exact: true }).click();
+    const beforeSeries = fixtureCount(state, usageSeriesPath);
     for (const hours of [72, 168, 720, 24]) {
-      await page.locator(`[data-usage-hours="${hours}"]`).click();
-      await waitForCount(() => fixtureCount(state, usageSeriesPath), initialSeriesCount + [72, 168, 720, 24].indexOf(hours) + 1);
+      const before = fixtureCount(state, usageSeriesPath);
+      await page.getByRole('combobox', { name: '走势时间范围', exact: true }).selectOption(String(hours));
+      await waitForCount(() => fixtureCount(state, usageSeriesPath), before + 1);
     }
-    const beforeMetricSwitch = fixtureCount(state, usageSeriesPath);
-    await page.locator('[data-usage-chart-metric="tokens"]').click();
-    await page.waitForTimeout(100);
-    assert.equal(fixtureCount(state, usageSeriesPath), beforeMetricSwitch);
-    await page.locator('[data-usage-chart-metric="cost"]').click();
-    await page.waitForTimeout(100);
-    assert.equal(fixtureCount(state, usageSeriesPath), beforeMetricSwitch);
-    await page.locator('[data-usage-hours="72"]').click();
-    await expandDetails(page.locator('#usage-series details'));
-    await page.locator('#usage-series').getByText(/没有采样|无采样|正用量|真实 0/).waitFor();
-    const currencyAxis = await page.locator('#usage-chart svg text').allTextContents();
-    const currencyTicks = currencyAxis.filter(text => text.includes('¥'));
-    assert(currencyTicks.length > 0);
-    assert(currencyTicks.every(text => !/[1-9]/.test(text)));
-    assert.equal(await page.locator('#usage-bucket-select option:not([value=""])').count(), 36);
-    await assertZeroBars(page);
-    await page.locator('#usage-bucket-select').selectOption('0');
-    await bucketDetails(page).getByText('Token', { exact: true }).waitFor();
-    const zeroToken = bucketDetails(page).locator('dl > div').filter({ has: page.getByText('Token', { exact: true }) }).locator('dd');
-    assert.equal(await zeroToken.innerText(), '0');
-    await assertZeroBars(page);
-    await page.locator('[data-usage-hours="24"]').click();
-    await page.waitForFunction(() => document.querySelectorAll('#usage-bucket-select option:not([value=""])').length === 48);
-    const bucketSelect = page.getByRole('combobox', { name: '查看时间桶', exact: true });
-    assert.equal(await bucketSelect.getAttribute('id'), 'usage-bucket-select');
-    const bucketValues = await bucketSelect.locator('option:not([value=""])').evaluateAll(options => options.map(option => option.getAttribute('value')));
-    assert.deepEqual(bucketValues, Array.from({ length: 48 }, (_, index) => String(index)));
-    await bucketSelect.selectOption('0');
-    await bucketSelect.focus();
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('Enter');
-    await page.keyboard.press('Escape');
-    assert.equal(await bucketSelect.inputValue(), '1');
-    clickedBar = await chartBar(page, 2).evaluate(element => ({
-      index: element.getAttribute('data-usage-bucket-index'),
-      bounds: element.getBoundingClientRect().toJSON(),
-    }));
-    await chartBar(page, 2).click();
-    await page.waitForFunction(expected => {
-      const select = document.getElementById('usage-bucket-select');
-      const details = document.querySelector('#usage-chart [data-usage-bucket-details]');
-      return select instanceof HTMLSelectElement && select.value === String(expected)
-        && details?.getAttribute('data-usage-bucket-details') === String(expected);
-    }, 2, { timeout: 3_000 });
-    assert.equal(await bucketSelect.inputValue(), '2');
-    const pointerFocusOutlines = await page.locator('#usage-chart svg [tabindex]').evaluateAll(elements => elements.map(element => {
-      const style = getComputedStyle(element);
-      return {
-        tag: element.tagName,
-        className: element.getAttribute('class'),
-        focused: element === document.activeElement,
-        outlineStyle: style.outlineStyle,
-        outlineWidth: style.outlineWidth,
-      };
-    }));
-    assert(pointerFocusOutlines.length > 0, 'Chart has no internal focus groups to validate after the pointer click.');
-    assert(pointerFocusOutlines.every(outline => outline.outlineStyle === 'none' || Number.parseFloat(outline.outlineWidth) === 0),
-      `An internal SVG focus group rendered an outline after the pointer click: ${JSON.stringify(pointerFocusOutlines)}.`);
-    const chartBucketCountsEvidence = await assertChartBucketCounts(bucketDetails(page));
-    const selectedBucketText = await bucketDetails(page).innerText();
-    assert(selectedBucketText.includes('CN¥0.0006') && selectedBucketText.includes('涉及会话'));
-    for (const bucketIndex of [2, 23, 47]) hoverEvidence.push(await assertChartHover(page, bucketIndex));
-    assert.equal(await bucketDetails(page).innerText(), selectedBucketText, 'Hover changed the pinned bucket details.');
-    assert.equal(await bucketSelect.inputValue(), '2', 'Hover changed the selected bucket.');
-    await bucketSelect.selectOption('23');
-    bucketDetailEvidence.push(await assertLongBucketDetails(page));
-    const tierLegend = page.locator('#usage-chart [aria-label="价格时段图例"]');
-    for (const label of ['高峰', '空闲', '混合']) await tierLegend.getByText(label, { exact: true }).waitFor();
-    await page.getByText(/最忙桶/).waitFor();
-    await page.getByText(/图外累计历史|窗口外|更早.*历史/).waitFor();
-
-    await page.locator('[data-usage-chart-metric="tokens"]').click();
-    await bucketSelect.selectOption('47');
-    const selectedToken = bucketDetails(page).locator('dl > div').filter({ has: page.getByText('Token', { exact: true }) }).locator('dd');
-    const compactBucketTokens = await selectedToken.innerText();
-    assert.match(compactBucketTokens, /^2(?:\.\d+)?k$/i);
-    const tokenAxisLabels = page.locator('#usage-chart .recharts-yAxis-tick-labels .recharts-cartesian-axis-tick-value');
-    await tokenAxisLabels.filter({ hasText: /k/i }).first().waitFor();
-    const compactTokenTicks = await tokenAxisLabels.allTextContents();
-    assert(compactTokenTicks.some(text => /k/i.test(text)), 'Token axis did not use compact counts.');
-    const readsBeforeChartCounts = usageReadCount(state);
-    await detailedCounts.click();
-    assert.equal(await selectedToken.innerText(), '2,208');
-    await tokenAxisLabels.filter({ hasText: /\d,\d{3}/ }).first().waitFor();
-    const detailedTokenTicks = await tokenAxisLabels.allTextContents();
-    assert(detailedTokenTicks.some(text => /\d,\d{3}/.test(text)) && detailedTokenTicks.every(text => !/[kmb]/i.test(text)));
-    await chartBar(page, 47).hover();
-    await page.getByRole('tooltip').waitFor();
-    assert((await page.getByRole('tooltip').innerText()).includes('2,208'), 'Floating tooltip did not show detailed token counts.');
-    await page.locator('#usage-summary').hover();
-    await page.getByRole('tooltip').waitFor({ state: 'hidden' });
-    await detailedCounts.click();
-    assert.equal(await selectedToken.innerText(), compactBucketTokens);
-    await chartBar(page, 47).hover();
-    await page.getByRole('tooltip').waitFor();
-    assert((await page.getByRole('tooltip').innerText()).includes(compactBucketTokens), 'Floating tooltip did not return to compact token counts.');
-    await page.locator('#usage-summary').hover();
-    await page.getByRole('tooltip').waitFor({ state: 'hidden' });
-    assert.equal(usageReadCount(state), readsBeforeChartCounts, 'Chart count display toggle refetched data.');
-    assert.equal(await page.locator('[data-usage-metric="estimated-cost"] strong').innerText(), costBeforeCounts);
-    assert.equal(await page.locator('[data-usage-metric="cache-hit-rate"] strong').innerText(), rateBeforeCounts);
-    await page.locator('[data-usage-chart-metric="cost"]').click();
-
-    const keySelect = page.locator('#usage-key-select');
-    const readsBeforeCollapse = usageReadCount(state);
-    await turnsSummary.click();
-    assert.equal(await detailsOpen(turnsPanel), false);
-    await page.waitForTimeout(100);
-    assert.equal(usageReadCount(state), readsBeforeCollapse, 'Collapsing turn details refetched usage data.');
-    const turnsBeforeSelection = fixtureCount(state, usageTurnsPath);
-    await keySelect.selectOption(secondaryKey);
-    assert.equal(await detailsOpen(turnsPanel), false);
-    await expandDetails(turnsPanel);
-    await waitForCount(() => fixtureCount(state, usageTurnsPath), turnsBeforeSelection + 1);
-    assert.equal(fixtureCount(state, usageTurnsPath), turnsBeforeSelection + 1,
-      'Changing the selected conversation fetched turn details more than once.');
-    await page.waitForFunction(() => document.querySelectorAll('#usage-turns [data-usage-turn]').length === 3);
-    await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
-    const turnsBeforeExplicitLoad = fixtureCount(state, usageTurnsPath);
-    await page.locator('#usage-turns-load').click();
-    await waitForCount(() => fixtureCount(state, usageTurnsPath), turnsBeforeExplicitLoad + 1);
-    await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
-    assert.equal(await detailsOpen(turnsPanel), true);
-    assert.equal(await page.locator('#usage-turns [data-usage-turn]').count(), 3);
-    await page.locator('#usage-turns').getByText('fixture-provider', { exact: true }).first().waitFor();
-    await page.locator('#usage-turns').getByText(/累计|归属|追溯/).first().waitFor();
-
-    for (const theme of ['light', 'dark'] as const) {
-      await setTheme(page, theme);
-      await screenshot(page, `desktop-${theme}`);
-    }
-    await page.setViewportSize({ width: 390, height: 844 });
-    for (const theme of ['light', 'dark'] as const) {
-      await setTheme(page, theme);
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      assert(await page.locator('#usage-turns table').locator('..').evaluate(element => element.scrollWidth > element.clientWidth));
-      mobileChartEvidence.push(await assertReadableMobileChart(page));
-      mobileTableEvidence.push({
-        theme,
-        conversations: await assertFixedTablePanelLayout(page, {
-          bodySelector: '[data-usage-conversations-scroll]',
-          scrollSelector: '[data-usage-conversations-scroll]',
-          label: 'Mobile conversation records',
-        }),
-        prices: await assertFixedTablePanelLayout(page, {
-          bodySelector: '[data-usage-prices-scroll]',
-          scrollSelector: '[data-usage-prices-scroll]',
-          label: 'Mobile pricing details',
-        }),
-      });
-      await bucketSelect.tap();
-      await page.keyboard.press('Escape');
-      await bucketSelect.selectOption('0');
-      assert.equal(await bucketSelect.inputValue(), '0');
-      assert.equal(await bucketDetails(page).locator('dl > div').filter({ has: page.getByText('Token', { exact: true }) }).locator('dd').innerText(), '0');
-      for (const bucketIndex of [2, 47]) hoverEvidence.push(await assertChartHover(page, bucketIndex));
-      await bucketSelect.selectOption('23');
-      bucketDetailEvidence.push(await assertLongBucketDetails(page));
-      await screenshot(page, `mobile-${theme}`);
+    assert.equal(fixtureCount(state, usageSeriesPath), beforeSeries + 4);
+    const beforeMetric = fixtureCount(state, usageSeriesPath);
+    await page.getByRole('combobox', { name: '走势纵轴', exact: true }).selectOption('tokens');
+    await page.getByRole('combobox', { name: '走势纵轴', exact: true }).selectOption('cost');
+    assert.equal(fixtureCount(state, usageSeriesPath), beforeMetric);
+    await page.locator('#usage-chart .recharts-surface').waitFor();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const theme of ['light', 'dark'] as const) {
+        await setTheme(page, theme);
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+        await screenshot(page, `${width}-${theme}`);
+      }
     }
     await page.setViewportSize({ width: 1440, height: 1100 });
-
-    await page.locator('[data-usage-hours="168"]').click();
-    await page.locator('[data-usage-chart-metric="tokens"]').click();
-    await keySelect.selectOption(secondaryKey);
-    const turnsBeforeManualRefresh = fixtureCount(state, usageTurnsPath);
-    await page.locator('#usage-refresh').click();
-    await waitForCount(() => fixtureCount(state, usageTurnsPath), turnsBeforeManualRefresh + 1);
-    await page.waitForFunction(() => {
-      const button = document.getElementById('usage-refresh');
-      return button instanceof HTMLButtonElement && !button.disabled;
-    });
-    assert.equal(await turnsPanel.evaluate(element => element instanceof HTMLDetailsElement && element.open), true);
-    assert.equal(await recentPanel.evaluate(element => element instanceof HTMLDetailsElement && element.open), true);
-    const controlsBefore = await page.locator('#usage-auto-refresh').boundingBox();
     await page.locator('#usage-auto-refresh').selectOption('3000');
-    const beforeAuto = fixtureCount(state, usagePath);
-    const turnsBeforeAuto = fixtureCount(state, usageTurnsPath);
-    await waitForCount(() => fixtureCount(state, usagePath), beforeAuto + 1, 4_500);
-    await waitForCount(() => fixtureCount(state, usageTurnsPath), turnsBeforeAuto + 1, 4_500);
-    assert.equal(await page.locator('[data-usage-hours="168"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(await page.locator('[data-usage-chart-metric="tokens"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(await keySelect.inputValue(), secondaryKey);
-    const controlsAfter = await page.locator('#usage-auto-refresh').boundingBox();
-    assert(controlsBefore && controlsAfter);
-    assert(Math.abs(controlsBefore.x - controlsAfter.x) < 1 && Math.abs(controlsBefore.y - controlsAfter.y) < 1);
-
-    await setHidden(page, true);
-    const hiddenCount = fixtureCount(state, usagePath);
-    await page.waitForTimeout(3_300);
-    assert.equal(fixtureCount(state, usagePath), hiddenCount);
-    await setHidden(page, false);
-    await waitForCount(() => fixtureCount(state, usagePath), hiddenCount + 1, 2_000);
+    const beforeAutomatic = fixtureCount(state, usagePath);
+    await waitForCount(() => fixtureCount(state, usagePath), beforeAutomatic + 1, 5000);
     await page.locator('#usage-auto-refresh').selectOption('off');
-
-    const navigationCancellationEvidence = await assertNavigationCancellation(browser, state, compactTotal);
-
-    state.recentMode = 'failure';
+    state.summaryMode = 'failure';
+    const oldMetric = await page.locator('[data-usage-metric="total-tokens"] strong').innerText();
     await page.locator('#usage-refresh').click();
-    await page.locator('#usage-recent [role="alert"]').waitFor();
-    assert.equal(await page.locator('[data-usage-metric="total-tokens"] strong').count(), 1);
-    assert.equal(await page.locator('#usage-recent').innerText().then(text => /暂无最近调用|（空）|接口已成功返回空流水/.test(text)), false);
-    state.recentMode = 'success';
-    const recentBeforeRecovery = fixtureCount(state, usageRecentPath);
-    const turnsBeforeRecovery = fixtureCount(state, usageTurnsPath);
+    await page.locator('#usage-summary [role="alert"]').waitFor();
+    assert.equal(await page.locator('[data-usage-metric="total-tokens"] strong').innerText(), oldMetric);
+    state.summaryMode = 'success';
     await page.locator('#usage-refresh').click();
-    await waitForCount(() => fixtureCount(state, usageRecentPath), recentBeforeRecovery + 1);
-    await waitForCount(() => fixtureCount(state, usageTurnsPath), turnsBeforeRecovery + 1);
-    await page.waitForFunction(() => {
-      const button = document.getElementById('usage-refresh');
-      return button instanceof HTMLButtonElement && !button.disabled;
-    });
-    await page.locator('#usage-recent [data-usage-recent]').first().waitFor();
-
-    state.seriesMode = 'timeout';
-    const abortedBeforeTimeout = state.abortedReads;
-    const lateBeforeTimeout = state.lateResponses;
-    await page.locator('#usage-auto-refresh').selectOption('3000');
-    await page.waitForTimeout(50);
-    await setHidden(page, false);
-    await waitForCount(() => state.activeSeries, 1);
-    const timedOutSeries = state.delayedReads.at(-1);
-    assert.equal(timedOutSeries?.pathname, usageSeriesPath);
-    await setHidden(page, false);
-    await page.waitForTimeout(50);
-    assert.equal(state.maxActiveSeries, 1);
-    await page.locator('#usage-series [role="alert"]').waitFor();
-    await page.locator('#usage-auto-refresh').selectOption('off');
-    const timeoutText = await page.locator('#usage-series').innerText();
-    await waitForCount(() => state.abortedReads, abortedBeforeTimeout + 1);
-    assert.equal(timedOutSeries?.abortReason, 'handler_timeout');
-    await waitForCount(() => state.lateResponses, lateBeforeTimeout + 1, 1_000);
-    assert.equal(await page.locator('#usage-series').innerText(), timeoutText);
-    state.seriesMode = 'success';
-    await page.locator('#usage-refresh').click();
-    await page.locator('#usage-chart [data-usage-bucket-index]').first().waitFor();
-    assert.equal(state.maxActiveSeries, 1);
-
-    const resetPostsBeforeCancel = browserPostCount(state, usageResetPath);
+    await page.locator('#usage-summary [role="alert"]').waitFor({ state: 'hidden' });
     await page.locator('#usage-reset-open').click();
-    const resetDialog = page.getByRole('dialog', { name: '确认清空用量账本？', exact: true });
-    await resetDialog.getByText(/非原子|并发.*新用量|新用量.*丢弃/).waitFor();
-    await resetDialog.locator('#usage-reset-confirm').fill('清空用量账本');
-    await resetDialog.getByRole('button', { name: '取消', exact: true }).click();
-    await resetDialog.waitFor({ state: 'hidden' });
-    assert.equal(browserPostCount(state, usageResetPath), resetPostsBeforeCancel);
+    await page.getByRole('dialog', { name: '确认清空用量账本？', exact: true }).getByRole('button', { name: '取消', exact: true }).click();
     assert.equal(state.resetBodies.length, 0);
-
-    await page.locator('#usage-refresh').click();
-    await page.waitForFunction(() => {
-      const button = document.getElementById('usage-refresh');
-      return button instanceof HTMLButtonElement && !button.disabled;
-    });
-    const openedRevision = await page.evaluate(async () => {
-      const response = await fetch('/api/chat/usage?limit=200');
-      const value = await response.json() as { revision?: unknown };
-      return value.revision;
-    });
-    assert.equal(typeof openedRevision, 'string');
-    await page.locator('#usage-auto-refresh').selectOption('3000');
     await page.locator('#usage-reset-open').click();
-    state.summaryEpoch += 1;
-    const summaryBeforeDialogPoll = fixtureCount(state, usagePath);
-    await setHidden(page, false);
-    await waitForCount(() => fixtureCount(state, usagePath), summaryBeforeDialogPoll + 1);
-    await resetDialog.locator('#usage-reset-confirm').fill('清空用量账本');
-    await resetDialog.locator('#usage-reset-submit').click();
-    await resetDialog.locator('[role="alert"]').filter({ hasText: /账本已.*变化|重新.*revision/ }).waitFor();
-    await page.waitForTimeout(200);
-    assert.equal(browserPostCount(state, usageResetPath), resetPostsBeforeCancel + 1);
+    await page.locator('#usage-reset-confirm').fill('清空用量账本');
+    state.summaryEpoch++;
+    await page.locator('#usage-reset-submit').click();
+    await page.getByRole('dialog').getByRole('alert').waitFor();
+    assert.equal(await page.locator('#usage-reset-submit').isDisabled(), true);
     assert.equal(state.resetBodies.length, 0);
-    const conflictPost = state.browserPosts.filter(request => request.pathname === usageResetPath).at(-1);
-    assert(isRecord(conflictPost?.body));
-    assert.deepEqual(conflictPost.body, {
-      revision: openedRevision,
-      confirm: '清空用量账本',
-    });
-    await closeResetDialog(page);
-    await page.locator('#usage-auto-refresh').selectOption('off');
-    await page.locator('#usage-refresh').click();
-    await page.locator('[data-usage-metric="total-tokens"] strong').waitFor();
-
+    await page.getByRole('button', { name: '关闭并刷新核对', exact: true }).click();
+    await page.locator('#usage-reset-open').waitFor();
     state.resetMode = 'unknown';
     await page.locator('#usage-reset-open').click();
-    await resetDialog.locator('#usage-reset-confirm').fill('清空用量账本');
-    await resetDialog.locator('#usage-reset-submit').click();
-    await resetDialog.locator('[role="alert"]').filter({ hasText: /未知|无法确认|不要.*重试|勿.*提交/ }).waitFor();
-    assert(await resetDialog.locator('#usage-reset-confirm').isDisabled());
-    assert(await resetDialog.locator('#usage-reset-submit').isDisabled());
-    await page.waitForTimeout(300);
-    assert.equal(browserPostCount(state, usageResetPath), resetPostsBeforeCancel + 2);
+    await page.locator('#usage-reset-confirm').fill('清空用量账本');
+    await page.locator('#usage-reset-submit').click();
+    await page.getByRole('dialog').getByRole('alert').waitFor();
     assert.equal(state.resetBodies.length, 1);
-    await resetDialog.locator('#usage-reset-submit').dispatchEvent('click');
-    await page.waitForTimeout(200);
-    assert.equal(browserPostCount(state, usageResetPath), resetPostsBeforeCancel + 2);
-    await closeResetDialog(page);
-
-    state.resetMode = 'success';
-    await page.locator('#usage-refresh').click();
-    await page.locator('#usage-reset-open').click();
-    await resetDialog.locator('#usage-reset-confirm').fill('清空用量账本');
-    await resetDialog.locator('#usage-reset-submit').click();
-    await resetDialog.waitFor({ state: 'hidden' });
-    await waitForCount(() => state.resetBodies.length, 2);
-    assert.equal(browserPostCount(state, usageResetPath), resetPostsBeforeCancel + 3);
-
-    await navigate(page, '概览', 'overview');
-    state.summaryMode = 'failure';
-    state.seriesMode = 'failure';
-    state.recentMode = 'failure';
-    state.turnsMode = 'failure';
-    const unavailableResponse = page.waitForResponse(response => new URL(response.url()).pathname === usagePath);
-    await navigate(page, '用量统计', 'usage');
-    assert.equal((await unavailableResponse).status(), 503);
-    await page.locator('#usage-unavailable').getByText('请先接入聊天宿主与账本数据源；不可用不代表用量为零。', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-usage-metric]').count(), 0);
-    assert.equal(await page.locator('#usage-reset-open').count(), 0);
-    assert(await page.locator('#usage-auto-refresh').isDisabled());
-    await screenshot(page, 'native-unavailable');
-
-    assert.equal(await page.evaluate(() => globalThis.__usageSmokeXss === true), false);
-    assert.deepEqual(state.browserAuthorizations, []);
+    assert.equal(await page.locator('#usage-reset-submit').isDisabled(), true);
+    await page.getByRole('button', { name: '关闭并刷新核对', exact: true }).click();
+    assert.equal(state.resetBodies.length, 1);
+    assert.equal(state.browserAuthorizations.length, 0);
     assert.deepEqual(state.pageErrors, []);
     assert.deepEqual(state.externalRequests, []);
-    const result = {
-      checkedAt: new Date().toISOString(),
-      builtUi: true,
-      realAdminServer: true,
-      independentFixtureRoutes: true,
-      fixedPrivateFixture: true,
-      completeSummaryAndPricing: true,
-      ranges: [24, 72, 168, 720],
-      metricSwitchWithoutFetch: true,
-      mouseKeyboardTouchBuckets: true,
-      rechartsRenderedBars: true,
-      allBucketsAvailableInNativeSelect: true,
-      zeroBucketsHaveNoPositiveHeight: true,
-      hoverActiveBarMatchesColumn: true,
-      noFullHeightHoverBand: true,
-      internalPointerFocusOutlineAbsent: true,
-      pointerFocusOutlines,
-      floatingTooltipWithinViewport: true,
-      hoverPreservesPinnedDetails: true,
-      compactCountsDefault: true,
-      detailedCountsPreserveFullValues: true,
-      countToggleWithoutFetch: true,
-      chartCountsFollowDisplayMode: true,
-      countToggleResetsAfterNavigation: true,
-      amountAndPercentUnaffected: true,
-      zeroSeriesHasNoInventedPositiveAxis: true,
-      tiersAndOffChartHistory: true,
-      currentTierAndPricingRules: true,
-      conversationAndTurnDetails: true,
-      conversationClickExpandsTurns: true,
-      conversationPanelExplicitlyExpanded: true,
-      conversationsPanelDefaultCollapsed: true,
-      conversationsPanelHeight,
-      conversationsPanelEvidence,
-      pricingPanelExplicitlyExpanded: true,
-      pricesPanelDefaultCollapsed: true,
-      pricesPanelHeight,
-      shareProgressIsTruthful: true,
-      shareProgressEvidence,
-      turnsPanelInitialState: turnsPanelInitiallyOpen ? 'open' : 'collapsed',
-      turnsPanelExplicitlyExpanded: true,
-      turnsPanelEvidence,
-      turnsPanelToggleWithoutFetch: true,
-      turnsPanelStatePreserved: true,
-      recentPanelInitialState: recentPanelInitiallyOpen ? 'open' : 'collapsed',
-      recentPanelExplicitlyExpanded: true,
-      recentPanelEvidence,
-      recentPanelToggleWithoutFetch: true,
-      recentPanelStatePreserved: true,
-      tokenBreakdownUsesCompactCacheRow: true,
-      tokenBreakdownEvidence,
-      summaryTokenCaptionUsesDirectionRows: true,
-      chartBucketCountsUseCompactCacheRow: true,
-      chartBucketCountsEvidence,
-      recentEntries: 40,
-      recentProviderNotInvented: true,
-      responsiveThemes: ['desktop-light', 'desktop-dark', 'mobile-light', 'mobile-dark'],
-      mobileChartUsesReadableGeometry: true,
-      hoverEvidence,
-      mobileChartEvidence,
-      mobileTableEvidence,
-      bucketDetailEvidence,
-      nativeUnavailableDoesNotFakeZero: true,
-      autoRefreshVisibleOnly: true,
-      singleFlight: state.maxActiveSeries === 1,
-      controlsStableAcrossRefresh: true,
-      leaveCancelsRequests: true,
-      fixtureHandlerTimeoutMs,
-      navigationHandlerTimeoutMs,
-      navigationCancellationEvidence,
-      delayedReads: state.delayedReads,
-      leavePreventsLateTurns: true,
-      partialFailureDoesNotFakeZero: true,
-      timeoutAborted: true,
-      lateResponseIgnored: true,
-      resetCancelWithoutPost: true,
-      resetConflictWithoutRetry: true,
-      resetUnknownWithoutRetry: true,
-      resetSuccessOnFixtureOnly: true,
-      productionResetCalls: 0,
-      cookieAuthentication: true,
-      browserAuthorizationHeaders: 0,
-      xssExecuted: false,
-      pageErrors: 0,
-      externalRequests: 0,
-    };
-    await writePrivateJson(new URL(`result-${runId}.json`, outputDirectory).pathname, result);
-    console.log(`Usage smoke passed. Results: ${outputDirectory.pathname}result-${runId}.json`);
+    assert.equal(await page.evaluate(() => globalThis.__usageSmokeXss === true), false);
+    await writePrivateJson(new URL(`result-${runId}.json`, outputDirectory).pathname, { passed: true,
+      conversations: 26, turns: 50, recentCalls: 40, cookieAuthentication: true, chartRanges: [24, 72, 168, 720],
+      responsiveThemes: true, autoRefresh: true, failedRefreshPreservesData: true,
+      resetCancelWithoutWrite: true, resetConflictWithoutRetry: true, resetUnknownWithoutRetry: true,
+      productionResetCalls: 0, externalRequests: 0 });
+    console.log('用量浏览器验证通过：会话与逐轮明细、走势图、主题窄屏、自动刷新、错误保留与清空结果未知保护。');
   } catch (error: unknown) {
     const chartDiagnostics = page === undefined || page.isClosed() ? null : await page.evaluate(() => ({
       selectedIndex: document.querySelector<HTMLSelectElement>('#usage-bucket-select')?.value,

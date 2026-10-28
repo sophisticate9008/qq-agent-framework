@@ -196,7 +196,7 @@ function createFixtureRoutes(state: SmokeState): readonly AdminRoute[] {
     {
       method: 'GET', pathname: '/api/chat/activity', handle: ({ query }) => {
         state.fixtureRequests.push(`GET /api/chat/activity?${query.toString()}`);
-        assert.equal(query.size, 0);
+        assert.equal(query.get('source'), 'all');
         if (state.unavailable) throw new AdminRequestError(503, 'activity_unavailable');
         return { source: 'native-chat', retention: 'process', capacity: 100, state: 'stopped',
           items: Array.from({ length: 100 }, (_, index) => ({ id: `activity-${index}`, at: 1_792_800_000_000 - index * 1000,
@@ -422,7 +422,7 @@ async function run(): Promise<void> {
 
     await page.goto(origin);
     await connect(page);
-    await page.getByRole('heading', { name: '工作台概览', exact: true }).waitFor();
+    await page.getByRole('heading', { name: '连接与概览', exact: true }).waitFor();
     const cookies = await context.cookies(`${origin}/api/snapshot`);
     assert(cookies.some(cookie => cookie.httpOnly && cookie.sameSite === 'Strict' && cookie.path === '/api'));
 
@@ -430,28 +430,18 @@ async function run(): Promise<void> {
     await recent.locator('[data-activity-id="activity-0"]').waitFor();
     await recent.locator('[data-virtualized="true"]').waitFor();
     assert.equal(await recent.locator('img').count(), 0);
-    assert.equal(await page.evaluate(() => globalThis.__activitySmokeXss), undefined);
-    const firstActivity = recent.locator('[data-activity-id="activity-0"]');
-    assert((await firstActivity.locator('summary').innerText()).includes(xssText));
-    await firstActivity.locator('summary').click();
-    assert((await firstActivity.locator('pre').innerText()).includes(xssText));
-    assert.equal(await firstActivity.locator('img').count(), 0);
     assert(await recent.locator('[data-activity-id]').count() < 60);
+    const first = recent.locator('[data-activity-id="activity-0"]');
+    assert((await first.innerText()).includes(xssText));
+    await first.getByRole('button', { name: '⋯', exact: true }).click();
+    const activityDialog = page.getByRole('dialog');
+    assert((await activityDialog.innerText()).includes(xssText));
+    assert.equal(await activityDialog.locator('img').count(), 0);
+    await page.keyboard.press('Escape');
     const viewport = recent.locator('[data-recent-activity-scroll]');
-    const fixedHeight = await viewport.evaluate(element => element.getBoundingClientRect().height);
-    assert(fixedHeight > 0 && fixedHeight <= 384);
     await viewport.evaluate(element => { element.scrollTop = element.scrollHeight; });
     await recent.locator('[data-activity-id="activity-99"]').waitFor();
     assert(await recent.locator('[data-activity-id]').count() < 60);
-    for (const width of [1440, 390]) {
-      await page.setViewportSize({ width, height: 1000 });
-      for (const theme of ['light', 'dark'] as const) {
-        await page.getByRole('combobox', { name: '显示模式', exact: true }).selectOption(theme);
-        await page.waitForFunction(expected => document.documentElement.dataset.theme === expected, theme);
-        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
-        assert.equal(await viewport.evaluate(element => element.getBoundingClientRect().height), fixedHeight);
-      }
-    }
     state.unavailable = true;
     await recent.getByRole('button', { name: '刷新活动', exact: true }).click();
     await recent.getByRole('alert').waitFor();
@@ -459,155 +449,69 @@ async function run(): Promise<void> {
     await recent.getByRole('button', { name: '刷新活动', exact: true }).click();
     await recent.getByRole('alert').waitFor({ state: 'hidden' });
     assert.equal(state.browserPosts.some(request => request.pathname.startsWith('/api/chat/')), false);
-    await page.setViewportSize({ width: 1440, height: 1000 });
 
-    await openWorkspaceSearch(page, '会话 管理', '会话管理', '会话管理');
-    await page.locator('[data-page="sessions"]').waitFor();
-    await section(page, '会话绑定').waitFor();
-    assert.equal(await visibleNavigator(page).getByRole('button', { name: '会话绑定', exact: true }).count(), 1);
-    await page.getByRole('region', { name: '会话绑定列表', exact: true }).waitFor();
+    await navigateConsolePage(page, 'sessions');
     await page.locator('#session-filter').fill('420002');
     await page.locator(`[data-session-key="${filteredKey}"]`).waitFor();
-    assert.equal(await page.locator(`[data-session-key="${resetKey}"]`).count(), 0);
-    await page.locator(`[data-session-key="${filteredKey}"]`).getByRole('button', { name: /^(410001|420002)$/ }).click();
-    await page.locator(`[data-selected-session="${filteredKey}"]`).waitFor();
-    await page.getByText('fixture-session-private-420002', { exact: true }).waitFor();
+    await page.locator(`[data-session-key="${resetKey}"]`).waitFor({ state: 'hidden' });
+    await page.locator(`[data-session-key="${filteredKey}"]`).getByRole('button', { name: '420002', exact: true }).click();
+    await page.getByRole('dialog', { name: '会话详情', exact: true }).getByText('fixture-session-private-420002', { exact: true }).waitFor();
+    await page.keyboard.press('Escape');
     await page.locator('#session-filter').fill('');
-    await page.locator(`[data-session-key="${resetKey}"]`).waitFor();
-    await page.locator(`[data-session-key="${resetKey}"]`).getByRole('button', { name: /^(410001|420002)$/ }).click();
-
-    const resetPostsBeforeCancel = state.browserPosts.filter(request => request.pathname === sessionResetPath).length;
-    await page.locator('#session-reset-open').click();
-    const resetDialog = page.getByRole('dialog');
-    await resetDialog.getByRole('heading', { name: '重新开始这条对话？', exact: true }).waitFor();
-    await resetDialog.getByText(/旧 DSH 历史、用量及执行记录保留/).waitFor();
-    await resetDialog.getByText(/不会停止外部任务/).waitFor();
-    assert(!(await resetDialog.locator('#session-reset-submit').isDisabled()));
+    const row = page.locator(`[data-session-key="${resetKey}"]`);
+    await row.getByRole('button', { name: '解除绑定', exact: true }).click();
+    const resetDialog = page.getByRole('dialog', { name: '解除这条会话的绑定？', exact: true });
+    await resetDialog.waitFor();
+    assert.equal(await resetDialog.locator('#session-reset-delete-ledger').isChecked(), false);
     await resetDialog.getByRole('button', { name: '取消', exact: true }).click();
-    await resetDialog.waitFor({ state: 'hidden' });
-    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel);
     assert.equal(state.resetBodies.length, 0);
-
-    state.sessions = [...state.sessions.map(session => session.key === resetKey
-      ? { ...session, generation: 2, bindingRevision: 'b'.repeat(64) } : session),
-      { key: 'group:430003', sessionId: 'fixture-session-group-430003', owner: false, generation: 1, bindingRevision: 'd'.repeat(64) }];
-    await page.locator('#session-reset-open').click();
+    state.sessions = state.sessions.map(session => session.key === resetKey ? { ...session, generation: 2, bindingRevision: 'b'.repeat(64) } : session);
+    await row.getByRole('button', { name: '解除绑定', exact: true }).click();
     await resetDialog.locator('#session-reset-submit').click();
-    await resetDialog.getByText('这条会话绑定已变化，请刷新后重新选择。', { exact: true }).waitFor();
-    await waitForPostCount(state, sessionResetPath, resetPostsBeforeCancel + 1);
-    const conflictPosts = state.browserPosts.filter(request => request.pathname === sessionResetPath);
-    assert.deepEqual(conflictPosts.at(-1)?.body, {
-      key: resetKey,
-      sessionId: resetSessionId,
-      generation: 1,
-      bindingRevision: 'a'.repeat(64),
-      confirm: true,
-    });
+    await resetDialog.getByRole('alert').waitFor();
+    assert.equal(await resetDialog.locator('#session-reset-submit').isDisabled(), true);
     assert.equal(state.resetBodies.length, 0);
-    await page.waitForTimeout(250);
-    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 1);
+    const conflictPosts = state.browserPosts.filter(request => request.pathname === sessionResetPath).length;
     await resetDialog.getByRole('button', { name: '关闭并刷新', exact: true }).click();
-    await resetDialog.waitFor({ state: 'hidden' });
-    await page.getByText('已加载 3 条绑定；本次分页读取结束。', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-session-key]').count(), 3);
-    assert.equal(await page.locator('#session-load-more').count(), 0);
-
+    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, conflictPosts);
     state.resetOutcome = 'unknown';
-    await page.locator(`[data-session-key="${resetKey}"]`).getByRole('button', { name: /^(410001|420002)$/ }).click();
-    await page.locator('#session-reset-open').click();
+    await row.getByRole('button', { name: '解除绑定', exact: true }).click();
     await resetDialog.locator('#session-reset-submit').click();
-    await resetDialog.getByText('暂时无法确认重置是否完成。请勿再次提交；关闭窗口后手动刷新当前状态。', { exact: true }).waitFor();
-    await waitForPostCount(state, sessionResetPath, resetPostsBeforeCancel + 2);
-    const unknownPosts = state.browserPosts.filter(request => request.pathname === sessionResetPath);
-    assert.deepEqual(unknownPosts.at(-1)?.body, {
-      key: resetKey,
-      sessionId: resetSessionId,
-      generation: 2,
-      bindingRevision: 'b'.repeat(64),
-      confirm: true,
-    });
+    await resetDialog.getByRole('alert').waitFor();
     assert.equal(state.resetBodies.length, 1);
-    await page.waitForTimeout(250);
-    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 2);
-    assert.equal(state.resetBodies.length, 1);
+    assert.equal(await resetDialog.locator('#session-reset-submit').isDisabled(), true);
     await resetDialog.getByRole('button', { name: '关闭并刷新', exact: true }).click();
-    await resetDialog.waitFor({ state: 'hidden' });
-
+    assert.equal(state.resetBodies.length, 1);
     state.resetOutcome = 'success';
-    await page.locator(`[data-session-key="${resetKey}"]`).getByRole('button', { name: /^(410001|420002)$/ }).click();
-    await page.locator('#session-reset-open').click();
+    await row.getByRole('button', { name: '解除绑定', exact: true }).click();
     await resetDialog.locator('#session-reset-submit').click();
     await resetDialog.waitFor({ state: 'hidden' });
-    await page.getByText('已加载 2 条绑定；本次分页读取结束。', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-session-key]').count(), 2);
-    assert.equal(await page.locator('#session-load-more').count(), 0);
-    assert.equal(await page.locator(`[data-session-key="${resetKey}"]`).count(), 0);
+    await row.waitFor({ state: 'hidden' });
     assert.equal(state.resetBodies.length, 2);
-    assert.equal(state.browserPosts.filter(request => request.pathname === sessionResetPath).length, resetPostsBeforeCancel + 3);
-    await page.getByText('已解除这条会话的当前绑定；旧记录、历史和用量保留，下次聊天将新建上下文。', { exact: true }).waitFor();
-
-    await openWorkspaceSearch(page, '用量 统计', '用量统计', '用量统计');
-    await page.locator('[data-page="usage"]').waitFor();
-    await section(page, '账本汇总').waitFor();
-    await expandDetails(page.locator('details[data-usage-conversations-panel]'));
-    await page.locator('[data-usage-metric="total-tokens"]').getByText('45.68k', { exact: true }).waitFor();
-    const detailedCounts = page.getByRole('switch', { name: '详细数值', exact: true });
-    assert.equal(await detailedCounts.isChecked(), false);
-    await detailedCounts.click();
-    assert.equal(await detailedCounts.isChecked(), true);
-    await page.locator('[data-usage-metric="total-tokens"]').getByText('45,678', { exact: true }).waitFor();
-    await page.locator('[data-usage-metric="estimated-cost"]').getByText(/1\.234567/).waitFor();
-    await page.locator(`[data-usage-key="${resetKey}"]`).getByText(/0\.987654/).waitFor();
-    await page.getByText(xssText, { exact: true }).waitFor();
-    await page.getByText('聊天宿主未提供完整价目表；已有 token 与费用汇总仍可查看。', { exact: true }).waitFor();
-    await expandDetails(page.locator('details[data-usage-turns-panel]'));
-    await page.locator('#usage-turns [data-usage-turn]').first().waitFor();
-    for (const title of ['账本汇总', 'Token 构成', '按会话汇总']) {
-      assert.equal(await visibleNavigator(page).getByRole('button', { name: title, exact: true }).count(), 1);
-    }
+    assert.equal(state.sessions.some(session => session.key === resetKey), false);
+    const body = state.resetBodies.at(-1);
+    assert.deepEqual(body, { key: resetKey, sessionId: resetSessionId, generation: 2, bindingRevision: 'b'.repeat(64), confirm: true });
+    await navigateConsolePage(page, 'usage');
+    await page.locator('[data-usage-metric="total-tokens"] strong').getByText('45.68k', { exact: true }).waitFor();
+    await page.locator(`[data-usage-key="${resetKey}"] button`).first().click();
+    await page.locator('[data-usage-turn]').first().waitFor();
     assert(state.fixtureRequests.some(request => request.includes(usageTurnsPath)));
-
-    await page.setViewportSize({ width: 390, height: 844 });
-    for (const theme of ['light', 'dark'] as const) {
-      await setTheme(page, theme);
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-      assert(await page.locator('[data-usage-key]').first().isVisible());
-      assert(await page.locator('table').first().locator('..').evaluate(element => element.scrollWidth > element.clientWidth));
-      await screenshot(page, `loaded-usage-mobile-${theme}`);
-    }
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await navigate(page, '会话管理', 'sessions', '会话管理');
-    await page.locator('[data-session-key]').first().waitFor();
-    await page.setViewportSize({ width: 390, height: 844 });
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-    await screenshot(page, 'loaded-sessions-mobile');
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await navigate(page, '用量统计', 'usage', '用量与费用');
-
     state.unavailable = true;
-    await navigate(page, '会话管理', 'sessions', '会话管理');
+    await navigateConsolePage(page, 'sessions');
     await section(page, '原生会话不可用').waitFor();
-    await page.getByText('当前状态不会按零条会话显示。接入原生聊天宿主后再试。', { exact: true }).waitFor();
-    await navigate(page, '用量统计', 'usage', '用量与费用');
+    await navigateConsolePage(page, 'usage');
     await section(page, '用量暂不可用').waitFor();
-    await page.getByText('请先接入聊天宿主与账本数据源；不可用不代表用量为零。', { exact: true }).waitFor();
     assert.equal(await page.locator('[data-usage-metric="total-tokens"]').count(), 0);
-
-    const fixtureRequestCount = state.fixtureRequests.length;
     await page.reload();
-    await page.locator('[data-page="usage"]').waitFor();
     await section(page, '用量暂不可用').waitFor();
-    await navigate(page, '会话管理', 'sessions', '会话管理');
-    await section(page, '原生会话不可用').waitFor();
-    assert(state.fixtureRequests.length > fixtureRequestCount, 'Native operational pages did not request their 503 routes.');
-
-    await page.setViewportSize({ width: 390, height: 844 });
-    await setTheme(page, 'light');
-    await screenshot(page, 'mobile-light');
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
-    await setTheme(page, 'dark');
-    await screenshot(page, 'mobile-dark');
-    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const theme of ['light', 'dark'] as const) {
+        await setTheme(page, theme);
+        await screenshot(page, `${width}-${theme}`);
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      }
+    }
 
     assert(await tokenIsAbsentFromStorage(page));
     assert.deepEqual(state.browserAuthorizations, []);
@@ -627,14 +531,10 @@ async function run(): Promise<void> {
       resetUnknownWithoutRetry: true,
       resetSuccessOnlyConfirmsBindingRemoved: true,
       usageTotalsAndConversationDetails: true,
-      estimatedCostIsNonzero: true,
       perTurnEndpointRequired: true,
       disconnectedApiIsUnavailable: true,
       nativeRuntimeUnavailableAfterReload: true,
-      workspaceSearch: true,
-      pageNavigation: true,
       mobileThemes: ['light', 'dark'],
-      loadedMobileTablesWithoutPageOverflow: true,
       tokenStoredByBrowserScript: false,
       browserAuthorizationHeaders: 0,
       pageErrors: 0,

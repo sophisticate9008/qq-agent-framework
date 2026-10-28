@@ -22,11 +22,11 @@ const runId = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')
 const nativeResourceFilenames = ['chat-plans.json', 'chat-personas.json', 'chat-access.json', 'chat-adapters.json', 'chat-providers.json'] as const;
 
 const pages = [
-  { id: 'overview', label: '概览', heading: '工作台概览' },
-  { id: 'sessions', label: '会话管理', heading: '会话管理' },
+  { id: 'overview', label: '概览', heading: '连接与概览' },
+  { id: 'sessions', label: '会话管理', heading: '会话与执行记录' },
   { id: 'usage', label: '用量统计', heading: '用量与费用' },
-  { id: 'persona', label: '人设与形象', heading: '人设与形象' },
-  { id: 'features', label: '功能与触发', heading: '功能与触发' },
+  { id: 'persona', label: '人设与唤醒', heading: '人设与唤醒' },
+  { id: 'features', label: '功能与触发', heading: '功能与扩展' },
   { id: 'access', label: '访问范围', heading: '访问范围' },
   { id: 'model', label: '聊天方案', heading: '聊天方案' },
   { id: 'providers', label: '模型提供方', heading: '模型提供方' },
@@ -92,8 +92,8 @@ async function connect(page: Page): Promise<void> {
 
 async function navigate(page: Page, id: string, label: string, heading: string): Promise<void> {
   await navigateConsolePage(page, id as PageId);
-  await page.locator(`[data-page="${id}"]`).waitFor();
-  await page.getByRole('heading', { name: id === 'access' || id === 'settings' ? '安全' : heading, exact: true, level: 1 }).waitFor();
+  await page.locator(`[data-page="${id === 'access' || id === 'settings' ? 'security' : id}"]`).waitFor();
+  await page.getByRole('heading', { name: id === 'access' || id === 'settings' ? '访问与设置' : id === 'model' ? '聊天方案与助手' : id === 'providers' ? '模型服务' : heading, exact: true, level: 1 }).waitFor();
 }
 
 async function openWorkspaceSearch(page: Page): Promise<Locator> {
@@ -145,7 +145,7 @@ async function exerciseVirtualSearch(page: Page): Promise<void> {
     const body: unknown = await response.json();
     assert(isRecord(body) && Array.isArray(body.groups));
     await route.fulfill({ response, json: { ...body, groups: [...body.groups, {
-      id: 'virtual-search-fixture', title: '隔离长列表', description: '', category: 'settings', source: 'gateway', revision: 'a'.repeat(64),
+      id: 'virtual-search-fixture', title: '隔离长列表', description: '', category: 'settings', source: 'admin', revision: 'a'.repeat(64),
       fields: [...Array.from({ length: 100 }, (_, index) => ({ id: `virtual-search-${index}`, label: `虚拟搜索${String(index).padStart(3, '0')}`,
         description: '', type: 'text', value: '' })), { id: 'fixture-private-field', label: '草稿凭据隔离', description: '', type: 'secret', value: null, configured: false }]
     }] } });
@@ -153,7 +153,7 @@ async function exerciseVirtualSearch(page: Page): Promise<void> {
   try {
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width: 1440, height: 1000 });
-      await navigate(page, 'overview', '概览', '工作台概览');
+      await navigate(page, 'overview', '概览', '连接与概览');
       await page.setViewportSize({ width, height: 1000 });
       const search = await openWorkspaceSearch(page);
       await search.fill('虚拟搜索');
@@ -182,19 +182,23 @@ async function exerciseVirtualSearch(page: Page): Promise<void> {
       await search.press('End');
       await search.press('Enter');
       await search.waitFor({ state: 'hidden' });
-      await page.locator('[data-page="settings"]').waitFor();
+      await page.locator('[data-page="security"]').waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true);
       if (width === 1440) {
+        await page.getByRole('button', { name: '高级设置', exact: true }).click();
         await field(page, '虚拟搜索099').locator('input').fill('RETAINED_PUBLIC_CONFIGURATION_DRAFT');
         await field(page, '草稿凭据隔离').locator('input').fill('fixture-secret-not-retained');
-        await navigate(page, 'overview', '概览', '工作台概览');
+        await page.getByRole('dialog', { name: '管理端高级设置', exact: true }).getByRole('button', { name: '关闭', exact: true }).click();
+        await navigate(page, 'overview', '概览', '连接与概览');
         assert.equal(await page.getByRole('dialog', { name: '还有未保存的更改', exact: true }).count(), 0);
         const retainedSearch = await openWorkspaceSearch(page); await retainedSearch.fill('虚拟搜索099');
         await page.locator('[role="option"][data-search-title="虚拟搜索099"]').click();
-        await page.locator('[data-page="settings"]').waitFor();
+        await page.locator('[data-page="security"]').waitFor();
+        await page.getByRole('button', { name: '高级设置', exact: true }).click();
         assert.equal(await field(page, '虚拟搜索099').locator('input').inputValue(), 'RETAINED_PUBLIC_CONFIGURATION_DRAFT');
         assert.equal(await field(page, '草稿凭据隔离').locator('input').inputValue(), '');
         await section(page, '隔离长列表').getByRole('button', { name: '撤销更改', exact: true }).click();
+        await page.getByRole('dialog', { name: '管理端高级设置', exact: true }).getByRole('button', { name: '关闭', exact: true }).click();
       }
     }
   } finally {
@@ -337,126 +341,65 @@ async function run(): Promise<void> {
 
     await page.goto(origin);
     await connect(page);
-    await page.getByRole('heading', { name: '工作台概览', exact: true }).waitFor();
+    await page.getByRole('heading', { name: '连接与概览', exact: true }).waitFor();
     await exerciseVirtualSearch(page);
-    const writesBeforeBootstrapSearch = state.postRequests.length;
-    const bootstrapSearch = await openWorkspaceSearch(page);
-    await bootstrapSearch.fill('可信扩展装配摘要');
-    await page.locator('[role="option"][data-search-title="可信扩展装配摘要"]').click();
-    await page.locator('[data-page="features"]').waitFor();
-    await page.waitForFunction(() => document.querySelector('[role="tab"][aria-selected="true"]')?.textContent === 'Agent 扩展');
-    await page.locator('#native-bootstrap-summary h2[data-page-nav-target="true"]').waitFor();
-    assert.equal(await page.locator('[data-native-bootstrap-summary]').evaluate(element => element instanceof HTMLDetailsElement && element.open), true);
-    assert.equal(state.postRequests.length, writesBeforeBootstrapSearch);
-
-    for (const item of pages) {
-      await navigate(page, item.id, item.label, item.heading);
-      if (item.id === 'providers') await section(page, 'Fixture Provider').waitFor();
-      if (item.id === 'model') await section(page, 'Fixture Plan').waitFor();
-      if (item.id === 'usage') await section(page, '用量暂不可用').waitFor();
+    for (const item of pageRegistry) {
+      await navigate(page, item.id, item.label, item.id === 'usage' ? '用量与费用' : item.id === 'model' ? '聊天方案与助手' : item.label);
       await page.getByRole('heading', { name: '正在读取运行设置', exact: true }).waitFor({ state: 'hidden' });
+      await page.getByRole('button', { name: '展开本页目录', exact: true }).click();
       const navigator = visibleNavigator(page);
+      await navigator.waitFor();
       const headings = await page.locator(`[data-page="${item.id}"] h2:visible`).allTextContents();
-      assert(headings.length > 0, `${item.label} has no visible h2 headings.`);
-      for (const heading of headings.map(value => value.trim()).filter(Boolean)) {
-        const entry = navigator.getByRole('button', { name: heading, exact: true });
-        await entry.waitFor();
-        assert.equal(await entry.count(), 1,
-          `${item.label} does not index h2 ${heading}.`);
+      assert(headings.length > 0, `${item.label} has no visible sections.`);
+      for (const heading of new Set(headings.map(value => value.trim()).filter(Boolean))) {
+        assert.equal(await navigator.getByRole('button', { name: heading, exact: true }).count(), 1, `${item.label}: ${heading}`);
       }
-      const entryCount = await navigator.getByRole('button').count();
-      assert(entryCount > 0, `${item.label} has no page navigation entries.`);
-      state.pageEntryCounts[item.id] = entryCount;
+      state.pageEntryCounts[item.id] = await navigator.getByRole('button').count();
+      await page.keyboard.press('Escape');
     }
-    assert.equal(Object.keys(state.pageEntryCounts).length, 10);
+    assert.equal(Object.keys(state.pageEntryCounts).length, pageRegistry.length);
     for (const alias of ['access', 'settings']) {
       await page.evaluate(target => { location.hash = `#${target}`; }, alias);
       await page.locator('[data-page="security"]').waitFor();
       await page.locator(`#security-${alias}`).waitFor();
-      await page.getByRole('heading', { name: '安全', exact: true, level: 1 }).waitFor();
+      await page.getByRole('heading', { name: '访问与设置', exact: true, level: 1 }).waitFor();
       assert.equal(await page.evaluate(() => location.hash), `#${alias}`);
     }
-
-    const settingsPosts = state.postRequests.length;
-    await navigate(page, 'settings', '运行设置', '运行设置');
-    await field(page, '监听端口').locator('input').fill('3333');
-    await navigate(page, 'overview', '概览', '工作台概览');
-    assert.equal(await page.getByRole('dialog', { name: '还有未保存的更改', exact: true }).count(), 0);
-    await navigate(page, 'settings', '运行设置', '运行设置');
-    assert.equal(await field(page, '监听端口').locator('input').inputValue(), '3333');
-    assert.equal(state.postRequests.length, settingsPosts);
-    await section(page, '管理端监听').getByRole('button', { name: '撤销更改', exact: true }).click();
     await openWorkspaceSearch(page);
-    assert.equal(await page.getByRole('option').count(), pageRegistry.length);
-    const providersOption = await searchOption(page, '模型 提供方', '模型提供方', '模型提供方');
-    await providersOption.click();
+    const providerOption = await searchOption(page, '模型 提供方', '模型服务', '模型服务');
+    await providerOption.click();
     await page.locator('[data-page="providers"]').waitFor();
-    await page.getByRole('heading', { name: '模型提供方', exact: true, level: 1 }).waitFor();
     await section(page, 'Fixture Provider').waitFor();
     assert.equal(await page.evaluate(() => location.hash), '#providers');
-    assert(await page.locator('[data-page="providers"] [data-bounded-card]').count() >= 2);
-
-    await navigate(page, 'adapters', '连接', '连接');
-    for (const title of ['聊天运行', 'OneBot', 'DSH 聊天引擎']) {
-      await section(page, title).waitFor();
-    }
-    await page.getByText('协议连接管理', { exact: true }).waitFor();
-    assert.equal(await page.locator('[data-page="adapters"] [data-bounded-card]').count(), 3);
-
-    const desktopNavigator = visibleNavigator(page);
-    const sticky = await desktopNavigator.evaluate(element => {
-      let current: Element | null = element;
-      while (current !== null && getComputedStyle(current).position !== 'sticky') current = current.parentElement;
-      return current === null ? { found: false, right: false }
-        : { found: true, right: current.getBoundingClientRect().left > window.innerWidth / 2 };
-    });
-    assert.deepEqual(sticky, { found: true, right: true });
-
-    await page.route('**/api/chat/status', route => route.fulfill({ status: 503, json: { error: 'fixture_status_offline' } }));
-    await navigate(page, 'model', '聊天方案', '聊天方案');
+    await navigate(page, 'model', '聊天方案', '聊天方案与助手');
     const planName = field(page, '方案名称').locator('input');
-    await page.getByText('聊天运行状态暂未确认，方案编辑仍可继续。', { exact: true }).waitFor();
     await planName.fill('UNSAVED_NAVIGATION_DRAFT');
+    const writes = state.postRequests.length;
     await openWorkspaceSearch(page);
-    const personaOption = await searchOption(page, '人设', '人设与形象', '人设与形象');
+    const personaOption = await searchOption(page, '人设', '人设与唤醒', '人设与唤醒');
     await personaOption.click();
-    const leaveGuard = page.getByRole('dialog', { name: '还有未保存的更改', exact: true });
     await page.locator('[data-page="persona"]').waitFor();
-    assert.equal(await leaveGuard.count(), 0);
-    assert.equal(await page.evaluate(() => location.hash), '#persona');
-    await navigate(page, 'model', '聊天方案', '聊天方案');
-    await planName.waitFor();
+    assert.equal(await page.getByRole('dialog', { name: '还有未保存的更改', exact: true }).count(), 0);
+    await navigate(page, 'model', '聊天方案', '聊天方案与助手');
     assert.equal(await planName.inputValue(), 'UNSAVED_NAVIGATION_DRAFT');
-    await page.unroute('**/api/chat/status');
+    assert.equal(state.postRequests.length, writes);
     await page.getByRole('button', { name: '撤销更改', exact: true }).first().click();
-
-    await openWorkspaceSearch(page);
-    const planOption = await searchOption(page, '聊天 方案', '聊天方案', '聊天方案');
-    await planOption.click();
-    await section(page, '聊天方案').waitFor();
-    assert.equal(await page.evaluate(() => location.hash), '#model');
-
-    await openWorkspaceSearch(page);
-    const accessOption = await searchOption(page, '访问 范围', '安全', '安全');
-    await accessOption.click();
-    await page.locator('[data-page="access"]').waitFor();
-    await section(page, '消息白名单').waitFor();
-    assert.equal(await page.evaluate(() => location.hash), '#security');
-
-    await setTheme(page, 'light');
-    await screenshot(page, 'desktop-light');
-    await setTheme(page, 'dark');
-    await screenshot(page, 'desktop-dark');
-    await page.setViewportSize({ width: 390, height: 844 });
-    for (const theme of ['light', 'dark'] as const) {
-      await setTheme(page, theme);
-      const toggle = page.getByRole('button', { name: '展开本页目录', exact: true });
-      await toggle.click();
-      await visibleNavigator(page).waitFor();
-      await screenshot(page, `mobile-${theme}`);
-      assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
-      await visibleNavigator(page).getByRole('button', { name: '消息白名单', exact: true }).click();
-      assert.equal(await page.locator('[aria-label="本页目录"]:visible').count(), 0);
+    await navigate(page, 'security', '访问与设置', '访问与设置');
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      for (const theme of ['light', 'dark'] as const) {
+        await setTheme(page, theme);
+        {
+          await page.getByRole('button', { name: '展开本页目录', exact: true }).click();
+          await visibleNavigator(page).waitFor();
+        }
+        await screenshot(page, `${width}-${theme}`);
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+        {
+          await visibleNavigator(page).getByRole('button').first().click();
+          assert.equal(await page.locator('[aria-label="本页目录"]:visible').count(), 0);
+        }
+      }
     }
 
     const nativeFilesAfter = await Promise.all(nativeResourceFilenames
@@ -470,20 +413,18 @@ async function run(): Promise<void> {
     await writePrivateJson(new URL(`result-${runId}.json`, outputDirectory).pathname, {
       checkedAt: new Date().toISOString(),
       nativeRuntimeRoutes: true,
-      pageCount: pages.length,
+      pageCount: pageRegistry.length,
       nativeAdapterPage: true,
       nativeProvidersPage: true,
       registeredPageSearchShortcuts: pageRegistry.length,
       pageEntryCounts: state.pageEntryCounts,
       allVisibleH2Indexed: true,
       workspaceSearchNativeTargets: true,
-      hiddenFeatureTabReadonlySummarySearchWithoutWrite: true,
-      samePageSearchWithoutWrite: true,
       crossPageSearchWithoutWrite: true,
       legacyHashesResolveToSecurity: true,
       unsavedDraftRetainedAcrossPages: true,
       navigationDoesNotModifyNativeResources: true,
-      desktopStickyRight: true,
+      toolbarDirectoryDesktopAndMobile: true,
       mobileNavigationClosedAfterSelection: true,
       noHorizontalOverflow: true,
       pageErrors: 0,

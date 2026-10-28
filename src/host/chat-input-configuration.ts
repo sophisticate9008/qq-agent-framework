@@ -13,7 +13,7 @@ export const CHAT_INPUT_CONFIGURATION_CONTRIBUTION: PackageConfigurationContribu
       { id: 'nicknames', path: ['nicknames'], kind: 'string-list', label: '唤醒昵称', description: '群聊提及这些昵称时参与。', maximumEntries: 16, maximumLength: 128 },
       { id: 'wake-on-mention', path: ['wakeOnMention'], kind: 'boolean', label: '提及唤醒', description: '群聊直接提及机器人时参与。' },
       { id: 'wake-on-reply', path: ['wakeOnReply'], kind: 'boolean', label: '引用唤醒', description: '群聊引用机器人消息时参与。' },
-      { id: 'continuation', path: ['continuationMs'], kind: 'integer', label: '会话续聊时长', description: '唤醒或实际回复后，本会话所有发言者的消息都可进入模型参与判断，模型可静默；普通消息不刷新时长，0表示关闭。', minimum: 0, maximum: 300_000, unit: 'ms' },
+      { id: 'continuation', path: ['continuationMs'], kind: 'integer', label: '会话续聊时长', description: '从最近一次呼叫起，本会话所有发言者的消息都可进入参与判断；普通消息和机器人回复不续长时长，不相关时保持安静，0表示关闭。', minimum: 0, maximum: 300_000, unit: 'ms' },
       { id: 'group', path: ['scopes', 'group'], kind: 'boolean', label: '群聊', description: '在已获准的群聊中使用。' },
       { id: 'private', path: ['scopes', 'private'], kind: 'boolean', label: '私聊', description: '在已获准的私聊中使用。' },
       { id: 'include', path: ['scopes', 'include'], kind: 'string-list', label: '限定会话', description: '留空使用已开启的会话类型，填写后仅在列出的会话生效。', maximumEntries: 256, maximumLength: 40 },

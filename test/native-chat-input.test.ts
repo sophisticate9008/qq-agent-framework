@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { FrameworkEvent } from '../src/core/types.ts';
 import type { HistoryMessage } from '../src/host/history.ts';
 import type { InboundMessage } from '../src/host/types.ts';
-import { nativeParticipation, prepareNativeChatInput } from '../src/host/native-chat-input.ts';
+import { nativeMessageAddressing, nativeParticipation, prepareNativeChatInput } from '../src/host/native-chat-input.ts';
 
 const message: InboundMessage = { id: 'current', conversationId: 'group:456', userId: '123',
   receivedAt: 100, content: [{ type: 'text', text: '继续这个问题' }], directed: false, isSelf: false };
@@ -11,10 +11,11 @@ const history: HistoryMessage[] = [
   { id: 'first', actor: '123', receivedAt: 10, content: [{ type: 'text', text: '上个问题' }] },
   { id: 'answer', actor: 'assistant', receivedAt: 20, content: [{ type: 'text', text: '之前的回答' }] },
 ];
-const options = { names: ['伙伴'], continuationMs: 90 };
+const options = { names: ['伙伴'], continuationMs: 90, activatedAt: 20 };
 
 test('participation distinguishes explicit calls and bounded conversation continuation for all speakers', () => {
-  assert.equal(nativeParticipation(message, [], options, 100), 'ambient');
+  assert.equal(nativeParticipation(message, [], { ...options, activatedAt: undefined }, 100), 'ambient');
+  assert.equal(nativeParticipation(message, history, { ...options, activatedAt: undefined }, 100), 'ambient');
   assert.equal(nativeParticipation(message, [], { ...options, activatedAt: 20 }, 100), 'continuation');
   assert.equal(nativeParticipation({ ...message, content: [{ type: 'mention', userId: '789' }] }, [],
     { ...options, activatedAt: 20 }, 100), 'continuation');
@@ -34,10 +35,38 @@ test('participation distinguishes explicit calls and bounded conversation contin
   assert.equal(nativeParticipation(message, history, { ...options, activatedAt: 95 }, 111), 'continuation');
   assert.equal(nativeParticipation(message, [...history,
     { id: 'new-answer', actor: 'assistant', receivedAt: 120, content: message.content }],
-  { ...options, activatedAt: 20 }, 180), 'continuation');
+  { ...options, activatedAt: 20 }, 180), 'ambient');
   assert.equal(nativeParticipation(message, [...history,
     { id: 'new-question', actor: '456', receivedAt: 105, content: message.content }], options, 111), 'ambient');
   assert.equal(nativeParticipation({ ...message, isSelf: true, directed: true }, history, options, 100), 'ambient');
+});
+
+test('recipient facts distinguish third-party replies, bot replies and unresolved quotes without guessing from proximity', () => {
+  const addressedToOther = [{ type: 'reply' as const, messageId: 'first' }, { type: 'mention' as const, userId: '123' },
+    { type: 'text' as const, text: '是的' }];
+  assert.deepEqual(nativeMessageAddressing(addressedToOther, history, { selfId: '999' }), {
+    target: 'others', mentions: ['123'], replies: [{ id: 'first', actor: '123' }],
+  });
+  assert.equal(nativeMessageAddressing([{ type: 'reply', messageId: 'answer' }], history).target, 'assistant');
+  assert.equal(nativeMessageAddressing([{ type: 'reply', messageId: 'unknown' }], history).target, 'unknown');
+  assert.equal(nativeMessageAddressing([{ type: 'text', text: '换个话题' }], history).target, 'unspecified');
+  assert.equal(nativeMessageAddressing(addressedToOther, history, { addressed: true }).target, 'mixed');
+  assert.equal(nativeMessageAddressing([{ type: 'mention', userId: '999' }], history, { selfId: '999' }).target, 'assistant');
+});
+
+test('group observations retain recipients while leaving unsolicited pictures for selective media reading', () => {
+  const event: FrameworkEvent = { id: 'current', type: 'message.received', conversationId: 'group:456', userId: '456',
+    data: { directed: true, content: [{ type: 'reply', messageId: 'first' }, { type: 'mention', userId: '123' },
+      { type: 'image', assetId: 'media-other' }, { type: 'text', text: '是的' }] } };
+  const entries = [...history, { id: 'current', actor: '456', receivedAt: 100, content: message.content }];
+  const prepare = (participation: 'continuation' | 'direct') => prepareNativeChatInput(event, entries,
+    { owner: null, selfId: '999', partial: false, attachImages: true, participation });
+  const observation = prepare('continuation');
+  assert.equal(observation.some(part => part.type === 'image'), false);
+  const text = observation.filter(part => part.type === 'text').map(part => part.text).join('');
+  assert.match(text, /"currentAddressing":\{"target":"others","mentions":\["123"\],"replies":\[\{"id":"first","actor":"123"\}\]\}/);
+  assert.match(text, /media-other：未读取内容/);
+  assert.equal(prepare('direct').some(part => part.type === 'image'), true);
 });
 
 function prepare(content: InboundMessage['content'], entries = history, budget = 5000, context: {

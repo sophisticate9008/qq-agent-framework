@@ -31,12 +31,30 @@ export function nativeParticipation(message: InboundMessage, history: readonly H
     .some(entry => entry.id === part.messageId && entry.actor === 'assistant'))) return 'reply';
   const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').toLocaleLowerCase();
   if (options.names.some(name => text.includes(name.toLocaleLowerCase()))) return 'nickname';
-  // History contains assistant messages only after confirmed QQ delivery. Neither
-  // ordinary incoming messages nor the start of another continuation renews the window.
-  const lastReply = history.findLast(entry => entry.actor === 'assistant');
-  const activatedAt = Math.max(options.activatedAt ?? -Infinity, lastReply?.receivedAt ?? -Infinity);
+  // Only a real call activates the group. Our own replies cannot keep the entire
+  // group awake indefinitely while people have moved on to another conversation.
+  const activatedAt = options.activatedAt ?? -Infinity;
   if (options.continuationMs > 0 && now >= activatedAt && now - activatedAt <= options.continuationMs) return 'continuation';
   return 'ambient';
+}
+
+interface NativeMessageAddressing {
+  readonly target: 'assistant' | 'others' | 'mixed' | 'unspecified' | 'unknown';
+  readonly mentions: readonly string[];
+  readonly replies: readonly { readonly id: string; readonly actor: string | null }[];
+}
+/** Recipient facts only; neither proximity nor the author of a previous message proves a conversational target. */
+export function nativeMessageAddressing(content: readonly MessageContent[], history: readonly HistoryMessage[], options: {
+  readonly selfId?: string; readonly addressed?: boolean; readonly quotedMessages?: readonly HistoryMessage[];
+} = {}): NativeMessageAddressing {
+  const mentions = [...new Set(content.flatMap(part => part.type === 'mention' ? [part.userId] : []))].slice(0, 32);
+  const replies = content.filter(part => part.type === 'reply').slice(0, 4).map(part => ({ id: part.messageId,
+    actor: history.find(entry => entry.id === part.messageId)?.actor
+      ?? options.quotedMessages?.find(entry => entry.id === part.messageId)?.actor ?? null }));
+  const assistant = options.addressed === true || mentions.some(id => id === options.selfId) || replies.some(reply => reply.actor === 'assistant');
+  const others = mentions.some(id => id !== options.selfId) || replies.some(reply => reply.actor !== null && reply.actor !== 'assistant');
+  return { target: assistant ? others ? 'mixed' : 'assistant' : others ? 'others' : replies.some(reply => reply.actor === null) ? 'unknown' : 'unspecified',
+    mentions, replies };
 }
 
 function contentText(content: readonly MessageContent[], attachedImages: ReadonlySet<string> = new Set()): string {
@@ -54,6 +72,7 @@ function contentText(content: readonly MessageContent[], attachedImages: Readonl
 
 export function prepareNativeChatInput(event: FrameworkEvent, history: readonly HistoryMessage[], options: {
   readonly owner: string | null;
+  readonly selfId?: string;
   readonly partial: boolean;
   readonly attachImages?: boolean;
   readonly maxHistoryCharacters?: number;
@@ -71,20 +90,33 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   assert(Number.isSafeInteger(budget) && budget >= 0 && budget <= 6_000,
     'INVALID_INPUT_BUDGET', 'Context budget must be bounded.');
   const original = normalizeContent(event.data.content);
-  const images = options.attachImages ? [...new Set(original.filter(part => part.type === 'image').map(part => part.assetId))].slice(0, 4) : [];
-  const text = contentText(original, new Set(images));
   const participation = options.participation ?? (event.data.directed === true ? 'direct' : 'ambient');
+  const group = event.conversationId.startsWith('group:');
+  const addressedMessageIds = [...new Set([
+    ...(['direct', 'reply'].includes(participation) ? [event.id] : []),
+    ...(options.groupWake ?? []).filter(item => item.reason === 'direct' || item.reason === 'reply').map(item => item.messageId),
+  ])].slice(-16);
+  const addressing = (content: readonly MessageContent[], id: string) => nativeMessageAddressing(content, history,
+    { selfId: options.selfId, addressed: addressedMessageIds.includes(id), quotedMessages: options.quotedMessages });
+  const currentAddressing = addressing(original, event.id);
+  // Observation is not an instruction to analyze every picture posted by a third
+  // party or another bot. Relevant images remain available through normal media tools.
+  const observeOnly = group && (!['direct', 'reply', 'nickname'].includes(participation) || currentAddressing.target === 'others');
+  const images = options.attachImages && !observeOnly
+    ? [...new Set(original.filter(part => part.type === 'image').map(part => part.assetId))].slice(0, 4) : [];
+  const text = contentText(original, new Set(images));
   const currentTime = history.find(message => message.id === event.id)?.receivedAt;
   const recentWindow = currentTime === undefined ? [] : history.filter(message => message.receivedAt <= currentTime
     && message.receivedAt > currentTime - 120_000);
-  const groupParticipation = event.conversationId.startsWith('group:') ? {
+  const groupParticipation = group ? {
     mode: participation === 'direct' || participation === 'reply'
       || options.groupWake?.some(item => item.reason === 'direct' || item.reason === 'reply') ? 'addressed' : 'observe-and-select',
+    currentAddressing, addressedMessageIds,
     sentMessagesInTwoMinutes: recentWindow.filter(message => message.actor === 'assistant').length,
     receivedMessagesInTwoMinutes: recentWindow.filter(message => message.actor !== 'assistant' && message.actor !== 'system').length,
     speakersInTwoMinutes: new Set(recentWindow.filter(message => message.actor !== 'assistant' && message.actor !== 'system').map(message => message.actor)).size
   } : undefined;
-  const recent: { id: string; actor: string; text: string; truncated: boolean; unread: boolean }[] = [];
+  const recent: { id: string; actor: string; text: string; truncated: boolean; unread: boolean; addressing?: NativeMessageAddressing }[] = [];
   let size = 0;
   let historyTruncated = options.partial;
   // DSH owns the continuous conversation. Only forward messages it has not seen.
@@ -93,7 +125,8 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
     && entry.actor !== 'system' && (unreadIds === null || unreadIds.has(entry.id))).slice().reverse()) {
     const full = contentText(entry.content);
     const item = { id: entry.id, actor: entry.actor, text: full.slice(0, 800), truncated: full.length > 800,
-      unread: options.unread?.ids.includes(entry.id) ?? false };
+      unread: options.unread?.ids.includes(entry.id) ?? false,
+      ...(group && entry.content.some(part => part.type === 'reply' || part.type === 'mention') ? { addressing: addressing(entry.content, entry.id) } : {}) };
     const length = JSON.stringify(item).length;
     if (size + length > budget || recent.length >= 16) { historyTruncated = true; break; }
     recent.unshift(item); size += length;
@@ -116,9 +149,11 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   if (event.userId && currentDisplayName !== undefined) displayNames.set(event.userId, currentDisplayName);
   const relevantActors = [...new Set([event.userId, ...recent.slice().reverse().map(item => item.actor),
     ...quoted.map(item => item.actor),
+    ...currentAddressing.mentions, ...currentAddressing.replies.map(item => item.actor),
+    ...recent.flatMap(item => [...(item.addressing?.mentions ?? []), ...(item.addressing?.replies.map(reply => reply.actor) ?? [])]),
     ...history.filter(item => options.unsentReplyMessageIds?.includes(item.id)).slice(-4).map(item => item.actor),
     ...(options.groupWake?.map(item => item.actor) ?? [])])]
-    .filter((actor): actor is string => typeof actor === 'string' && actor !== 'assistant' && actor !== 'system');
+    .filter((actor): actor is string => typeof actor === 'string' && actor !== 'assistant' && actor !== 'system' && actor !== options.selfId);
   const participants = relevantActors.slice(0, 32).map(userId => ({ userId, displayName: displayNames.get(userId) ?? null }));
   const envelope = (currentTruncated: boolean) => JSON.stringify({ schema: 1, conversationId: event.conversationId, messageId: event.id,
     ...(options.sentWhileQueued?.length ? { replyTiming: {

@@ -180,11 +180,9 @@ export function createNativeInboundController(options: {
         }
         activationTimes.set(message.conversationId, activatedAt)
       }
-      // Ambient arrivals may refresh an already pending/busy group observation.
-      // They neither start a fresh idle wake nor renew the continuation window.
-      const followGroupObservation = participation === 'ambient' && message.conversationId.startsWith('group:')
-        && (runtime.inbox?.hasPending(message.conversationId) || Boolean(runtime.executions?.forConversation(message.conversationId)))
-      const incoming = { ...message, content, directed: participation !== 'ambient' || Boolean(followGroupObservation) }
+      // A busy model is not another group wake. Outside the actual call window,
+      // ordinary chatter stays in history without chaining new model requests.
+      const incoming = { ...message, content, directed: participation !== 'ambient' }
       participationReasons.set(digest([message.conversationId, message.id, 'prompt']), participation)
       // Release the protocol callback after durable admission, before model preparation/submission.
       // Otherwise subsequent QQ corrections remain stuck in the WebSocket queue.
@@ -299,6 +297,10 @@ export function createNativeInboundController(options: {
     inputSequence: (requestId: string) => inputSequences.get(requestId),
     preparedReadCursor(requestId: string, sequence: number) { preparedReadCursors.set(requestId, sequence) },
     participation: (requestId: string) => participationReasons.get(requestId),
+    observationActive(conversationId: string, continuationMs: number, at = Date.now()) {
+      const activatedAt = activationTimes.get(conversationId)
+      return activatedAt !== undefined && continuationMs > 0 && at >= activatedAt && at - activatedAt <= continuationMs
+    },
     setParticipation(requestId: string, reason: NativeParticipationReason) { participationReasons.set(requestId, reason) },
     groupWake: (requestId: string) => groupWakes.get(requestId),
     setGroupWake(requestId: string, wake: readonly { readonly messageId: string; readonly actor: string; readonly reason: NativeParticipationReason }[]) {

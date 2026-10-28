@@ -1021,7 +1021,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               const quotedMessages = await quotedContext?.read({ conversationId: event.conversationId,
                 content: normalizeContent(event.data.content) }, visibleHistory, execution.signal)
               inbound.preparedReadCursor(digest([event.conversationId, event.id, 'prompt']), through)
-              return prepareNativeChatInput(event, visibleHistory, { owner, partial: historyPartial, unsentReplyMessageIds,
+              return prepareNativeChatInput(event, visibleHistory, { owner, selfId, partial: historyPartial, unsentReplyMessageIds,
                 sentWhileQueued: history.messages.filter(item => item.actor === 'assistant' && item.sequence > through).slice(-4),
                 attachImages: active.deployment.modelSettings?.inputModalities?.includes('image') !== false,
                 unread: { ids: unread.messages.filter(item => item.sequence <= through && item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
@@ -1335,11 +1335,12 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             const definition = active ? configuredDefinition(active) : undefined
             const persona = active?.personas.find(value => value.id === definition?.personaId)
             const { effective } = await inbound.readInputConfiguration(entry.message.conversationId, persona?.name)
+            const observing = inbound.observationActive(entry.message.conversationId, effective.continuationMs)
             const enabled = entries.filter(item => item.message.conversationId.startsWith('private:')
               || item.trigger === 'mention' || item.trigger === 'private'
-              || item.trigger === 'observation'
+              || item.trigger === 'observation' && observing
               || item.trigger === 'reply' && effective.wakeOnReply
-              || item.trigger === 'continuation' && effective.continuationMs > 0
+              || item.trigger === 'continuation' && observing
               || item.trigger === 'nickname' && effective.names.some(name => item.message.content.some(part =>
                 part.type === 'text' && part.text.toLocaleLowerCase().includes(name.toLocaleLowerCase()))))
             if (!enabled.length) {

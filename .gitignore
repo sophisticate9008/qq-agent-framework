@@ -12,3 +12,15 @@ coverage/
 *.key
 *.token
 .DS_Store
+# 私有凭据、数据库与本地安装包
+.credentials.yaml
+.credentials.yml
+*.p12
+*.pfx
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.tgz
+*.bak
+.cache/

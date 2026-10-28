@@ -36,7 +36,7 @@
 
 CSS可用 .stack/.grid2/.grid3/.split(1.45fr/1fr)/.masterdetail(190px/1fr)/.formgrid(2cols)/.formgrid.three/.spanall/.row/.between/.push/.muted/.small/.strong/.strip/.strip.warn/.strip.bad/.flatgroup/.actions/.footer/.chips/.chip/.listrow/.masterlist/.active/.editorgrid/.metrics/.metric/.logline/.log-alt/.tablewrap/.mono/.danger-text/.summaryline
 
-交互属性：`data-page="id"`跳转；`data-open="id"`弹窗；`data-close`关闭；`data-save="说明"`仅保存演示草稿并toast；`data-demo="说明"`toast；`data-confirm="对象" data-impact="真实影响"`删除确认通用；`data-filter="容器id"`输入筛选；`data-select-item`目录选择（仅高亮并发UI.onSelect事件，可自行补监听）；`data-action="action"`调用UI.actions[action](button)。各代理可向UI.actions添加具名函数来实现具体模拟。动态弹窗ID可依次打开；主框架支持dialog栈，readonly drawer。
+交互属性：`data-page="id"`跳转；`data-open="id"`弹窗；`data-close`关闭；`data-save="说明"`仅保存演示草稿并toast；`data-demo="说明"`toast；`data-confirm="对象" data-impact="真实影响"`删除确认通用；`data-filter="容器id"`输入筛选；`data-select-item`目录选择（仅高亮并发UI.onSelect事件，可自行补监听）；`data-action="action"`调用 `UI.actions[action](button)`。各代理可向UI.actions添加具名函数来实现具体模拟。动态弹窗ID可依次打开；主框架支持dialog栈，readonly drawer。
 
 静态演示需清楚的加载/失败/未知状态；不要把“检查”伪造成真实请求结果。全局toast固定说明仅演示，零网络。
 

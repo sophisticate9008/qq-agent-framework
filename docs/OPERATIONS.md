@@ -2,7 +2,7 @@
 
 ## 安装和首次配置
 
-使用 Node.js `>=24.12.0`。仓库依赖由锁文件固定；本轮本机验证使用 Node.js 24.22.1。项目目录中执行：
+从零安装见 [安装教程](INSTALL.md)，日常操作见 [使用教程](USAGE.md)。使用 Node.js `>=24.12.0`，依赖由锁文件固定。项目目录中执行：
 
 ```sh
 npm ci
@@ -85,6 +85,22 @@ npm run test:sdk
 浏览器工具按需安装到 `runtime/testing/`，普通安装、构建、启动和单元测试不需要 Playwright。需要预装时执行 `npm run cli -- install --browser`；系统库不足时可加 `--with-deps`。`--skip-browser-download` 只安装工具包。`npm run cli -- uninstall --browser` 只清理浏览器工具，不清业务数据和证据。
 
 单组浏览器命令为 `npm run cli -- test --browser --target <名称>`，名称包括 `browser`、`management`、`page-navigation`、`activity`、`usage`、`markdown`、`presentation`、`virtual-list-perf`、`native-chat-ui`、`execution-journal`。这些测试使用隔离配置与协议替身；真实模型质量另行记录。插件测试命令与加载方法见 [DSH](DSH.md)，最终结果及历史失败处理见 [验收记录](VALIDATION.md)。
+
+## 升级与备份
+
+升级前核对本地修改，并按部署方式停止框架管理进程；使用 `qqagent` 的部署执行 `qqagent stop framework-admin`，前台 CLI 等待 Ctrl+C 完成。停止结果未知时先核对排空，不继续覆盖运行文件。
+
+备份私有配置、账号目录、SQLite 与其有效 WAL、关联资源和外部 DSH 配置，保留文件权限。不要只复制单个数据库文件；运行中备份使用支持一致快照的工具。
+
+工作树可安全快进时执行：
+
+```sh
+git pull --ff-only
+npm ci
+npm run build
+```
+
+继续使用原管理配置启动；受管部署使用 `qqagent start framework-admin`，前台使用原 `npm start` 命令及参数。升级不重新运行 `init`，不重置会话。DSH 桥接插件是独立安装，按 [DSH 接入](DSH.md) 重新构建、安装并加载相应版本。版本记录与已知限制见 [发布说明](RELEASE_NOTES.md)。
 
 ## 自动保留
 

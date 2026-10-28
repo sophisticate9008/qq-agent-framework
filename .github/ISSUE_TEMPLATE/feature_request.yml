@@ -1,0 +1,16 @@
+name: 功能建议
+description: 描述希望解决的使用问题
+title: "[建议] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 希望解决什么问题
+      description: 说明具体场景、当前行为和期望结果，请勿包含真实会话内容。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案与影响范围
+      description: 可说明涉及聊天、控制台、协议、模型或扩展中的哪些部分。

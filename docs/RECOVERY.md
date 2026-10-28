@@ -52,7 +52,7 @@ GET /api/chat/application?id=<原 operationId>
 
 公开 reconcile DTO 中的 verified、missingReasons、verificationScope、unverified 和 preset 证据共同决定可继续条件。文件和托管 provider/preset provenance 通过，不等于外部进程已加载相同凭据值；公开 `credentialValueIdentityVerified` 保持 false。界面只在相应证据满足时提供明确的后续操作。
 
-助手目标独立使用 `/api/chat/assistant/deployment` 及其 `/prepare`、`/apply`、`/reconcile`。保存 `chat-assistant` 的 provider/model/reasoning 只是选择，明确应用后才部署独立 target；target resolver 仍检查当前配置、已应用证据与模型元数据。unknown 不在工作启动时隐式部署。只有真实主人准入的独立工作子会话才应用 `fullAccess: true`，首轮前通过 DSH 官方权限服务设置并读回全本机权限；父会话和普通聊天不改变。请求范围与实际授予证据随工作记录持久保留，冷恢复仍核验原子会话绑定。
+助手目标独立使用 `/api/chat/assistant/deployment` 及其 `/prepare`、`/apply`、`/reconcile`。保存并启用 `chat-assistant` 的 provider/model/reasoning 会自动准备、应用并核验独立 target；只选择但未保存时不部署，target resolver 仍检查当前配置、已应用证据与模型元数据。unknown 不在工作启动时隐式部署。只有真实主人准入的独立工作子会话才应用 `fullAccess: true`，首轮前通过 DSH 官方权限服务设置并读回全本机权限；父会话和普通聊天不改变。请求范围与实际授予证据随工作记录持久保留，冷恢复仍核验原子会话绑定。
 
 本机接入优先自动发现实际 profile、凭据层与所选模型元数据，不要求重复填写已知路径或容量。修改受管配置之外的文件，不应通过“重新生成全部配置”来修复。实现与核对见 [dsh-profile-deployment.ts](../src/adapters/dsh-profile-deployment.ts)、[native-assistant-target.ts](../src/host/native-assistant-target.ts)。
 
@@ -84,7 +84,7 @@ GET /api/chat/application?id=<原 operationId>
 
 提醒规则和 occurrence 分开持久化。显式停止 runtime 不删除规则；下次 start 恢复规则服务。发生时核验当前访问规则与发送授权，unknown 发送不自动重试，相应规则可保留阻断证据。配置提醒不会顺带授权模型工具或开启主动话题。日历和持久任务同样先保存发生记录，重启不会把原 running/unknown 当成尚未执行。
 
-模型问题会发到所属 QQ 会话，实际配置主人在原问题上下文中答复。外部工具确认按当前请求的真实主人来源自动允许或拒绝，不再等待逐次答复。网页只读问题摘要，没有代答或批准接口。记忆 proposal 的确认也在 QQ 中完成：`/确认记忆 memory-...`；撤销使用 `/撤销记忆 memory-...`。`/记住` 默认绑定来源会话，`/记住群` 要求群来源，`/记住全局` 是主人明确共享。网页手工管理、纠正或撤销不会自动确认模型 proposal。
+模型问题会发到所属 QQ 会话，实际配置主人在原问题上下文中答复。外部工具确认按当前请求的真实主人来源自动允许或拒绝，不再等待逐次答复。网页只读问题摘要，没有代答或批准接口。记忆 proposal 的确认也在 QQ 中完成：`/确认记忆 memory-...`；撤销使用 `/撤销记忆 memory-...`。`/记住` 默认绑定来源会话，`/记住群` 要求群来源，`/记住全局` 是主人明确共享。记忆业务的工具与上下文由扩展接入；控制台不提供手工记忆管理表单。
 
 ## bootstrap、包状态与关闭
 

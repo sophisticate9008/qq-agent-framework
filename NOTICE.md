@@ -1,14 +1,16 @@
-# Notices and Attribution
+# 来源、许可与致谢
 
-## Relationship to qq-bridge
+## qq-bridge 参考来源
 
-QQ Agent Framework is an independent TypeScript rebuild informed by the requirements, interfaces, operational lessons, and failure modes of the open source project [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge). This attribution does not imply a runtime dependency on that project.
+QQ Agent Framework 是独立的 TypeScript 重建项目，设计参考了开源项目 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 的需求、接口、运维经验与故障处理。该参考关系不构成运行时依赖。
 
-This repository is not an official release, successor, or Git fork of qq-bridge, and it is not endorsed by the qq-bridge authors. It does not claim that the referenced design and operational work is wholly original to this repository. Where qq-bridge material is adapted or redistributed, the following upstream copyright and MIT license apply.
+本仓库不是 qq-bridge 的官方版本、继任项目或 Git 分叉，未获得其作者背书；也不将参考项目的设计与运维成果声称为本仓库全部原创。改编或再分发 qq-bridge 材料时，适用以下上游版权声明及 MIT 许可。
 
-The group conversation redesign reviewed on 2026-10-28 references qq-bridge revision `bdc6d09`: explicit send behavior in `dsh/agent-presets/qq-chat-v2/agent.cordis.yml`, unread wake coalescing and recent participation cues in `src/bridge.js`, and continuation handling in `src/local/dialogue-wake.js`. This framework implements those ideas through its own typed inbox, policy and output services. Its continuation window includes all group members, and its queue preserves the actual executing sender separately from wake metadata.
+2026-10-28 的群聊重设计参考了 qq-bridge 提交 `bdc6d09`：`dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 中的显式发送行为、`src/bridge.js` 中的未读唤醒合并和近期参与提示，以及 `src/local/dialogue-wake.js` 中的续聊处理。本框架通过自身的类型化收件箱、权限与输出服务实现这些思路，续聊窗口覆盖群成员，并将实际执行发言者与唤醒元数据分别保留。
 
-## qq-bridge MIT License
+## qq-bridge 的 MIT 许可原文
+
+许可证原文保留英文，以保留上游授权及免责声明：
 
 MIT License
 
@@ -32,39 +34,48 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-The upstream `LICENSE` file also contains project-specific third-party and compliance notes after this MIT text. Those notes describe the upstream dependency set and are not reproduced as terms for this independent repository; consult the [upstream LICENSE](https://github.com/Derpyu520/qq-bridge/blob/main/LICENSE) when using or redistributing qq-bridge itself.
 
-## This Repository
+上游 `LICENSE` 在 MIT 正文后另有该项目的第三方及合规说明，描述的是其依赖集合，不作为本独立仓库的附加许可条款；使用或再分发 qq-bridge 本体时请查阅 [上游 LICENSE](https://github.com/Derpyu520/qq-bridge/blob/main/LICENSE)。
 
-### Built-in Markdown Image Rendering
+## 本仓库使用的组件与参考资料
 
-The framework's Markdown-to-PNG integration uses [markdown-it](https://github.com/markdown-it/markdown-it) for parsing, [Takumi](https://github.com/kane50613/takumi) for local layout and image rendering, [highlight.js](https://github.com/highlightjs/highlight.js) for static syntax highlighting, [MathJax](https://github.com/mathjax/MathJax) for local mathematical notation, and [sharp](https://github.com/lovell/sharp) for PNG pagination. These packages retain their respective licenses and notices in their distributions. No headless browser is bundled by this integration.
+### Markdown 图片排版
 
-[mdshot](https://github.com/pi0/mdshot) was reviewed as a Markdown screenshot reference during engine selection; its source is not embedded in this implementation. Bundled Chinese font attribution and redistribution terms are listed separately below.
+框架使用 [markdown-it](https://github.com/markdown-it/markdown-it) 解析 Markdown、[Takumi](https://github.com/kane50613/takumi) 完成本机排版和图像渲染、[highlight.js](https://github.com/highlightjs/highlight.js) 提供静态语法高亮、[MathJax](https://github.com/mathjax/MathJax) 处理数学公式、[sharp](https://github.com/lovell/sharp) 完成 PNG 分页。这些依赖保留各自发行包中的许可与声明；此集成不捆绑无头浏览器。
 
-### Video Observation
+选型时参考过 [mdshot](https://github.com/pi0/mdshot) 的 Markdown 截图方案，实现未嵌入其源码。中文字体的再分发许可见下文。
 
-The built-in video observer invokes a separately installed [FFmpeg/FFprobe](https://github.com/FFmpeg/FFmpeg) executable. It uses the documented probe metadata and frame extraction interfaces. FFmpeg source and binaries are not embedded or redistributed by this integration. An installed FFmpeg distribution retains its own license, which depends on its build options; consult its accompanying notices and [upstream license](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md).
+### 视频观察
 
-### Bundled WenQuanYi Micro Hei Font
+内置视频观察器调用独立安装的 [FFmpeg/FFprobe](https://github.com/FFmpeg/FFmpeg)，使用其探测元数据与抽帧接口。本仓库未嵌入或再分发 FFmpeg 源码及二进制。安装的 FFmpeg 发行版保留自身许可，具体取决于编译选项；请查阅其附带说明和 [上游许可](https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md)。
 
-The Markdown image renderer uses the unmodified WenQuanYi Micro Hei 0.2.0-beta font collection, redistributed under Apache License 2.0 as identified by the font's embedded license records. Digitized data copyright © 2007 Google Corporation; copyright © 2008–2009 WenQuanYi Board of Trustees and Qianqian Fang. The collection includes WenQuanYi Micro Hei and WenQuanYi Micro Hei Mono.
+### 随附的文泉驿微米黑字体
 
-The font, complete license, original authors and upstream notice are bundled in [assets/fonts](assets/fonts/README.md). This font remains subject to its separate license; the framework's MIT license does not replace it.
+Markdown 图片渲染使用未经修改的文泉驿微米黑 0.2.0-beta 字体集合，依字体内嵌许可记录按 Apache License 2.0 再分发。数字化数据版权 © 2007 Google Corporation；版权 © 2008–2009 WenQuanYi Board of Trustees 和 Qianqian Fang。集合包含 WenQuanYi Micro Hei 及 WenQuanYi Micro Hei Mono。
 
-### OneBot QQ Space Interface References
+字体、完整许可、原作者及上游声明位于 [assets/fonts](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/assets/fonts/README.md)。字体独立适用其自身许可，框架的 MIT 许可不替代它。
 
-The shared QQ Space adapter is independently implemented against the wire interfaces documented by these projects; it does not embed their clients or web authentication implementations:
+### OneBot 空间接口参考
 
-- [OneBot v11 standard API](https://github.com/botuniverse/onebot-11/blob/master/api/public.md): QQ Space actions are outside this standard.
-- [NapCat publish action](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/SendQzoneMsg.ts) and [delete action](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/DeleteQzoneMsg.ts).
-- [NapCat v4.18.14 release](https://github.com/NapNeko/NapCatQQ/releases/tag/v4.18.14): introduction of publishing, image upload and deletion.
-- SnowLuma [publish reference](https://snowluma.github.io/zh/docs/api/qzone/send_qzone_msg), [delete reference](https://snowluma.github.io/zh/docs/api/qzone/delete_qzone_msg), and [action definitions](https://github.com/SnowLuma/SnowLuma/blob/main/packages/onebot/src/actions/qzone.ts).
+共享空间适配器依据以下项目公开的线格式接口独立实现，没有嵌入它们的客户端或网页认证实现：
 
-References reviewed on 2026-10-27. Installed gateway versions and enabled extensions determine actual availability.
+- [OneBot v11 标准 API](https://github.com/botuniverse/onebot-11/blob/master/api/public.md)：空间操作属于标准以外的扩展。
+- NapCat 的 [发布接口](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/SendQzoneMsg.ts) 与 [删除接口](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/DeleteQzoneMsg.ts)。
+- [NapCat v4.18.14 发布记录](https://github.com/NapNeko/NapCatQQ/releases/tag/v4.18.14)：引入发布、图片上传及删除。
+- SnowLuma 的 [发布参考](https://snowluma.github.io/zh/docs/api/qzone/send_qzone_msg)、[删除参考](https://snowluma.github.io/zh/docs/api/qzone/delete_qzone_msg) 与 [动作定义](https://github.com/SnowLuma/SnowLuma/blob/main/packages/onebot/src/actions/qzone.ts)。
 
-### Provider Model Metadata References
+接口核对日期为 2026-10-27；实际可用性仍由已安装网关版本及已启用扩展决定。
 
-The provider metadata reader uses the declared fields described in the [DeepSeek model catalog](https://api-docs.deepseek.com/api/list-models/) and the [Chat Completions reasoning parameter](https://api-docs.deepseek.com/api/create-chat-completion/). Reviewed on 2026-10-28. The `off` to `none` mapping implied by that documentation is restricted to the official DeepSeek OpenAI-compatible endpoint; other providers must explicitly declare their mapping.
+### 模型元数据参考
 
-QQ Agent Framework's own source is distributed under the MIT license in [LICENSE](LICENSE). Dependencies and separately obtained protocol gateways, agent runtimes, models, or services remain subject to their own licenses and terms. This notice does not grant rights to third-party software and does not imply affiliation with Tencent, QQ, DeepSeek, SnowLuma, or the qq-bridge authors.
+提供方元数据读取器参考 [DeepSeek 模型目录](https://api-docs.deepseek.com/api/list-models/) 及 [Chat Completions 推理参数](https://api-docs.deepseek.com/api/create-chat-completion/)，核对日期为 2026-10-28。文档涉及的 `off` 到 `none` 映射仅用于 DeepSeek 官方 OpenAI 兼容端点；其他提供方必须显式声明映射。
+
+### 控制台组件样式
+
+控制台基于 [shadcn/ui](https://github.com/shadcn-ui/ui) 的组件约定与 Base UI。`web/shadcn.css` 原样保留 npm 包 `shadcn@4.22.1` 的 `dist/tailwind.css`，SHA-256 为 `4c371f7a1ff5d219ae2f7ff28bd256b4346fd546fe46fbae22092e57db2f0fae`；随附 [MIT 许可](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/assets/licenses/shadcn-MIT.txt) 保留原作者授权。框架构建直接使用这份样式，不安装 shadcn CLI 及其传递依赖。
+
+### DSH 接入
+
+DSH 与官方 SDK 来自 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。桥接插件当前核对的是 SDK `0.2.1-rc.2` 与 Cordis `4.0.5`，实际接入条件见 [DSH 文档](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/docs/DSH.md)。
+
+本框架源码按 [LICENSE](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/LICENSE) 中的 MIT 许可分发。依赖及独立取得的协议网关、智能体运行时、模型和服务继续适用各自的许可与使用条款。本文不授予第三方软件的额外权利，也不表示与腾讯、QQ、DeepSeek、SnowLuma 或 qq-bridge 作者存在隶属或背书关系。

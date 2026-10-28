@@ -99,7 +99,7 @@ npm pack ./packages/framework-sdk --pack-destination /tmp
 # 在一个新的外部目录中
 npm init -y
 npm pkg set type=module
-npm install --ignore-scripts /tmp/qq-agent-framework-sdk-0.1.0.tgz
+npm install --ignore-scripts /tmp/qq-agent-framework-sdk-1.0.0.tgz
 npm install --save-dev typescript@5.9.3
 ```
 
@@ -457,4 +457,4 @@ try {
 
 ## 空间底层服务
 
-内置包 `qzone` 通过 `context.service("qzone", 1)` 提供 `QzoneToolPort`。扩展在 manifest 中声明对 `qzone` 的依赖及所需服务版本；`inspect` 核对当前协议能力，`execute` 按原 OneBot 名称与参数调用。框架不将这些底层操作自动挂到聊天模型，也不替调用方决定触发和访问策略。完整示例与边界见 [空间说说](QZONE.md)。
+内置包 `qzone` 通过 `context.service("qzone", 1)` 提供 `QzoneToolPort`。扩展在 manifest 中声明对 `qzone` 的依赖及所需服务版本；`inspect` 核对当前协议能力，`execute` 按原 OneBot 名称与参数调用。原生聊天会按实际协议能力另行登记发布与删除工具，复用会话白名单和真实消息来源校验；扩展直接调用底层服务时，自行通过宿主 policy 确认触发与访问范围。完整示例与边界见 [空间说说](QZONE.md)。

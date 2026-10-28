@@ -49,7 +49,7 @@ flowchart TD
 
 保存目录与应用到 DSH 是两个操作。领域 planner 生成受管配置，profile 适配器只修改托管部分并读回核对；本机配置和模型元数据由自动发现提供，静态 YAML 不执行表达式。模型的输入类型来自真实元数据，缺少 image 证据时按 text 处理。DSH 凭据值是否已被运行中的外部进程加载，不由文件 provenance 推断为已验证。
 
-[native-application.ts](../src/host/native-application.ts) 将明确应用请求保存为带 operationId 的 journal，再执行停止、准备、应用、迁移与启动。网页退出不会创建另一次应用，也不会凭 HTTP 读取成功就清除 unknown。助手目标由 [native-assistant-target.ts](../src/host/native-assistant-target.ts) 独立准备和应用，使用独立 preset/provider 路由；保存助手配置本身不部署、不抬高 DSH 原有工具权限。
+[native-application.ts](../src/host/native-application.ts) 将明确应用请求保存为带 operationId 的 journal，再执行停止、准备、应用、迁移与启动。网页退出不会创建另一次应用，也不会凭 HTTP 读取成功就清除 unknown。助手目标由 [native-assistant-target.ts](../src/host/native-assistant-target.ts) 独立准备和应用，使用独立 preset/provider 路由；保存并启用助手配置会自动准备、应用并核验独立目标；需要加载且本机维护服务可用时会执行受控重载。只有真实主人准入的工作子会话在首轮前设置并读回全本机权限，父会话与普通聊天不改变。
 
 [native-configuration-impact.ts](../src/host/native-configuration-impact.ts) 比较实际选中的方案、人设、提供方和已部署工具、连接、鉴权、执行等依赖。编辑未选中的目录对象不必停止当前聊天；实际依赖变化仍需按影响核验、迁移或重启。访问规则撤回在副作用前生效。secret 参与依赖指纹时不进入公开状态。
 
@@ -61,7 +61,7 @@ flowchart TD
 
 [native-execution.ts](../src/host/native-execution.ts) 将入站期限、请求、可信 claim receipt、用户消息和外部 turn 关联起来。`accepted` 只说明提交已被接受。丢流、超时或停止后的执行可保留隔离和 unknown；晚到结果记录在原执行，不自动发回或重新提交。取消也有独立的请求和确认状态。
 
-同一会话正常忙碌时，新消息可以进入 [native-inbox.ts](../src/host/native-inbox.ts)，保留原到达期限并按发送者合并。未知执行不接纳为正常忙碌队列；重启时未完成队列转为 blocked，不自动重放。全局 follow 池满时，新会话在创建前受到背压。管理端展示 pending/blocked 与原错误，不能把“停止接收”显示成“外部动作已停止”。
+同一会话正常忙碌时，新消息可以进入 [native-inbox.ts](../src/host/native-inbox.ts)，保留原到达期限并按发送者合并。未确认执行时暂缓后续提交，并有界核对原执行证据；重启保留未提交且未过期的输入，中断提交的批次记录未知结果后移出待发队列，不自动重放。全局 follow 池满时，新会话在创建前受到背压。管理端展示 pending/blocked 与原错误，不能把“停止接收”显示成“外部动作已停止”。
 
 outbox 先保存发送意图，再经适配器发送并记录回执。confirmed、rejected 和 unknown 有不同含义；未知发送不靠换幂等键再试一次。独立工作、提醒、日历与交互也各自保存发生记录和归属。
 

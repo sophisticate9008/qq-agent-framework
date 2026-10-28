@@ -1,0 +1,33 @@
+name: 问题反馈
+description: 报告运行、安装或界面问题
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: 请使用合成账号和脱敏信息，不要上传令牌、完整运行配置、会话原文或私有素材。安全漏洞请通过仓库 Security 页面私下报告。
+  - type: input
+    id: version
+    attributes:
+      label: 框架版本或提交
+      placeholder: v1.0 或提交编号
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 系统、Node.js、协议端及 DSH 版本
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤、预期和实际结果
+      description: 提供最小复现，区分配置保存、应用、模型执行和 QQ 发送结果。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏错误码或证据
+      description: 提交前检查账号、路径、地址和截图中的敏感内容。

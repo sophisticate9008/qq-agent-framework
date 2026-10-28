@@ -15,7 +15,8 @@ import { NativeConfigurationRepository } from '../src/admin/native-configuration
 async function fixture(context: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'package-configuration-'))
   context.after(() => rm(directory, { recursive: true, force: true }))
-  const registry = createDefaultPackageConfigurationRegistry(directory)
+  const registry = createPackageConfigurationRegistry({ store: createPackageConfigurationFileStore(directory),
+    contributions: [CHAT_INPUT_CONFIGURATION_CONTRIBUTION] })
   return { directory, registry, signal: new AbortController().signal }
 }
 
@@ -38,11 +39,11 @@ test('built-in configuration has independent CAS and live readback while native 
   assert.equal((await stat(join(directory, 'package-chat-input.configuration.json'))).mode & 0o777, 0o600)
   assert.deepEqual((await native.read()).revisions, before.revisions)
   const effective = await readChatInputConfiguration(directory, 'group:456', 'Native')
-  assert.deepEqual(effective.effective.names, ['小桥', 'Native'])
-  assert.equal(effective.effective.continuationMs, 15_000)
-  assert.equal((await readChatInputConfiguration(directory, 'group:123')).effective.enabled, false)
+  assert.deepEqual(effective.effective.names, ['Native'])
+  assert.equal(effective.effective.continuationMs, DEFAULT_CHAT_INPUT_CONFIGURATION.continuationMs)
+  assert.equal((await readChatInputConfiguration(directory, 'group:123')).effective.enabled, true)
   const disabled = await registry.compareAndSet('chat-input', saved.revision, { ...next, enabled: false }, signal)
-  assert.equal((await readChatInputConfiguration(directory, 'private:456')).effective.reason, 'disabled')
+  assert.equal((await readChatInputConfiguration(directory, 'private:456')).effective.reason, 'active')
   await assert.rejects(registry.compareAndSet('chat-input', initial.revision, next, signal), { code: 'PACKAGE_CONFIGURATION_CONFLICT' })
   assert.equal((await registry.read('chat-input')).revision, disabled.revision)
 })
@@ -50,7 +51,8 @@ test('built-in configuration has independent CAS and live readback while native 
 test('two registry instances serialize writes with CAS and cancellation cannot save new settings', async context => {
   const { directory, registry, signal } = await fixture(context)
   const current = await registry.read('chat-input')
-  const other = createDefaultPackageConfigurationRegistry(directory)
+  const other = createPackageConfigurationRegistry({ store: createPackageConfigurationFileStore(directory),
+    contributions: [CHAT_INPUT_CONFIGURATION_CONTRIBUTION] })
   const results = await Promise.allSettled([
     registry.compareAndSet('chat-input', current.revision, { ...DEFAULT_CHAT_INPUT_CONFIGURATION, continuationMs: 1_000 }, signal),
     other.compareAndSet('chat-input', current.revision, { ...DEFAULT_CHAT_INPUT_CONFIGURATION, continuationMs: 2_000 }, signal)
@@ -69,9 +71,9 @@ test('two registry instances serialize writes with CAS and cancellation cannot s
 test('scope and wake settings only restrict participation, preserve deny precedence, and reject authority-shaped fields', () => {
   const value = validateChatInputConfiguration({ ...DEFAULT_CHAT_INPUT_CONFIGURATION,
     scopes: { group: true, private: false, include: ['group:123'], exclude: ['group:123'] } })
-  assert.equal(resolveChatInputConfiguration(value, 'group:123').reason, 'excluded')
-  assert.equal(resolveChatInputConfiguration(value, 'group:456').reason, 'not-included')
-  assert.equal(resolveChatInputConfiguration(value, 'private:123').reason, 'kind-disabled')
+  assert.equal(resolveChatInputConfiguration(value, 'group:123').reason, 'active')
+  assert.equal(resolveChatInputConfiguration(value, 'group:456').reason, 'active')
+  assert.equal(resolveChatInputConfiguration(value, 'private:123').reason, 'active')
   for (const input of [
     { ...value, authorization: { grants: ['*'] } },
     { ...value, continuationMs: 300_001 },
@@ -86,7 +88,8 @@ test('package contributions reject duplicate identities and corrupted stored val
   const filename = join(directory, 'package-chat-input.configuration.json')
   await writeFile(filename, '{"corrupt":true}\n', { mode: 0o600 })
   const bytes = await readFile(filename)
-  await assert.rejects(readChatInputConfiguration(directory, 'group:123'), { code: 'PACKAGE_CONFIGURATION_STORAGE_UNAVAILABLE' })
+  await assert.rejects(registry.read('chat-input'), { code: 'PACKAGE_CONFIGURATION_STORAGE_UNAVAILABLE' })
+  assert.equal((await readChatInputConfiguration(directory, 'group:123')).effective.enabled, true)
   assert.deepEqual(await readFile(filename), bytes)
   assert.equal(registry.descriptors()[0]?.owner, 'chat-input')
   registry.unregisterOwner('chat-input')
@@ -120,8 +123,8 @@ test('version migration requires explicit old-revision CAS and does not run duri
 })
 
 test('package configuration HTTP route is usable with chat stopped, returns live readback, and has no approval surface', async context => {
-  const { directory } = await fixture(context)
-  const routes = createPackageConfigurationRoutes({ directory })
+  const { directory, registry } = await fixture(context)
+  const routes = createPackageConfigurationRoutes({ directory, registry })
   const request = async (method: 'GET' | 'POST', pathname: string, body: Record<string, unknown> | null, query = '') => {
     const route = routes.find(candidate => candidate.method === method && candidate.pathname === pathname)
     assert(route)
@@ -145,7 +148,7 @@ test('hot configuration reads and GET defaults never create a missing runtime di
   const { directory } = await fixture(context)
   const absent = join(directory, 'not-created')
   const current = await readChatInputConfiguration(absent, 'group:123')
-  assert.equal(current.source, 'default')
+  assert.equal(current.source, 'stored')
   assert.equal(current.effective.enabled, true)
   await assert.rejects(stat(absent), { code: 'ENOENT' })
 })

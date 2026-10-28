@@ -8,7 +8,6 @@ import { createNativeApplicationCoordinator, type NativeApplicationPorts, type N
 import { createNativeApplicationStorage } from '../src/storage/native-application.ts';
 import type { NativeApplicationRequest } from '../src/contracts/native-application.ts';
 import type { NativeConfigurationRevisions } from '../src/contracts/native-revisions.ts';
-import type { NativeSessionMigrationBinding } from '../src/host/native-session-migration-state.ts';
 
 const revisions: NativeConfigurationRevisions = { plans: '1'.repeat(64), personas: '2'.repeat(64), access: '3'.repeat(64),
   adapters: '4'.repeat(64), providers: '5'.repeat(64), authorization: '6'.repeat(64), deployment: '7'.repeat(64), execution: '8'.repeat(64) };
@@ -188,25 +187,17 @@ test('reload observation expires as pending, blocks replacement intents and resu
   assert.equal((await storage.read()).value.records.length, 1);
 });
 
-test('old unknown apply resumes with prepared revisions, migrates before start and never replays preparation or writes', async t => {
+test('old unknown apply resumes with prepared revisions and retains existing sessions without migration', async t => {
   const storage = createNativeApplicationStorage(await directory(t)); const f = fixture();
   const preparedRevisions = { ...revisions, deployment: 'a'.repeat(64) };
   f.setStatus({ state: 'stopped', chatReady: false, canStart: false, canApplyDeployment: true,
     revisions: preparedRevisions, configurationCompatibility: { state: 'blocked' } });
-  const id = randomUUID(); const migrationId = randomUUID(); const migrationRevision = 'c'.repeat(64);
-  const binding: NativeSessionMigrationBinding = { migrationId, conversationId: 'group:123', sourceSessionId: 'parent-history',
-    sourceGeneration: 4, sourceRevision: 8, sourceRequestId: null, expectedPreset: 'old-preset', targetPreset: 'new-preset',
-    issuerEpoch: 'epoch', sourceCursor: 20, sourceDigest: 'd'.repeat(64), targetRevision: 'e'.repeat(64), state: 'available', childSessionId: null };
-  f.ports.previewMigration = async expected => {
-    f.calls.push('preview-migrate'); assert.deepEqual(expected, preparedRevisions);
-    return { schema: 1, state: 'available', migrationId, revision: migrationRevision,
-      revisions: preparedRevisions, bindings: [binding], missingReasons: [] };
-  };
-  f.ports.migrate = async request => {
-    f.calls.push('migrate'); assert.deepEqual(request, { revisions: preparedRevisions, confirm: true, migrationId, revision: migrationRevision });
+  const id = randomUUID();
+  const reconcile = f.ports.reconcileDeployment;
+  f.ports.reconcileDeployment = async (...args) => {
+    const verified = await reconcile(...args);
     f.setStatus({ canStart: true, configurationCompatibility: { state: 'compatible' } });
-    return { schema: 1, state: 'completed', migrationId, revision: migrationRevision, revisions: preparedRevisions,
-      bindings: [{ ...binding, state: 'bound', childSessionId: 'child-with-preserved-history' }], missingReasons: [] };
+    return verified;
   };
   const prior = await storage.read();
   await storage.write(prior.revision, { schema: 1, records: [{ instanceId: 'old-instance', request: { operationId: id, revisions, deploy: true },
@@ -216,10 +207,10 @@ test('old unknown apply resumes with prepared revisions, migrates before start a
   assert.equal((await coordinator.read())?.phaseState, 'in-flight');
   assert.equal((await coordinator.reconcile(id)).state, 'running'); await coordinator.drain();
   assert.equal((await coordinator.read())?.state, 'completed');
-  assert.deepEqual(f.calls, ['reconcile-deployment', 'preview-migrate', 'migrate', 'start']);
+  assert.deepEqual(f.calls, ['reconcile-deployment', 'start']);
   assert.deepEqual((await storage.read()).value.records[0]?.request.revisions, revisions);
   assert.equal((await coordinator.reconcile(id)).state, 'completed');
-  assert.deepEqual(f.calls, ['reconcile-deployment', 'preview-migrate', 'migrate', 'start']);
+  assert.deepEqual(f.calls, ['reconcile-deployment', 'start']);
 });
 
 test('unknown apply stays unknown without matching configuration and complete deployment proof', async t => {

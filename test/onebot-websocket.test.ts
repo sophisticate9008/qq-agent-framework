@@ -104,7 +104,7 @@ test('OneBot WS validates endpoint/options without construction-time networking'
   ]) assert.throws(() => fake.client(overrides), { code: 'onebot_ws_invalid_options' })
   for (const endpoint of [fake.endpoint, 'ws://127.2.3.4:1234', 'ws://localhost:1234', 'ws://[::1]:1234', 'wss://example.com/socket']) {
     const client = fake.client({ endpoint })
-    assert.deepEqual(client.status(), { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0 })
+    assert.deepEqual(client.status(), { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, accountOnline: null, accountGood: null })
     await client.close()
   }
   await delay(50)
@@ -245,7 +245,7 @@ test('OneBot WS requires exact successful login status and positive safe discove
   }
 })
 
-test('OneBot WS reconnects with new echoes/identity and stops at its lifetime retry budget', async context => {
+test('OneBot WS reconnects with new echoes/identity and resets the consecutive-failure budget after a verified reconnection', async context => {
   const fake = await fixture(context, { login: (socket, request, index) => {
     socket.send(JSON.stringify({ echo: request.echo, retcode: 0, status: 'ok', data: { user_id: 12345 + index } }))
   } })
@@ -264,10 +264,11 @@ test('OneBot WS reconnects with new echoes/identity and stops at its lifetime re
   fake.peers[1]!.terminate()
   await until(() => fake.requests.length === 3 && client.status().state === 'connected')
   fake.peers[2]!.terminate()
-  await until(() => client.status().state === 'error')
+  await until(() => fake.requests.length === 4 && client.status().state === 'connected')
+  await client.close()
   await delay(250)
-  assert.equal(fake.requests.length, 3)
-  assert.equal(new Set(fake.requests.map(request => request.echo)).size, 3)
+  assert.equal(fake.requests.length, 4)
+  assert.equal(new Set(fake.requests.map(request => request.echo)).size, 4)
   assert(fake.requests.every(request => request.action === 'get_login_info'))
 })
 
@@ -571,8 +572,9 @@ test('OneBot WS watchdog reconnects with fresh identity and ignores stale-genera
   assert.equal(client.status().selfId, null)
   await until(() => fake.requests.length === 2 && client.status().state === 'connected')
   assert.equal(client.status().selfId, '12346')
-  await until(() => client.status().state === 'error')
+  await until(() => fake.pings.length >= 2 && client.status().state === 'reconnecting')
   assert.equal(client.status().lastError, 'onebot_ws_pong_timeout')
+  await client.close()
   assert.equal(fake.pings.length, 2)
   assert.notDeepEqual(fake.pings[0]!.data, fake.pings[1]!.data)
   await delay(350)

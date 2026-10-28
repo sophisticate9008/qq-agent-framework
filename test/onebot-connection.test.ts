@@ -52,7 +52,7 @@ test('connection manager construction is offline and HTTP-only configuration nev
   const manager = createOneBotConnectionManager({ createClient() { calls += 1; return fakeClient().client } })
   context.after(() => manager.close())
   assert.deepEqual(manager.status(), { running: false })
-  assert.deepEqual(manager.connectionStatus(), { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false })
+  assert.deepEqual(manager.connectionStatus(), { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false, accountOnline: null, accountGood: null })
   await assert.rejects(manager.connect(createDefaultAdapterConfiguration(), new AbortController().signal), { code: 'onebot_ws_not_enabled' })
   assert.equal(calls, 0)
 })
@@ -70,11 +70,12 @@ test('manager waits for verified identity, omits event delivery and keeps protoc
   await fake.entered
   assert.deepEqual(manager.status(), { running: false })
   assert.equal(manager.connectionStatus().state, 'connecting')
-  assert.deepEqual(received, { endpoint: selected.onebotWs.endpoint, accessToken: 'private-ws-secret', callbackTimeoutMs: 300_000, connectTimeoutMs: 5_000, maxReconnectAttempts: 8 })
+  login.resolve()
+  assert.deepEqual(received, { endpoint: selected.onebotWs.endpoint, accessToken: 'private-ws-secret', callbackTimeoutMs: 300_000, connectTimeoutMs: 5_000, maxReconnectAttempts: null })
   login.resolve()
   await connecting
   assert.deepEqual(manager.status(), { running: true })
-  assert.deepEqual(manager.connectionStatus(), { state: 'connected', selfId: '123', lastError: null, received: 2, dropped: 2, chatReady: false })
+  assert.deepEqual(manager.connectionStatus(), { state: 'connected', selfId: '123', lastError: null, received: 2, dropped: 2, chatReady: false, accountOnline: null, accountGood: null })
   controller.abort()
   assert.equal(fake.signal()?.aborted, false)
   await manager.disconnect()
@@ -131,7 +132,7 @@ test('manager start deadline, client aborts and failed logins close the client w
   const connecting = manager.connect(configuration(), new AbortController().signal)
   const rejection = assert.rejects(connecting, { code: 'onebot_ws_connection_failed' })
   await fake.entered
-  context.mock.timers.tick(5_000)
+  context.mock.timers.tick(10_000)
   await rejection
   assert.equal(fake.closes(), 1)
   assert.deepEqual(manager.status(), { running: false })

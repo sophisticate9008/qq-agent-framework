@@ -20,7 +20,7 @@ test('empty search returns one shortcut for every registered page', () => {
   assert.equal(results.length, pageRegistry.length);
   assert(results.every(target => target.kind === 'page'));
   assert.equal(new Set(results.map(target => target.page)).size, pageRegistry.length);
-  assert(results.some(target => target.page === 'providers' && target.title === '模型提供方'));
+  assert(results.some(target => target.page === 'providers' && target.title === '模型服务'));
 });
 
 test('search matches normalized metadata without indexing values', () => {

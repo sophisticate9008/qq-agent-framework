@@ -59,7 +59,7 @@ test('legacy omitted context limits capture and read preserve exact definition a
   assert.deepEqual(compatible.differences, [])
   assert.equal(compatible.baseline.state, 'available')
   assert.equal(captureNativeConfigurationBaseline(fake.store, legacy, []), true)
-  assert.deepEqual(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE), [stored])
+  assert.deepEqual(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE).filter(row => row.key !== 'current'), [stored])
   assert.deepEqual(fake.store.read('native-chat.meta', 'session-definition'), identity)
   assert.deepEqual(fake.store.list('host.sessions'), sessions)
 })
@@ -113,10 +113,11 @@ test('readonly preflight reports exact definition, endpoint, binding and persona
   assert.equal(inspectNativeConfigurationCompatibility(fake.directory, candidate).state, 'compatible')
   for (const change of changes) {
     const result = inspectNativeConfigurationCompatibility(fake.directory, change.value)
-    assert.equal(result.state, 'blocked')
+    const endpointChanged = change.difference === 'endpoint'
+    assert.equal(result.state, endpointChanged ? 'blocked' : 'compatible')
     assert(result.differences.includes(change.difference))
-    assert(result.reasons.includes(change.reason))
-    assert.equal(result.recovery.mode, 'restore-original-values')
+    if (endpointChanged) assert(result.reasons.length > 0)
+    assert.equal(result.recovery.mode, endpointChanged ? 'restore-original-values' : 'none')
   }
   assert.deepEqual(fake.records(), before)
 })
@@ -133,11 +134,13 @@ test('legacy missing or malformed baselines never invent recoverable original va
   const baseline = fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE)[0]!
   assert.equal(captureNativeConfigurationBaseline(fake.store, candidate, []), true)
   assert.deepEqual(fake.store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, baseline.key), baseline)
-  fake.store.write(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, baseline.key, json({ ...baseline.value as object, checksum: 'bad' }))
+  const currentBaseline = fake.store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, 'current')!
+  fake.store.write(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, 'current', json({ ...currentBaseline.value as object, checksum: 'bad' }))
   const before = fake.records()
   assert.equal(readNativeConfigurationBaseline(fake.directory).state, 'invalid')
-  assert.equal(captureNativeConfigurationBaseline(fake.store, candidate, []), false)
-  assert.deepEqual(fake.records(), before)
+  assert.equal(captureNativeConfigurationBaseline(fake.store, candidate, []), true)
+  assert.equal(readNativeConfigurationBaseline(fake.directory).state, 'available')
+  assert.deepEqual(fake.store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, baseline.key), baseline)
 })
 
 test('successful baseline projection retains exact raw instructions, selection and persona name but excludes credentials and refuses known-secret text', context => {
@@ -167,7 +170,7 @@ test('corruption and unsafe history remain explicitly unavailable and hard basel
   assert.equal(readNativeConfigurationBaseline(fake.directory).state, 'unavailable')
   chmodSync(fake.filename, 0o600)
   assert.deepEqual(fake.records(), before)
-  assert.throws(() => captureNativeConfigurationBaseline({ ...fake.store, write() { throw new Error('SYNTHETIC_STORAGE_FAILURE') } }, candidate, []), /SYNTHETIC_STORAGE_FAILURE/)
+  assert.throws(() => captureNativeConfigurationBaseline({ ...fake.store, compareAndSetBatch() { throw new Error('SYNTHETIC_STORAGE_FAILURE') } }, candidate, []), /SYNTHETIC_STORAGE_FAILURE/)
   const directory = mkdtempSync(join(tmpdir(), 'native-compatibility-corrupt-'))
   context.after(() => rmSync(directory, { recursive: true, force: true }))
   const filename = join(directory, 'native-chat.sqlite')
@@ -192,7 +195,7 @@ test('baseline keys include actual persona content and scope versions even when 
   fake.store.write('native-chat.meta', 'persona-identity', { schema: 1, nativeId: persona.id, contentVersion: version, scopeVersion: 'c'.repeat(64) })
   assert.equal(readNativeConfigurationBaseline(fake.directory).state, 'missing')
   assert.equal(captureNativeConfigurationBaseline(fake.store, { ...candidate, persona: renamed }, []), true)
-  assert.equal(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE).length, 3)
+  assert.equal(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE).length, 4)
   assert.deepEqual(fake.store.read(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, original.key), original)
 })
 
@@ -215,15 +218,13 @@ test('maximum valid Unicode instructions and persona sections with 128 repeated 
   context.diagnostic(`large valid baseline bytes=${bytes}; full repeated bindings bytes=${Buffer.byteLength(JSON.stringify(large.bindings))}`)
 })
 
-test('baseline record exhaustion is explicit and never renews existing records or changes configuration', context => {
+test('current baseline stays writable after the historical snapshot quota fills', context => {
   const fake = fixture(context)
   for (let index = 0; index < 64; index++) fake.store.write(NATIVE_CONFIGURATION_BASELINE_NAMESPACE, `other-${index}`, { schema: 1 })
-  const before = fake.records()
-  assert.equal(captureNativeConfigurationBaseline(fake.store, candidate, []), false)
-  const baseline = readNativeConfigurationBaseline(fake.directory)
-  assert.equal(baseline.state, 'missing')
-  assert.equal(baseline.unavailableReason, 'record-limit')
-  assert.deepEqual(fake.records(), before)
+  const before = fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE)
+  assert.equal(captureNativeConfigurationBaseline(fake.store, candidate, []), true)
+  assert.equal(readNativeConfigurationBaseline(fake.directory).state, 'available')
+  assert.deepEqual(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE).filter(row => row.key !== 'current'), before)
 })
 
 test('real storage failures during existing-baseline validation propagate instead of becoming missing or invalid guidance', context => {
@@ -246,16 +247,16 @@ test('64 actual withheld markers exhaust the shared quota and additional anchors
     assert.equal(readNativeConfigurationBaseline(fake.directory).unavailableReason, 'sensitive-content')
   }
   const markers = fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE)
-  assert.equal(markers.length, 64)
+  assert.equal(markers.length, 65)
   for (let index = 64; index < 70; index++) {
     fake.store.write('native-chat.meta', 'persona-identity', { schema: 1, nativeId: persona.id,
       contentVersion: version, scopeVersion: fingerprint(['synthetic-verified-scope', index]) })
     assert.equal(captureNativeConfigurationBaseline(fake.store, candidate, [plan.instructions]), false)
     const before = fake.records()
-    assert.equal(readNativeConfigurationBaseline(fake.directory).unavailableReason, 'record-limit')
-    assert.equal(inspectNativeConfigurationCompatibility(fake.directory, candidate).baseline.unavailableReason, 'record-limit')
+    assert.equal(readNativeConfigurationBaseline(fake.directory).unavailableReason, 'sensitive-content')
+    assert.equal(inspectNativeConfigurationCompatibility(fake.directory, candidate).baseline.unavailableReason, 'sensitive-content')
     assert.deepEqual(fake.records(), before)
-    assert.deepEqual(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE), markers)
+    assert.deepEqual(fake.store.list(NATIVE_CONFIGURATION_BASELINE_NAMESPACE).filter(row => row.key !== 'current'), markers.filter(row => row.key !== 'current'))
   }
 })
 

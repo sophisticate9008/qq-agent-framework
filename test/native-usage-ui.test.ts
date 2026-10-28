@@ -33,7 +33,7 @@ test('actual native projections parse empty, complete, partial and mixed-currenc
   assert.equal(summary.nowTier?.tier, 'flat');
   assert.equal(summary.priceTable?.pricingMode, 'flat');
   assert.equal(summary.ledger, null);
-  assert.equal(summary.resetAvailable, false);
+  assert.equal(summary.resetAvailable, true);
   const series = parseUsageSeries(projection.series());
   assert(series);
   assert.equal(series.totals.tokens, 170);
@@ -51,8 +51,8 @@ test('actual native projections parse empty, complete, partial and mixed-currenc
   usage.append({ ...turn, turnId: 'unknown', coverage: 'unknown', tokens: { input: null, output: null, cacheRead: null, cacheWrite: null, total: null } });
   const partial = parseUsageSnapshot(projection.summary());
   assert(partial);
-  assert.equal(partial.totals.totalTokens, null);
-  assert.equal(partial.totals.cost, null);
+  assert.equal(partial.totals.totalTokens, 170);
+  assert.equal(partial.totals.cost, recorded.cost?.amount);
   assert.equal(partial.coverage?.knownTokens.total, 170);
   assert.equal(partial.coverage?.missingTokens.total, 1);
   assert.equal(partial.conversations[0].knownCosts?.USD, recorded.cost?.amount);

@@ -45,7 +45,7 @@ test('activity output keeps summary as text and discards unrecognized body/think
   assert.equal(JSON.stringify(result).includes('never display'), false);
   for (const type of ['processed', 'timeout', 'error', 'runtime']) assert.equal(parseRecentActivity({ ...snapshot, items: [{ ...entry, type, content: 'not a public message excerpt' }] })?.items[0]?.content, null);
   assert.equal(parseRecentActivity({ ...snapshot, items: [{ ...entry, content: 'x'.repeat(2001) }] }), null);
-  assert.deepEqual(Object.keys(result.items[0]!).sort(), ['at', 'content', 'conversationId', 'id', 'level', 'summary', 'type']);
+  assert.deepEqual(Object.keys(result.items[0]!).sort(), ['at', 'content', 'conversationId', 'count', 'errorCode', 'id', 'level', 'summary', 'type']);
 });
 
 test('activity labels are human-readable and stopped explicitly excludes other bridge logs', () => {

@@ -13,7 +13,8 @@ test('registered pages share titles across navigation and search and each belong
     assert.equal(pageNavigationGroups.filter(group => group.pages.includes(page.id)).length, 1);
   }
   assert.deepEqual(groupWorkspaceSearchTargets(workspacePageTargets).map(group => group.page), pageRegistry.map(page => page.id));
-  assert.deepEqual(pageNavigationGroups.find(group => group.id === 'persona')?.pages, ['persona', 'model']);
+  assert.deepEqual(pageNavigationGroups.find(group => group.id === 'persona')?.pages, ['persona']);
+  assert.deepEqual(pageNavigationGroups.find(group => group.id === 'model')?.pages, ['model']);
   for (const shortcut of overviewPageShortcuts) assert(registeredPageId(shortcut.id));
   assert.equal(registeredPageId('not-a-page'), false);
 });

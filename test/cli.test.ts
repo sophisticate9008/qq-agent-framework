@@ -41,10 +41,22 @@ test('test CLI selects explicit suites and built output without mixing browser o
   }
 });
 
-test('CI shard plans cover all tests once and keep compiled acceptance separate', () => {
+test('daily CI stays small and manual CI covers all test files once', () => {
   const root = dirname(dirname(browserToolchainPaths().directory));
-  const workflow: unknown = parseYaml(readFileSync(join(root, '.github/workflows/verify.yml'), 'utf8'));
+  const daily: unknown = parseYaml(readFileSync(join(root, '.github/workflows/verify.yml'), 'utf8'));
+  assert(isRecord(daily) && isRecord(daily.jobs) && isRecord(daily.on));
+  assert.deepEqual(Object.keys(daily.jobs).sort(), ['secrets', 'verify']);
+  assert.deepEqual(Object.keys(daily.on).sort(), ['pull_request', 'push', 'workflow_call', 'workflow_dispatch']);
+  const verify = daily.jobs.verify;
+  assert(isRecord(verify) && Array.isArray(verify.steps));
+  const commands = verify.steps.flatMap((step: unknown) => isRecord(step) && typeof step.run === 'string' ? [step.run] : []);
+  assert.deepEqual(commands, ['npm ci --ignore-scripts --no-audit --no-fund', 'npm run typecheck', 'npm test']);
+  const workflow: unknown = parseYaml(readFileSync(join(root, '.github/workflows/full.yml'), 'utf8'));
   assert(isRecord(workflow) && isRecord(workflow.jobs));
+  assert(isRecord(workflow.on));
+  assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
+  assert(isRecord(workflow.jobs.basic));
+  assert.equal(workflow.jobs.basic.uses, './.github/workflows/verify.yml');
   const job = workflow.jobs.tests;
   assert(isRecord(job) && isRecord(job.strategy) && isRecord(job.strategy.matrix));
   const matrix = job.strategy.matrix.include;
@@ -55,9 +67,10 @@ test('CI shard plans cover all tests once and keep compiled acceptance separate'
     const parsed = parseCliArguments(['test', '--suite', entry.suite, '--shard', entry.shard]);
     return shardTestFiles(discoverTestFiles(join(root, 'test'), '.ts', parsed.suite), parsed.shard);
   });
+  const fast = discoverTestFiles(join(root, 'test'), '.ts', 'fast');
   const artifacts = discoverTestFiles(join(root, 'test'), '.ts', 'artifacts');
-  assert.deepEqual([...selected, ...artifacts].sort(), all);
-  assert.equal(new Set([...selected, ...artifacts]).size, all.length);
+  assert.deepEqual([...fast, ...selected, ...artifacts].sort(), all);
+  assert.equal(new Set([...fast, ...selected, ...artifacts]).size, all.length);
   const quality = workflow.jobs.quality;
   assert(isRecord(quality) && Array.isArray(quality.steps));
   assert(quality.steps.some((step: unknown) => isRecord(step) && step.run === 'npm run cli -- test --built --suite artifacts --skip-build'));
@@ -229,7 +242,7 @@ test('execution browser target and native runtime acceptance remain inside the i
 
 test('optional SDK CI installs, tests and verifies the package tarball in its own locked job', () => {
   const root = dirname(dirname(browserToolchainPaths().directory));
-  const workflow: unknown = parseYaml(readFileSync(join(root, '.github/workflows/verify.yml'), 'utf8'));
+  const workflow: unknown = parseYaml(readFileSync(join(root, '.github/workflows/full.yml'), 'utf8'));
   assert(isRecord(workflow) && isRecord(workflow.jobs));
   const job = workflow.jobs['dsh-bridge-plugin'];
   assert(isRecord(job) && isRecord(job.defaults) && isRecord(job.defaults.run) && Array.isArray(job.steps));

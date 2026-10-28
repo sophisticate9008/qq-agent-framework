@@ -199,7 +199,7 @@ test('browser diagnostics executable collects only the current fixture workspace
 
 test('CI calls the strict collector and uploads only after safe projection succeeds with the Node24 pin', async () => {
   const root = fileURLToPath(new URL(import.meta.url.endsWith('.js') ? '../../' : '../', import.meta.url));
-  const workflow: unknown = parse(await readFile(join(root, '.github/workflows/verify.yml'), 'utf8'));
+  const workflow: unknown = parse(await readFile(join(root, '.github/workflows/full.yml'), 'utf8'));
   assert(workflow !== null && typeof workflow === 'object' && 'jobs' in workflow);
   const jobs = workflow.jobs as Record<string, { steps: Array<Record<string, unknown>> }>;
   const prepare = jobs.browser.steps.find(step => step.id === 'diagnostics');

@@ -4,11 +4,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      full-built:
-        description: 额外执行完整编译后测试（发布前或排查编译差异时）
-        type: boolean
-        default: false
+  workflow_call:
 
 permissions:
   contents: read
@@ -39,19 +35,12 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
       - name: 扫描完整历史并脱敏输出
         run: '"$RUNNER_TEMP/gitleaks" git . --log-opts="--all --full-history" --redact=100 --no-banner --no-color'
-  tests:
-    name: 测试 ${{ matrix.suite }} ${{ matrix.shard }}
+  verify:
+    name: 类型检查与快速测试
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { suite: fast, shard: '1/1', concurrency: '2' }
-          - { suite: integration, shard: '1/3', concurrency: '2' }
-          - { suite: integration, shard: '2/3', concurrency: '2' }
-          - { suite: integration, shard: '3/3', concurrency: '2' }
-          - { suite: deadline, shard: '1/1', concurrency: '1' }
+    env:
+      QQ_TEST_CONCURRENCY: '2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
@@ -59,103 +48,5 @@ jobs:
           node-version: '24.12.0'
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: 按集合与文件分片执行源码测试
-        run: npm run cli -- test --suite ${{ matrix.suite }} --shard ${{ matrix.shard }}
-        env:
-          QQ_TEST_CONCURRENCY: ${{ matrix.concurrency }}
-  quality:
-    name: 类型、构建与外部 SDK
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24.12.0'
-          cache: npm
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm audit --audit-level=high
-      - run: npm run check
-      - run: npm run build
-      - name: 编译产物与实际 CLI 生命周期
-        run: npm run cli -- test --built --suite artifacts --skip-build
-        env:
-          QQ_TEST_CONCURRENCY: '1'
-      - run: npm run test:sdk
-  browser:
-    name: 浏览器回归
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24.12.0'
-          cache: npm
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: 缓存 Chromium 下载
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: runtime/testing/browsers
-          key: chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/cli.ts') }}
-      - name: 浏览器验证（仅构建网页）
-        id: browser
-        run: npm run cli -- test --browser --with-deps
-        env:
-          QQ_AGENT_UI_EVIDENCE_DIR: ${{ github.workspace }}/runtime/execution-journal-smoke
-      - name: 整理浏览器失败诊断
-        id: diagnostics
-        if: ${{ failure() && steps.browser.outcome == 'failure' }}
-        run: node scripts/collect-browser-diagnostics.ts
-      - name: 上传浏览器失败诊断
-        if: ${{ failure() && steps.browser.outcome == 'failure' && steps.diagnostics.outcome == 'success' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: browser-diagnostics-attempt-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/browser-smoke-diagnostics/*.png
-            ${{ runner.temp }}/browser-smoke-diagnostics/*.json
-          retention-days: 3
-          if-no-files-found: warn
-          include-hidden-files: false
-  full-built:
-    name: 完整编译后回归（手动）
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full-built }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24.12.0'
-          cache: npm
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm run test:built
-        env:
-          QQ_TEST_CONCURRENCY: '2'
-  dsh-bridge-plugin:
-    name: DSH 桥接插件
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: packages/dsh-bridge-plugin
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24.12.0'
-          cache: npm
-          cache-dependency-path: packages/dsh-bridge-plugin/package-lock.json
-      - name: 安装框架客户端依赖
-        working-directory: .
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: 插件依赖安全审计
-        run: npm audit --audit-level=high
+      - run: npm run typecheck
       - run: npm test
-      - name: 框架客户端与真实离线 DSH SDK 集成
-        run: npm run test:framework
-        env:
-          QQ_FRAMEWORK_DSH_PORT_MODULE: ${{ github.workspace }}/src/adapters/dsh-jsonrpc.ts
-      - run: npm run test:pack

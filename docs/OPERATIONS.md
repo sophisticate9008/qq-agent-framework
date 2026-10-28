@@ -87,7 +87,11 @@ npm run test:sdk
 | `npm run test:sdk` | 打包 SDK，在临时外部项目严格编译并运行 |
 | `npm run test:browser` | 完整十组浏览器场景，仅构建网页资源 |
 
-CI 的集成集合通过 `npm run cli -- test --suite integration --shard 1/3` 分成三片，序号分别为 `1/3`、`2/3`、`3/3`；按文件名稳定分配，每片互不重叠且合起来覆盖全集。需要复用已经准备好的编译产物时使用 `--built --skip-build`，调用者负责产物与源码一致。推送、拉取请求和手动触发条件保持原样，同分支新运行会取消旧运行；各类验证并行执行，常规任务上限十分钟。完整编译后回归可在手动触发时勾选 `full-built`，上限二十分钟。浏览器下载缓存独立保存，失败诊断保留三天。
+日常 CI（`框架验证`）在推送或拉取请求时只运行两个任务：历史凭据扫描，以及 `npm run typecheck` 与 `npm test`。不安装浏览器、不构建产物、不执行慢集成或真实期限测试；同分支新运行会取消旧运行，凭据扫描最多五分钟，日常检查最多十分钟。
+
+发布前或需要完整回归时，进入 GitHub 的 Actions，选择“完整验证（手动）”，点击 Run workflow 并选择分支。它会复用日常检查，再运行源码规则与架构检查、集成、真实期限、构建产物、依赖审计、SDK、浏览器与插件验证。无需设置额外选项；原 `full-built` 选项已移除，整套编译后测试仍可在本地显式运行 `npm run test:built`。
+
+完整工作流的集成集合通过 `npm run cli -- test --suite integration --shard 1/3` 分成三片，序号分别为 `1/3`、`2/3`、`3/3`；每片互不重叠且合起来覆盖全集。需要复用已准备好的编译产物时使用 `--built --skip-build`，调用者负责产物与源码一致。浏览器下载缓存独立保存，失败诊断保留三天。
 
 浏览器工具按需安装到 `runtime/testing/`，普通安装、构建、启动和单元测试不需要 Playwright。需要预装时执行 `npm run cli -- install --browser`；系统库不足时可加 `--with-deps`。`--skip-browser-download` 只安装工具包。`npm run cli -- uninstall --browser` 只清理浏览器工具，不清业务数据和证据。
 

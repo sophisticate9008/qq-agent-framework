@@ -66,6 +66,8 @@ export interface BridgeHostOptions {
   splitAgentMessage?(content: readonly MessageContent[], event: FrameworkEvent): readonly (readonly MessageContent[])[];
   onFault?(code: string): void;
   onAgentDelivery?(requestId: string, receipt: DeliveryReceipt): void;
+  /** Optional local diagnostics; faults never affect delivery. Content has confirmed receipts only. */
+  onAgentMessageDelivery?(event: FrameworkEvent, result: AgentMessageDelivery, confirmedContent: readonly MessageContent[]): void;
   shouldSendAgentMessage?(event: FrameworkEvent): boolean | Promise<boolean>;
 }
 export interface AgentMessageDelivery {
@@ -102,7 +104,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   taskTickMs = 250, maxConcurrentSends = 1, eventTimeoutMs = 30000, timeouts: timeoutInput,
   replyTimeoutMs = 30000, replyTimeoutNotice = '请求已提交，但尚未收到回复。结果尚未确认，未自动重复提交。',
   selectAgentMessage, splitAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
-  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, shouldSendAgentMessage, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
+  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, onAgentMessageDelivery, shouldSendAgentMessage, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
   const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
   bindAccountStore(store, accountScope);
   assert(typeof authorizeIncoming === 'function' && Number.isSafeInteger(taskTickMs) && taskTickMs >= 10 && taskTickMs <= 60000,
@@ -181,15 +183,17 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   async function performAgentMessageDelivery(execution: FeatureExecution, event: FrameworkEvent, respondToWatchdog: boolean): Promise<AgentMessageDelivery> {
     const requestId = object(event.data.agentData ?? {}).nativeRequestId;
     const receipts: DeliveryReceipt[] = [];
-    function record(result: AgentMessageDelivery): AgentMessageDelivery {
+    const confirmedContent: MessageContent[] = [];
+    function record(result: AgentMessageDelivery, settled = true): AgentMessageDelivery {
       const value = snapshot(result);
+      if (settled) { try { onAgentMessageDelivery?.(snapshot(event), value, snapshot(confirmedContent)); } catch {} }
       if (!respondToWatchdog && typeof requestId === 'string' && explicitRequestKeys.has(requestId)) {
         if (agentDeliveries.size >= 4096 && !agentDeliveries.has(requestId)) agentDeliveries.delete(agentDeliveries.keys().next().value!);
         agentDeliveries.set(requestId, value);
       }
       return value;
     }
-    record({ status: 'unknown', receipts });
+    record({ status: 'unknown', receipts }, false);
     let prepared: readonly MessageContent[] | null;
     let messages: readonly (readonly MessageContent[])[];
     try {
@@ -209,6 +213,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         receipts.push(result);
         if (result.status !== 'confirmed') return record({ status: result.status, receipts,
           errorCode: result.status === 'rejected' ? 'DELIVERY_REJECTED' : 'DELIVERY_UNKNOWN' });
+        confirmedContent.push(...message);
         if (isConfirmedMessageReceipt(result)) history.append(event.conversationId, { id: result.messageId, actor: 'assistant', content: message, receivedAt: clock() });
         if (index === 0 && respondToWatchdog) {
           const binding = sessions.get(event.conversationId);

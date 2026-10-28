@@ -3,6 +3,7 @@ import { FrameworkError, assert, errorCode, isRecord, reference, snapshot } from
 import { digest, json, object } from './data.ts'
 import { withDeadline } from './deadlines.ts'
 import type { DurableStore, SessionBinding, StoredRecord } from './types.ts'
+import { readNativeExecutionSummaries } from './native-execution-summary.ts'
 
 export interface NativeExecutionPolicy {
   readonly schema: 1
@@ -180,6 +181,23 @@ export function createNativeExecutionController(options: NativeExecutionOptions)
   function get(id: string): NativeExecutionRecord | null {
     const record = store.read(executions, id)
     return record ? readExecution(record) : null
+  }
+
+  function list({ limit = 100, after, order }: { readonly limit?: number; readonly after?: string; readonly order?: 'recent' } = {}) {
+    const recentCursor = after === undefined ? undefined : /^(\d{1,16}):([a-f0-9]{64})$/.exec(after)
+    assert(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1_000
+      && (order === undefined || order === 'recent')
+      && (after === undefined || (order === 'recent' ? recentCursor && Number.isSafeInteger(Number(recentCursor[1])) : /^[a-f0-9]{64}$/.test(after))),
+    'EXECUTION_INVALID_QUERY', 'Execution queries must be bounded.')
+    if (order === 'recent') assert(store.listByNumber, 'EXECUTION_ORDER_UNAVAILABLE', 'This store cannot read chronological execution pages.')
+    const rows = order === 'recent'
+      ? store.listByNumber!({ namespace: executions, field: 'admittedAt', limit,
+        ...(recentCursor ? { before: { value: Number(recentCursor[1]), key: recentCursor[2] } } : {}) })
+      : store.list(executions, { limit, ...(after === undefined ? {} : { after }) })
+    return snapshot(rows.map(record => {
+      const execution = readExecution(record)
+      return { ...execution, revision: record.revision, cursor: order === 'recent' ? `${execution.admittedAt}:${record.key}` : record.key }
+    }))
   }
 
   function update(id: string, operation: (current: NativeExecutionRecord) => NativeExecutionRecord) {
@@ -420,6 +438,15 @@ export function createNativeExecutionController(options: NativeExecutionOptions)
       started = true
     },
     admit, get,
+    inspect(id: string) {
+      const execution = get(id)
+      return execution ? snapshot({ ...execution, summary: readNativeExecutionSummaries(store, [execution]).get(id)! }) : null
+    },
+    listForDisplay(query: Parameters<typeof list>[0] = {}) {
+      const rows = list(query)
+      const summaries = readNativeExecutionSummaries(store, rows)
+      return snapshot(rows.map(row => ({ ...row, summary: summaries.get(row.id)! })))
+    },
     active() { return snapshot(activeRecords()) },
     forConversation(conversationId: string) {
       const claim = store.read(conversations, digest(conversationId))
@@ -590,22 +617,7 @@ export function createNativeExecutionController(options: NativeExecutionOptions)
       assertRunning()
       for (const id of timers.keys()) expire(id)
     },
-    list({ limit = 100, after, order }: { readonly limit?: number; readonly after?: string; readonly order?: 'recent' } = {}) {
-      const recentCursor = after === undefined ? undefined : /^(\d{1,16}):([a-f0-9]{64})$/.exec(after)
-      assert(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1_000
-        && (order === undefined || order === 'recent')
-        && (after === undefined || (order === 'recent' ? recentCursor && Number.isSafeInteger(Number(recentCursor[1])) : /^[a-f0-9]{64}$/.test(after))),
-      'EXECUTION_INVALID_QUERY', 'Execution queries must be bounded.')
-      if (order === 'recent') assert(store.listByNumber, 'EXECUTION_ORDER_UNAVAILABLE', 'This store cannot read chronological execution pages.')
-      const rows = order === 'recent'
-        ? store.listByNumber!({ namespace: executions, field: 'admittedAt', limit,
-          ...(recentCursor ? { before: { value: Number(recentCursor[1]), key: recentCursor[2] } } : {}) })
-        : store.list(executions, { limit, ...(after === undefined ? {} : { after }) })
-      return snapshot(rows.map(record => {
-        const execution = readExecution(record)
-        return { ...execution, revision: record.revision, cursor: order === 'recent' ? `${execution.admittedAt}:${record.key}` : record.key }
-      }))
-    },
+    list,
     metrics() { return { started, stopped, faulted, deadlines: timers.size, pendingActions: pending.size, rawPending, maxPendingOperations } },
     stop() {
       if (stopping) return stopping

@@ -1,3 +1,4 @@
+import type { NativeExecutionSummary } from '../../src/host/native-execution-summary.ts';
 import type { NativeExecutionRecord } from '../../src/host/native-execution.ts';
 import { asRecord } from './api.ts';
 
@@ -7,6 +8,7 @@ export type ExecutionJournalEntry = Pick<NativeExecutionRecord,
   | 'userMessage' | 'turn' | 'progressEvents' | 'lastEventId' | 'lateOutcome' | 'lastError'> & {
     readonly revision: number;
     readonly cursor: string;
+    readonly summary?: NativeExecutionSummary | null;
   };
 
 const statuses = ['prepared', 'submitting', 'running', 'completed', 'failed', 'rejected', 'timed-out', 'unknown'] as const;
@@ -47,6 +49,34 @@ function integer(input: unknown, minimum = 0, maximum = Number.MAX_SAFE_INTEGER)
   return typeof input === 'number' && Number.isSafeInteger(input) && input >= minimum && input <= maximum;
 }
 
+function parseSummary(input: unknown): NativeExecutionSummary | null {
+  const summary = asRecord(input);
+  const source = asRecord(summary.input);
+  const reply = asRecord(summary.reply);
+  const delivery = asRecord(summary.delivery);
+  const tools = summary.tools === null ? null : asRecord(summary.tools);
+  const text = (value: unknown, limit: number) => value === null || typeof value === 'string' && value.length <= limit;
+  const count = (value: unknown) => value === null || integer(value);
+  if (summary.schema !== 1 || typeof summary.partial !== 'boolean'
+    || !text(source.messageId, 160) || !text(source.senderId, 160) || !text(source.displayName, 160) || !text(source.text, 400)
+    || !text(reply.text, 400) || !text(reply.reason, 160)
+    || reply.outcome != null && !member(['sent', 'rejected', 'unknown'] as const, reply.outcome)
+    || !['confirmed', 'rejected', 'unknown', 'pending'].every(key => count(delivery[key]))
+    || !count(summary.mergedMessages) || !count(summary.durationMs)
+    || tools !== null && (!integer(tools.count) || !Array.isArray(tools.names) || tools.names.length > 64
+      || !tools.names.every(name => typeof name === 'string' && name.length <= 160))) return null;
+  return {
+    schema: 1, partial: summary.partial,
+    input: { messageId: source.messageId as string | null, senderId: source.senderId as string | null,
+      displayName: source.displayName as string | null, text: source.text as string | null },
+    reply: { text: reply.text as string | null, reason: reply.reason as string | null, outcome: reply.outcome == null ? null : reply.outcome as 'sent' | 'rejected' | 'unknown' },
+    delivery: { confirmed: delivery.confirmed as number | null, rejected: delivery.rejected as number | null,
+      unknown: delivery.unknown as number | null, pending: delivery.pending as number | null },
+    mergedMessages: summary.mergedMessages as number | null, durationMs: summary.durationMs as number | null,
+    tools: tools === null ? null : { count: tools.count as number, names: tools.names as string[] },
+  };
+}
+
 export function parseExecutionJournalEntry(input: unknown): ExecutionJournalEntry | null {
   const record = asRecord(input);
   const binding = asRecord(record.binding);
@@ -70,6 +100,7 @@ export function parseExecutionJournalEntry(input: unknown): ExecutionJournalEntr
     || record.lateOutcome !== null && (!reference(late.eventId) || !member(outcomes, late.outcome))) return null;
   return {
     schema: 1, id: record.id, cursor: record.cursor as string, revision: record.revision,
+    ...(record.summary === undefined ? {} : { summary: parseSummary(record.summary) }),
     binding: { conversationId: binding.conversationId, sessionId: binding.sessionId, generation: binding.generation },
     requestId: record.requestId, policyRevision: record.policyRevision,
     admittedAt: record.admittedAt, deadlineAt: record.deadlineAt,
@@ -107,7 +138,12 @@ export function mergeExecutionJournalPages(previous: ExecutionJournalPage | null
   let changed = 0;
   for (const item of page.items) {
     const prior = items.get(item.id);
-    if (prior && prior.revision >= item.revision) continue;
+    if (prior && prior.revision > item.revision) continue;
+    if (prior && prior.revision === item.revision) {
+      // Delivery can settle after the model execution revision stops changing.
+      if (item.summary) items.set(item.id, { ...prior, summary: item.summary });
+      continue;
+    }
     if (prior && prior.revision !== item.revision) changed++;
     items.set(item.id, item);
   }
@@ -164,4 +200,75 @@ export function executionContinuationLabel(record: ExecutionJournalEntry): strin
   if (!record.isolated) return '本轮未暂停后续处理';
   return ['prepared', 'submitting', 'running'].includes(record.status) && !record.deadlineReached && record.externalStatus !== 'unknown'
     ? '等待本次任务结束' : '暂停后续任务';
+}
+
+/** Model completion and confirmed QQ sends have separate evidence. */
+export function executionJournalPresentation(record: ExecutionJournalEntry): ExecutionPresentation {
+  const base = executionPresentation(record);
+  const summary = record.summary;
+  if (base.tone !== 'success' || !summary) return base;
+  const { confirmed, rejected, unknown, pending } = summary.delivery;
+  if (summary.reply.outcome === 'unknown') return { label: '发送待确认', tone: 'warning', explanation: '本轮有发送尝试结果未确认；已确认的部分单独计数。' };
+  if (unknown) return { label: '发送待确认', tone: 'warning', explanation: `有 ${unknown} 条发送结果尚未确认。` };
+  if (rejected) return { label: confirmed ? '部分发送' : '发送失败', tone: 'warning', explanation: `已确认发送 ${confirmed ?? 0} 条，未能发送 ${rejected} 条。` };
+  if (pending) return { label: '正在发送', tone: 'neutral', explanation: `有 ${pending} 条回复正在等待发送结果。` };
+  if (summary.reply.outcome === 'rejected' && summary.reply.reason !== 'AGENT_MESSAGE_SUPPRESSED') return { label: confirmed ? '部分发送' : '未能发送', tone: 'warning', explanation: '本轮有回复未能发送；已确认的部分单独计数。' };
+  if (confirmed) return { label: `已发送 ${confirmed} 条`, tone: 'success', explanation: '协议端已确认这些发送请求。' };
+  if (summary.reply.reason === 'superseded' || summary.reply.reason === 'AGENT_MESSAGE_SUPPRESSED') return { label: '让出回复', tone: 'neutral', explanation: executionReplyReason(summary.reply.reason) };
+  if (summary.reply.reason && /^[A-Z][A-Z0-9_]+$/.test(summary.reply.reason)) return { label: '未能发送', tone: 'warning', explanation: executionReplyReason(summary.reply.reason) };
+  if (summary.reply.reason) return { label: summary.reply.reason === 'no-explicit-send' ? '未发送' : '未发言', tone: 'neutral', explanation: executionReplyReason(summary.reply.reason) };
+  return base;
+}
+
+export function executionReplyReason(reason: string | null | undefined): string {
+  switch (reason) {
+    case 'DELIVERY_UNKNOWN': return '发送结果尚未确认，未自动重复发送。';
+    case 'DELIVERY_REJECTED': return '协议端未接受本次发送。';
+    case 'AGENT_MESSAGE_PREPARATION_FAILED': return '回复内容准备失败，尚未发送。';
+    case 'no-explicit-send': return '本轮未调用发送工具。';
+    case 'AGENT_MESSAGE_SUPPRESSED':
+    case 'superseded': return '收到新消息，旧回复已让出，交由后续轮次结合新内容处理。';
+    case 'not-addressed': return '本轮未被询问，没有插话。';
+    case 'already-answered': return '问题已有答复，本轮未重复回复。';
+    case 'user-requested': return '按用户要求，本轮不回复。';
+    case 'invalid_reply_decision': return '未参与决定格式无效，未发送内部控制内容。';
+    case 'no-useful-addition': return '本轮没有需要补充的内容。';
+    case 'conversation-ended': return '话题已结束，没有继续回复。';
+    case 'silent': return '本轮选择不发言。';
+    default: return reason ? /^[A-Z][A-Z0-9_]+$/.test(reason) ? '回复未能发送，具体原因标记见技术详情。' : '本轮已记录不发言决定，具体标记见技术详情。' : '未记录本轮发送结果。';
+  }
+}
+
+export function executionInputLabel(record: ExecutionJournalEntry): string {
+  const source = record.summary?.input;
+  if (!source?.text) return '输入摘要未留存';
+  const sender = source.displayName || source.senderId;
+  return `${sender ? `${sender}：` : ''}${source.text}`;
+}
+
+export function executionResultLabel(record: ExecutionJournalEntry): string {
+  if (record.summary?.reply.text) return record.summary.reply.text;
+  if (record.summary?.reply.reason) return executionReplyReason(record.summary.reply.reason);
+  const delivery = record.summary?.delivery;
+  if (delivery?.rejected) return '回复未能发送，查看详情核对。';
+  if (delivery?.unknown) return '发送结果尚未确认。';
+  const failure = executionErrorLabel(record);
+  if (failure) return failure;
+  if (record.status === 'running' || record.status === 'submitting' || record.status === 'prepared') return '等待本轮结果…';
+  if (record.summary?.tools?.count) return `已完成 ${record.summary.tools.count} 次工具调用 · 未记录发送结果`;
+  if (executionPresentation(record).tone === 'warning') return executionPresentation(record).explanation;
+  return '本轮发送明细未留存';
+}
+
+export function executionErrorLabel(record: ExecutionJournalEntry): string | null {
+  switch (record.lastError) {
+    case 'EXECUTION_DEADLINE_BEFORE_SUBMIT': return '等待超时，本轮尚未提交给模型。';
+    case 'EXECUTION_DEADLINE_REACHED': return '本轮超过处理时限。';
+    case 'EXECUTION_ADMISSION_CONFLICT': return '同一会话已有执行任务，本次未被受理。';
+    case 'EXECUTION_INTERRUPTED': return '服务运行中断，本轮结果尚未确认。';
+    case 'EXECUTION_STREAM_LOST': return '模型事件连接中断，未收到最终结果。';
+    case 'EXECUTION_STOPPED_BEFORE_SUBMIT': return '聊天停止时，本轮尚未提交给模型。';
+    case 'EXECUTION_STOPPED_UNKNOWN': return '聊天已停止，本轮外部执行结果尚未确认。';
+    default: return record.lastError ? '本轮有异常记录，原因码可在技术详情查看。' : record.status === 'failed' ? '执行失败，未记录具体原因。' : null;
+  }
 }

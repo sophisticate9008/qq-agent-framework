@@ -1333,7 +1333,7 @@ function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
       if (id !== null) {
         if (!REVISION_PATTERN.test(id) || [...parsed.keys()].length !== 1) requestError(400, 'invalid_query')
         const controller = runtime.executions()
-        const row = controller ? controller.get(id) : historyRead(runtime, history => history.executions.get(id))
+        const row = controller ? controller.inspect(id) : historyRead(runtime, history => history.executions.inspect(id))
         const item = row ? (({ policy: _policy, ...publicRow }) => publicRow)(row) : null
         return { native: true, item, manualCancelAvailable: false, ...(!controller ? { historyReadOnly: true } : {}) }
       }
@@ -1349,7 +1349,7 @@ function nativeChatControlRoutes(directory: string, runtime: NativeChatRuntime,
       requireEmptyQuery(parsed)
       const executions = runtime.executions()
       const options = { limit, ...(after === null ? {} : { after }), ...(order === 'recent' ? { order: 'recent' as const } : {}) }
-      const rows = executions ? executions.list(options) : historyRead(runtime, history => history.executions.list(options))
+      const rows = executions ? executions.listForDisplay(options) : historyRead(runtime, history => history.executions.listForDisplay(options))
       return { native: true, items: rows.map(({ policy: _policy, ...row }) => row),
         next: rows.length === limit ? rows.at(-1)!.cursor : null, manualCancelAvailable: false,
         ...(!executions ? { historyReadOnly: true } : {}) }

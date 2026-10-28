@@ -17,6 +17,7 @@ import type { NativeGuardPhase } from './native-configuration-guard.ts'
 import { nativeAuthorizationMode } from './native-access.ts'
 import { digest, json, object } from './data.ts'
 import { mapNativeExecutionObservation } from './native-event-mapping.ts'
+import { recordNativeExecutionInput } from './native-execution-summary.ts'
 
 export interface NativeAgentResources {
   readonly lifetime: AbortController | undefined
@@ -149,6 +150,7 @@ export function createNativeAgentCoordinator(options: {
             const execution = runtime.executions.admit({ binding: { conversationId: binding.conversationId,
               sessionId: request.sessionId, generation: binding.generation }, requestId: request.requestId,
               policyRevision: runtime.configuration.revisions.execution, admittedAt: options.admittedAt(request.requestId) ?? Date.now() })
+            recordNativeExecutionInput(store, execution)
             observeExecution(execution)
             if (execution.status !== 'prepared') return { status: 'unknown' }
             runtime.claims.attach(execution, baseline)

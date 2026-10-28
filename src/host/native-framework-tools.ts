@@ -11,6 +11,7 @@ import { makeFrameworkMediaResultProjector } from './framework-media.ts';
 import type { DurableStore, SessionBinding } from './types.ts';
 import type { NativeEventInput } from '../contracts/native-events.ts';
 import { mapNativeToolObservation } from './native-event-mapping.ts';
+import { recordNativeExecutionTool } from './native-execution-summary.ts';
 
 export const NATIVE_TOOL_EVENT = 'native.tool.request';
 export const NATIVE_TOOL_FEATURE = 'framework-tools';
@@ -119,6 +120,7 @@ export function createNativeFrameworkTools(options: {
       try {
         const result = await registry.execute(call,signal);
         const binding = options.host.sessions.findBySessionId(call.sessionId,call.generation);
+        if (binding && result.status === 'confirmed') recordNativeExecutionTool(options.store, binding, call);
         observe(mapNativeToolObservation(call,result,binding?.conversationId));
         return result;
       } catch (error) {

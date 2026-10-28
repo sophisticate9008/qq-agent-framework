@@ -26,7 +26,7 @@ export interface NativeHistoryReader {
   readonly inbox: { readonly summary: () => ReturnType<typeof readNativeInboxSummary> };
   readonly sessions: { readonly list: (options?: { limit?: number; after?: string }) => ReturnType<typeof readSessionMetadata> };
   readonly usage: NativeUsageReader;
-  readonly executions: Pick<ReturnType<typeof createNativeExecutionController>, 'list' | 'get'>;
+  readonly executions: Pick<ReturnType<typeof createNativeExecutionController>, 'list' | 'get' | 'inspect' | 'listForDisplay'>;
 }
 
 export function readNativeHistory<Result>(directory: string, read: (history: NativeHistoryReader) => Result, accountScope?: AccountScope): Result {
@@ -46,7 +46,7 @@ export function readNativeHistory<Result>(directory: string, read: (history: Nat
         readSessionMetadata(store, options) }),
       usage: Object.freeze({ snapshot: usage.snapshot, sessionLedgers: usage.sessionLedgers, pricing: usage.pricing, summary: usage.summary,
         recent: usage.recent, list: usage.list, series: usage.series }),
-      executions: Object.freeze({ list: executions.list, get: executions.get }) }));
+      executions: Object.freeze({ list: executions.list, get: executions.get, inspect: executions.inspect, listForDisplay: executions.listForDisplay }) }));
     });
   } finally { store.close(); }
 }

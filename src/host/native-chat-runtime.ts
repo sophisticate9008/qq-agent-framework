@@ -57,6 +57,7 @@ import type { AgentEvent } from './types.ts'
 import { createNativeUsage, type NativeUsageTokens } from './native-usage.ts'
 import { digest, json, object } from './data.ts'
 import { createNativeExecutionController } from './native-execution.ts'
+import { recordNativeExecutionDelivery } from './native-execution-summary.ts'
 import { createNativeExecutionClaims } from './native-execution-claims.ts'
 import { createNativeExecutionPolicyActions } from './native-execution-actions.ts'
 import { createNativeBootstrapMount, type LoadedNativeBootstrap, type NativeBootstrapMount } from './native-bootstrap.ts'
@@ -972,6 +973,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         host = createBridgeHost({ store, accountScope, agent, context, persona: personaReference,
           ...bootstrapMount?.bridgeOptions,
           onAgentDelivery: (requestId, receipt) => workFeedback?.delivered(requestId, receipt),
+          onAgentMessageDelivery: (event, result, confirmedContent) => recordNativeExecutionDelivery(store!, event, result, confirmedContent),
           shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
           effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...replyEffects,

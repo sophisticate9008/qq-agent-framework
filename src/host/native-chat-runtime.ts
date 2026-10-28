@@ -1499,7 +1499,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             && host?.replies.get(conversationId)?.status !== 'waiting',
           onFault: code => { lastError = code; activity.record('error', null, undefined, {}, code) } })
         const runningResources: NativeRunningRunResources = { lifetime: controller, host, dsh, work, claims, executions,
-          workFeedback, bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, releaseInteractions,
+          workFeedback, bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, scheduler: pluginScheduler, releaseInteractions,
           closeInteractions: stopInteractions, claimTimer, clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
         runningResources.lifetime.signal.throwIfAborted()
         state = 'running'

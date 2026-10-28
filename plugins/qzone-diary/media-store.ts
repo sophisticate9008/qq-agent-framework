@@ -1,0 +1,51 @@
+import { createHash } from 'node:crypto'
+import { mkdir, readdir, lstat, unlink, writeFile, realpath, open } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import type { DiaryMedia } from './types.ts'
+
+/** Use only when the protocol process can read the same operator-owned local directory. */
+export function createLocalDiaryMedia(directory: string): DiaryMedia {
+  const root = resolve(directory)
+  async function prepare() {
+    await mkdir(root, { recursive: true, mode: 0o700 })
+    const info = await lstat(root)
+    if (!info.isDirectory() || info.isSymbolicLink() || info.mode & 0o077 || await realpath(root) !== root) throw new Error('DIARY_MEDIA_DIRECTORY_INVALID')
+  }
+  async function verify(name: string) {
+    await prepare()
+    const match = name.match(/^[A-Za-z0-9-]+-([a-f0-9]{64})\.(png|jpg|webp)$/)
+    if (!match) throw new Error('DIARY_MEDIA_INVALID')
+    const handle = await open(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const info = await handle.stat()
+      if (!info.isFile() || info.nlink !== 1 || info.size > 8 * 1024 * 1024 || info.mode & 0o077) throw new Error('DIARY_MEDIA_INVALID')
+      if (createHash('sha256').update(await handle.readFile()).digest('hex') !== match[1]) throw new Error('DIARY_MEDIA_CHANGED')
+    } finally { await handle.close() }
+    return { protocolImage: pathToFileURL(join(root, name)).href }
+  }
+  return {
+    async save(id, image) {
+      await prepare()
+      if (!/^[A-Za-z0-9-]{1,100}$/.test(id) || image.data.byteLength > 8 * 1024 * 1024
+        || createHash('sha256').update(image.data).digest('hex') !== image.sha256) throw new Error('DIARY_MEDIA_INVALID')
+      const name = `${id}-${image.sha256}.${image.mediaType === 'image/png' ? 'png' : image.mediaType === 'image/jpeg' ? 'jpg' : 'webp'}`
+      await writeFile(join(root, name), image.data, { mode: 0o600, flag: 'wx' }).catch((error: unknown) => {
+        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST')) throw error
+      })
+      return { id: name, ...await verify(name) }
+    },
+    resolve: verify,
+    async prune(retainedIds) {
+      await prepare()
+      const retained = new Set(retainedIds), files = await readdir(root)
+      if (files.length > 10000) throw new Error('DIARY_MEDIA_MAINTENANCE_LIMIT')
+      for (const name of files) {
+        if (retained.has(name) || !/^[A-Za-z0-9-]+-[a-f0-9]{64}\.(png|jpg|webp)$/.test(name)) continue
+        const info = await lstat(join(root, name))
+        if (info.isFile() && !info.isSymbolicLink() && info.mtimeMs < Date.now() - 7 * 86400000) await unlink(join(root, name))
+      }
+    },
+  }
+}

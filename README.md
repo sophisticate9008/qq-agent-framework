@@ -57,6 +57,7 @@ npm start
 | QQ 协议基础能力与尚未接入项目 | [QQ 能力清单](docs/QQ_CAPABILITIES.md) |
 | 插件能力分层与会话服务设计 | [设计文档](docs/PLUGIN_CAPABILITIES_AND_SESSIONS.md) |
 | 编写扩展及使用 SDK | [扩展开发](docs/EXTENDING.md) · [SDK](packages/framework-sdk/README.md) |
+| 插件调度与空间日记实例 | [持久定时任务](docs/TRIGGERS.md) · [空间生活日记](plugins/qzone-diary/README.md) |
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |
 | 处理未决执行、会话和恢复 | [恢复手册](docs/RECOVERY.md) |
 | 参与开发与报告问题 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |

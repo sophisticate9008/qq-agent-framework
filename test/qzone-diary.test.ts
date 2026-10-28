@@ -30,6 +30,7 @@ interface FixtureOptions {
   readonly review?: (index: number) => unknown;
   readonly publish?: boolean;
   readonly outcome?: OneBotReadResult<JsonValue> | 'lost';
+  readonly onPlan?: (request: ModelStart) => void;
   readonly onReview?: (request: ModelStart, index: number) => void;
 }
 
@@ -61,6 +62,7 @@ async function fixture(context: TestContext, options: FixtureOptions = {}) {
           ? { acceptable: false, captionMatches: true, issues: ['右手多出一根手指'], correction: '右手保留正常五根手指' } : goodReview;
       } else if (request.prompt.includes('"slots"')) {
         stats.planning++; stats.order.push('plan');
+        options.onPlan?.(request);
         const count = Number(request.prompt.match(/安排(\d+)个/)?.[1]);
         assert(count >= 1 && count <= 3);
         output = { slots: Array.from({ length: count }, (_, index) => ({ scene: `第${index + 1}段生活：去公园画树叶`, style: '柔和水彩' })) };
@@ -253,6 +255,36 @@ test('restarting during the initial five-second planning delay preserves one dur
   assert.equal(f.diary.read('2026-01-01')?.state, 'planned');
   assert.equal(f.stats.planning, 1);
   await f.restart(); await f.tick(); assert.equal(f.stats.planning, 1);
+});
+
+test('a slow planning response moves a missed random instant into the future and includes its local time in the prompt', async context => {
+  let advance: (() => void) | undefined;
+  const f = await fixture(context, { onPlan() { advance?.(); } });
+  f.setNow(initial + 58.5 * 60_000);
+  advance = () => f.setNow(f.now + 139_000);
+  await f.diary.planDay();
+  const day = f.diary.read('2026-01-01')!;
+  const slot = day.slots[0]!;
+  assert.equal(slot.state, 'scheduled'); assert(slot.at >= f.now + 1000);
+  assert(slot.until - slot.at >= 1_800_000);
+  assert(f.stats.modelCalls[0]!.prompt.includes('本地时间依次为09:00'));
+  const scheduled = f.scheduler.forPlugin('qzone-diary', new AbortController().signal).list({ limit: 1000 })
+    .find(rule => rule.id === 'post-' + day.date + '-0');
+  assert(scheduled); assert.deepEqual(scheduled.schedule, { kind: 'once', at: slot.at });
+  f.setNow(slot.at); await f.tick();
+  assert.equal(f.diary.read(day.date)!.slots[0]!.state, 'published');
+  assert.equal(f.stats.planning, 1); assert.equal(f.stats.publications.length, 1);
+});
+
+test('a plan completed with less than thirty minutes left skips its slot without scheduling generation', async context => {
+  let advance: (() => void) | undefined;
+  const f = await fixture(context, { onPlan() { advance?.(); } });
+  advance = () => f.setNow(localMinute('2026-01-01', 11 * 60 + 45, 'Asia/Shanghai'));
+  const day = await f.startPlan();
+  assert.equal(day.state, 'planned'); assert.equal(day.slots[0]!.state, 'skipped');
+  const rules = f.scheduler.forPlugin('qzone-diary', new AbortController().signal).list({ limit: 1000 });
+  assert(!rules.some(rule => rule.id.startsWith('post-')));
+  await f.tick(); assert.equal(f.stats.images.length, 0); assert.equal(f.stats.publications.length, 0);
 });
 
 test('new daily plans reuse the independent durable writer binding and its initialized persona context', async context => {

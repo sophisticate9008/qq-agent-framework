@@ -100,6 +100,7 @@ export function createNativeSessionDirectoryTools(options: {
   readonly resolveQQ: (key: string) => SessionBinding | null;
   readonly listQQ: () => readonly SessionMetadata[];
   readonly bindQQ: (target: NativeSessionResetTarget, targetSessionId: string, signal: AbortSignal) => unknown | Promise<unknown>;
+  readonly deferQQ?: (request: EffectRequest, target: NativeSessionResetTarget, targetSessionId?: string) => unknown | Promise<unknown>;
   readonly unbindQQ: (target: NativeSessionResetTarget) => unknown | Promise<unknown>;
 }): readonly DirectoryTool[] {
   async function guard(request: EffectRequest): Promise<void> {
@@ -151,10 +152,11 @@ export function createNativeSessionDirectoryTools(options: {
         return { status: 'confirmed', bindings: all.slice(0, input.limit), limited: all.length > input.limit,
           pluginManagementAvailable: service !== undefined };
       }),
-    make('qaf_session_bind', '将空闲QQ或插件绑定切换到明确的targetSessionId。QQ传resolve/list得到的完整target，保持历史并推进generation；两个QQ不能占用同一实际会话。插件传pluginOwner、expectedRevision及可选具名键，可共享QQ或其他插件会话。',
+    make('qaf_session_bind', '将空闲QQ或插件绑定切换到明确的targetSessionId。QQ传resolve/list得到的完整target，保持历史并推进generation；两个QQ不能占用同一实际会话。插件传pluginOwner、expectedRevision及可选具名键，可共享QQ或其他插件会话。管理当前QQ会话时先返回pending与operationId，待本轮处理和发送结束后应用。',
       mutationSchema('bind'), value => mutationInput(value, 'bind'), async (input, request) => {
         if (input.kind === 'qq') {
           assert(input.targetSessionId, 'INVALID_SESSION_TOOL_INPUT', 'A concrete targetSessionId is required.');
+          if (input.target.key === request.scope.conversationId && options.deferQQ) return options.deferQQ(request, input.target, input.targetSessionId);
           return options.bindQQ(input.target, input.targetSessionId, request.signal);
         }
         assert(input.request.action === 'bind', 'INVALID_SESSION_TOOL_INPUT', 'A plugin binding target is required.');
@@ -171,9 +173,12 @@ export function createNativeSessionDirectoryTools(options: {
           expectedRevision: target.revision, ...(target.model === undefined ? {} : { model: target.model }) }, request.signal);
         return { status: 'confirmed', kind: 'plugin', binding };
       }),
-    make('qaf_session_unbind', '解除QQ或插件的当前会话绑定并保留实际模型会话历史。QQ使用完整target版本；插件使用pluginOwner、expectedRevision及具名键。仅处理已空闲且执行结果明确的目标；解绑后下次调用可建立新绑定。',
+    make('qaf_session_unbind', '解除QQ或插件的当前会话绑定并保留实际模型会话历史。QQ使用完整target版本；插件使用pluginOwner、expectedRevision及具名键。管理当前QQ会话时先返回pending与operationId，在本轮结束后应用；其余目标即时核验空闲与执行状态。解绑后下次调用可建立新绑定。',
       mutationSchema('unbind'), value => mutationInput(value, 'unbind'), async (input, request) => {
-        if (input.kind === 'qq') return options.unbindQQ(input.target);
+        if (input.kind === 'qq') {
+          if (input.target.key === request.scope.conversationId && options.deferQQ) return options.deferQQ(request, input.target);
+          return options.unbindQQ(input.target);
+        }
         const target = input.request;
         assert(target.action === 'unbind', 'INVALID_SESSION_TOOL_INPUT', 'A plugin unbind target is required.');
         const unbound = await modelService().unbind(target.owner, { name: target.name, conversationId: target.conversationId,

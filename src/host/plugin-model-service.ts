@@ -3,7 +3,7 @@ import { FrameworkError, snapshot } from '../core/values.ts'
 import type { AgentEvent, DurableStore, StoredRecord } from '../contracts/ports.ts'
 import type { JsonObject, JsonValue } from '../contracts/data.ts'
 import { isRecord } from '../contracts/values.ts'
-import { parsePluginModelSelection, pluginModelIdentifier } from '../contracts/plugin-model.ts'
+import { parsePluginModelImages, parsePluginModelSelection, pluginModelIdentifier } from '../contracts/plugin-model.ts'
 import type { PluginModelBackend, PluginModelBinding, PluginModelBindingKey, PluginModelClient, PluginModelRunRequest, PluginModelRunResult,
   PluginModelSelection, PluginModelSessionKey, PluginModelManagedSession } from '../contracts/plugin-model.ts'
 
@@ -238,11 +238,12 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
             conversationId: target.conversationId, state: 'running', startedAt: Date.now() }))
           submitted = true
           const result = await options.backend.start({ sessionId: target.sessionId, requestId, owner, prompt: request.prompt,
+            ...(request.images ? { images: request.images } : {}),
             ...(model ? { model } : {}), signal: active })
           if (result.status === 'rejected') {
             options.store.write(EXECUTIONS, target.sessionId, json({ schema: 1, owner, requestId, state: 'rejected', updatedAt: Date.now() }))
             submitted = false
-            failure('PLUGIN_MODEL_REJECTED')
+            failure(result.code ?? 'PLUGIN_MODEL_REJECTED')
           }
           if (result.status !== 'accepted') failure('PLUGIN_MODEL_EXECUTION_UNKNOWN')
           const event = await terminal
@@ -340,6 +341,10 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
         async run(request) {
           if (typeof request.prompt !== 'string' || request.prompt.trim() === '' || request.prompt.length > 128_000 || Buffer.byteLength(request.prompt) > 262_144
             || request.mode !== undefined && request.mode !== 'persistent' && request.mode !== 'stateless') failure('PLUGIN_MODEL_INVALID_REQUEST')
+          if (request.images !== undefined) {
+            try { request = { ...request, images: parsePluginModelImages(request.images) } }
+            catch { failure('PLUGIN_MODEL_INVALID_IMAGES') }
+          }
           const signal = combine(lifetime, request.signal)
           signal.throwIfAborted()
           if (request.mode === 'stateless') {

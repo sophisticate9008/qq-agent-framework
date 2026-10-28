@@ -1,6 +1,6 @@
 import { createDshAdapter, DshAdapterError, type DshClientPort, type DshPortResult, type DshSessionEvent } from './dsh.ts'
 import { isRecord } from '../contracts/values.ts'
-import { parsePluginModelSelection, pluginModelIdentifier } from '../contracts/plugin-model.ts'
+import { parsePluginModelImages, parsePluginModelSelection, pluginModelIdentifier } from '../contracts/plugin-model.ts'
 import type { PluginModelBackend, PluginModelDescription } from '../contracts/plugin-model.ts'
 import type { JsonObject, JsonValue } from '../contracts/data.ts'
 
@@ -41,9 +41,13 @@ export function createDshPluginModelBackend(options: {
     async start(request) {
       try {
         const result = await options.invoke('bridgePlugin/startPluginModel', { sessionId: request.sessionId, requestId: request.requestId,
-          owner: request.owner, prompt: request.prompt, ...(request.model ? { model: { ...parsePluginModelSelection(request.model) } } : {}) }, request.signal)
+          owner: request.owner, prompt: request.prompt, ...(request.images ? { images: parsePluginModelImages(request.images).map(image => ({ ...image })) } : {}),
+          ...(request.model ? { model: { ...parsePluginModelSelection(request.model) } } : {}) }, request.signal)
         if (!result.ok) return { status: 'rejected' }
-        return isRecord(result.value) && result.value.accepted === true ? { status: 'accepted' } : { status: 'unknown' }
+        return isRecord(result.value) && result.value.accepted === true ? { status: 'accepted' }
+          : isRecord(result.value) && result.value.accepted === false ? { status: 'rejected',
+            ...(result.value.code === 'PLUGIN_MODEL_IMAGE_UNSUPPORTED' || result.value.code === 'PLUGIN_MODEL_INVALID_IMAGES' ? { code: result.value.code } : {}) }
+          : { status: 'unknown' }
       } catch { return { status: 'unknown' } }
     },
     follow(request) {
@@ -51,6 +55,9 @@ export function createDshPluginModelBackend(options: {
       let currentTurn: string | number | undefined
       let matchedTurn: string | number | undefined
       let pendingStart: DshSessionEvent | undefined
+      const pending: Record<string, boolean[]> = { 'next-turn': [], 'next-step': [] }
+      const matchesSource = (message: unknown) => isRecord(message) && isRecord(message.source)
+        && message.source.kind === 'qaf-plugin' && message.source.owner === request.owner && message.source.requestId === request.requestId
       const adapter = createDshAdapter({
         createSession: input => options.client.createSession(input), prompt: input => options.client.prompt(input),
         cancel: input => options.client.cancel(input),
@@ -68,8 +75,17 @@ export function createDshPluginModelBackend(options: {
             pendingStart = currentTurn === undefined ? undefined : frame
             return
           }
-          if (type === 'user/message' && currentTurn !== undefined && isRecord(data?.source)
-            && data.source.kind === 'qaf-plugin' && data.source.owner === request.owner && data.source.requestId === request.requestId) {
+          let claimed = type === 'user/message' && matchesSource(data)
+          if (type === 'agent/inbox/spliced' && data && typeof data.target === 'string' && pending[data.target]
+            && Number.isSafeInteger(data.start) && Number.isSafeInteger(data.removedCount ?? 0) && Array.isArray(data.inserted)) {
+            const queue = pending[data.target]!
+            const start = Number(data.start), removed = Number(data.removedCount ?? 0)
+            if (start >= 0 && start <= queue.length && removed >= 0 && removed <= queue.length - start) {
+              const consumed = queue.splice(start, removed, ...data.inserted.map(matchesSource))
+              if (data.outcome !== 'canceled' && consumed.some(Boolean)) claimed = true
+            }
+          }
+          if (claimed && currentTurn !== undefined) {
             matchedTurn = currentTurn
             if (pendingStart) await input.onEvent(pendingStart)
             pendingStart = undefined

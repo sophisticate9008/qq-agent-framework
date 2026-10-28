@@ -1,7 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { appendPluginRecord, pluginRecordOf, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { PromptContentPart } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-query'
@@ -15,11 +16,12 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    'qaf-plugin/session': { readonly owner: string }
+  interface PluginRecordMap {
+    'plugin:qaf/model-session': { readonly owner: string }
   }
 }
 interface Selection { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+interface Image { readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; readonly data: string }
 interface ModelRun {
   readonly requestId: string
   readonly owner: string
@@ -39,6 +41,21 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 const MAX_OWNED_HANDLES = 64
 const MAX_RUNS = 256
 const MAX_ACTIVE = 32
+const isOwnedSession = (events: readonly SessionEvent[]) => events.some(event => pluginRecordOf(event)?.type === 'plugin:qaf/model-session')
+function images(value: unknown): readonly Image[] {
+  if (!Array.isArray(value) || value.length > 4) throw new TypeError('Invalid plugin model images')
+  let total = 0
+  return value.map((image: unknown): Image => {
+    if (!object(image) || !['image/png', 'image/jpeg', 'image/webp'].includes(String(image.mediaType))
+      || typeof image.data !== 'string' || image.data.length < 4 || image.data.length > 4 * Math.ceil(8 * 1024 * 1024 / 3)
+      || Object.keys(image).some(key => key !== 'mediaType' && key !== 'data')
+      || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) throw new TypeError('Invalid plugin model image')
+    const bytes = Buffer.from(image.data, 'base64')
+    total += bytes.length
+    if (bytes.toString('base64') !== image.data || bytes.length > 8 * 1024 * 1024 || total > 16 * 1024 * 1024) throw new TypeError('Plugin model image capacity exceeded')
+    return { mediaType: image.mediaType as Image['mediaType'], data: image.data }
+  })
+}
 function selection(value: unknown): Selection {
   if (!object(value) || !identifier(value.provider) || !identifier(value.model)
     || value.reasoningEffort !== undefined && !identifier(value.reasoningEffort)
@@ -84,14 +101,14 @@ export function createPluginModelChannel(ctx: Context) {
   const resolve = async (sessionId: string, signal: AbortSignal): Promise<Agent> => {
     const live = ctx.agents.get(SessionId(sessionId))
     if (live) return live
-    // Plugin-owned sessions have no workspace and no chat preset. Resume that
+    // Plugin-owned sessions have no chat preset. Resume their
     // recorded composition directly; the ordinary controller requires a cwd.
     if (sessionId.startsWith('qaf-plugin-')) {
       const query = ctx.get('sessionQuery')
       if (!query) throw new TypeError('Session query is unavailable')
       const observed = await query.observeSession(SessionId(sessionId), { signal })
       try {
-        if (observed.events.some(event => event.type === 'qaf-plugin/session')) {
+        if (isOwnedSession(observed.events)) {
           const selected = [...observed.events].reverse().find(event => event.type === 'model/selection')
           if (!selected) throw new TypeError('Plugin session model is unavailable')
           const model = selection(selected.data)
@@ -164,11 +181,13 @@ export function createPluginModelChannel(ctx: Context) {
         await verifySelection(model, signal)
         if (ctx.agents.get(SessionId(request.sessionId)) || await persistence.stat(SessionId(request.sessionId), { signal })) throw new TypeError('Plugin session already exists')
         assertOpen()
-        return ctx.agents.create({ sessionId: SessionId(request.sessionId), signal,
+        // The stock session history/follow API requires a cwd in the header.
+        // This address metadata grants no tools or filesystem capability.
+        return ctx.agents.create({ sessionId: SessionId(request.sessionId), meta: { cwd: process.cwd() }, signal,
           agentOptions: { provider: model.provider, model: model.model,
             ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) },
           setup: (_scope, agent) => {
-            agent.session.append('qaf-plugin/session', { owner: request.owner })
+            appendPluginRecord(agent.session, 'plugin:qaf/model-session', { owner: request.owner })
             agent.session.append('model/selection', { provider: model.provider, model: model.model,
               ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) })
           } })
@@ -176,14 +195,17 @@ export function createPluginModelChannel(ctx: Context) {
       await persistence.flush()
       return { sessionId: request.sessionId, created: true }
     },
-    async start(request: { sessionId: string; requestId: string; owner: string; prompt: string; model?: Selection }, signal: AbortSignal) {
-      if (!object(request) || Object.keys(request).some(key => !['sessionId', 'requestId', 'owner', 'prompt', 'model'].includes(key))
+    async start(request: { sessionId: string; requestId: string; owner: string; prompt: string; images?: readonly Image[]; model?: Selection }, signal: AbortSignal) {
+      if (!object(request) || Object.keys(request).some(key => !['sessionId', 'requestId', 'owner', 'prompt', 'images', 'model'].includes(key))
         || !identifier(request.sessionId) || !identifier(request.requestId) || !identifier(request.owner)
         || typeof request.prompt !== 'string' || request.prompt.trim() === '' || request.prompt.length > 128_000
         || Buffer.byteLength(request.prompt) > 262_144) throw new TypeError('Invalid plugin model request')
+      const suppliedImages = request.images === undefined ? [] : images(request.images)
       admitRun(request.sessionId)
       const disposers: (() => void)[] = []
       let handedOff = false
+      let submitted = false
+      let rejectionCode = 'PLUGIN_MODEL_REJECTED'
       try {
         const agent = await resolve(request.sessionId, signal)
         const model = request.model === undefined ? undefined : selection(request.model)
@@ -191,13 +213,44 @@ export function createPluginModelChannel(ctx: Context) {
         signal.throwIfAborted()
         assertOpen()
         if (agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new TypeError('Plugin session is not idle')
-        const ownContext = agent.session.snapshotEvents().some(event => event.type === 'qaf-plugin/session')
+        const ownContext = isOwnedSession(agent.session.snapshotEvents())
         // restrict() alone masks global tools only. Assembly removes scoped schemas,
         // while the monotonic guard also rejects calls reconstructed from old history.
         disposers.push(agent.ctx.tools.restrict({ allow: [] }))
         disposers.push(agent.ctx.tools.guard(() => 'Plugin generation does not execute tools'))
+        const shadowedContexts = new Set<string>()
+        const shadow = (register: () => () => void) => {
+          try { disposers.push(register()) }
+          catch (error) {
+            // Agent-local SDK contributions already own their exact scope.
+            // Optional contexts are suppressed below; required operational
+            // facts remain under the SDK's control. Global deployment content
+            // can be shadowed without disposing another plugin's effects.
+            if (!(error instanceof Error) || !error.message.endsWith('is already registered in this scope')) throw error
+          }
+        }
+        if (ownContext) {
+          disposers.push(agent.ctx.systemPrompt.suppressRuntimeContext())
+          const initial = await agent.ctx.systemPrompt.assemble({ agent, scope: agent, signal })
+          if (initial.sections.length > 256 || initial.contexts.length > 256) throw new TypeError('Plugin context capacity exceeded')
+          // Complete prompt sections are restored after the assembly waterfall,
+          // so shadow them before the first actual model step as well.
+          for (const section of initial.sections) shadow(() => agent.ctx.systemPrompt.section({ name: section.name, order: 0, text: '' }))
+          for (const context of initial.contexts) {
+            shadow(() => agent.ctx.systemPrompt.context({ name: context.name, order: 0, text: '' }))
+            shadowedContexts.add(context.name)
+          }
+        }
         disposers.push(agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
           const assembled = await next()
+          if (ownContext) for (const context of assembled.contexts) {
+            if (shadowedContexts.has(context.name)) continue
+            if (shadowedContexts.size >= 256) throw new TypeError('Plugin context capacity exceeded')
+            // SDK admission refresh restores required registered contexts. Shadow
+            // each contribution in this scope so refresh also stays model-only.
+            shadow(() => agent.ctx.systemPrompt.context({ name: context.name, order: 0, text: '' }))
+            shadowedContexts.add(context.name)
+          }
           return { ...assembled, tools: [], ...(ownContext ? { sections: [], contexts: [], variables: {} } : {}) }
         }))
         if (model) disposers.push(agent.ctx.on('agent/request', async (_event, next): Promise<LlmCallConfig> => {
@@ -206,8 +259,26 @@ export function createPluginModelChannel(ctx: Context) {
           return { ...rest, provider: model.provider, model: model.model,
             ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) }
         }))
-        const message = createUserMessage({ source: { kind: 'qaf-plugin', owner: request.owner, requestId: request.requestId }, content: [{ type: 'text',
-          text: `本轮来源为插件 ${request.owner} 的文本生成请求。结果返回该插件；本轮没有 QQ 发言者或 QQ 主人身份，工具不可用。\n\n${request.prompt}` }] })
+        if (suppliedImages.length) {
+          rejectionCode = 'PLUGIN_MODEL_IMAGE_UNSUPPORTED'
+          const route = model ?? agent.session.requestHeader()?.config ?? agent.options
+          if (!route.provider || !route.model) throw new TypeError('Plugin image model is unavailable')
+          const llm = ctx.get('llm')
+          if (!llm) throw new TypeError('Plugin image model is unavailable')
+          const call = await llm.prepareCall({ provider: route.provider, model: route.model }, signal)
+          if (!call.inputModalities?.includes('image')) throw new TypeError('Plugin model image capability is not verified')
+        }
+        const promptText = `本轮来源为插件 ${request.owner} 的生成请求。结果返回该插件；本轮没有 QQ 发言者或 QQ 主人身份，工具不可用。\n\n${request.prompt}`
+        const promptContent: PromptContentPart[] = [{ type: 'text', text: promptText },
+          ...suppliedImages.map(image => ({ type: 'image' as const, ...image }))]
+        if (suppliedImages.length) rejectionCode = 'PLUGIN_MODEL_INVALID_IMAGES'
+        const attachments = ctx.get('attachments')
+        if (suppliedImages.length && !attachments) throw new TypeError('Plugin image attachment storage is unavailable')
+        const content = suppliedImages.length && attachments ? await attachments.admitPromptContent(promptContent)
+          : [{ type: 'text' as const, text: promptText }]
+        signal.throwIfAborted()
+        const message = createUserMessage({ source: { kind: 'qaf-plugin', owner: request.owner, requestId: request.requestId }, content })
+        submitted = true
         agent.followup(message)
         let run!: ModelRun
         const idle = agent.whenIdle().finally(async () => {
@@ -233,6 +304,11 @@ export function createPluginModelChannel(ctx: Context) {
         runs.set(request.sessionId, run)
         handedOff = true
         return { accepted: true }
+      } catch (error) {
+        // A pre-admission refusal has no model execution to reconcile. Keep
+        // unknown only after input was actually handed to the agent loop.
+        if (!submitted) return { accepted: false, code: rejectionCode }
+        throw error
       } finally {
         if (!handedOff) {
           for (const dispose of disposers.reverse()) dispose()
@@ -261,7 +337,10 @@ export function createPluginModelChannel(ctx: Context) {
         let claimedTurn: number | null = null
         let terminal: Extract<SessionEvent, { type: 'turn/end' }> | undefined
         let validQueue = true
-        const pending: Record<'next-turn' | 'next-step', number> = { 'next-turn': 0, 'next-step': 0 }
+        const pending: Record<'next-turn' | 'next-step', boolean[]> = { 'next-turn': [], 'next-step': [] }
+        const matchesSource = (message: { readonly source: { readonly kind: string } }) => message.source.kind === 'qaf-plugin'
+          && 'owner' in message.source && message.source.owner === request.owner
+          && 'requestId' in message.source && message.source.requestId === request.requestId
         for (const event of observation.events) {
           if (event.type === 'turn/start') currentTurn = event.data.turn
           if (event.type === 'user/message' && event.data.source.kind === 'qaf-plugin'
@@ -273,14 +352,17 @@ export function createPluginModelChannel(ctx: Context) {
           if (event.type === 'agent/inbox/spliced') {
             const data = event.data
             const removed = data.removedCount ?? 0
-            if (!(data.target in pending) || data.start < 0 || data.start > pending[data.target]
-              || removed < 0 || removed > pending[data.target] - data.start) validQueue = false
-            else pending[data.target] += data.inserted.length - removed
+            if (!(data.target in pending) || data.start < 0 || data.start > pending[data.target].length
+              || removed < 0 || removed > pending[data.target].length - data.start) validQueue = false
+            else {
+              const consumed = pending[data.target].splice(data.start, removed, ...data.inserted.map(matchesSource))
+              if (data.outcome !== 'canceled' && consumed.some(Boolean)) claimedTurn = currentTurn
+            }
           }
         }
         const live = ctx.agents.get(SessionId(request.sessionId))
         const idle = !active.has(request.sessionId) && validQueue && currentTurn === null
-          && pending['next-turn'] === 0 && pending['next-step'] === 0
+          && pending['next-turn'].length === 0 && pending['next-step'].length === 0
           && (!live || live.status === 'idle' && live.inbox.nextTurn.length === 0 && live.inbox.nextStep.length === 0)
         const usageSteps: UsageStep[] = []
         let usageComplete = claimedTurn !== null

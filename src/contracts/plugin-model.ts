@@ -35,11 +35,37 @@ export interface PluginModelBinding {
 }
 export interface PluginModelRunRequest extends PluginModelSessionKey {
   readonly prompt: string
+  /** Canonical Base64 transport encoding; admitted as actual SDK image attachments. */
+  readonly images?: readonly PluginModelImage[]
   readonly mode?: 'persistent' | 'stateless'
   readonly model?: PluginModelSelection
   readonly maxOutputChars?: number
   readonly timeoutMs?: number
   readonly signal?: AbortSignal
+}
+export interface PluginModelImage {
+  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp'
+  readonly data: string
+}
+export type PluginModelRejectionCode = 'PLUGIN_MODEL_REJECTED' | 'PLUGIN_MODEL_IMAGE_UNSUPPORTED' | 'PLUGIN_MODEL_INVALID_IMAGES'
+export const PLUGIN_MODEL_IMAGE_LIMITS = Object.freeze({ count: 4, bytesPerImage: 8 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 })
+export function parsePluginModelImages(value: unknown): readonly PluginModelImage[] {
+  if (!Array.isArray(value) || value.length > PLUGIN_MODEL_IMAGE_LIMITS.count) throw new TypeError('Invalid plugin model images')
+  let total = 0
+  return value.map((image: unknown): PluginModelImage => {
+    if (!image || typeof image !== 'object' || Array.isArray(image)) throw new TypeError('Invalid plugin model image')
+    const row = image as Record<string, unknown>
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(String(row.mediaType)) || typeof row.data !== 'string'
+      || row.data.length < 4 || row.data.length > 4 * Math.ceil(PLUGIN_MODEL_IMAGE_LIMITS.bytesPerImage / 3)
+      || Object.keys(row).some(key => key !== 'mediaType' && key !== 'data')
+      || row.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(row.data)
+      || row.data.endsWith('==') && !/[AQgw]==$/.test(row.data)
+      || !row.data.endsWith('==') && row.data.endsWith('=') && !/[AEIMQUYcgkosw048]=$/.test(row.data)) throw new TypeError('Invalid plugin model image')
+    const bytes = row.data.length / 4 * 3 - (row.data.endsWith('==') ? 2 : row.data.endsWith('=') ? 1 : 0)
+    total += bytes
+    if (bytes > PLUGIN_MODEL_IMAGE_LIMITS.bytesPerImage || total > PLUGIN_MODEL_IMAGE_LIMITS.totalBytes) throw new TypeError('Plugin model image capacity exceeded')
+    return { mediaType: row.mediaType as PluginModelImage['mediaType'], data: row.data }
+  })
 }
 export interface PluginModelRunResult {
   readonly requestId: string
@@ -69,7 +95,9 @@ export interface PluginModelBackend {
   inspect(sessionId: string, signal: AbortSignal): Promise<{ readonly exists: boolean }>
   create(request: { readonly sessionId: string; readonly owner: string; readonly model: PluginModelSelection; readonly signal: AbortSignal }): Promise<void>
   start(request: { readonly sessionId: string; readonly requestId: string; readonly owner: string; readonly prompt: string;
-    readonly model?: PluginModelSelection; readonly signal: AbortSignal }): Promise<{ readonly status: 'accepted' | 'rejected' | 'unknown' }>
+    readonly images?: readonly PluginModelImage[]; readonly model?: PluginModelSelection; readonly signal: AbortSignal }): Promise<{
+      readonly status: 'accepted' | 'rejected' | 'unknown'; readonly code?: PluginModelRejectionCode
+    }>
   follow: (request: Parameters<AgentAdapter['follow']>[0] & { readonly requestId: string; readonly owner: string }) => ReturnType<AgentAdapter['follow']>
   /** Resolves after the loop is idle and the model-only tool restriction has been removed. */
   waitForIdle(sessionId: string, requestId: string, signal: AbortSignal): Promise<void>

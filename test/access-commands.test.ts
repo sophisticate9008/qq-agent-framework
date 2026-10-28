@@ -143,7 +143,7 @@ test('stable service error codes map only to fixed conflict, denial, unknown and
     ['ACCESS_INVALID_REQUEST', '白名单请求无效，本次未修改。'],
     ['ACCESS_CHANGE_UNKNOWN', '本次白名单操作结果未能确认，请先查看状态，勿重复提交。'],
     ['OTHER_ERROR', '本次白名单操作结果未能确认，请先查看状态，勿重复提交。'],
-    ['APPLIED_RELOAD_REQUIRED', '白名单已保存，当前聊天需重新加载后生效。'],
+    ['APPLIED_RELOAD_REQUIRED', '白名单已保存，但运行同步未完成；可再次发送同一条命令同步。'],
   ]) {
     const current = fixture({ error: code })
     await current.handler(message('/添加群白名单'), current.reply, signal)

@@ -64,7 +64,7 @@ test('owner changes only the requested canonical allow scope; publish receives c
   assert.equal(setup.writes(), 2);
 });
 
-test('no-op add/remove never CAS or publish, but owner and revision are still checked', async () => {
+test('no-op add/remove republish saved rules without CAS, after checking owner and revision', async () => {
   const setup = fixture();
   assert.equal((await setup.service.change(change({ kind: 'group' }), signal())).state, 'unchanged');
   assert.equal((await setup.service.change(change({ operation: 'remove' }), signal())).state, 'unchanged');
@@ -73,7 +73,12 @@ test('no-op add/remove never CAS or publish, but owner and revision are still ch
   setup.set({ ...setup.current(), value: { ...setup.current().value, owner: null } });
   await assert.rejects(setup.service.change(change(), signal()), code('ACCESS_OWNER_REQUIRED'));
   assert.equal(setup.writes(), 0);
-  assert.equal(setup.publications.length, 0);
+  assert.equal(setup.publications.length, 2);
+  for (const publication of setup.publications) {
+    assert.deepEqual(publication.saved, publication.previous);
+    assert.equal(publication.saved.revision, 'revision-1');
+    assert.equal(publication.signal.aborted, false);
+  }
 });
 
 test('deny wins over allow additions and removal does not modify deny, owner or the other conversation kind', async () => {
@@ -162,7 +167,12 @@ test('CAS conflicts are not retried; unconfirmed or mismatched callbacks never p
 });
 
 test('publish failure is explicitly already applied; no publication callback is also supported', async () => {
-  const setup = fixture({ async publish() { throw new Error('reload failed'); } });
+  let failing = true;
+  let publications = 0;
+  const setup = fixture({ async publish() {
+    publications++;
+    if (failing) throw new Error('live synchronization failed');
+  } });
   await assert.rejects(setup.service.change(change(), signal()), failure => {
     assert(failure instanceof AccessServiceError);
     assert.equal(failure.code, 'APPLIED_RELOAD_REQUIRED');
@@ -171,8 +181,13 @@ test('publish failure is explicitly already applied; no publication callback is 
     return true;
   });
   assert.equal(setup.writes(), 1);
+  await assert.rejects(setup.service.change(change({ expectedRevision: 'revision-2' }), signal()), code('APPLIED_RELOAD_REQUIRED'));
+  assert.equal(setup.writes(), 1);
+  failing = false;
   const result = await setup.service.change(change({ expectedRevision: 'revision-2' }), signal());
   assert.equal(result.state, 'unchanged');
+  assert.equal(publications, 3);
+  assert.equal(result.document.revision, 'revision-2');
   assert.equal(setup.writes(), 1);
   const optional = fixture({ publish: undefined });
   assert.equal((await optional.service.change(change(), signal())).state, 'applied');

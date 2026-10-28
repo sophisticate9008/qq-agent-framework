@@ -41,7 +41,7 @@ export function createChatInputNativePackage(options: { readonly directory: stri
 /** The host keeps existing media facts and policy; the package owns only guarded service/effect registrations. */
 export function createMediaNativePackage(options: { readonly registry: NativeMediaPackageService }): NativePackageDefinition {
   return Object.freeze({
-    content: createBuiltinPackageContent(import.meta.url, ['./native-media', './native-media-configuration', '../contracts/native-media-configuration', '../contracts/framework-media', '../adapters/ffmpeg-video', '../adapters/gif-observation']),
+    content: createBuiltinPackageContent(import.meta.url, ['./native-media', './native-image-references', './native-media-configuration', '../contracts/native-media', '../contracts/native-media-configuration', '../contracts/framework-media', '../adapters/ffmpeg-video', '../adapters/gif-observation']),
     configurations: [NATIVE_MEDIA_CONFIGURATION],
     manifest: { schema: 1, id: 'media', version: '1.0.0', dependencies: [],
       provides: [{ id: 'media', version: 1 }], requires: [],
@@ -54,7 +54,14 @@ export function createMediaNativePackage(options: { readonly registry: NativeMed
           return adapter.execute({ ...request, signal: AbortSignal.any([request.signal, context.signal]) })
         } })
       }
-      const service: NativeMediaPackageService = Object.freeze({
+      const service = Object.freeze<NativeMediaPackageService>({
+        async readImage(request) {
+          const signal = AbortSignal.any([request.signal, context.signal])
+          signal.throwIfAborted()
+          const result = await registry.readImage({ ...request, signal })
+          signal.throwIfAborted()
+          return result
+        },
         register(asset, signal) { return registry.register(asset, AbortSignal.any([signal, context.signal])) },
         readForPrompt(request) { return registry.readForPrompt({ ...request, signal: AbortSignal.any([request.signal, context.signal]) }) },
         resolveOutgoing(request) { return registry.resolveOutgoing({ ...request, signal: AbortSignal.any([request.signal, context.signal]) }) },

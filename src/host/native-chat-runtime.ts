@@ -15,7 +15,7 @@ import { readDshToolInventory, unavailableToolInventory } from '../adapters/dsh-
 import { withFrameworkToolInventory } from './native-tool-inventory.ts'
 import { startNativeOperationRetention } from './native-operation-retention.ts'
 import { unbindNativeSession, assertNativeSessionIdle } from './native-session-actions.ts'
-import type { NativeSessionResetTarget } from './native-session-management.ts'
+import { nativeSessionBindingRevision, type NativeSessionResetTarget } from './native-session-management.ts'
 import { createNativeUsageProjection } from './native-usage-projection.ts'
 import { createPrivateSqlitePathGuard, openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
 import type { AccountScope } from '../contracts/account-scope.ts'
@@ -252,7 +252,14 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       models: { models: requested => models().models(requested), list: () => models().list(),
         bind: request => models().bind(request), unbind: key => models().unbind(key),
         create: request => models().create(request), run: request => models().run(request) },
-      sessions: { resolve(conversationId) { check(); return host?.sessions.get(conversationId) ?? null },
+      sessions: { resolve(conversationId) {
+        check()
+        const binding = host?.sessions.get(conversationId)
+        const row = binding ? store?.read('host.sessions', conversationId) : null
+        if (!binding || !row || !isRecord(row.value)) return null
+        return { ...binding, target: { key: conversationId, sessionId: binding.sessionId, generation: binding.generation,
+          bindingRevision: nativeSessionBindingRevision({ ...row.value, conversationId }) } }
+      },
         bind(target, sessionId, requested) { check(); return runtime.bindSession(target, sessionId,
           AbortSignal.any([signal, ...(requested ? [requested] : [])])) },
         unbind(target) { check(); return runtime.unbindSession(target) } }
@@ -563,12 +570,6 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
 
   function recordUsage(event: AgentEvent, pluginOwner?: string) {
     if (!usage || !active || (event.type !== 'completed' && event.type !== 'failed')) return
-    const pluginExecution = store?.read('plugin-model.executions', event.sessionId)
-    if (!pluginOwner && pluginExecution && isRecord(pluginExecution.value)) {
-      const value = pluginExecution.value
-      if (['running', 'unknown'].includes(String(value.state))
-        || isRecord(value.usage) && value.usage.turn !== undefined && String(value.usage.turn) === String(event.data?.turn)) return
-    }
     const binding = pluginOwner ? { conversationId: `plugin:${pluginOwner}`, sessionId: event.sessionId, generation: 1 } : bindingForSession(event.sessionId)
     if (!binding) return
     const data = event.data ?? {}

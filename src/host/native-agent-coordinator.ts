@@ -175,7 +175,6 @@ export function createNativeAgentCoordinator(options: {
             try {
               const stop = await sourceAgent.follow({ ...request, async onEvent(event) {
             if (controller.signal.aborted || runtime.lifetime !== controller || request.signal.aborted) return
-            options.recordUsage(event)
             const binding = bindingForSession(event.sessionId)
             if (!binding || !runtime.executions) return
             const waiting = runtime.executions.forConversation(binding.conversationId)
@@ -193,6 +192,8 @@ export function createNativeAgentCoordinator(options: {
               const scope = { conversationId: binding.conversationId, sessionId: event.sessionId, generation: binding.generation }
               const execution = runtime.executions.forTurn(scope, String(turn))
               if (!execution) return
+              // Shared sessions also emit plugin turns. Only a claimed QQ turn belongs in the QQ ledger.
+              options.recordUsage(event)
               event = { ...event, data: { ...event.data, nativeRequestId: execution.requestId } }
               const reason = event.data?.reason
               const aborted = reason !== null && typeof reason === 'object' && !Array.isArray(reason) && reason.kind === 'aborted'

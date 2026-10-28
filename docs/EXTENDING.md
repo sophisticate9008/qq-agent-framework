@@ -476,6 +476,6 @@ const result = await runtime.models.run({ name: 'daily-writing', prompt: '接着
 
 `runtime.models` 提供 `models/list/create/bind/unbind/run`；`run` 首次自动建会话，默认持续复用。插件自建会话不加载 QQ 人设、聊天方案或工具，绑定已有会话沿用已有历史；模型服务细节见 [插件模型与持久会话](PLUGIN_MODELS.md)。插件业务数据仍放在包持久状态中，模型上下文仅保存必要任务历史。
 
-`runtime.sessions.resolve('group:123456')` 或 `private:123456` 返回实际 QQ 绑定；`bind(target, sessionId, signal)`、`unbind(target)` 要求完整当前版本，保留 DSH 历史。插件可以解析 QQ 绑定后把该实际 ID 交给 `runtime.models.bind`。插件固定绑定该 ID，QQ 后来换绑不会自动改变插件上下文。
+`runtime.sessions.resolve('group:123456')` 或 `private:123456` 返回实际 QQ 绑定及可直接用于管理的 `target` 版本；`bind(target, sessionId, signal)`、`unbind(target)` 要求完整当前版本，保留 DSH 历史。插件可以解析 QQ 绑定后把该实际 ID 交给 `runtime.models.bind`。插件固定绑定该 ID，QQ 后来换绑不会自动改变插件上下文。
 
 对 QQ 命令开放这些内部接口时，插件入口负责校验真实发言者；定时任务以已登记插件身份执行，不需要伪造主人消息。生命周期结束后旧实例不能继续提交调用。对模型开放的管理动作使用框架二级能力目录，由宿主核验实际主人。

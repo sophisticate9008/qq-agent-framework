@@ -8,7 +8,7 @@ export interface PluginRuntimeServices {
   readonly capabilities: PluginCapabilityClient
   readonly models: PluginModelClient
   readonly sessions: {
-    resolve(conversationId: string): SessionBinding | null
+    resolve(conversationId: string): (SessionBinding & { readonly target: NativeSessionResetTarget }) | null
     bind(target: NativeSessionResetTarget, sessionId: string, signal?: AbortSignal): Promise<unknown>
     unbind(target: NativeSessionResetTarget): Promise<unknown>
   }

@@ -1,3 +1,4 @@
+import { createNativeQzoneEffects, availableNativeQzoneTools } from './native-qzone-tools.ts'
 import { createOneBotQzoneTools } from '../adapters/onebot-qzone-tools.ts'
 import { createQzoneNativePackage } from './native-qzone.ts'
 import type { QzoneToolPort } from '../contracts/qzone-tools.ts'
@@ -926,31 +927,39 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             ? { sessionId: binding.sessionId, generation: binding.generation } : null },
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         const bootstrapOnebotOptions: import('./native-bootstrap.ts').NativeBootstrapOneBotOptions | undefined = bootstrapMount?.onebotOptions
+        const resolveOutputAsset: import('../adapters/onebot.ts').OneBotAssetResolver = request => {
+          if (request.assetId.startsWith('markdown-asset-')) {
+            if (!markdown) failure('NATIVE_MARKDOWN_UNAVAILABLE')
+            return markdown.resolve(request)
+          }
+          if (request.assetId.startsWith('media-')) {
+            if (!media) failure('NATIVE_MEDIA_UNAVAILABLE')
+            const binding = host?.sessions.get(request.conversationId)
+            if (!binding || binding.sessionId !== request.sessionId || binding.generation !== request.generation) failure('SESSION_STALE')
+            return media.resolveOutgoing(request)
+          }
+          if (request.assetId.startsWith('work-asset-')) {
+            if (!workAssets) failure('WORK_ASSET_UNAVAILABLE')
+            return workAssets.resolve(request)
+          }
+          const onebotOptions: Pick<import('../adapters/onebot.ts').OneBotTransportOptions, 'resolveAsset'> | undefined = bootstrapMount?.onebotOptions
+          const resolver = onebotOptions && 'resolveAsset' in onebotOptions ? onebotOptions.resolveAsset : undefined
+          if (!resolver) failure('NATIVE_ASSET_UNAVAILABLE')
+          return resolver(request)
+        }
         const sourceTransport = createOneBotTransport({ endpoint: configuration.adapters.onebotHttp.endpoint,
           accessToken: configuration.adapters.onebotHttp.secret, timeoutMs: 30_000,
           ...bootstrapOnebotOptions,
           forward: { group: true, private: true, ...bootstrapOnebotOptions?.forward,
             senderId: selfId, senderName: persona.name.slice(0, 100) },
-          resolveAsset(request) {
-            if (request.assetId.startsWith('markdown-asset-')) {
-              if (!markdown) failure('NATIVE_MARKDOWN_UNAVAILABLE')
-              return markdown.resolve(request)
-            }
-            if (request.assetId.startsWith('media-')) {
-              if (!media) failure('NATIVE_MEDIA_UNAVAILABLE')
-              const binding = host?.sessions.get(request.conversationId)
-              if (!binding || binding.sessionId !== request.sessionId || binding.generation !== request.generation) failure('SESSION_STALE')
-              return media.resolveOutgoing(request)
-            }
-            if (request.assetId.startsWith('work-asset-')) {
-              if (!workAssets) failure('WORK_ASSET_UNAVAILABLE')
-              return workAssets.resolve(request)
-            }
-            const onebotOptions: Pick<import('../adapters/onebot.ts').OneBotTransportOptions, 'resolveAsset'> | undefined = bootstrapMount?.onebotOptions
-            const resolver = onebotOptions && 'resolveAsset' in onebotOptions ? onebotOptions.resolveAsset : undefined
-            if (!resolver) failure('NATIVE_ASSET_UNAVAILABLE')
-            return resolver(request)
-          } })
+          resolveAsset: resolveOutputAsset })
+        const qzonePort = createOneBotQzoneTools({ endpoint: configuration.adapters.onebotHttp.endpoint,
+          ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}),
+          ...(options.qzoneSupportedActions ? { readSupportedActions: options.qzoneSupportedActions } : {}) })
+        const qzoneInventory = await qzonePort.inspect(controller.signal)
+        const qzoneTools = availableNativeQzoneTools(qzoneInventory)
+        const qzoneEffects = createNativeQzoneEffects({ port: qzonePort, store, selfId, resolveAsset: resolveOutputAsset,
+          sources: () => messageSources?.reader, authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         const reminderService = reminders.service()
         const workEffects = createNativeWorkEffects({ executor: () => work, sources: () => messageSources?.reader })
         const conversationEffects = createNativeConversationService({
@@ -964,7 +973,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         const replyEffects = createNativeReplyEffects({ sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
         const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
-        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', ...Object.keys(conversationEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
+        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', ...Object.keys(conversationEffects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
           failure('NATIVE_CHAT_RESERVED_CAPABILITY')
         }
         if ([...ONEBOT_PROTOCOL_EVENT_TYPES, NATIVE_TOOL_EVENT, ...Object.keys(reminderService.eventValidators)].some(type => bootstrapMount?.bridgeOptions.eventValidators?.[type])) {
@@ -981,7 +990,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           onAgentMessageDelivery: (event, result, confirmedContent) => recordNativeExecutionDelivery(store!, event, result, confirmedContent),
           shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
-          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...replyEffects,
+          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...qzoneEffects, ...replyEffects,
             'native.stickers.list': { execute(request) {
               if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE')
               return stickers.list.execute(request)
@@ -1108,9 +1117,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             return latest.personas.find(item => item.id === plan?.personaId)
           } }),
           createMediaNativePackage({ registry: media }), createRemindersNativePackage({ service: reminderService }),
-          createQzoneNativePackage(createOneBotQzoneTools({ endpoint: configuration.adapters.onebotHttp.endpoint,
-            ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}),
-            ...(options.qzoneSupportedActions ? { readSupportedActions: options.qzoneSupportedActions } : {}) })),
+          createQzoneNativePackage(qzonePort),
           createMemoryNativePackage({ service: memory.start() }), createNativeOutputPackage(output), createNativeServicesPackage({ ports: {
             agent: { status: () => ({ available: state === 'running' && dsh !== undefined && pluginEpoch !== null,
               missingReasons: state === 'running' && dsh && pluginEpoch ? [] : ['native_agent_not_ready'] }),
@@ -1228,7 +1235,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         if (plugin.frameworkToolProtocol !== 'qq-agent-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
         if (plugin.frameworkToolProtocol === 'qq-agent-framework.tools/1' && dsh.frameworkTools) {
           frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
-            tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
+            tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...qzoneTools, ...(work ? NATIVE_WORK_TOOLS : [])],
             async toolDescriptions(signal): Promise<Readonly<Record<string, string>>> {
               const identity = await options.readWorkIdentity?.(signal)
               signal.throwIfAborted()

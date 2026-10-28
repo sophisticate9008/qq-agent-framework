@@ -18,6 +18,7 @@ import {
   uninstallBrowserToolchain,
   type CliIo
 } from '../scripts/cli.ts';
+import { discoverTestFiles, shardTestFiles } from '../scripts/test-discovery.ts';
 import { registerBrowserToolchainResolver } from '../scripts/browser-toolchain.ts';
 import { loadGatewayAdminConfiguration, startGatewayAdmin } from '../src/admin/gateway.ts';
 import { loadOneBotGatewayConfiguration, startOneBotGateway } from '../src/host/onebot-gateway.ts';
@@ -29,13 +30,46 @@ const GATEWAY_SECRET = 'cli-gateway-secret-0123456789';
 
 test('test CLI selects explicit suites and built output without mixing browser options', () => {
   assert.equal(parseCliArguments(['test']).suite, undefined);
-  for (const suite of ['all', 'fast', 'deadline', 'integration']) {
+  for (const suite of ['all', 'fast', 'deadline', 'integration', 'artifacts']) {
     const parsed = parseCliArguments(['test', '--suite', suite, '--built']);
     assert.equal(parsed.suite, suite);
     assert.equal(parsed.built, true);
   }
   for (const argumentsList of [['test', '--suite', 'missing'], ['test', '--browser', '--suite', 'fast'],
     ['test', '--browser', '--built'], ['start', '--suite', 'fast'], ['build', '--built']]) {
+    assert.throws(() => parseCliArguments(argumentsList));
+  }
+});
+
+test('CI shard plans cover all tests once and keep compiled acceptance separate', () => {
+  const root = dirname(dirname(browserToolchainPaths().directory));
+  const workflow: unknown = parseYaml(readFileSync(join(root, '.github/workflows/verify.yml'), 'utf8'));
+  assert(isRecord(workflow) && isRecord(workflow.jobs));
+  const job = workflow.jobs.tests;
+  assert(isRecord(job) && isRecord(job.strategy) && isRecord(job.strategy.matrix));
+  const matrix = job.strategy.matrix.include;
+  assert(Array.isArray(matrix));
+  const all = discoverTestFiles(join(root, 'test'), '.ts');
+  const selected = matrix.flatMap((entry: unknown) => {
+    assert(isRecord(entry) && typeof entry.suite === 'string' && typeof entry.shard === 'string');
+    const parsed = parseCliArguments(['test', '--suite', entry.suite, '--shard', entry.shard]);
+    return shardTestFiles(discoverTestFiles(join(root, 'test'), '.ts', parsed.suite), parsed.shard);
+  });
+  const artifacts = discoverTestFiles(join(root, 'test'), '.ts', 'artifacts');
+  assert.deepEqual([...selected, ...artifacts].sort(), all);
+  assert.equal(new Set([...selected, ...artifacts]).size, all.length);
+  const quality = workflow.jobs.quality;
+  assert(isRecord(quality) && Array.isArray(quality.steps));
+  assert(quality.steps.some((step: unknown) => isRecord(step) && step.run === 'npm run cli -- test --built --suite artifacts --skip-build'));
+});
+
+test('test build reuse and file sharding require explicit valid combinations', () => {
+  const parsed = parseCliArguments(['test', '--built', '--skip-build', '--suite', 'artifacts', '--shard', '2/3']);
+  assert.equal(parsed.skipBuild, true);
+  assert.deepEqual(parsed.shard, { index: 2, total: 3 });
+  for (const argumentsList of [['test', '--skip-build'], ['test', '--shard', '4/3'], ['test', '--shard', '0/3'],
+    ['test', '--browser', '--shard', '1/3'], ['test', '--browser', '--built', '--skip-build'],
+    ['start', '--shard', '1/3'], ['build', '--skip-build'], ['test', '--shard', '1/3', '--shard', '2/3']]) {
     assert.throws(() => parseCliArguments(argumentsList));
   }
 });

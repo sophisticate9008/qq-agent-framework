@@ -9,7 +9,10 @@ function request(id: string, signal = new AbortController().signal): SendRequest
   return { conversationId: 'room:1', idempotencyKey: id, content: [{ type: 'text', text: 'fixture' }], signal };
 }
 
-test('transport throttle preserves FIFO with finite admission and minimum start spacing', async () => {
+test('transport throttle preserves FIFO and exact minimum spacing on a controlled monotonic clock', async context => {
+  let monotonic = 0;
+  context.mock.method(performance, 'now', () => monotonic);
+  context.mock.timers.enable({ apis: ['setTimeout'] });
   const starts: number[] = [];
   const ids: string[] = [];
   let release!: () => void;
@@ -25,9 +28,16 @@ test('transport throttle preserves FIFO with finite admission and minimum start 
     assert.equal((await transport.send(request('overflow'))).status, 'rejected');
     release();
     assert.equal((await first).status, 'confirmed');
+    assert.deepEqual(ids, ['first']);
+    monotonic = 19;
+    context.mock.timers.tick(19);
+    await nextTurn();
+    assert.deepEqual(ids, ['first']);
+    monotonic = 20;
+    context.mock.timers.tick(1);
     assert.equal((await second).status, 'confirmed');
     assert.deepEqual(ids, ['first', 'second']);
-    assert(starts[1] - starts[0] >= 19);
+    assert.deepEqual(starts, [0, 20]);
     assert.equal(transport.metrics().queued, 0);
   } finally { release(); await transport.stop(); }
 });

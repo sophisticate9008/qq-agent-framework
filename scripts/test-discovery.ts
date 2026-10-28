@@ -1,22 +1,40 @@
 import { readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-export const TEST_SUITES = ['all', 'fast', 'deadline', 'integration'] as const;
+export const TEST_SUITES = ['all', 'fast', 'deadline', 'integration', 'artifacts'] as const;
 export type TestSuite = typeof TEST_SUITES[number];
 
-const integrationFiles = new Set([
-  'native-chat-runtime', 'native-chat-gateway', 'native-account-gateway', 'native-message-sources-default', 'native-access-default',
-  'native-capability-default', 'native-bootstrap-default-path', 'native-bootstrap-example',
-  'native-activity-runtime', 'native-configuration-compatibility', 'native-configuration-recovery',
-  'native-admission-follow', 'native-control-hooks', 'cli-bootstrap', 'cli-lifecycle',
-]);
-
-/** Longer real-time acceptance stays explicit; these tests never become part of the fast suite. */
+/** Suites partition source and compiled tests identically, including real-clock and asset checks. */
 export function testSuiteFor(filename: string): Exclude<TestSuite, 'all'> {
   const name = filename.replaceAll('\\', '/');
-  if (name.endsWith('/native-chat-real-deadline.test.ts') || name.endsWith('/native-chat-real-deadline.test.js')) return 'deadline';
-  if (/(?:^|\/)integration\//.test(name) || integrationFiles.has(name.split('/').at(-1)!.replace(/\.test\.(?:ts|js)$/, ''))) return 'integration';
+  const stem = name.split('/').at(-1)!.replace(/\.test\.(?:ts|js)$/, '');
+  if (stem === 'native-chat-real-deadline' || stem === 'admin-deadline') return 'deadline';
+  if (['cli-lifecycle', 'admin-chunks', 'admin', 'app'].includes(stem)) return 'artifacts';
+  if (/(?:^|\/)integration\//.test(name) || stem.startsWith('native-') || stem === 'cli-bootstrap') return 'integration';
   return 'fast';
+}
+
+export interface TestShard {
+  readonly index: number;
+  readonly total: number;
+}
+
+export function parseTestShard(value: string): TestShard {
+  const match = /^([1-9]\d?)\/([1-9]\d?)$/.exec(value);
+  if (!match || Number(match[1]) > Number(match[2]) || Number(match[2]) > 32) {
+    throw new Error('--shard 必须为 序号/总数，满足 1 ≤ 序号 ≤ 总数 ≤ 32');
+  }
+  return { index: Number(match[1]), total: Number(match[2]) };
+}
+
+/** Sort before distributing so discovery order cannot duplicate or omit files across workers. */
+export function shardTestFiles(files: readonly string[], shard?: TestShard): readonly string[] {
+  if (!shard) return files;
+  return [...files].sort().filter((_, index) => index % shard.total === shard.index - 1);
+}
+
+export function testNeedsBuild(suite: TestSuite, built: boolean): boolean {
+  return built || suite === 'all' || suite === 'artifacts';
 }
 
 /** Real deadlines run alone; CLI acceptance builds assets and therefore runs last. */

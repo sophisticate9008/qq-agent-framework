@@ -21,7 +21,8 @@ import {
   type OneBotGatewayConfiguration
 } from '../src/host/onebot-gateway.ts';
 import { loadSelectedNativeBootstrap } from './bootstrap-loader.ts';
-import { discoverTestFiles, testConcurrency, testExecutionBatches, TEST_SUITES, type TestSuite } from './test-discovery.ts';
+import { runTestFiles } from './test-runner.ts';
+import { discoverTestFiles, parseTestShard, shardTestFiles, testConcurrency, testExecutionBatches, testNeedsBuild, TEST_SUITES, type TestShard, type TestSuite } from './test-discovery.ts';
 
 const PLAYWRIGHT_VERSION = '1.61.1';
 const BROWSER_TYPESCRIPT_VERSION = '5.9.3';
@@ -59,6 +60,8 @@ export interface ParsedCliArguments {
   readonly adminOnly: boolean;
   readonly suite?: TestSuite;
   readonly built?: boolean;
+  readonly skipBuild?: boolean;
+  readonly shard?: TestShard;
   readonly target?: BrowserTarget;
   readonly skipBrowserDownload?: boolean;
 }
@@ -88,7 +91,7 @@ const GENERAL_HELP = `QQ Agent Framework 命令行
   npm run cli -- start [--config <管理配置>] [--admin-only] [--bootstrap <可信本机TS绝对路径>]
   npm run cli -- status [--config <管理配置>]
   npm run cli -- doctor --conversation <group:群号|private:QQ号> [--account <账号ID>] [--config <管理配置>]
-  npm run cli -- test [--suite all|fast|deadline|integration] [--built]
+  npm run cli -- test [--suite all|fast|deadline|integration|artifacts] [--built] [--skip-build] [--shard <序号/总数>]
   npm run cli -- test --browser [--target <项目>] [--with-deps]
   npm run cli -- install --browser [--skip-browser-download] [--with-deps]
   npm run cli -- uninstall --browser
@@ -102,8 +105,9 @@ init 默认创建独立的本机 OneBot HTTP 网关配置；--gateway-config 可
 start 默认启动或复用配置匹配的 gateway；--admin-only 仅启动管理界面。
 --bootstrap 在本次 start 显式选择可信本机 TypeScript 扩展；未指定时读取管理配置旁的固定版本选择，不自动授予权限。
 普通安装、构建、启动和单元测试不需要 Playwright。
-test 默认构建并递归执行全部源码与编译后测试；--built 仅执行编译后测试。
---suite fast 排除独立集成与六十秒真实时限场景；deadline 和 integration 可单独执行，省略为 all。
+test 默认执行 fast 源码测试，无需构建；--suite all 执行完整源码测试，--built 默认执行完整编译后测试。
+--suite 可单独选择 integration、deadline 或 artifacts；需要产物时自动构建，--built --skip-build 复用已有产物。
+--shard 1/3 按文件稳定分片；QQ_TEST_CONCURRENCY 设置每个进程的文件并发数（默认 4）。
 install --browser 或 test --browser 才准备 runtime/testing/ 内的独立浏览器测试工具。
 --skip-browser-download 只安装测试包；--with-deps 额外安装系统库，可能需要管理员权限。
 --target 可选：${Object.keys(BROWSER_TARGETS).join('、')}；省略时执行全部浏览器测试。
@@ -136,12 +140,12 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
       if (argumentsList.length !== 2) usage('帮助参数不能与其他参数同时使用。');
       return { command, help: true, browser: false, withDeps: false, adminOnly: false };
     }
-    if (['--browser', '--with-deps', '--admin-only', '--skip-browser-download', '--built'].includes(argument)) {
+    if (['--browser', '--with-deps', '--admin-only', '--skip-browser-download', '--built', '--skip-build'].includes(argument)) {
       if (flags.has(argument)) usage(`参数 ${argument} 不能重复。`);
       flags.add(argument);
       continue;
     }
-    if (['--config', '--gateway-config', '--service-manager', '--host', '--port', '--target', '--bootstrap', '--suite', '--conversation', '--account'].includes(argument)) {
+    if (['--config', '--gateway-config', '--service-manager', '--host', '--port', '--target', '--bootstrap', '--suite', '--shard', '--conversation', '--account'].includes(argument)) {
       if (values.has(argument)) usage(`参数 ${argument} 不能重复。`);
       values.set(argument, optionValue(argumentsList, index, argument));
       index += 1;
@@ -155,7 +159,7 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     : command === 'start' ? new Set(['--config', '--admin-only', '--bootstrap'])
       : command === 'doctor' ? new Set(['--config', '--conversation', '--account'])
       : command === 'status' ? new Set(['--config'])
-      : command === 'test' ? new Set(['--browser', '--with-deps', '--target', '--suite', '--built'])
+      : command === 'test' ? new Set(['--browser', '--with-deps', '--target', '--suite', '--built', '--skip-build', '--shard'])
         : command === 'install' ? new Set(['--browser', '--with-deps', '--skip-browser-download'])
           : command === 'uninstall' ? new Set(['--browser']) : new Set<string>();
   for (const option of [...values.keys(), ...flags]) {
@@ -164,7 +168,10 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
   if (flags.has('--with-deps') && !flags.has('--browser')) usage('--with-deps 只能与 --browser 一起使用。');
   const suite = values.get('--suite');
   if (suite !== undefined && !TEST_SUITES.some(value => value === suite)) usage(`--suite 可选：${TEST_SUITES.join('、')}。`);
-  if (flags.has('--browser') && (suite !== undefined || flags.has('--built'))) usage('--browser 不能与 --suite 或 --built 同时使用。');
+  if (flags.has('--browser') && (suite !== undefined || flags.has('--built') || flags.has('--skip-build') || values.has('--shard'))) usage('--browser 不能与 --suite、--built、--skip-build 或 --shard 同时使用。');
+  if (flags.has('--skip-build') && !flags.has('--built')) usage('--skip-build 需要 --built，且调用前须准备好编译产物。');
+  const shardText = values.get('--shard');
+  const shard = shardText === undefined ? undefined : parseTestShard(shardText);
   if ((command === 'install' || command === 'uninstall') && !flags.has('--browser')) usage('请指定 --browser，只管理可选的浏览器测试工具。');
   if (flags.has('--skip-browser-download') && flags.has('--with-deps')) usage('--skip-browser-download 不能与 --with-deps 同时使用。');
   const target = values.get('--target');
@@ -200,6 +207,8 @@ export function parseCliArguments(argumentsList: readonly string[]): ParsedCliAr
     adminOnly: flags.has('--admin-only'),
     ...(suite === undefined ? {} : { suite: suite as TestSuite }),
     ...(flags.has('--built') ? { built: true } : {}),
+    ...(flags.has('--skip-build') ? { skipBuild: true } : {}),
+    ...(shard === undefined ? {} : { shard }),
     ...(target === undefined ? {} : { target: target as BrowserTarget }),
     ...(flags.has('--skip-browser-download') ? { skipBrowserDownload: true } : {})
   };
@@ -488,17 +497,27 @@ export function uninstallBrowserToolchain(root = PROJECT_ROOT): void {
 async function runTests(parsed: ParsedCliArguments, io: CliIo): Promise<void> {
   const { browser, withDeps, target } = parsed;
   if (!browser) {
-    const concurrency = testConcurrency(process.env.QQ_TEST_CONCURRENCY);
-    await build();
-    const suite = parsed.suite ?? 'all';
-    for (const [directory, extension] of (parsed.built ? [['dist/test', '.js']] : [['test', '.ts'], ['dist/test', '.js']]) as Array<[string, '.ts' | '.js']>) {
-      const files = discoverTestFiles(resolve(PROJECT_ROOT, directory), extension, suite);
-      if (files.length === 0) throw new CliOperationError(`测试集合 ${suite} 未发现测试：${directory}`);
-      io.stdout(`执行 ${suite} 测试：${directory}（${files.length} 个文件）`);
-      for (const batch of testExecutionBatches(files)) {
-        await runProcess(process.execPath, ['--test', `--test-concurrency=${concurrency}`, ...batch]);
-      }
+    const concurrency = testConcurrency(io.env.QQ_TEST_CONCURRENCY);
+    const suite = parsed.suite ?? (parsed.built ? 'all' : 'fast');
+    if (!parsed.skipBuild && testNeedsBuild(suite, parsed.built === true)) await build();
+    const directory = parsed.built ? 'dist/test' : 'test';
+    const files = shardTestFiles(discoverTestFiles(resolve(PROJECT_ROOT, directory), parsed.built ? '.js' : '.ts', suite), parsed.shard);
+    if (files.length === 0) throw new CliOperationError(`测试集合 ${suite} 未发现测试：${directory}，请核对构建产物和分片数量。`);
+    const shardLabel = parsed.shard ? `，分片 ${parsed.shard.index}/${parsed.shard.total}` : '';
+    io.stdout(`执行 ${suite} 测试：${directory}（${files.length} 个文件，并发 ${concurrency}${shardLabel}）`);
+    const started = Date.now();
+    let tests = 0;
+    let passed = 0;
+    let skipped = 0;
+    for (const batch of testExecutionBatches(files)) {
+      const result = await runTestFiles(batch, { concurrency, cwd: PROJECT_ROOT, stdout: io.stdout, stderr: io.stderr });
+      tests += result.tests;
+      passed += result.passed;
+      skipped += result.skipped;
+      if (result.failed > 0) throw new CliOperationError(`${result.failed} 个测试文件失败。`);
     }
+    io.stdout(`测试完成：${suite}，${files.length} 个文件，${tests} 项测试，${passed} 通过，${skipped} 跳过，耗时 ${((Date.now() - started) / 1000).toFixed(1)} 秒。`);
+
     return;
   }
   await prepareBrowser(withDeps, true, io);
@@ -509,7 +528,7 @@ async function runTests(parsed: ParsedCliArguments, io: CliIo): Promise<void> {
     paths.configuration,
     '--noEmit'
   ]);
-  await build();
+  await build(true);
   for (const smoke of browserSmokeFiles(target)) {
     io.stdout(`执行浏览器测试：${smoke}`);
     await runProcess(process.execPath, ['--import', pathToFileURL(paths.resolver).href, resolve(PROJECT_ROOT, smoke)], {

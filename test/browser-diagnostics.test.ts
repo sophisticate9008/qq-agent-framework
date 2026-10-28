@@ -202,8 +202,8 @@ test('CI calls the strict collector and uploads only after safe projection succe
   const workflow: unknown = parse(await readFile(join(root, '.github/workflows/verify.yml'), 'utf8'));
   assert(workflow !== null && typeof workflow === 'object' && 'jobs' in workflow);
   const jobs = workflow.jobs as Record<string, { steps: Array<Record<string, unknown>> }>;
-  const prepare = jobs.verify.steps.find(step => step.id === 'diagnostics');
-  const upload = jobs.verify.steps.find(step => typeof step.uses === 'string' && step.uses.startsWith('actions/upload-artifact@'));
+  const prepare = jobs.browser.steps.find(step => step.id === 'diagnostics');
+  const upload = jobs.browser.steps.find(step => typeof step.uses === 'string' && step.uses.startsWith('actions/upload-artifact@'));
   assert(prepare);
   assert(upload);
   assert.equal(prepare.run, 'node scripts/collect-browser-diagnostics.ts');

@@ -67,20 +67,27 @@ npm start
 
 ```sh
 npm run check
-QQ_TEST_CONCURRENCY=1 npm test
-QQ_TEST_CONCURRENCY=1 npm run test:built
+npm test
+# 按改动选择完整源码或完整编译后回归
+npm run test:all
+npm run test:built
 npm run test:sdk
 ```
 
-`check` 包括服务端与网页严格类型检查、AST 依赖边界、显式 `any` 与屏蔽指令检查。`npm test` 构建后递归发现源码与编译后测试，排除 fixture 与隐藏目录；`test:built` 只运行编译后测试。两条命令不是两个必须连续重复执行的独立产品操作，按改动和验证缺口选择。并发可设 1–32，默认 4；本轮完整验收与 CI 使用 1。
+`check` 包括服务端与网页严格类型检查、AST 依赖边界、显式 `any` 与屏蔽指令检查。`npm test` 默认只执行快速源码集合，无需构建；`test:all` 构建后执行完整源码集合一次；`test:built` 构建后执行完整编译后集合一次。递归发现排除 fixture 与隐藏目录。每个文件在独立进程组中运行，超过五分钟即终止整个组，残留定时器和子进程也受限制；成功时仅输出进度和汇总，失败保留末尾诊断。文件并发可设 `QQ_TEST_CONCURRENCY=1`–`32`，默认 4，CI 常规集合用 2，真实期限和编译产物验收用 1。
 
 | 测试入口 | 用途 |
 |---|---|
-| `npm run test:fast` | 排除独立集成与六十秒真实时限的常规测试 |
-| `npm run test:deadline` | 真实墙钟期限场景，不能用短时间模拟代替 |
-| `npm run test:integration` | 独立集成与实际 CLI 生命周期 |
+| `npm test` / `npm run test:fast` | 无需构建的快速源码测试 |
+| `npm run test:integration` | 原生聊天与协议集成，无需构建 |
+| `npm run test:deadline` | 真实墙钟期限场景，保留原有真实等待 |
+| `npm run test:artifacts` | 构建产物访问与实际 CLI 生命周期 |
+| `npm run test:all` | 全部源码测试，含集成、真实期限及产物验收 |
+| `npm run test:built` | 全部编译后测试，按需显式执行 |
 | `npm run test:sdk` | 打包 SDK，在临时外部项目严格编译并运行 |
-| `npm run test:browser` | 完整十组浏览器场景 |
+| `npm run test:browser` | 完整十组浏览器场景，仅构建网页资源 |
+
+CI 的集成集合通过 `npm run cli -- test --suite integration --shard 1/3` 分成三片，序号分别为 `1/3`、`2/3`、`3/3`；按文件名稳定分配，每片互不重叠且合起来覆盖全集。需要复用已经准备好的编译产物时使用 `--built --skip-build`，调用者负责产物与源码一致。推送、拉取请求和手动触发条件保持原样，同分支新运行会取消旧运行；各类验证并行执行，常规任务上限十分钟。完整编译后回归可在手动触发时勾选 `full-built`，上限二十分钟。浏览器下载缓存独立保存，失败诊断保留三天。
 
 浏览器工具按需安装到 `runtime/testing/`，普通安装、构建、启动和单元测试不需要 Playwright。需要预装时执行 `npm run cli -- install --browser`；系统库不足时可加 `--with-deps`。`--skip-browser-download` 只安装工具包。`npm run cli -- uninstall --browser` 只清理浏览器工具，不清业务数据和证据。
 

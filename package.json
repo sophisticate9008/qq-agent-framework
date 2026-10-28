@@ -18,6 +18,8 @@
     "build": "node scripts/build.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json",
     "test": "node scripts/cli.ts test",
+    "test:all": "node scripts/cli.ts test --suite all",
+    "test:artifacts": "node scripts/cli.ts test --suite artifacts",
     "test:built": "node scripts/cli.ts test --built",
     "test:fast": "node scripts/cli.ts test --suite fast",
     "test:deadline": "node scripts/cli.ts test --suite deadline",

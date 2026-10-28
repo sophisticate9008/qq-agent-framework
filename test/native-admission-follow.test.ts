@@ -15,19 +15,16 @@ import { digest } from '../src/host/data.ts'
 import { createClaimReceiptJournal } from '../packages/dsh-bridge-plugin/src/receipts.ts'
 import { createDshClaimPluginFixture } from './fixtures/dsh-claim-plugin.ts'
 import { handleDshControlFrame } from './fixtures/dsh-wire.ts'
+import { awaitCondition } from './fixtures/await-condition.ts'
 
 function value(input: unknown): Record<string, unknown> {
   assert(input !== null && typeof input === 'object' && !Array.isArray(input))
   return input as Record<string, unknown>
 }
 async function until(predicate: () => boolean | Promise<boolean>, timeout = 4000) {
-  const end = performance.now() + timeout
-  while (performance.now() < end) {
-    if (await predicate()) return
-    await delay(5)
-  }
-  throw new Error('PROBE_CONDITION_TIMEOUT')
+  await awaitCondition(predicate, { message: 'PROBE_CONDITION_TIMEOUT', timeoutMs: timeout, intervalMs: 5 })
 }
+
 const persona = { id: 'review', name: 'Review', identity: 'Offline review persona.', style: 'Brief.' }
 const plan = { id: 'review-plan', name: 'Review plan', description: '', instructions: 'Offline only.',
   personaId: 'review', provider: 'local', model: 'offline', reasoningEffort: 'off' as const }
@@ -234,7 +231,7 @@ test('native ingress expires in FIFO and late authorization cannot create or pro
   assert(status.ingress.queue)
   assert.equal(status.ingress.queue.items.length, 2)
   assert(status.ingress.queue.items.every(item => item.lastError === 'NATIVE_CHAT_DEADLINE_EXPIRED' && item.expired === 1))
-  context.diagnostic(JSON.stringify({ case: 'short-queued-expiry', arrivedAt, calls: fake.calls, status }))
+  context.diagnostic(JSON.stringify({ case: 'short-queued-expiry', arrivals: arrivedAt.length, calls: fake.calls.length, expired: status.ingress.queue.items.length }))
 })
 
 test('native create and claim baseline share the original ingress budget', async context => {
@@ -249,7 +246,7 @@ test('native create and claim baseline share the original ingress budget', async
   fake.inbound(1)
   await delay(220)
   assert.equal(fake.calls.filter(call => call.method === 'session/create').length, 1)
-  context.diagnostic(JSON.stringify({ case: 'create-expiry', arrival, calls: fake.calls, sessions: storedRows(fake.directory, 'host.sessions') }))
+  context.diagnostic(JSON.stringify({ case: 'create-expiry', elapsedMs: Date.now() - arrival, creates: fake.calls.filter(call => call.method === 'session/create').length }))
 
   const baseline = await fixture('native-baseline-budget', { turnTimeoutMs: 900, noticeEnabled: false })
   context.after(baseline.close)
@@ -298,7 +295,7 @@ test('native recycles idle follows for 24 bindings and lazily reuses the same co
     assert.equal(fake.calls.filter(call => call.method === 'session/create').length, 24)
     authorization.splice(0, authorization.length, ...storedRows(fake.directory, 'policy.grants'))
   }
-  context.diagnostic(JSON.stringify({ case: '24-bindings-restarts', calls: fake.calls, bindings, status: await fake.runtime.status() }))
+  context.diagnostic(JSON.stringify({ case: '24-bindings-restarts', bindings: bindings.length, prompts: fake.calls.filter(call => call.method === 'session/prompt').length, sends: fake.sends.length }))
 })
 
 test('native active and unknown follow slots backpressure before create without poisoning restart or refilling grants', async context => {
@@ -346,7 +343,7 @@ test('native active and unknown follow slots backpressure before create without 
   await fake.answer('review-session-17')
   await until(() => fake.sends.length === 1)
   assert.deepEqual(storedRows(fake.directory, 'policy.grants').filter(row => row.value.conversationId === 'private:123' && row.value.featureId === 'agent-relay'), oldGrant)
-  context.diagnostic(JSON.stringify({ case: 'active-full-restarts', calls: fake.calls, executions: fake.runtime.executionJournal(), status: await fake.runtime.status() }))
+  context.diagnostic(JSON.stringify({ case: 'active-full-restarts', prompts: fake.calls.filter(call => call.method === 'session/prompt').length, sends: fake.sends.length }))
 })
 
 test('native explicit sixty-second budget includes real FIFO wait and forbids new work after expiry',
@@ -373,6 +370,5 @@ test('native explicit sixty-second budget includes real FIFO wait and forbids ne
     assert.equal(fake.calls.filter(call => call.method === 'session/create' && call.at >= arrivals[0]!.at + 60_100).length, 0)
     assert.equal(storedRows(fake.directory, 'host.sessions').some(row => row.key === 'private:138'), false)
     assert.equal((await fake.runtime.status()).ingress.lastReceipt?.errorCode, 'NATIVE_CHAT_DEADLINE_EXPIRED')
-    context.diagnostic(JSON.stringify({ case: 'real-default-queue', observedAt: Date.now(), arrivals, calls: fake.calls,
-      sessions: storedRows(fake.directory, 'host.sessions'), executions: fake.runtime.executionJournal(), status: await fake.runtime.status() }))
+    context.diagnostic(JSON.stringify({ case: 'real-default-queue', elapsedMs: Date.now() - arrivals[0]!.at, arrivals: arrivals.length, prompts: prompts.length }))
   })

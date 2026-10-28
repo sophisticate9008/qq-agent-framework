@@ -202,7 +202,7 @@ test('optional SDK CI installs, tests and verifies the package tarball in its ow
   assert.equal(job.defaults.run['working-directory'], 'packages/dsh-bridge-plugin');
   const commands = job.steps.flatMap((step: unknown) => isRecord(step) && typeof step.run === 'string' ? [step.run] : []);
   assert.deepEqual(commands, ['npm ci --ignore-scripts --no-audit --no-fund', 'npm ci --ignore-scripts --no-audit --no-fund',
-    'npm test', 'npm run test:framework', 'npm run test:pack']);
+    'npm audit --audit-level=high', 'npm test', 'npm run test:framework', 'npm run test:pack']);
   const integration = job.steps.find((step: unknown) => isRecord(step) && step.run === 'npm run test:framework');
   assert(isRecord(integration) && isRecord(integration.env));
   assert.equal(integration.env.QQ_FRAMEWORK_DSH_PORT_MODULE, '${{ github.workspace }}/src/adapters/dsh-jsonrpc.ts');

@@ -370,7 +370,7 @@ test('explicit controls receive saved private configuration under lock and never
   assert.equal(received?.onebotHttp.secret, 'existing-http-secret')
   assert(Object.isFrozen(received))
   assert.deepEqual(ready.status, { assembled: true, running: true, applyAvailable: true })
-  assert.deepEqual(ready.connection, { state: 'connected', selfId: '123', lastError: null, received: 3, dropped: 3, chatReady: false })
+  assert.deepEqual(ready.connection, { state: 'connected', selfId: '123', lastError: null, received: 3, dropped: 3, chatReady: false, accountOnline: null, accountGood: null })
   assert.equal(ready.revision, saved.revision)
   const disconnected = await control(routes, 'disconnect', {})
   assert.deepEqual(disconnected.status, { assembled: true, running: false, applyAvailable: true })
@@ -398,7 +398,7 @@ test('in-flight controls reject concurrent controls and configuration writes wit
   await entered
   try {
     await rejects(control(other, 'connect', { revision: initial.revision }), 409, 'adapter_runtime_busy')
-    await rejects(control(other, 'disconnect', {}), 409, 'adapter_runtime_busy')
+    await rejects(control(other, 'disconnect', {}), 409, 'native_chat_busy')
     await rejects(invoke(other, 'POST', { revision: initial.revision, adapters: {
       onebotHttp: { enabled: true, endpoint: 'https://http.example.test' }
     } }), 409, 'native_chat_busy')
@@ -408,7 +408,7 @@ test('in-flight controls reject concurrent controls and configuration writes wit
   }
 })
 
-test('control timeout aborts the port at five seconds and retains exclusion until the raw operation settles', async context => {
+test('control timeout aborts the port at twelve seconds and retains exclusion until the raw operation settles', async context => {
   const setup = fixture(context)
   const initial = await invoke(setup.routes, 'GET')
   context.mock.timers.enable({ apis: ['setTimeout'] })
@@ -423,7 +423,7 @@ test('control timeout aborts the port at five seconds and retains exclusion unti
   const first = control(routes, 'connect', { revision: initial.revision })
   const rejection = rejects(first, 504, 'adapter_runtime_timeout')
   await entered
-  context.mock.timers.tick(5_000)
+  context.mock.timers.tick(12_000)
   await rejection
   assert.equal(signal?.aborted, true)
   await rejects(control(routes, 'connect', { revision: initial.revision }), 409, 'adapter_runtime_busy')

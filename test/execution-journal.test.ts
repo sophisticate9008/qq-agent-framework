@@ -68,8 +68,8 @@ test('execution page merge deduplicates and refuses state regression while retai
 });
 
 test('execution pagination is same-origin and bounded with only trusted hex cursors', () => {
-  assert.equal(executionJournalPath(), '/api/chat/executions?limit=100');
-  assert.equal(executionJournalPath('a'.repeat(64)), `/api/chat/executions?limit=100&after=${'a'.repeat(64)}`);
+  assert.equal(executionJournalPath(), '/api/chat/executions?limit=100&order=recent');
+  assert.equal(executionJournalPath('a'.repeat(64)), `/api/chat/executions?limit=100&order=recent&after=${'a'.repeat(64)}`);
   for (const cursor of ['//elsewhere', 'a&limit=50000', '', 'A'.repeat(64), 'a'.repeat(63)]) assert.throws(() => executionJournalPath(cursor));
 });
 
@@ -94,7 +94,7 @@ test('normal task waiting remains distinct from uncertain-result isolation and n
   assert.equal(executionContinuationLabel(executionRecord(1)), '等待本次任务结束');
   assert.equal(executionContinuationLabel(executionRecord(1, { status: 'unknown', externalStatus: 'unknown' })), '暂停后续任务');
   assert.equal(executionContinuationLabel(executionRecord(1, { deadlineReached: true })), '暂停后续任务');
-  assert.equal(executionContinuationLabel(executionRecord(1, { isolated: false })), '未因本次记录暂停');
+  assert.equal(executionContinuationLabel(executionRecord(1, { isolated: false })), '本轮未暂停后续处理');
   assert.equal(executionPresentation(executionRecord(1, { status: 'rejected', externalStatus: 'rejected', isolated: false })).label, '未受理');
   assert.equal(executionPresentation(executionRecord(1, { status: 'failed', externalStatus: 'cancelled', isolated: false, cancelStatus: 'confirmed' })).label, '已确认停止');
 });

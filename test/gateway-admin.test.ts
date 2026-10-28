@@ -1,3 +1,4 @@
+import { awaitCondition } from './fixtures/await-condition.ts';
 import { parseNativeRuntimeProjection } from '../src/contracts/native-runtime-projection.ts';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -414,11 +415,19 @@ test('CLI address is offline-safe while listening and health use the configured 
 test('gateway mounts explicit WS protocol controls, verifies login, drops incoming chat and drains connections on close', async context => {
   const files = createFiles({ gatewayPort: await availablePort(), upstreamPort: await availablePort() });
   context.after(() => rmSync(files.directory, { recursive: true, force: true }));
-  const sockets = new WebSocketServer({ host: '127.0.0.1', port: 0 });
-  await new Promise<void>(resolvePromise => sockets.once('listening', () => resolvePromise()));
+  const protocol = createServer((request, response) => {
+    assert.equal(request.headers.authorization, 'Bearer existing-http-private-key');
+    assert(['/get_login_info', '/get_status'].includes(request.url ?? ''));
+    response.end(JSON.stringify({ status: 'ok', retcode: 0,
+      data: request.url === '/get_login_info' ? { user_id: 123 } : { online: true, good: true } }));
+  });
+  const sockets = new WebSocketServer({ server: protocol });
+  await new Promise<void>(resolvePromise => protocol.listen(0, '127.0.0.1', resolvePromise));
   context.after(async () => {
     for (const client of sockets.clients) client.terminate();
     await new Promise<void>(resolvePromise => sockets.close(() => resolvePromise()));
+    protocol.closeAllConnections();
+    await new Promise<void>(resolvePromise => protocol.close(() => resolvePromise()));
   });
   const address = sockets.address();
   assert(address !== null && typeof address !== 'string');
@@ -461,13 +470,19 @@ test('gateway mounts explicit WS protocol controls, verifies login, drops incomi
   }
   const initial = await getAdapters();
   assert.deepEqual(initial.status, { assembled: true, running: false, applyAvailable: true });
-  assert.deepEqual(initial.connection, { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false });
+  assert.deepEqual(initial.connection, { state: 'disconnected', selfId: null, lastError: null, received: 0, dropped: 0, chatReady: false, accountOnline: null, accountGood: null });
   assert.equal(connections, 0);
+  await awaitCondition(async () => {
+    const response = await fetch(`${origin}/api/chat/runtime`, { headers });
+    const status = parseObject(await response.json());
+    const restoration = parseObject(parseObject(status.lifecycle).restoration);
+    return !['not-attempted', 'checking'].includes(String(restoration.state));
+  }, { message: 'Startup recovery must finish before explicit adapter writes', timeoutMs: 5000 });
   assert.equal((await fetch(`${origin}/api/chat/adapters/connect`, {
     method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify({ revision: initial.revision })
   })).status, 401);
   const saving = post('', { revision: initial.revision, adapters: {
-    onebotHttp: { enabled: true, endpoint: 'https://existing-http.example.test', secret: 'existing-http-private-key' },
+    onebotHttp: { enabled: true, endpoint: `http://127.0.0.1:${address.port}`, secret: 'existing-http-private-key' },
     onebotWs: { enabled: true, endpoint: `ws://127.0.0.1:${address.port}`, secret: 'fixture-ws-secret' }
   } });
   await requested;

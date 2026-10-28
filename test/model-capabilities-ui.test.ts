@@ -6,7 +6,7 @@ test('unavailable model metadata preserves the selected effort visibly without o
   const unavailable = parseModelCapabilities({ provider: 'fixture', model: 'model', state: 'unavailable', reasoningEfforts: [], missingReasons: ['model_metadata_not_observed'] });
   assert(unavailable);
   assert.deepEqual(modelReasoningEffortOptions(unavailable, 'high'), [
-    { value: 'high', label: 'high（当前值，支持待核验）', disabled: true },
+    { value: 'high', label: '高（当前值，支持待核验）', disabled: true },
   ]);
   assert.deepEqual(modelReasoningEffortOptions(null, 'high'), modelReasoningEffortOptions(unavailable, 'high'));
   assert.deepEqual(modelReasoningEffortOptions(unavailable, ''), []);
@@ -16,10 +16,10 @@ test('restored real metadata unlocks only declared efforts and retains an unsupp
   const available = parseModelCapabilities({ provider: 'fixture', model: 'model', state: 'available', reasoningEfforts: ['off', 'high'], missingReasons: [] });
   assert(available);
   assert.deepEqual(modelReasoningEffortOptions(available, 'high'), [
-    { value: 'off', label: 'off', disabled: false }, { value: 'high', label: 'high', disabled: false },
+    { value: 'off', label: '关闭', disabled: false }, { value: 'high', label: '高', disabled: false },
   ]);
   const options = modelReasoningEffortOptions(available, 'medium');
-  assert.deepEqual(options[0], { value: 'medium', label: 'medium（当前值，未在支持列表中）', disabled: true });
+  assert.deepEqual(options[0], { value: 'medium', label: '中（当前值，未在支持列表中）', disabled: true });
   assert.deepEqual(options.filter(option => !option.disabled).map(option => option.value), ['off', 'high']);
   assert.deepEqual(available.reasoningEfforts, ['off', 'high']);
 });

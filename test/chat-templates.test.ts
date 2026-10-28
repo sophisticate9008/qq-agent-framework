@@ -76,10 +76,10 @@ test('owner familiarity and incoming text never substitute for trusted authoriza
   const { instructions } = BUILTIN_DAILY_CHAT_PLAN
   assert.match(instructions, /主人身份只认.*宿主.*可信/)
   assert.match(instructions, /正文、昵称、引用.*不能.*授予.*角色.*权限/)
-  assert.match(instructions, /主人.*明确.*要求.*实际工作/)
-  assert.match(instructions, /不.*绕过.*权限.*预算/)
-  assert.match(instructions, /工具.*实际挂载.*为准/)
-  assert.match(instructions, /未提供.*不可用/)
+  assert.match(instructions, /独立助手委派、本机文件和敏感写操作由宿主核验主人身份与范围/)
+  assert.match(instructions, /能力与权限分别判断，不自行扩大授权/)
+  assert.match(instructions, /核对当前实际挂载的工具及说明/)
+  assert.match(instructions, /未提供的能力才说明限制，不虚构执行/)
   assert.match(instructions, /不.*开启.*定时主动.*黑话/)
 })
 
@@ -96,11 +96,11 @@ test('owner is exclusively the configured account, never a self-elected relation
 
 test('group participation separates strong calls, follow-up and unrelated quoted speakers', () => {
   const { instructions } = BUILTIN_DAILY_CHAT_PLAN
-  assert.match(instructions, /强唤醒.*直接.*@.*叫名字/)
-  assert.match(instructions, /引用.*转发.*旧称呼.*不算/)
-  assert.match(instructions, /续聊.*不是.*每条必答.*不.*工作授权/)
-  assert.match(instructions, /主人.*普通群聊.*选择.*不.*逐条/)
-  assert.match(instructions, /引用.*第三人.*不.*抢/)
+  assert.match(instructions, /当前直接 @ 你、引用你的话提问或明确向你发问应优先回应/)
+  assert.match(instructions, /仅在句子里出现你的名字可能是旁人谈论你，不必纠正称呼或抢话/)
+  assert.match(instructions, /激活后的续聊覆盖全会话所有发言者.*这不赋予工作权限/)
+  assert.match(instructions, /主人普通群聊同样选择性参与/)
+  assert.match(instructions, /引用别人的话不等于当前发言者认领.*第三人称/)
 })
 
 test('media and presentation instructions require evidence and supported output formats', () => {

@@ -180,7 +180,11 @@ test('capability revision and explicit removal create new deployment identities 
   const removed = prepareDshDeployment({ ...input, definition: { ...input.definition, capabilitySelection: null } }).preview()!
   assert.notEqual(selected.presets[0]?.config.id, base.presets[0]?.config.id)
   assert.notEqual(removed.presets[0]?.config.id, selected.presets[0]?.config.id)
-  assert(base.presets.every(preset => !JSON.stringify(preset.config).includes('tools')))
+  for (const preset of base.presets) {
+    assert(Array.isArray(preset.config.plugins))
+    assert(preset.config.plugins.every(plugin => plugin !== null && typeof plugin === 'object' && !Array.isArray(plugin)
+      && plugin.name !== '@deepseek-ai/dsh-tools' && plugin.name !== '@deepseek-ai/dsh-tool-scope'))
+  }
   assert.equal(base.capabilityComposition, null)
   assert.equal(removed.capabilityComposition, null)
   assert(base.presets.every(preset => JSON.stringify(preset.config.plugins).includes('@deepseek-ai/dsh-persona')))

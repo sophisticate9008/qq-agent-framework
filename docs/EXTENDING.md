@@ -1,6 +1,6 @@
 # 扩展开发
 
-扩展通过功能定义、宿主服务、包贡献和生命周期进入框架。声明入口后，实际副作用仍由调用方的 `FeatureExecution` 和当前 policy 核验。bootstrap 是可信运维代码，在宿主进程内运行；安装扩展需要运维信任，运行扩展还需要独立的会话授权。
+扩展通过功能定义、宿主服务、包贡献和生命周期进入框架。模型和 QQ 命令入口按真实调用者与当前 policy 核验；已安装的可信插件通过宿主内部服务执行任务，身份由加载器注入。bootstrap 在宿主进程内运行，安装扩展需要运维信任。
 
 能力名称与工具说明只描述功能，例如“启动工作”“发布动态”；身份、白名单和自主执行权限由宿主策略单独配置与检查，不写入能力定义或模型参数。SDK `contracts` 导出独立的 `NATIVE_TOOL_CAPABILITY_CATALOG`、`nativeToolCapabilityDefinition` 与 `NativeToolCapability`，供工具和界面复用。目录列出能力不等于能力已安装、就绪或获得授权。
 
@@ -458,3 +458,24 @@ try {
 ## 空间底层服务
 
 内置包 `qzone` 通过 `context.service("qzone", 1)` 提供 `QzoneToolPort`。扩展在 manifest 中声明对 `qzone` 的依赖及所需服务版本；`inspect` 核对当前协议能力，`execute` 按原 OneBot 名称与参数调用。原生聊天会按实际协议能力另行登记发布与删除工具，复用会话白名单和真实消息来源校验；扩展直接调用底层服务时，自行通过宿主 policy 确认触发与访问范围。完整示例与边界见 [空间说说](QZONE.md)。
+
+
+## 插件直接使用协议能力和模型会话
+
+包的 `NativePackageContext` 与可信 bootstrap 的 context 提供可选 `runtime`（原生聊天宿主装配时可用）。包在 `start` 后使用：
+
+```ts
+const runtime = context.runtime
+if (!runtime) throw new Error('当前宿主未提供插件运行服务')
+const catalog = await runtime.capabilities.catalog({ category: 'qzone' })
+const result = await runtime.models.run({ name: 'daily-writing', prompt: '接着之前的主题，起草今天的短文案。' })
+// result.text 交回插件，由插件决定是否发布；框架不会自动发到 QQ。
+```
+
+`runtime.capabilities.catalog({ id })` 读取具体参数；`call({ id, input, idempotencyKey })` 调用协议动作。写操作必须给稳定幂等键，重启后相同动作仍使用原键，不能为绕过未知结果换键重发。当前适配器按实际协议版本与能力清单开放；插件获得 `confirmed`、`rejected` 或 `unknown` 回执。插件可用协议原生本机文件参数处理自己生成的素材，不必伪造 QQ 发言或会话媒体资源。
+
+`runtime.models` 提供 `models/list/create/bind/unbind/run`；`run` 首次自动建会话，默认持续复用。插件自建会话不加载 QQ 人设、聊天方案或工具，绑定已有会话沿用已有历史；模型服务细节见 [插件模型与持久会话](PLUGIN_MODELS.md)。插件业务数据仍放在包持久状态中，模型上下文仅保存必要任务历史。
+
+`runtime.sessions.resolve('group:123456')` 或 `private:123456` 返回实际 QQ 绑定；`bind(target, sessionId, signal)`、`unbind(target)` 要求完整当前版本，保留 DSH 历史。插件可以解析 QQ 绑定后把该实际 ID 交给 `runtime.models.bind`。插件固定绑定该 ID，QQ 后来换绑不会自动改变插件上下文。
+
+对 QQ 命令开放这些内部接口时，插件入口负责校验真实发言者；定时任务以已登记插件身份执行，不需要伪造主人消息。生命周期结束后旧实例不能继续提交调用。对模型开放的管理动作使用框架二级能力目录，由宿主核验实际主人。

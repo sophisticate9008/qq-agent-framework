@@ -1,3 +1,4 @@
+import type { PluginRuntimeServices } from './plugin-runtime.ts'
 import { extensionMetadata, validExtensionMetadata } from '../contracts/extension-metadata.ts'
 import { FrameworkError, assert, errorCode, identifier, snapshot } from '../core/values.ts'
 import type { DurableStore } from '../contracts/ports.ts'
@@ -12,6 +13,7 @@ import { validatePackageConfigurationContribution, type PackageConfigurationCont
   type PackageConfigurationRegistry } from './package-configuration.ts'
 
 export interface NativePackageContext {
+  readonly runtime?: PluginRuntimeServices
   readonly owner: string
   readonly signal: AbortSignal
   readonly state: OwnedPackageState | undefined
@@ -66,6 +68,7 @@ function key(kind: string, id: string): string { return `${kind}:${id}` }
 
 /** Preflight all declarations before running package code. Array order resolves independent packages. */
 export function createNativePackages(options: {
+  readonly runtimeServices?: (owner: string, lifetime: AbortSignal, assertActive: () => void) => PluginRuntimeServices
   readonly packages: readonly NativePackageDefinition[]
   readonly configurationRegistry: PackageConfigurationRegistry
   readonly stateStore?: DurableStore
@@ -218,6 +221,7 @@ export function createNativePackages(options: {
       async reconcile(revision: number, operationId: string, current: AbortSignal) { migrating(); return owned.reconcile(revision, operationId, stateSignal(current)) }
     }) : undefined
     return Object.freeze({ owner: manifest.id, signal, namespace, state,
+      ...(options.runtimeServices ? { runtime: options.runtimeServices(manifest.id, entry.lifetime.signal, active) } : {}),
       configuration: Object.freeze({
         async read(id: string) {
           active()

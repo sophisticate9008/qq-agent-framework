@@ -43,3 +43,6 @@ export { createQzoneNativePackage, NATIVE_QZONE_SERVICE_ID, NATIVE_QZONE_SERVICE
 export { createPluginModelService } from '../host/plugin-model-service.ts';
 export type { PluginModelService, PluginModelServiceOptions } from '../host/plugin-model-service.ts';
 export type * from '../contracts/plugin-model.ts';
+export type { PluginRuntimeServices } from '../host/plugin-runtime.ts';
+export { createPluginCapabilityService } from '../host/plugin-capability-service.ts';
+export type { PluginCapabilityService, PluginCapabilityClient, PluginCapabilityCatalogQuery, PluginCapabilityCall } from '../host/plugin-capability-service.ts';

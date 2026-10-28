@@ -1,3 +1,4 @@
+import type { PluginRuntimeServices } from './plugin-runtime.ts';
 import { validExtensionMetadata } from '../contracts/extension-metadata.ts';
 import type { OneBotTransportOptions } from '../adapters/onebot.ts';
 import type { FeatureDefinition } from '../core/types.ts';
@@ -22,6 +23,7 @@ export interface NativeBootstrapManifest {
   readonly apiVersion: 1;
 }
 export interface NativeBootstrapContext {
+  readonly runtime?: PluginRuntimeServices;
   /** Registered, independently replaceable implementations owned by this runtime. */
   readonly extensions?: ReturnType<typeof createReloadableExtensionRegistry>;
   readonly directory: string;

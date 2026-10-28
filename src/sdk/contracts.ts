@@ -25,3 +25,4 @@ export type { NativeToolRegistrationSource } from '../contracts/native-tool-inve
 
 export type * from '../contracts/qzone-tools.ts';
 export * from '../contracts/plugin-model.ts';
+export * from '../contracts/qq-capabilities.ts';

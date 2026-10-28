@@ -1,3 +1,12 @@
+import { createOneBotCapabilitiesPort } from '../adapters/onebot-capabilities.ts'
+import { createPluginCapabilityService, type PluginCapabilityService } from './plugin-capability-service.ts'
+import { createPluginModelService, type PluginModelService } from './plugin-model-service.ts'
+import { createSessionTurnQueue } from './session-turns.ts'
+import type { PluginRuntimeServices } from './plugin-runtime.ts'
+import { createNativeCapabilityDirectory, NATIVE_DIRECTORY_TOOLS } from './native-capability-directory.ts'
+import { createNativeSessionDirectoryTools } from './native-session-tools.ts'
+import { switchNativeSessionBinding } from './native-session-bind.ts'
+import { createNativeSessionIntents } from './native-session-intents.ts'
 import { createNativeQzoneEffects, availableNativeQzoneTools } from './native-qzone-tools.ts'
 import { createOneBotQzoneTools } from '../adapters/onebot-qzone-tools.ts'
 import { createQzoneNativePackage } from './native-qzone.ts'
@@ -228,6 +237,27 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let interactionMessages: ReturnType<typeof createNativeInteractionMessages> | undefined
   let media: ReturnType<typeof createNativeMediaRegistry> | undefined
   let packages: ReturnType<typeof createNativePackages> | undefined
+  let pluginCapabilities: PluginCapabilityService | undefined
+  let pluginModels: PluginModelService | undefined
+  let sessionTurns: ReturnType<typeof createSessionTurnQueue> | undefined
+  let sessionIntents: ReturnType<typeof createNativeSessionIntents> | undefined
+  let directoryInventory: readonly { name: string; description: string; loadedInSession: boolean;
+    registrationSource: { origin: 'framework-builtin'; ownerId: string; ownerName: string; transport: 'native' } }[] = []
+  function pluginServices(owner: string, signal: AbortSignal, assertActive: () => void = () => signal.throwIfAborted()): PluginRuntimeServices {
+    const check = () => { signal.throwIfAborted(); assertActive(); if (closed) failure('PLUGIN_RUNTIME_UNAVAILABLE') }
+    const capabilities = () => { check(); if (!pluginCapabilities) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginCapabilities.forPlugin(owner, signal, check) }
+    const models = () => { check(); if (!pluginModels) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginModels.forPlugin(owner, signal) }
+    return Object.freeze({
+      capabilities: { catalog: query => capabilities().catalog(query), call: request => capabilities().call(request) },
+      models: { models: requested => models().models(requested), list: () => models().list(),
+        bind: request => models().bind(request), unbind: key => models().unbind(key),
+        create: request => models().create(request), run: request => models().run(request) },
+      sessions: { resolve(conversationId) { check(); return host?.sessions.get(conversationId) ?? null },
+        bind(target, sessionId, requested) { check(); return runtime.bindSession(target, sessionId,
+          AbortSignal.any([signal, ...(requested ? [requested] : [])])) },
+        unbind(target) { check(); return runtime.unbindSession(target) } }
+    } satisfies PluginRuntimeServices)
+  }
   let packageUnknown = false
   let inputPackage: NativeChatInputPackageService | undefined
   let memoryPackage: NativeMemoryPackageService | undefined
@@ -531,9 +561,15 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     return host?.sessions.findBySessionId(sessionId) ?? undefined
   }
 
-  function recordUsage(event: AgentEvent) {
+  function recordUsage(event: AgentEvent, pluginOwner?: string) {
     if (!usage || !active || (event.type !== 'completed' && event.type !== 'failed')) return
-    const binding = bindingForSession(event.sessionId)
+    const pluginExecution = store?.read('plugin-model.executions', event.sessionId)
+    if (!pluginOwner && pluginExecution && isRecord(pluginExecution.value)) {
+      const value = pluginExecution.value
+      if (['running', 'unknown'].includes(String(value.state))
+        || isRecord(value.usage) && value.usage.turn !== undefined && String(value.usage.turn) === String(event.data?.turn)) return
+    }
+    const binding = pluginOwner ? { conversationId: `plugin:${pluginOwner}`, sessionId: event.sessionId, generation: 1 } : bindingForSession(event.sessionId)
     if (!binding) return
     const data = event.data ?? {}
     if (data.terminal === true || !(typeof data.turn === 'string' && data.turn.length > 0
@@ -675,12 +711,17 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     replyFreshness = undefined
     media = undefined
     stickers = undefined
+    pluginCapabilities = undefined
+    pluginModels = undefined
+    sessionIntents = undefined
+    directoryInventory = []
     inputPackage = undefined
     memoryPackage = undefined
     quotedContext = undefined
     inbox = undefined
     claimTimer = undefined
     const result = await drainNativeRun(resources)
+    sessionTurns = undefined
     await markdown?.close().catch(error => { result.errors.push(error) })
     frameworkTools = undefined
     work = undefined
@@ -871,7 +912,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             ...(binding ? { conversationId: binding.conversationId, generation: binding.generation } : {}),
             ...(accountScope ? { protocolId: accountScope.protocolId, accountId: accountScope.accountId } : {}) } })
         } })
-        const agent = createNativeAgentCoordinator({ sourceAgent, dsh, store, controller, definition, configuration, identity,
+        sessionTurns = createSessionTurnQueue({ signal: controller.signal, store })
+        const agent = sessionTurns.wrapChat(createNativeAgentCoordinator({ sourceAgent, dsh, store, controller, definition, configuration, identity,
           onReplyAttempted: requestId => Boolean(host?.deliveryForRequest(requestId)),
           presetBindings: selected.deployment.presetBindings, activity, bindingForSession, admittedAt: inbound.admittedAt, checkpoint, guard,
           onReplySuppressed: requestId => workFeedback?.suppressed(requestId),
@@ -881,7 +923,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             get messageSources() { return messageSources }, get pluginEpoch() { return pluginEpoch } },
           recordUsage(event) { try { recordUsage(event) } catch (error) {
             usageFaults++; lastUsageError = safeCode(error); activity.record('usage_error')
-          } } })
+          } } }))
         const context = createContextStore()
         const outgoingPersona = configurationState.personaScope
         const personaReference = context.registerPersona({ ...contentIdentity.persona, version: personaMetadata.scopeVersion })
@@ -912,7 +954,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           } })
         bootstrapMount = options.bootstrap ? await createNativeBootstrapMount({ bootstrap: options.bootstrap,
           context: { directory: options.directory, store, context, persona: personaReference, signal: controller.signal,
-            messageSources: messageSources.reader, extensions } }) : undefined
+            messageSources: messageSources.reader, extensions,
+            runtime: pluginServices(options.bootstrap.metadata.manifest.id, controller.signal) } }) : undefined
         if (lifecycleHooks !== managerHooks) lifecycleHooks.close()
         lifecycleHooks = createLifecycleHooks([...managerDefinitions, ...(bootstrapMount?.lifecycleHooks ?? [])])
         await checkpoint('runtime.starting', { state: 'starting', planId: definition.planId }, controller.signal)
@@ -953,6 +996,22 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           forward: { group: true, private: true, ...bootstrapOnebotOptions?.forward,
             senderId: selfId, senderName: persona.name.slice(0, 100) },
           resolveAsset: resolveOutputAsset })
+        const capabilityPort = createOneBotCapabilitiesPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
+          ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}) })
+        const capabilityInspection = await capabilityPort.inspect(controller.signal)
+        pluginCapabilities = createPluginCapabilityService({ port: capabilityPort, store, accountId: selfId, signal: controller.signal,
+          ...(capabilityInspection.status === 'confirmed' ? { inventory: capabilityInspection.data } : {}) })
+        pluginModels = createPluginModelService({ store, backend: dsh.pluginModels, signal: controller.signal,
+          defaultModel: () => ({ provider: selected.deployment.presetBindings.find(b => b.externalProvider)?.externalProvider ?? definition.model.provider,
+            model: definition.model.name }),
+          withSessionLease: (sessionId, signal, operation) => sessionTurns!.withSession(sessionId, signal, operation),
+          isSessionBusy: sessionId => sessionTurns?.isBusy(sessionId) ?? false,
+          onUsage: event => recordUsage({ id: event.requestId, sessionId: event.sessionId, type: event.status, data: event.data }, event.owner) })
+        sessionIntents = createNativeSessionIntents({ store, signal: controller.signal,
+          currentOwner: () => active?.access.owner ?? null,
+          isReady: key => state === 'running' && !inbound.isProcessing(key) && !inbox?.hasPending(key)
+            && executions?.forConversation(key) === null && host?.replies.get(key)?.status !== 'waiting',
+          bind: (target, id, signal) => runtime.bindSession(target, id, signal), unbind: target => runtime.unbindSession(target) })
         const qzonePort = createOneBotQzoneTools({ endpoint: configuration.adapters.onebotHttp.endpoint,
           ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}),
           ...(options.qzoneSupportedActions ? { readSupportedActions: options.qzoneSupportedActions } : {}) })
@@ -972,8 +1031,25 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         const replyEffects = createNativeReplyEffects({ sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
+        const capabilityDirectory = createNativeCapabilityDirectory({ port: capabilityPort,
+          inventory: capabilityInspection.status === 'confirmed' ? capabilityInspection.data : null,
+          store, selfId, sources: () => messageSources?.reader,
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource'),
+          tools: () => [...qzoneTools.map(tool => ({ tool, effect: qzoneEffects[tool.definition.capability]!, category: 'qzone', permission: 'autonomous' as const })),
+            ...createNativeSessionDirectoryTools({ sources: () => messageSources?.reader, modelService: () => pluginModels,
+              resolveQQ: key => host?.sessions.get(key) ?? null, listQQ: () => host?.sessions.list({ limit: 1000 }) ?? [],
+              bindQQ: (target, id, signal) => runtime.bindSession(target, id, signal), unbindQQ: target => runtime.unbindSession(target),
+              async deferQQ(request, target, targetSessionId) {
+                if (!messageSources || !sessionIntents) failure('SESSION_MANAGEMENT_BUSY')
+                const source = await messageSources.reader.requireOwner(request.scope, request.signal)
+                request.signal.throwIfAborted()
+                return sessionIntents.schedule({ target, ...(targetSessionId ? { targetSessionId } : {}), ownerId: source.userId })
+              } })] })
+        directoryInventory = capabilityDirectory.inventory().map(item => ({ name: item.id, description: item.description,
+          loadedInSession: false, registrationSource: { origin: 'framework-builtin', ownerId: 'qq-agent-framework',
+            ownerName: '框架能力目录', transport: 'native' } }))
         const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
-        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', ...Object.keys(conversationEffects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
+        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', 'native.stickers.manage', ...Object.keys(conversationEffects), ...Object.keys(capabilityDirectory.effects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
           failure('NATIVE_CHAT_RESERVED_CAPABILITY')
         }
         if ([...ONEBOT_PROTOCOL_EVENT_TYPES, NATIVE_TOOL_EVENT, ...Object.keys(reminderService.eventValidators)].some(type => bootstrapMount?.bridgeOptions.eventValidators?.[type])) {
@@ -990,7 +1066,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           onAgentMessageDelivery: (event, result, confirmedContent) => recordNativeExecutionDelivery(store!, event, result, confirmedContent),
           shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
-          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...qzoneEffects, ...replyEffects,
+          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...capabilityDirectory.effects, ...qzoneEffects, ...replyEffects,
+            'native.stickers.manage': { execute(request) { if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE'); return stickers.manage.execute(request) } },
             'native.stickers.list': { execute(request) {
               if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE')
               return stickers.list.execute(request)
@@ -1109,7 +1186,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         stickers = createNativeStickerService({
           port: createOneBotStickerPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
             ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}) }),
-          register: media.register, authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+          register: media.register, store, selfId, sources: () => messageSources?.reader, resolveAsset: resolveOutputAsset,
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         packages = createNativePackages({ packages: [createChatInputNativePackage({ directory: options.directory,
           async readPersona() {
             const latest = await options.loadConfiguration()
@@ -1128,7 +1206,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             tools: { catalog: signal => runtime.tools(signal) },
             work: { status: () => runtime.workStatus(), read: id => runtime.readWork(id), list: query => runtime.listWork(query) }
           } }), ...(bootstrapMount?.packageDefinitions ?? [])], signal: controller.signal,
-          configurationRegistry: packageConfigurationRegistry, stateStore: store,
+          configurationRegistry: packageConfigurationRegistry, stateStore: store, runtimeServices: pluginServices,
           ...(options.bootstrap ? { bootstrapContent: {
             identity: options.bootstrap.metadata.contentIdentity ?? { fingerprint: options.bootstrap.metadata.codeFingerprint, coverage: 'entry-only' as const, files: 1 },
             packageIds: bootstrapMount?.packageDefinitions.map(definition => definition.manifest.id) ?? [],
@@ -1235,7 +1313,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         if (plugin.frameworkToolProtocol !== 'qq-agent-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
         if (plugin.frameworkToolProtocol === 'qq-agent-framework.tools/1' && dsh.frameworkTools) {
           frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
-            tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...qzoneTools, ...(work ? NATIVE_WORK_TOOLS : [])],
+            tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
             async toolDescriptions(signal): Promise<Readonly<Record<string, string>>> {
               const identity = await options.readWorkIdentity?.(signal)
               signal.throwIfAborted()
@@ -1395,6 +1473,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         const reportedTimeouts = new Set<string>()
         claimTimer = setInterval(() => {
           if (state !== 'running' || controller.signal.aborted || !executions || !claims) return
+          void sessionIntents?.drain(controller.signal).catch(error => { lastError = safeCode(error) })
           try {
             const pending = executions.active()
             try {
@@ -1505,6 +1584,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     const result = await service.reconcile(id, combined)
     if (result.state === 'released') {
       combined.throwIfAborted()
+      sessionTurns?.releaseReconciled(result.execution.binding.sessionId, result.execution.requestId)
       const reply = currentHost.replies.get(result.execution.binding.conversationId)
       if (reply && ['waiting', 'timed-out'].includes(reply.status)
         && digest([result.execution.binding.conversationId, reply.requestId, 'prompt']) === result.execution.requestId) {
@@ -1602,7 +1682,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     catch (error) { return { ...empty, coverage: error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND' ? 'absent' : 'unavailable' } }
   }
 
-  const runtime = Object.freeze({ status, start, stop, adapterRuntime, applyAccessChange, reconcileExecution, recoverExecution, diagnostics, mediaDiagnostics,
+  const runtime = Object.freeze({ status, start, stop, adapterRuntime,
+    pluginModelService: () => state === 'running' && !closed ? pluginModels : undefined,
+    pluginCapabilityService: () => state === 'running' && !closed ? pluginCapabilities : undefined, applyAccessChange, reconcileExecution, recoverExecution, diagnostics, mediaDiagnostics,
     extensionStatus() { return extensions.list() },
     reloadExtension(id: string, expectedRevision: string, signal: AbortSignal) {
       if (state !== 'running' || !lifetime || lifetime.signal.aborted || closed) failure('EXTENSION_RUNTIME_UNAVAILABLE')
@@ -1647,10 +1729,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           } catch { signal.throwIfAborted() }
         }
         signal.throwIfAborted()
-        return withFrameworkToolInventory(inventory, frameworkTools?.inventory(), sessionNames)
+        return withFrameworkToolInventory(inventory, frameworkTools ? [...frameworkTools.inventory(), ...directoryInventory] : undefined, sessionNames)
       } catch {
         signal.throwIfAborted()
-        return withFrameworkToolInventory(unavailableToolInventory('tool_inventory_connection_unavailable'), frameworkTools?.inventory())
+        return withFrameworkToolInventory(unavailableToolInventory('tool_inventory_connection_unavailable'), frameworkTools ? [...frameworkTools.inventory(), ...directoryInventory] : undefined)
       } finally { await temporary?.close() }
     },
     async tools(signal: AbortSignal) {
@@ -1757,6 +1839,25 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         || inbound.isProcessing(target.key)) failure('SESSION_MANAGEMENT_BUSY')
       // Recheck the binding and admission synchronously after the observation.
       return unbindNativeSession(currentStore, target)
+    },
+    async bindSession(target: NativeSessionResetTarget, targetSessionId: string, signal: AbortSignal) {
+      if (closed || state !== 'running' || starting || stopping || !store || !lifetime || !dsh || !sessionTurns || !host)
+        failure('SESSION_MANAGEMENT_BUSY')
+      const currentStore = store, currentLifetime = lifetime, currentHost = host, port = dsh.pluginModels, queue = sessionTurns
+      const combined = AbortSignal.any([signal, currentLifetime.signal, AbortSignal.timeout(15000)])
+      runtime.assertSessionIdle(target)
+      const releases: (() => void)[] = []
+      try {
+        for (const id of [...new Set([target.sessionId, targetSessionId])].sort()) releases.push(await queue.acquire(id, combined))
+        if (!(await port.inspect(targetSessionId, combined)).exists) failure('SESSION_MANAGEMENT_TARGET_NOT_FOUND')
+        combined.throwIfAborted()
+        if (closed || state !== 'running' || lifetime !== currentLifetime || store !== currentStore || host !== currentHost)
+          failure('SESSION_MANAGEMENT_BUSY')
+        runtime.assertSessionIdle(target)
+        const result = switchNativeSessionBinding({ store: currentStore, target, targetSessionId })
+        currentHost.sessions.bind(target.key, result.sessionId, result.generation)
+        return result
+      } finally { for (const release of releases.reverse()) release() }
     },
     host() { return closed ? undefined : host },
     usage() { return closed ? undefined : usage },

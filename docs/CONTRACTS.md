@@ -269,3 +269,13 @@ GIF 仍登记为当前会话的图片，不受视频观察开关影响。`qaf_me
 `GET /api/chat/assistant` 只读取本地配置，返回 `revision`、`configuration`、`statusSource: "configuration"`、`executionAvailable: null` 和空 `missingReasons`，不发现 DSH、不读取远端预设或模型目录。`null` 表示本次未检查执行状态，不表示不可用。`GET /api/chat/assistant/status` 为显式只读检查，返回同一配置与布尔 `executionAvailable`；检查最多五秒，检查超时或异常返回 `assistant_status_unavailable` 并保留配置，不转为设置读取失败。请求被调用方取消仍按取消处理。
 
 助手保存仍应用所选模型，保存后的状态检查失败不把已确认保存变成未知写入。首页不轮询助手配置，首次打开、手动刷新和保存后读取；实际工作准入继续执行完整目标、权限和配置版本核验，不以设置页显示或缓存授予执行资格。
+
+## 插件能力与会话服务
+
+可信插件上下文提供 `runtime.capabilities`、`runtime.models` 和 `runtime.sessions`。宿主绑定插件身份及生命周期；QQ 命令入口仍校验实际调用者。协议写操作要求稳定幂等键，已确认或拒绝回执保留七天，未确认结果保留且不自动重放；业务永久去重由插件持久业务状态承担。模型只直接接收常用工具与能力目录入口，按具体工具 ID 才展开参数，原始协议管理调用核验主人。
+
+插件模型默认首次自动创建持久会话，只加载插件任务与历史，不注入 QQ 人设、聊天方案、回复协议或工具。绑定现有会话保留上下文，固定指向实际 DSH 会话 ID，不随 QQ 换绑自动漂移。模型输出只交回插件，不自动发送到 QQ。共享实际会话有界串行，未知执行必须核对原记录，不通过新会话自动绕过；仅确认原会话不存在且执行已结清时才重建并记录来源。插件用量按插件及实际会话记录。
+
+`GET /api/chat/plugin-sessions` 只读本地绑定及已创建会话登记；`GET /api/chat/plugin-sessions/models` 显式读取已配置模型。`POST /api/chat/plugin-sessions` 的 `create/bind/unbind/reconcile` 校验当前 `revision`，并保留历史；`reconcile` 不重新执行模型请求。`POST /api/chat/sessions/bind` 要求 QQ 完整绑定版本与目标实际会话 ID，核验目标存在、原绑定和执行状态后原子换绑。插件可以共享 QQ 会话，两个 QQ 地址不能绑定同一实际会话。
+
+模型从当前 QQ 会话请求自身换绑或解绑时，登记待执行操作，待当前聊天、发送和入站排空后再次核验主人和绑定版本再执行；未知结果不重放。待执行队列最多 64 项，已结束操作七天回收，未知操作保留。详见[插件能力与统一会话服务](PLUGIN_CAPABILITIES_AND_SESSIONS.md)与[插件模型](PLUGIN_MODELS.md)。

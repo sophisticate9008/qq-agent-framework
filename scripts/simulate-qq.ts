@@ -21,7 +21,7 @@ import { ACCESS_COMMAND_REPLIES, createAccessCommandHandler, parseAccessCommand 
 import { createNativePackageConfigurationRegistry } from '../src/host/native-package-configuration.ts'
 import { validateNativeOutputConfiguration } from '../src/contracts/native-output.ts'
 import { upgradeBuiltinPersonaParticipation } from '../src/host/chat-personas.ts'
-import { validateChatPersona } from '../src/contracts/chat-plans.ts'
+import { validateChatPersona, validateChatPlan } from '../src/contracts/chat-plans.ts'
 import { upgradeBuiltinChatOperatingInstructions } from '../src/host/chat-operating-instructions.ts'
 import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts'
 import { createNativeDshDeploymentRuntime } from '../src/host/native-dsh-deployment.ts'
@@ -30,16 +30,17 @@ import { prepareSimulationDsh } from './simulate-qq-dsh.ts'
 import { simulatedMemberIndex, startSimulatedOneBot, type SimulatedAsset, type SimulatedMessage } from './simulate-qq-onebot.ts'
 
 const HELP = `本机 QQ 消息模拟（真实模型）
-node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--services <服务清单>] [--batch <JSONL|basic|work|presentation|video>] [--prepare-only]
+node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--services <服务清单>] [--provider <已有供应商id> --model <模型id>] [--batch <JSONL|basic|work|presentation|video>] [--prepare-only]
 
 默认从 runtime/live/runtime 与 runtime/live/services.json 读取现有配置。
 每次创建全新 runtime/simulations/qq-*/，使用独立DSH进程/鉴权/会话，OneBot发送仅写本地捕获。
 --prepare-only 只准备私有配置，不启动DSH、不发送模型请求。
+--provider 与 --model 必须成对，仅覆盖本轮复制后的启用方案，保留思考档位与上下文设置。
 交互普通文本默认主人群聊@；JSON支持 actor:owner|member、memberIndex:1..8、kind:group|private、mention、text、replyTo、segments。
 命令 /status、/settle、/quit；批量控制行 {"waitMs":1000}、{"settleMs":180000}、{"status":true}。
 批量消息默认等候稳定；waitMs:0 可制造并发追加。详细用法见 docs/SIMULATION.md。`
 
-interface Arguments { source: string; services: string; batch?: string; prepareOnly: boolean }
+interface Arguments { source: string; services: string; provider?: string; model?: string; batch?: string; prepareOnly: boolean }
 function argumentsFor(values: readonly string[]): Arguments | null {
   if (values.length === 1 && ['-h', '--help'].includes(values[0]!)) { console.log(HELP); return null }
   const parsed: Arguments = { source: resolve('runtime/live/runtime'), services: resolve('runtime/live/services.json'), prepareOnly: false }
@@ -53,9 +54,12 @@ function argumentsFor(values: readonly string[]): Arguments | null {
     if (!value || value.startsWith('--')) throw new Error('simulation_option_value_required')
     if (key === '--source-directory') parsed.source = resolve(value)
     else if (key === '--services') parsed.services = resolve(value)
+    else if (key === '--provider') parsed.provider = value
+    else if (key === '--model') parsed.model = value
     else if (key === '--batch') parsed.batch = ['basic', 'work', 'presentation', 'video'].includes(value) ? value : resolve(value)
     else throw new Error('simulation_unknown_option')
   }
+  if ((parsed.provider === undefined) !== (parsed.model === undefined)) throw new Error('simulation_provider_model_pair_required')
   return parsed
 }
 
@@ -137,7 +141,7 @@ export async function publishSimulationActivityIndex(options: {
   }
 }
 
-async function copyConfiguration(source: string, destination: string) {
+async function copyConfiguration(source: string, destination: string, modelOverride?: { readonly provider: string; readonly model: string }) {
   // Explicit configuration allowlist. In particular no journal, outbox, history, account registry, or running intent is copied.
   for (const name of ['chat-plans.json', 'chat-personas.json', 'chat-providers.json', 'chat-execution.json', 'chat-assistant.json', 'package-chat-output.configuration.json', 'package-media.configuration.json']) {
     const filename = join(source, name)
@@ -153,7 +157,11 @@ async function copyConfiguration(source: string, destination: string) {
       if (!isRecord(document) || !Array.isArray(document.plans)) throw new Error('simulation_source_plans_invalid')
       const plans = document.plans.map((plan: unknown) => {
         if (!isRecord(plan) || typeof plan.instructions !== 'string') throw new Error('simulation_source_plan_invalid')
-        return { ...plan, instructions: upgradeBuiltinChatOperatingInstructions(plan.instructions) }
+        const copied = { ...plan, instructions: upgradeBuiltinChatOperatingInstructions(plan.instructions) }
+        if (!modelOverride || plan.id !== document.activePlanId) return copied
+        const overridden = { ...copied, ...modelOverride }
+        validateChatPlan(overridden)
+        return overridden
       })
       content = Buffer.from(JSON.stringify({ ...document, plans }) + '\n')
     }
@@ -318,6 +326,12 @@ export async function simulateQq(values = process.argv.slice(2)) {
   const args: Arguments = parsed
   process.umask(0o077)
   const original = await readNativeChatConfigurationUnlocked(args.source)
+  const sourcePlan = original.catalog.plans.find(plan => plan.id === original.catalog.activePlanId)
+  if (!sourcePlan) throw new Error('simulation_active_plan_required')
+  const modelOverride = args.provider !== undefined && args.model !== undefined ? { provider: args.provider, model: args.model } : undefined
+  if (modelOverride && !original.providers.some(provider => provider.id === modelOverride.provider)) throw new Error('simulation_provider_not_configured')
+  const selectedPlan = validateChatPlan({ ...sourcePlan, ...modelOverride })
+  const modelSelection = { provider: selectedPlan.provider, model: selectedPlan.model, modelOverride: modelOverride !== undefined }
   const ownerId = original.access.owner
   if (!ownerId || !/^[1-9][0-9]{0,14}$/.test(ownerId)) throw new Error('simulation_configured_owner_required')
   const selfId = '900000000001'
@@ -327,7 +341,7 @@ export async function simulateQq(values = process.argv.slice(2)) {
   const directory = await mkdtemp(resolve('runtime/simulations/qq-'))
   const nativeDirectory = join(directory, 'native')
   await mkdir(nativeDirectory, { mode: 0o700 })
-  await copyConfiguration(args.source, nativeDirectory)
+  await copyConfiguration(args.source, nativeDirectory, modelOverride)
   const dsh = await prepareSimulationDsh({ directory, servicesFilename: args.services, configuration: original })
   const fixtures = await prepareFixtures(dsh.workspace, args.batch === 'video')
   const transcript = join(directory, 'events.jsonl')
@@ -367,8 +381,8 @@ export async function simulateQq(values = process.argv.slice(2)) {
     await jsonFile(join(directory, 'simulation.json'), { schema: 1, sourceDirectory: args.source,
       nativeDirectory, dshHome: dsh.home, workspace: dsh.workspace, dshEndpoint: dsh.endpoint,
       protocolMode: 'local-capture', bundles: dsh.bundles, productionBootstrapMounted: false,
-      fixtures, prepareOnly: args.prepareOnly })
-    console.log(JSON.stringify({ type: 'simulation-created', directory, fixtures, prepareOnly: args.prepareOnly }))
+      fixtures, prepareOnly: args.prepareOnly, ...modelSelection })
+    console.log(JSON.stringify({ type: 'simulation-created', directory, fixtures, prepareOnly: args.prepareOnly, ...modelSelection }))
     if (args.prepareOnly) return
     const peer = protocol!
     await dsh.start(lifetime.signal)
@@ -482,8 +496,8 @@ export async function simulateQq(values = process.argv.slice(2)) {
     activityTimer.unref()
     stopActivitySnapshots = async () => { clearInterval(activityTimer); await activityWrite; await saveActivity(); await usageWrite; await publishUsage() }
     await native.start((await load()).revisions, lifetime.signal)
-    record({ type: 'ready', status: await native.status() })
-    console.log(JSON.stringify({ type: 'ready', directory, groupId, memberId, members: peer.members,
+    record({ type: 'ready', status: await native.status(), ...modelSelection })
+    console.log(JSON.stringify({ type: 'ready', directory, groupId, memberId, members: peer.members, ...modelSelection,
       defaultActor: 'owner', defaultKind: 'group', defaultMention: true }))
     async function status() {
       const snapshot = { type: 'status', runtime: await native.status(), work: native.listWork(),

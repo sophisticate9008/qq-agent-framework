@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-settings'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -111,13 +112,30 @@ export function createPluginModelChannel(ctx: Context) {
     signal.throwIfAborted()
     const llm = ctx.get('llm')
     if (!llm) throw new TypeError('Model runtime is unavailable')
+    const settings = ctx.get('settings')
+    if (!settings) throw new TypeError('Local model configuration is unavailable')
+    const registered = new Map(llm.listProviders().map(provider => [provider.id, provider]))
+    const namespaces = new Map<string, unknown>(settings.describe({ redactSecrets: true }).map(row => [String(row.ns), row.value]))
     const entries: { provider: string; providerName: string; model: string; modelName: string }[] = []
-    for (const provider of llm.listProviders()) {
+    const seen = new Set<string>()
+    // Adapter listModels() can perform remote account discovery and has no
+    // cancellation parameter. A selector only needs the configured local
+    // declarations; exact model capabilities belong to the selected SDK call.
+    for (const declaration of llm.listConfigurableProviders()) {
       signal.throwIfAborted()
-      for (const model of await llm.listModels(provider.id)) {
+      const provider = registered.get(declaration.provider)
+      if (!provider || !identifier(provider.id)) continue
+      let profile = namespaces.get(declaration.settingsNs)
+      for (const key of declaration.settingsPath) profile = object(profile) ? profile[key] : undefined
+      if (!object(profile) || !Array.isArray(profile.models)) continue
+      for (const model of profile.models) {
+        if (!object(model) || !identifier(model.id)) continue
+        const identity = JSON.stringify([provider.id, model.id])
+        if (seen.has(identity)) continue
         if (entries.length >= 4096) throw new TypeError('Plugin model catalog exceeds capacity')
-        if (!identifier(provider.id) || !identifier(model.id)) continue
-        entries.push({ provider: provider.id, providerName: provider.name.slice(0, 256), model: model.id, modelName: model.name.slice(0, 256) })
+        seen.add(identity)
+        entries.push({ provider: provider.id, providerName: provider.name.slice(0, 256), model: model.id,
+          modelName: typeof model.name === 'string' && model.name.length > 0 ? model.name.slice(0, 256) : model.id })
       }
     }
     return { models: entries }
@@ -125,7 +143,6 @@ export function createPluginModelChannel(ctx: Context) {
   const verifySelection = async (model: Selection, signal: AbortSignal) => {
     const catalog = await models(signal)
     if (!catalog.models.some(entry => entry.provider === model.provider && entry.model === model.model)) throw new TypeError('Plugin model is not configured')
-    await ctx.llm.resolveModelInfo(model.provider, model.model, signal)
   }
   return Object.freeze({
     models,

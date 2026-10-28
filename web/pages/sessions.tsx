@@ -1,5 +1,6 @@
 import { AutomaticMaintenanceStatus } from '../components/automatic-maintenance-status.tsx';
 import { WorkRecords } from '../components/work-records.tsx';
+import { PluginSessions } from '../components/plugin-sessions.tsx';
 import { SimulationSessions } from '../components/simulation-sessions.tsx';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs.tsx';
 import { SessionDeleteDialog } from '../components/session-delete-dialog.tsx';
@@ -364,7 +365,7 @@ export function SessionsPage(props: PageProps) {
 
   return <div className="page-stack" data-page="sessions">
     <PageHeading title="会话与执行记录" description={snapshot?.source === 'imported' ? '查看迁入的原有会话记录；尚未由新聊天接管。' : '查看会话、原执行证据、QQ 互动与独立工作。'} actions={<><AutomaticMaintenanceStatus api={api} connected={connected} />{sessionView === 'qq' && <Button variant="outline" onClick={reload} disabled={loading || resetState === 'saving'}><RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button>}</>} />
-    <Tabs value={sessionView} onValueChange={value => setSessionView(String(value))} className="gap-2"><TabsList aria-label="会话来源" className="h-[34px] justify-start"><TabsTrigger value="qq">QQ 会话</TabsTrigger><TabsTrigger value="simulation">模拟会话</TabsTrigger></TabsList><TabsContent value="qq" keepMounted className="[&[hidden]]:hidden">
+    <Tabs value={sessionView} onValueChange={value => setSessionView(String(value))} className="gap-2"><TabsList aria-label="会话来源" className="h-[34px] justify-start"><TabsTrigger value="qq">QQ 会话</TabsTrigger><TabsTrigger value="plugin">插件会话</TabsTrigger><TabsTrigger value="simulation">模拟会话</TabsTrigger></TabsList><TabsContent value="qq" keepMounted className="[&[hidden]]:hidden">
     {snapshot?.source === 'imported' && <p className="rounded-lg border px-4 py-3 text-xs leading-6 text-muted-foreground" role="status">已迁入原有会话记录，尚未由新聊天接管。这里只读查看，不代表原有挂起提问或工具审批已经恢复。</p>}
     {inbox.error && <p role="status" className="rounded-lg border p-3 text-xs text-muted-foreground">收件队列暂时无法读取，已保留上次结果供核对；不会按空队列处理。</p>}
     {notice && <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-5 text-foreground" role="status"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" /><span>{notice}</span></div>}
@@ -394,7 +395,7 @@ export function SessionsPage(props: PageProps) {
           {moreError && <p className="mt-2 text-xs leading-5 text-amber-700 dark:text-amber-300" role="status">{moreError}</p>}
         </Section>
       </div>}
-    </TabsContent><TabsContent value="simulation" keepMounted className="[&[hidden]]:hidden"><SimulationSessions api={api} connected={connected} active={sessionView === 'simulation'} onUsage={navigateToUsage} /></TabsContent></Tabs>
+    </TabsContent><TabsContent value="plugin" keepMounted className="[&[hidden]]:hidden"><PluginSessions api={api} connected={connected} active={sessionView === 'plugin'} qqSessions={snapshot?.sessions ?? []} qqSessionsLimited={Boolean(snapshot?.next) || loadError.length > 0 || snapshot === null} /></TabsContent><TabsContent value="simulation" keepMounted className="[&[hidden]]:hidden"><SimulationSessions api={api} connected={connected} active={sessionView === 'simulation'} onUsage={navigateToUsage} /></TabsContent></Tabs>
     <DetailsWindow open={detailTarget !== null} onOpenChange={open => { if (!open) setDetailTarget(null); }} title="会话详情" description={detailTarget ? `${describeConversationKey(detailTarget.key).label} ${describeConversationKey(detailTarget.key).identifier}` : '当前会话绑定'}>{detailTarget && <div className="grid gap-3"><ChatInboxState item={inboxItems.get(detailTarget.key)} known={inbox.snapshot !== null} stale={inbox.error !== null} /><TechnicalDetails fields={[{ label: '所属会话', value: detailTarget.key }, { label: '模型会话标识', value: detailTarget.sessionId }, { label: '绑定版本', value: detailTarget.bindingRevision }, { label: '第几次建立对话', value: detailTarget.generation }]} /><div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => void copySessionId(detailTarget.sessionId)}>复制会话标识</Button><Button variant="outline" onClick={navigateToUsage}>用量统计</Button></div></div>}</DetailsWindow>
     <DetailsWindow open={mediaKey !== null} onOpenChange={open => { if (!open) setMediaKey(null); }} title="媒体与引用记录" description={mediaKey ? `${describeConversationKey(mediaKey).label} ${describeConversationKey(mediaKey).identifier}` : '媒体读取记录'}>{mediaKey && <ConversationMediaDiagnostics api={api} connected={connected} conversationId={mediaKey} />}</DetailsWindow>
     <DetailsWindow open={diagnosticKey !== null} onOpenChange={open => { if (!open) setDiagnosticKey(null); }} title="检查未回复原因" description={diagnosticKey ? `${describeConversationKey(diagnosticKey).label} ${describeConversationKey(diagnosticKey).identifier}` : '会话检查'}>{diagnosticKey && <ConversationDiagnostics {...props} conversationId={diagnosticKey} />}</DetailsWindow>

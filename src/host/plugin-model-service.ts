@@ -11,6 +11,8 @@ const BINDINGS = 'plugin-model.bindings'
 const EXECUTIONS = 'plugin-model.executions'
 const SESSIONS = 'plugin-model.sessions'
 const MAX_BINDINGS = 4096
+const MAX_PENDING = 256
+const MAX_PENDING_PER_KEY = 16
 
 export interface PluginModelServiceOptions {
   readonly store: DurableStore
@@ -50,6 +52,8 @@ function binding(value: unknown, revision: number, busy: boolean): PluginModelBi
 
 export function createPluginModelService(options: PluginModelServiceOptions) {
   const queues = new Map<string, Promise<void>>()
+  const pendingByKey = new Map<string, number>()
+  let pending = 0
   const running = new Set<string>()
   const isBusy = (sessionId: string) => running.has(sessionId) || options.isSessionBusy?.(sessionId) === true
   const rows = (namespace: string): readonly StoredRecord[] => {
@@ -72,20 +76,40 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     return parsed
   }
   const combine = (lifetime: AbortSignal, signal?: AbortSignal) => AbortSignal.any([lifetime, ...(options.signal ? [options.signal] : []), ...(signal ? [signal] : [])])
+  const managementSignal = (signal: AbortSignal) => options.signal ? AbortSignal.any([signal, options.signal]) : signal
   const serial = async <Value>(id: string, signal: AbortSignal, operation: () => Promise<Value>): Promise<Value> => {
     signal.throwIfAborted()
+    const queued = pendingByKey.get(id) ?? 0
+    if (pending >= MAX_PENDING || queued >= MAX_PENDING_PER_KEY) failure('PLUGIN_MODEL_QUEUE_FULL')
+    pending++
+    pendingByKey.set(id, queued + 1)
     const previous = queues.get(id) ?? Promise.resolve()
     let release!: () => void
     const next = new Promise<void>(resolve => { release = resolve })
     const tail = previous.then(() => next)
     queues.set(id, tail)
+    let abort!: () => void
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason ?? new FrameworkError('PLUGIN_MODEL_ABORTED', '插件模型排队已停止。'))
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+    })
     try {
-      await previous
+      await Promise.race([previous, cancelled])
       signal.throwIfAborted()
       return await operation()
     } finally {
+      signal.removeEventListener('abort', abort)
       release()
-      if (queues.get(id) === tail) queues.delete(id)
+      // A cancelled waiter remains in the bounded chain until its predecessor
+      // settles. Removing its tail early would let a later writer overtake it.
+      void tail.then(() => {
+        pending--
+        const remaining = (pendingByKey.get(id) ?? 1) - 1
+        if (remaining === 0) pendingByKey.delete(id)
+        else pendingByKey.set(id, remaining)
+        if (queues.get(id) === tail) queues.delete(id)
+      })
     }
   }
   const read = (owner: string, key: PluginModelSessionKey = {}) => {
@@ -98,6 +122,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     return snapshot({ ...value, revision: saved.revision, busy: isBusy(value.sessionId) })
   }
   const listBindings = (owner?: string): readonly PluginModelBinding[] => {
+    options.signal?.throwIfAborted()
     if (owner !== undefined) keyOf(owner)
     const entries = rows(BINDINGS)
     if (entries.length > MAX_BINDINGS) failure('PLUGIN_MODEL_BINDING_LIMIT')
@@ -110,6 +135,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
   const selectModel = async (selection: PluginModelSelection | undefined, signal: AbortSignal): Promise<PluginModelSelection> => {
     const selected = selection ?? (typeof options.defaultModel === 'function' ? options.defaultModel() : options.defaultModel)
     const models = await options.backend.models(signal)
+    signal.throwIfAborted()
     const model = selected ? parsePluginModelSelection(selected) : models[0]
     if (!model || !models.some(candidate => candidate.provider === model.provider && candidate.model === model.model)) failure('PLUGIN_MODEL_UNAVAILABLE')
     return parsePluginModelSelection({ provider: model.provider, model: model.model,
@@ -240,6 +266,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
   return Object.freeze({
     listBindings,
     listManagedSessions(owner?: string): readonly PluginModelManagedSession[] {
+      options.signal?.throwIfAborted()
       if (owner !== undefined) keyOf(owner)
       const entries = rows(SESSIONS)
       if (entries.length > MAX_BINDINGS) failure('PLUGIN_MODEL_SESSION_LIMIT')
@@ -250,9 +277,14 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
           name: parsed.name, conversationId: parsed.conversationId, mode: row.value.mode as 'persistent' | 'stateless', createdAt: parsed.createdAt }]
       })
     },
-    models(signal: AbortSignal) { return options.backend.models(signal) },
+    models(callerSignal: AbortSignal) {
+      const signal = managementSignal(callerSignal)
+      signal.throwIfAborted()
+      return options.backend.models(signal)
+    },
     /** Read exact request evidence only; reconciliation never dispatches another model turn. */
-    reconcile(owner: string, key: PluginModelBindingKey, signal: AbortSignal): Promise<PluginModelBinding> {
+    reconcile(owner: string, key: PluginModelBindingKey, callerSignal: AbortSignal): Promise<PluginModelBinding> {
+      const signal = managementSignal(callerSignal)
       return serial(`binding:${keyOf(owner, key).id}`, signal, async () => {
         const current = read(owner, key)
         compareRevision(key.expectedRevision, current.row?.revision ?? null)
@@ -269,6 +301,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
             signal.throwIfAborted()
             if (options.onUsage) await options.onUsage({ owner: previous.value.owner, requestId: previous.value.requestId,
               sessionId: current.value.sessionId, conversationId: current.value.conversationId, data: observed.usage })
+            signal.throwIfAborted()
             options.store.write(EXECUTIONS, current.value.sessionId, json({ ...previous.value, state: observed.state,
               usage: observed.usage, reconciledAt: Date.now(), updatedAt: Date.now() }), { expectedRevision: previous.revision })
           }
@@ -279,12 +312,14 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
       })
     },
     /** Management callers authenticate separately; owner is an explicit management target. */
-    bind(owner: string, request: PluginModelBindingKey & { readonly sessionId: string }, signal: AbortSignal) { return bind(owner, request, signal) },
-    unbind(owner: string, key: PluginModelBindingKey, signal: AbortSignal) { return unbind(owner, key, signal) },
-    create(owner: string, request: PluginModelBindingKey & { readonly model?: PluginModelSelection }, signal: AbortSignal) {
+    bind(owner: string, request: PluginModelBindingKey & { readonly sessionId: string }, signal: AbortSignal) { return bind(owner, request, managementSignal(signal)) },
+    unbind(owner: string, key: PluginModelBindingKey, signal: AbortSignal) { return unbind(owner, key, managementSignal(signal)) },
+    create(owner: string, request: PluginModelBindingKey & { readonly model?: PluginModelSelection }, callerSignal: AbortSignal) {
+      const signal = managementSignal(callerSignal)
       return serial(`binding:${keyOf(owner, request).id}`, signal, () => create(owner, request, signal))
     },
     forPlugin(owner: string, lifetime: AbortSignal): PluginModelClient {
+      combine(lifetime).throwIfAborted()
       keyOf(owner)
       return Object.freeze<PluginModelClient>({
         models(signal?: AbortSignal) { return options.backend.models(combine(lifetime, signal)) },

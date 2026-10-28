@@ -18,6 +18,10 @@ interface ChatAssistantSnapshotBase {
 }
 
 export type ChatAssistantSnapshot = ChatAssistantSnapshotBase & ({
+  readonly state: 'configured';
+  readonly executionAvailable: null;
+  readonly missingReasons: readonly [];
+} | {
   readonly state: 'available';
   readonly executionAvailable: true;
   readonly missingReasons: readonly [];
@@ -50,13 +54,18 @@ export function parseAssistantConfiguration(value: unknown): ChatAssistantConfig
 
 export function parseChatAssistant(value: unknown): ChatAssistantSnapshot | null {
   if (!isRecord(value) || typeof value.revision !== 'string' || !/^[a-f0-9]{64}$/.test(value.revision)
-    || typeof value.executionAvailable !== 'boolean' || !Array.isArray(value.missingReasons)
+    || value.statusSource !== undefined && value.statusSource !== 'configuration'
+    || value.statusSource === 'configuration' && value.executionAvailable !== null
+    || typeof value.executionAvailable !== 'boolean' && !(value.executionAvailable === null && value.statusSource === 'configuration')
+    || !Array.isArray(value.missingReasons)
     || value.missingReasons.length > 32
     || !value.missingReasons.every((reason: unknown): reason is string => typeof reason === 'string'
       && /^[a-z][a-z0-9_.:-]{0,127}$/.test(reason))
     || new Set(value.missingReasons).size !== value.missingReasons.length) return null;
   const configuration = parseAssistantConfiguration(value.configuration);
   if (!configuration) return null;
+  if (value.executionAvailable === null) return value.missingReasons.length === 0
+    ? { revision: value.revision, configuration, state: 'configured', executionAvailable: null, missingReasons: [] } : null;
   if (value.executionAvailable) return value.missingReasons.length === 0
     ? { revision: value.revision, configuration, state: 'available', executionAvailable: true, missingReasons: [] } : null;
   const [first, ...rest] = value.missingReasons;
@@ -66,8 +75,10 @@ export function parseChatAssistant(value: unknown): ChatAssistantSnapshot | null
 
 export function assistantAvailabilityMessage(snapshot: ChatAssistantSnapshot): string {
   if (snapshot.configuration.mode === 'chat-only') return '助手已关闭';
+  if (snapshot.state === 'configured') return '助手已开启';
   if (snapshot.state === 'available') return '助手已启用';
   const reasons = snapshot.missingReasons.join(' ');
+  if (/assistant_status_unavailable/.test(reasons)) return '暂时无法检查连接，已保存设置保留';
   if (/assistant_deployment_busy/.test(reasons)) return '助手正在更新';
   if (/not_running/.test(reasons)) return '助手已保存，聊天尚未启动';
   if (/not_applied/.test(reasons)) return '助手尚未启用';

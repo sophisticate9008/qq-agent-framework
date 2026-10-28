@@ -36,3 +36,17 @@ test('future bounded unavailable reason codes remain available in details and co
     { ...current, missingReasons: Array.from({ length: 33 }, (_, index) => `reason_${index}`) },
   ]) assert.equal(parseChatAssistant(input), null);
 });
+
+
+test('saved assistant settings distinguish unchecked readiness from a failed assistant', () => {
+  const value = { ...current, statusSource: 'configuration', executionAvailable: null, missingReasons: [],
+    configuration: { ...current.configuration, mode: 'chat-assistant', provider: 'local', model: 'worker' } };
+  const parsed = parseChatAssistant(value);
+  assert(parsed);
+  assert.equal(parsed.state, 'configured');
+  assert.equal(parsed.executionAvailable, null);
+  assert.equal(assistantAvailabilityMessage(parsed), '助手已开启');
+  assert.equal(parseChatAssistant({ ...value, missingReasons: ['failed'] }), null);
+  assert.equal(parseChatAssistant({ ...value, statusSource: undefined }), null);
+  assert.equal(parseChatAssistant({ ...value, executionAvailable: true }), null);
+});

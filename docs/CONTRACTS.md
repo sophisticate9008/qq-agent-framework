@@ -255,3 +255,9 @@ DSH 未报告缓存读取时保持未知，不能凭输入、输出与总量恒�
 GIF 仍登记为当前会话的图片，不受视频观察开关影响。`qaf_media_read` 识别真实 GIF 字节后，静态 GIF 沿用单图读取；动画返回 `kind: animation`、单次播放的 `durationSeconds`、原始 `frameCount`、解码器实际 `loopCount`（`0` 表示无限循环）与 `frames: [{ timeSeconds, mediaType: "image/jpeg", data }]`。时间点来自累计真实帧延时，表示对应原始显示帧的起始时刻；抽样按播放时间分布并去重，保留 GIF 的画布合成与帧处置效果，不编造缺失的时序或循环信息。
 
 输入最多 8 MiB，原动画最多 256 帧、单帧 1600 万像素且总计 6400 万像素、单次播放最多 600 秒；本机观察总期限九秒。输出最多六帧 JPEG、实际图片字节合计 360 KiB、线格式 512 KiB，经既有 SDK 多图通道投影为一段说明与实际图片。`coverage: sampled-frames-only` 只证明这些抽样帧已提供，不能宣称已逐帧观看完整动画。自动用户图片附件路径保留 GIF 句柄、按需交给工具读取，不先抽样再丢弃，也不把跳过内联记为读取失败或覆盖原成功记录。GIF 外发沿用原图片通道、会话权限与原始字节，不将抽样 JPEG 替换为发送内容。
+
+## 助手配置与按需检查
+
+`GET /api/chat/assistant` 只读取本地配置，返回 `revision`、`configuration`、`statusSource: "configuration"`、`executionAvailable: null` 和空 `missingReasons`，不发现 DSH、不读取远端预设或模型目录。`null` 表示本次未检查执行状态，不表示不可用。`GET /api/chat/assistant/status` 为显式只读检查，返回同一配置与布尔 `executionAvailable`；检查最多五秒，检查超时或异常返回 `assistant_status_unavailable` 并保留配置，不转为设置读取失败。请求被调用方取消仍按取消处理。
+
+助手保存仍应用所选模型，保存后的状态检查失败不把已确认保存变成未知写入。首页不轮询助手配置，首次打开、手动刷新和保存后读取；实际工作准入继续执行完整目标、权限和配置版本核验，不以设置页显示或缓存授予执行资格。

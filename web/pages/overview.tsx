@@ -42,14 +42,14 @@ export function OverviewPage(props: PageProps) {
   const [localDirty, setLocalDirty] = useState(false);
   const runtime = useReadResource(api, '/api/chat/runtime', connected, parseChatRuntimeStatus, { intervalMs: 5_000 });
   const plans = useReadResource(api, '/api/chat/plans', connected, parsePlanCatalog, { intervalMs: 5_000 });
-  const assistant = useReadResource(api, '/api/chat/assistant', connected, parseChatAssistant, { intervalMs: 10_000 });
+  const assistant = useReadResource(api, '/api/chat/assistant', connected, parseChatAssistant);
   const access = useReadResource(api, '/api/chat/access', connected, parseAccessSummary, { intervalMs: 5_000 });
   const sessions = useReadResource(api, sessionPagePath(), connected, parseSessionSnapshot, { intervalMs: 15_000 });
   const inbox = useReadResource(api, '/api/chat/inbox', connected, parseNativeInboxSummary, { intervalMs: 5_000 });
   const status = runtime.error ? null : runtime.snapshot;
   const planCatalog = plans.error ? null : plans.snapshot;
   const selectedPlan = planCatalog?.plans.find(plan => plan.id === planCatalog.activePlanId);
-  const assistantValue = assistant.error ? null : assistant.snapshot;
+  const assistantValue = assistant.snapshot;
   const scope = access.error ? null : access.snapshot;
   const bound = sessions.error ? null : sessions.snapshot;
   const inboxValue = inbox.error ? null : inbox.snapshot;
@@ -93,10 +93,10 @@ export function OverviewPage(props: PageProps) {
           <div className="actions"><Button variant="outline" size="sm" disabled={runtime.loading} onClick={runtime.refresh}>检查状态</Button><ReadOnlyDetails title="引擎详情" description="当前聊天引擎与配置载入状态。"><div className="stack">{runtimeDetails}{rawRuntime}</div></ReadOnlyDetails><span className="push"><OverviewSettings title="聊天引擎设置" label="设置">{active => <AdapterManager {...props} compact="dsh" active={active} />}</OverviewSettings></span></div>
         </section>
         <section className="entity">
-          <div className="row"><span className="avatar"><Bot className="size-5" /></span><div><h2 className="font-semibold">后台助手</h2><p className="small muted">独立工作模式</p></div><span className="push"><StatusPill tone={assistantValue?.executionAvailable ? 'success' : assistantValue?.configuration.mode === 'chat-only' ? 'neutral' : 'warning'}>{assistantValue ? assistantValue.configuration.mode === 'chat-only' ? '已关闭' : assistantValue.executionAvailable ? '已启用' : '待就绪' : assistant.error ? '读取失败' : '读取中'}</StatusPill></span></div>
+          <div className="row"><span className="avatar"><Bot className="size-5" /></span><div><h2 className="font-semibold">后台助手</h2><p className="small muted">独立工作模式</p></div><span className="push"><StatusPill tone={assistantValue?.executionAvailable || assistantValue?.state === 'configured' && assistantValue.configuration.mode === 'chat-assistant' ? 'success' : assistantValue?.configuration.mode === 'chat-only' ? 'neutral' : 'warning'}>{assistantValue ? assistantValue.configuration.mode === 'chat-only' ? '已关闭' : assistantValue.state === 'configured' ? '已开启' : assistantValue.executionAvailable ? '已启用' : '待就绪' : assistant.error ? '读取失败' : '读取中'}</StatusPill></span></div>
           <div className="meta"><span>{assistantValue?.configuration.model ?? '未选择模型'}</span><span>敏感操作仅主人可用</span></div>
-          <div className={`strip ${assistantValue && !assistantValue.executionAvailable && assistantValue.configuration.mode !== 'chat-only' ? 'warn' : ''}`}>{assistantValue ? assistantAvailabilityMessage(assistantValue) : '读取助手配置与运行状态。'}</div>
-          <div className="actions"><OverviewSettings title="设置后台助手" label="选择模型">{() => <ChatAssistantManager api={api} connected={connected} setDirty={setDirty} onManageCapabilities={() => navigate('providers')} />}</OverviewSettings><ReadOnlyDetails title="后台助手状态"><TechnicalDetails fields={[{ label: '运行状态', value: assistantValue ? assistantAvailabilityMessage(assistantValue) : '待读取' }, { label: '模型', value: assistantValue?.configuration.model }, { label: '原因', value: assistantValue?.missingReasons }]} /></ReadOnlyDetails><Button className="ml-auto" variant="ghost" size="sm" onClick={() => navigate('model', { kind: 'section', sectionId: 'native-work-records', title: '工作记录' })}>工作记录</Button></div>
+          <div className={`strip ${assistantValue && assistantValue.state !== 'configured' && !assistantValue.executionAvailable && assistantValue.configuration.mode !== 'chat-only' ? 'warn' : ''}`}>{assistantValue ? assistantAvailabilityMessage(assistantValue) : '读取助手配置与运行状态。'}</div>
+          <div className="actions"><OverviewSettings title="设置后台助手" label="选择模型">{() => <ChatAssistantManager api={api} connected={connected} setDirty={setDirty} onSaved={assistant.refresh} onManageCapabilities={() => navigate('providers')} />}</OverviewSettings><ReadOnlyDetails title="后台助手状态"><TechnicalDetails fields={[{ label: '运行状态', value: assistantValue ? assistantAvailabilityMessage(assistantValue) : '待读取' }, { label: '模型', value: assistantValue?.configuration.model }, { label: '原因', value: assistantValue?.missingReasons }]} /></ReadOnlyDetails><Button className="ml-auto" variant="ghost" size="sm" onClick={() => navigate('sessions', { kind: 'section', sectionId: 'native-work-records', title: '工作记录' })}>工作记录</Button></div>
         </section>
       </div>
       <div className="split overview-activity-layout">

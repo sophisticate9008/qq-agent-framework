@@ -400,7 +400,7 @@ export function SessionsPage(props: PageProps) {
     <DetailsWindow open={diagnosticKey !== null} onOpenChange={open => { if (!open) setDiagnosticKey(null); }} title="检查未回复原因" description={diagnosticKey ? `${describeConversationKey(diagnosticKey).label} ${describeConversationKey(diagnosticKey).identifier}` : '会话检查'}>{diagnosticKey && <ConversationDiagnostics {...props} conversationId={diagnosticKey} />}</DetailsWindow>
     <Section title="相关记录" className="[&>.panel-body]:p-0">
       <Tabs defaultValue="executions" className="gap-0">
-        <TabsList aria-label="会话相关记录" className="h-[34px] w-full justify-start bg-muted/30 px-2"><TabsTrigger value="executions">执行日志</TabsTrigger><TabsTrigger value="interactions">QQ 互动</TabsTrigger><TabsTrigger value="work">独立工作</TabsTrigger></TabsList>
+        <TabsList aria-label="会话相关记录" className="h-[34px] w-full justify-start bg-muted/30 px-2"><TabsTrigger value="executions">执行日志</TabsTrigger><TabsTrigger value="interactions">QQ 互动</TabsTrigger><TabsTrigger value="work">助手工作</TabsTrigger></TabsList>
         <TabsContent value="executions" keepMounted className="[&[hidden]]:hidden"><ExecutionJournal api={api} connected={connected} embedded /></TabsContent>
         <TabsContent value="interactions" keepMounted className="[&[hidden]]:hidden"><ChatInteractions key={reloadVersion} api={api} connected={connected} embedded /></TabsContent>
         <TabsContent value="work" keepMounted className="[&[hidden]]:hidden"><WorkRecords api={api} connected={connected} embedded /></TabsContent>

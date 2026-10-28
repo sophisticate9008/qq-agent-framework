@@ -1,6 +1,6 @@
 import { createDraftKey, retainDraft, retainedDraft } from '../lib/retained-drafts.ts';
 import { useNativeCatalogOperation } from '../lib/use-native-catalog-operation.ts';
-import { readResource, writeResource } from '../lib/resource-reader.ts';
+import { readResource, readResourceSnapshot, writeResource } from '../lib/resource-reader.ts';
 import { useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { ApiError, errorMessage, type ApiClient } from '../lib/api.ts';
@@ -39,11 +39,12 @@ interface AssistantView {
 
 const assistantDraftKey = createDraftKey<{ readonly snapshot: ChatAssistantSnapshot; readonly draft: ChatAssistantConfiguration }>('chat-assistant');
 
-export function ChatAssistantManager({ api, connected, setDirty, onManageCapabilities }: {
+export function ChatAssistantManager({ api, connected, setDirty, onManageCapabilities, onSaved }: {
   readonly api: ApiClient;
   readonly connected: boolean;
   readonly setDirty?: (value: boolean, scope?: string) => void;
   readonly onManageCapabilities?: () => void;
+  readonly onSaved?: () => void;
 }) {
   const recovery = useNativeCatalogOperation(api, 'assistant');
   const [view, setView] = useState<AssistantView | null>(null);
@@ -56,7 +57,7 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
   connection.current = { api, connected };
   const dirtyCallback = useRef(setDirty);
   dirtyCallback.current = setDirty;
-  const refresh = useRef<() => void>(() => undefined);
+  const refresh = useRef<(checkStatus?: boolean) => void>(() => undefined);
   const [capabilities, setCapabilities] = useState<AssistantCapabilities | null>(null);
   const capabilitiesEpoch = useRef(0);
 
@@ -65,10 +66,11 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
     let active = true;
     const owns = () => active && epoch.current === generation && connection.current.api === api && connection.current.connected;
     const retained = retainedDraft(api, assistantDraftKey);
-    const initial: AssistantView = { api, generation, snapshot: retained?.snapshot ?? null, draft: retained?.draft ?? null, providers: [], providerError: '', error: '',
+    const cached = retained?.snapshot ?? parseChatAssistant(readResourceSnapshot(api, '/api/chat/assistant').value);
+    const initial: AssistantView = { api, generation, snapshot: cached, draft: retained?.draft ?? cached?.configuration ?? null, providers: [], providerError: '', error: '',
       loading: connected, saving: false, blocked: uncertain.current.has(api) || recovery.store.getSnapshot().assistant !== undefined, reviewed: false, message: '' };
     live.current = initial; setView(initial);
-    async function load(): Promise<void> {
+    async function load(checkStatus = false): Promise<void> {
       if (!owns() || request.current) return;
       const controller = new AbortController();
       request.current = controller;
@@ -79,7 +81,7 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
       live.current = pending; setView(pending);
       try {
         const [settings, catalog] = await Promise.allSettled([
-          readResource(api, '/api/chat/assistant', controller.signal), readResource(api, '/api/chat/providers', controller.signal, 1_000),
+          readResource(api, checkStatus ? '/api/chat/assistant/status' : '/api/chat/assistant', controller.signal), readResource(api, '/api/chat/providers', controller.signal, 1_000),
         ]);
         if (!current()) return;
         const providers = catalog.status === 'fulfilled' ? parseAssistantProviders(catalog.value) : null;
@@ -100,7 +102,7 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
         if (current()) request.current = null;
       }
     }
-    const read = () => { void load(); };
+    const read = (checkStatus = false) => { void load(checkStatus); };
     refresh.current = read;
     if (connected) read();
     return () => {
@@ -159,7 +161,7 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
     const owner = owned();
     if (!owner?.snapshot || !owner.draft || request.current || owner.loading || owner.saving || owner.blocked || recovery.blocked
       || sameAssistantConfiguration(owner.snapshot.configuration, owner.draft)
-        && (owner.draft.mode !== 'chat-assistant' || owner.snapshot.executionAvailable)) return;
+        && (owner.draft.mode !== 'chat-assistant' || owner.snapshot.state === 'configured' || owner.snapshot.executionAvailable)) return;
     const configuration = parseAssistantConfiguration(owner.draft);
     if (!configuration || configuration.mode === 'chat-assistant' && !owner.providers.some(provider => provider.enabled
       && provider.id === configuration.provider && provider.models.some(model => model.id === configuration.model))) {
@@ -194,6 +196,7 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
       uncertain.current.delete(api);
       const next = { ...pending, snapshot, draft: snapshot.configuration, saving: false, message: snapshot.configuration.mode === 'chat-only' ? '已保存' : snapshot.executionAvailable ? '助手已启用' : '设置已保存，助手尚未启用成功。' };
       live.current = next; setView(next);
+      onSaved?.();
     } catch (failure) {
       const failureState = recovery.fail(operationToken, failure);
       if (!owns()) return;
@@ -222,19 +225,21 @@ export function ChatAssistantManager({ api, connected, setDirty, onManageCapabil
   const effortSupported = draft?.reasoningEffort != null && supportedEfforts.includes(draft.reasoningEffort);
   const saveControls = <div className="flex flex-wrap items-center gap-2 text-xs">
       {dirty && <span className="text-muted-foreground">未保存</span>}
-      <Button disabled={locked || !dirty && (draft?.mode !== 'chat-assistant' || current?.snapshot?.executionAvailable === true)} onClick={() => void save()}>
-        {current?.saving ? '正在应用…' : draft?.mode === 'chat-assistant' ? dirty ? '保存并启用' : '启用助手' : '保存'}
+      <Button disabled={locked || !dirty && (draft?.mode !== 'chat-assistant' || current?.snapshot?.state === 'configured' || current?.snapshot?.executionAvailable === true)} onClick={() => void save()}>
+        {current?.saving ? '正在应用…' : draft?.mode === 'chat-assistant' ? dirty ? '保存并启用' : current?.snapshot?.state === 'configured' || current?.snapshot?.executionAvailable ? '已开启' : '启用助手' : '保存'}
       </Button>
       <HelpTip label="启用助手">保存后自动加载所选助手模型；需要重启本机 DSH 时会自动处理，并恢复聊天。</HelpTip>
       {current?.message && <span role="status" className="text-muted-foreground">{current.message}</span>}
     </div>;
-  const stateControls = <><Button size="sm" variant="outline" disabled={!current || current.loading || current.saving} onClick={() => refresh.current()}><RefreshCw className="size-3" />重新读取</Button>
+  const stateControls = <><Button size="sm" variant="outline" disabled={!current || current.loading || current.saving} onClick={() => refresh.current()}><RefreshCw className="size-3" />刷新设置</Button>
+      {current?.snapshot?.configuration.mode === 'chat-assistant' && <Button size="sm" variant="outline" disabled={current.loading || current.saving} onClick={() => refresh.current(true)}>检查连接</Button>}
       {current?.snapshot?.configuration.mode === 'chat-assistant' && <ReadOnlyDetails title="助手状态" description="所选模型与加载状态。"><TechnicalDetails fields={[
         { label: '模型', value: `${current.snapshot.configuration.provider} / ${current.snapshot.configuration.model}` },
+        { label: '状态', value: current.snapshot.state === 'configured' ? '按保存设置开启；实际委派时检查连接' : assistantAvailabilityMessage(current.snapshot) },
         { label: '状态码', value: current.snapshot.missingReasons }, { label: '配置版本', value: current.snapshot.revision },
         { label: '支持的思考等级', value: supportedEfforts.map(modelReasoningEffortLabel).join('、') || '尚未确认' },
       ]} /></ReadOnlyDetails>}</>;
-  return <Section id="chat-assistant" title="后台助手" actions={<StatusPill tone={current?.snapshot?.executionAvailable ? 'success' : 'neutral'}>{current?.snapshot ? assistantAvailabilityMessage(current.snapshot) : '正在读取'}</StatusPill>}>
+  return <Section id="chat-assistant" title="后台助手" actions={<StatusPill tone={current?.snapshot?.executionAvailable ? 'success' : 'neutral'}>{current?.snapshot ? assistantAvailabilityMessage(current.snapshot) : current?.loading ? '正在读取' : '设置未读取'}</StatusPill>}>
     <div className="grid gap-2 text-sm">
       {current?.error && <p role="alert" className="text-destructive">{current.error}</p>}
       {current?.providerError && <p role="status" className="text-muted-foreground">{current.providerError}</p>}

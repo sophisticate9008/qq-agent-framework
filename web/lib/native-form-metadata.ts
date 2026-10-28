@@ -11,7 +11,7 @@ export const nativeFormMetadata = {
   output: form('overview', 'package-configuration-chat-output', '回复方式', {}),
   media: form('overview', 'package-configuration-media', '视频观察', {}),
   forwardAuthorization: form('features', 'forward-authorization', '合并转发权限', { conversations: '允许合并转发的会话' }),
-  workRecords: form('model', 'native-work-records', '独立工作记录', { conversation: '工作所属会话筛选' }),
+  workRecords: form('sessions', 'native-work-records', '独立工作记录', { conversation: '工作所属会话筛选' }),
   memory: form('features', 'native-memory', '记忆与偏好', {
     scope: '记忆作用范围', conversation: '记忆来源会话', user: '记忆用户账号', kind: '记忆类型', content: '记忆正文', tags: '记忆标签',
     changeExpiry: '更改记忆有效期', permanent: '记忆长期保存', hours: '记忆有效小时数',

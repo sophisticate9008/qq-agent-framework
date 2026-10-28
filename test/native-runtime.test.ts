@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
 
+import { createNativeAssistantTarget } from '../src/host/native-assistant-target.ts'
+import { NativeConfigurationRepository } from '../src/admin/native-configuration-repository.ts'
 import { createNativeRuntimeRoutes } from '../src/admin/runtime.ts'
 import { AdminRequestError, type AdminRoute } from '../src/admin/server.ts'
 
@@ -94,7 +96,7 @@ test('native runtime exposes empty editable resources without fabricating a conn
   const paths = routes.map(item => `${item.method} ${item.pathname}`)
   assert.equal(new Set(paths).size, paths.length)
   assert.deepEqual(paths.sort(), [
-    'GET /api/chat/assistant', 'POST /api/chat/assistant', 'GET /api/chat/model-capabilities',
+    'GET /api/chat/assistant', 'GET /api/chat/assistant/status', 'POST /api/chat/assistant', 'GET /api/chat/model-capabilities',
     'POST /api/chat/model-capabilities', 'GET /api/chat/provider-model-capabilities',
     'GET /api/chat/activity', 'GET /api/chat/extensions/reload', 'POST /api/chat/extensions/reload',
     'GET /api/chat/plans', 'POST /api/chat/plans',
@@ -368,4 +370,33 @@ test('native storage rejects symlinks, unsafe files, invalid requests and missin
   writeFileSync(join(files.directory, 'chat-plans.json'), JSON.stringify({ schema: 1 }), { mode: 0o644 })
   await rejects(invoke(routes, 'GET', '/api/chat/plans'), 500, 'chat_storage_invalid')
   assert.equal(readFileSync(target, 'utf8'), '{}')
+})
+
+
+test('assistant settings remain readable without DSH and failed explicit checks preserve settings', async context => {
+  const { directory } = fixture(context)
+  const repository = new NativeConfigurationRepository(directory)
+  await repository.readAssistant()
+  const configuration = { schema: 1, mode: 'chat-assistant', provider: 'local', model: 'worker', nickname: '助手', reasoningEffort: null } as const
+  writeFileSync(join(directory, 'chat-assistant.json'), JSON.stringify(configuration), { mode: 0o600 })
+  let checks = 0
+  const target = createNativeAssistantTarget({ directory,
+    loadAssistant: () => repository.readAssistant(),
+    loadConfiguration: () => repository.read() })
+  const routes = createNativeRuntimeRoutes({ directory, assistantTarget: { ...target,
+    async resolve() { checks++; throw new DOMException('Read timed out', 'TimeoutError') } } })
+  const saved = await invoke(routes, 'GET', '/api/chat/assistant')
+  assert.deepEqual(saved.configuration, configuration)
+  assert.equal(saved.statusSource, 'configuration')
+  assert.equal(saved.executionAvailable, null)
+  assert.equal(checks, 0)
+  const checked = await invoke(routes, 'GET', '/api/chat/assistant/status')
+  assert.equal(checks, 1)
+  assert.equal(checked.revision, saved.revision)
+  assert.deepEqual(checked.configuration, configuration)
+  assert.equal(checked.executionAvailable, false)
+  assert.deepEqual(checked.missingReasons, ['assistant_status_unavailable'])
+  const refreshed = await invoke(routes, 'GET', '/api/chat/assistant')
+  assert.equal(checks, 1)
+  assert.deepEqual(refreshed, saved)
 })

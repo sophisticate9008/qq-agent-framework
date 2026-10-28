@@ -1,3 +1,4 @@
+import { withDeadline } from '../host/deadlines.ts'
 import { readAdminActivity } from './simulation-activity.ts'
 import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
 import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
@@ -365,12 +366,20 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   async function assistantResponse(revision: string, configuration: ChatAssistantConfiguration, signal: AbortSignal) {
     if (configuration.mode === 'chat-only') return { revision, configuration, executionAvailable: false, missingReasons: ['assistant_disabled'] }
     if (!options.assistantTarget) return chatAssistantConfigurationResponse(revision, configuration)
-    const target = await options.assistantTarget.resolve(AbortSignal.any([signal, AbortSignal.timeout(5_000)]))
-    const work = chatRuntime?.workStatus() ?? { available: false, missingReasons: ['assistant_runtime_not_connected'] }
-    const missingReasons = [...new Set([...target.missingReasons, ...work.missingReasons])]
-    const executionAvailable = target.configuration.enabled && work.available && missingReasons.length === 0
-    return { revision, configuration, executionAvailable,
-      missingReasons: executionAvailable ? [] : missingReasons.length > 0 ? missingReasons : ['assistant_target_unavailable'] }
+    try {
+      const target = await withDeadline({ signal, timeoutMs: 5_000, code: 'ASSISTANT_STATUS_TIMEOUT',
+        run: checkSignal => options.assistantTarget!.resolve(checkSignal) })
+      signal.throwIfAborted()
+      const work = chatRuntime?.workStatus() ?? { available: false, missingReasons: ['assistant_runtime_not_connected'] }
+      const missingReasons = [...new Set([...target.missingReasons, ...work.missingReasons])]
+      const executionAvailable = target.configuration.enabled && work.available && missingReasons.length === 0
+      return { revision, configuration, executionAvailable,
+        missingReasons: executionAvailable ? [] : missingReasons.length > 0 ? missingReasons : ['assistant_target_unavailable'] }
+    } catch {
+      signal.throwIfAborted()
+      // A failed readiness check must not hide saved settings or turn a confirmed save into an unknown write.
+      return { revision, configuration, executionAvailable: false, missingReasons: ['assistant_status_unavailable'] }
+    }
   }
 
   const capabilityCache = createProviderModelCapabilityCache(directory)
@@ -424,6 +433,16 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   const routes: AdminRoute[] = [
     {
       method: 'GET', pathname: '/api/chat/assistant',
+      async handle({ query, signal }) {
+        requireEmptyQuery(query)
+        const document = await repository.readAssistant()
+        signal.throwIfAborted()
+        return { revision: document.revision, configuration: document.value, statusSource: 'configuration',
+          executionAvailable: null, missingReasons: [] }
+      }
+    },
+    {
+      method: 'GET', pathname: '/api/chat/assistant/status',
       async handle({ query, signal }) {
         requireEmptyQuery(query)
         const document = await repository.readAssistant()

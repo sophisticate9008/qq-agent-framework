@@ -2023,7 +2023,7 @@ test('long-forward uses whitelist and unknown output is not replayed after resta
   const unknown = await fixture(context, { unknownSend: true })
   await unknown.configure(); await unknown.start(); unknown.message(1911)
   await until(() => unknown.rpc.some(call => call.method === 'session/prompt'))
-  unknown.answer()
+  await unknown.answer()
   await until(() => unknown.runtime().host()!.outbox.list().some(row => row.status === 'unknown'))
   assert.equal(unknown.sends.length, 1)
   await unknown.restart()

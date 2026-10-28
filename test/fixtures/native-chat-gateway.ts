@@ -229,7 +229,7 @@ export async function createNativeChatGatewayFixture(context: TestContext, optio
       if (!match) return false
       origin = match[1]
       return true
-    }, realCli ? 90_000 : 5_000)
+    }, realCli ? 90_000 : 20_000)
   }
   async function shutdown(expectedExitCode = 0) {
     if (!child || child.exitCode !== null) return

@@ -89,6 +89,15 @@ function selectReasoningCandidates<T extends { readonly api: unknown }>(candidat
   return matching.length > 0 ? matching : candidates
 }
 
+/** Prefer the saved provider's original declaration over historical generated routes at the same endpoint. */
+function modelProviderRoutes(routes: Record<string, unknown>, provider: NativeModelProvider, model: string): readonly [string, unknown][] {
+  const named = routes[provider.id]
+  if (isRecord(named) && canonicalBase(named.baseURL) === canonicalBase(provider.baseUrl)
+    && named.api === modelProviderApi(provider) && Array.isArray(named.models)
+    && named.models.some(entry => isRecord(entry) && entry.id === model)) return [[provider.id, named]]
+  return Object.entries(routes)
+}
+
 /** Generated conversation caps are deployment limits, not new observations of the model's capacity. */
 function managedConversationRoutes(entries: readonly Record<string, unknown>[]): ReadonlySet<string> {
   const routes = new Set<string>()
@@ -126,7 +135,7 @@ export async function readLocalDshModelCapabilities(provider: NativeModelProvide
     const base = canonicalBase(provider.baseUrl)
     if (base === null) return unavailable('model_metadata_not_observed')
     const candidates: { api: unknown; reasoningEfforts: unknown; contextWindow: unknown; maxTokens: unknown }[] = []
-    for (const [routeId, route] of Object.entries(entries[0]!.config.providers)) {
+    for (const [routeId, route] of modelProviderRoutes(entries[0]!.config.providers, provider, modelId)) {
       if (generatedRoutes.has(routeId)) continue
       if (!isRecord(route) || canonicalBase(route.baseURL) !== base || !Array.isArray(route.models)) continue
       for (const model of route.models) {
@@ -184,7 +193,7 @@ export async function readLocalDshModelMetadata(provider: NativeModelProvider, m
     const base = canonicalBase(provider.baseUrl)
     if (base === null) missing()
     const candidates: { api: unknown; settings: DshDeploymentModelSettings; reasoning: unknown }[] = []
-    for (const [routeId, route] of Object.entries(entries[0]!.config.providers)) {
+    for (const [routeId, route] of modelProviderRoutes(entries[0]!.config.providers, provider, modelId)) {
       if (generatedRoutes.has(routeId)) continue
       if (!isRecord(route) || canonicalBase(route.baseURL) !== base || !Array.isArray(route.models)) continue
       for (const model of route.models) {

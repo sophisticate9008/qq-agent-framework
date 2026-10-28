@@ -241,6 +241,11 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let pluginModels: PluginModelService | undefined
   let sessionTurns: ReturnType<typeof createSessionTurnQueue> | undefined
   let sessionIntents: ReturnType<typeof createNativeSessionIntents> | undefined
+  function assertShareableSession(sessionId: string) {
+    if (!store) failure('PLUGIN_RUNTIME_UNAVAILABLE')
+    if (store.lookup({ namespace: 'native-work.executions', field: 'childId', equals: sessionId, limit: 1 }).length)
+      failure('PLUGIN_MODEL_ASSISTANT_SESSION_RESERVED')
+  }
   let directoryInventory: readonly { name: string; description: string; loadedInSession: boolean;
     registrationSource: { origin: 'framework-builtin'; ownerId: string; ownerName: string; transport: 'native' } }[] = []
   function pluginServices(owner: string, signal: AbortSignal, assertActive: () => void = () => signal.throwIfAborted()): PluginRuntimeServices {
@@ -1002,7 +1007,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         const capabilityInspection = await capabilityPort.inspect(controller.signal)
         pluginCapabilities = createPluginCapabilityService({ port: capabilityPort, store, accountId: selfId, signal: controller.signal,
           ...(capabilityInspection.status === 'confirmed' ? { inventory: capabilityInspection.data } : {}) })
-        pluginModels = createPluginModelService({ store, backend: dsh.pluginModels, signal: controller.signal,
+        store.createIndex({ namespace: 'native-work.executions', field: 'childId', unique: true })
+        const modelBackend = dsh.pluginModels
+        pluginModels = createPluginModelService({ store, backend: { ...modelBackend,
+          inspect: (id, signal) => { assertShareableSession(id); return modelBackend.inspect(id, signal) } }, signal: controller.signal,
           defaultModel: () => ({ provider: selected.deployment.presetBindings.find(b => b.externalProvider)?.externalProvider ?? definition.model.provider,
             model: definition.model.name }),
           withSessionLease: (sessionId, signal, operation) => sessionTurns!.withSession(sessionId, signal, operation),
@@ -1845,6 +1853,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       if (closed || state !== 'running' || starting || stopping || !store || !lifetime || !dsh || !sessionTurns || !host)
         failure('SESSION_MANAGEMENT_BUSY')
       const currentStore = store, currentLifetime = lifetime, currentHost = host, port = dsh.pluginModels, queue = sessionTurns
+      assertShareableSession(targetSessionId)
       const combined = AbortSignal.any([signal, currentLifetime.signal, AbortSignal.timeout(15000)])
       runtime.assertSessionIdle(target)
       const releases: (() => void)[] = []

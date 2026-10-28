@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/dsh-session-query'
@@ -23,6 +23,14 @@ interface ModelRun {
   readonly requestId: string
   readonly owner: string
   readonly idle: Promise<void>
+}
+interface UsageStep {
+  readonly eventId: string
+  readonly turn: number
+  readonly step: number
+  readonly provider: string
+  readonly model: string
+  readonly usage: Record<string, number>
 }
 const identifier = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value)
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -131,11 +139,15 @@ export function createPluginModelChannel(ctx: Context) {
         if (model) await verifySelection(model, signal)
         signal.throwIfAborted()
         if (agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new TypeError('Plugin session is not idle')
+        const ownContext = agent.session.snapshotEvents().some(event => event.type === 'qaf-plugin/session')
         // restrict() alone masks global tools only. Assembly removes scoped schemas,
         // while the monotonic guard also rejects calls reconstructed from old history.
         disposers.push(agent.ctx.tools.restrict({ allow: [] }))
         disposers.push(agent.ctx.tools.guard(() => 'Plugin generation does not execute tools'))
-        disposers.push(agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => ({ ...await next(), tools: [] })))
+        disposers.push(agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+          const assembled = await next()
+          return { ...assembled, tools: [], ...(ownContext ? { sections: [], contexts: [], variables: {} } : {}) }
+        }))
         if (model) disposers.push(agent.ctx.on('agent/request', async (_event, next): Promise<LlmCallConfig> => {
           const current = await next()
           const { reasoningEffort: _previous, ...rest } = current
@@ -166,7 +178,68 @@ export function createPluginModelChannel(ctx: Context) {
       if (!run || run.requestId !== request.requestId) throw new TypeError('Plugin model run is unknown')
       await run.idle
       signal.throwIfAborted()
+      await ctx.get('sessionPersistence')?.flush()
       return { sessionId: request.sessionId, requestId: request.requestId, idle: true }
+    },
+    async inspectRun(request: { sessionId: string; requestId: string; owner: string }, signal: AbortSignal) {
+      if (!object(request) || Object.keys(request).length !== 3 || !identifier(request.sessionId)
+        || !identifier(request.requestId) || !identifier(request.owner)) throw new TypeError('Invalid plugin run inspection')
+      const query = ctx.get('sessionQuery')
+      if (!query) throw new TypeError('Session query is unavailable')
+      const observation = await query.observeSession(SessionId(request.sessionId), { signal })
+      try {
+        if (observation.events.length > 100_000 || Buffer.byteLength(JSON.stringify(observation.events)) > 16_777_216) throw new TypeError('Plugin session inspection exceeds capacity')
+        let currentTurn: number | null = null
+        let claimedTurn: number | null = null
+        let terminal: Extract<SessionEvent, { type: 'turn/end' }> | undefined
+        let validQueue = true
+        const pending: Record<'next-turn' | 'next-step', number> = { 'next-turn': 0, 'next-step': 0 }
+        for (const event of observation.events) {
+          if (event.type === 'turn/start') currentTurn = event.data.turn
+          if (event.type === 'user/message' && event.data.source.kind === 'qaf-plugin'
+            && event.data.source.owner === request.owner && event.data.source.requestId === request.requestId) claimedTurn = currentTurn
+          if (event.type === 'turn/end') {
+            if (event.data.turn === claimedTurn) terminal = event
+            if (event.data.turn === currentTurn) currentTurn = null
+          }
+          if (event.type === 'agent/inbox/spliced') {
+            const data = event.data
+            const removed = data.removedCount ?? 0
+            if (!(data.target in pending) || data.start < 0 || data.start > pending[data.target]
+              || removed < 0 || removed > pending[data.target] - data.start) validQueue = false
+            else pending[data.target] += data.inserted.length - removed
+          }
+        }
+        const live = ctx.agents.get(SessionId(request.sessionId))
+        const idle = !active.has(request.sessionId) && validQueue && currentTurn === null
+          && pending['next-turn'] === 0 && pending['next-step'] === 0
+          && (!live || live.status === 'idle' && live.inbox.nextTurn.length === 0 && live.inbox.nextStep.length === 0)
+        const usageSteps: UsageStep[] = []
+        let usageComplete = claimedTurn !== null
+        if (claimedTurn !== null) for (const event of observation.events) {
+          if (event.type !== 'assistant/message' || event.data.turn !== claimedTurn) continue
+          const source = event.data.message.source
+          const raw = event.data.usage
+          if (!raw || source.kind !== 'model' || usageSteps.length >= 256) { usageComplete = false; continue }
+          const usage: Record<string, number> = {}
+          for (const key of ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'] as const) {
+            const value = raw[key]
+            if (value === undefined) continue
+            if (!Number.isSafeInteger(value) || value < 0) { usageComplete = false; continue }
+            usage[key] = value
+          }
+          if (usage.cacheReadTokens === undefined) delete usage.inputTokens
+          if (usage.cacheReadTokens !== undefined && usage.totalTokens !== undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined
+            && usage.totalTokens === usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + (usage.cacheWriteTokens ?? 0)) usage.cacheWriteTokens ??= 0
+          usageSteps.push({ eventId: `${event.type}:seq:${event.seq}`, turn: claimedTurn, step: event.data.step,
+            provider: source.provider, model: source.model, usage })
+        }
+        const state: 'running' | 'completed' | 'failed' | 'unknown' = terminal
+          ? terminal.data.reason.kind === 'completed' ? 'completed' : 'failed'
+          : claimedTurn !== null || active.has(request.sessionId) ? 'running' : 'unknown'
+        return { sessionId: request.sessionId, requestId: request.requestId, owner: request.owner, state, idle,
+          usage: { usageSteps, usageComplete: usageComplete && usageSteps.length > 0, ...(claimedTurn === null ? {} : { turn: claimedTurn }) } }
+      } finally { observation[Symbol.dispose]() }
     },
     async close() {
       for (const sessionId of active) ctx.agents.get(SessionId(sessionId))?.cancel({ kind: 'disposed' })

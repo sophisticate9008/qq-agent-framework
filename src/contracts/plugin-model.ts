@@ -31,6 +31,7 @@ export interface PluginModelBinding {
   readonly updatedAt: number
   readonly lastUsedAt: number | null
   readonly state: 'ready' | 'creating' | 'unknown'
+  readonly contextRestartedFrom?: string
 }
 export interface PluginModelRunRequest extends PluginModelSessionKey {
   readonly prompt: string
@@ -72,6 +73,11 @@ export interface PluginModelBackend {
   follow: AgentAdapter['follow']
   /** Resolves after the loop is idle and the model-only tool restriction has been removed. */
   waitForIdle(sessionId: string, requestId: string, signal: AbortSignal): Promise<void>
+  inspectRun(request: { readonly sessionId: string; readonly requestId: string; readonly owner: string; readonly signal: AbortSignal }): Promise<{
+    readonly state: 'running' | 'completed' | 'failed' | 'unknown'
+    readonly idle: boolean
+    readonly usage: JsonObject
+  }>
   cancel?: AgentAdapter['cancel']
 }
 

@@ -17,6 +17,7 @@ export interface PluginModelServiceOptions {
   readonly backend: PluginModelBackend
   readonly signal?: AbortSignal
   readonly defaultModel?: PluginModelSelection | (() => PluginModelSelection)
+  readonly isSessionBusy?: (sessionId: string) => boolean
   /** Reserve the concrete session across QQ, assistant and plugin writers for the complete callback. */
   readonly withSessionLease: <Value>(sessionId: string, signal: AbortSignal, operation: () => Promise<Value>) => Promise<Value>
   readonly onUsage?: (event: { readonly owner: string; readonly requestId: string; readonly sessionId: string;
@@ -39,15 +40,18 @@ function binding(value: unknown, revision: number, busy: boolean): PluginModelBi
     || !['ready', 'creating', 'unknown'].includes(String(value.state))
     || ![value.createdAt, value.updatedAt].every(time => typeof time === 'number' && Number.isSafeInteger(time) && time >= 0)
     || value.lastUsedAt !== null && (typeof value.lastUsedAt !== 'number' || !Number.isSafeInteger(value.lastUsedAt) || value.lastUsedAt < 0)) failure('PLUGIN_MODEL_INVALID_STATE')
+  if (value.contextRestartedFrom !== undefined && !pluginModelIdentifier(value.contextRestartedFrom)) failure('PLUGIN_MODEL_INVALID_STATE')
   const model = value.model === null ? null : parsePluginModelSelection(value.model)
   return snapshot({ revision, busy, owner: value.owner, name: value.name, conversationId: value.conversationId, sessionId: value.sessionId,
     source: value.source as PluginModelBinding['source'], state: value.state as PluginModelBinding['state'], model,
-    createdAt: Number(value.createdAt), updatedAt: Number(value.updatedAt), lastUsedAt: value.lastUsedAt as number | null })
+    createdAt: Number(value.createdAt), updatedAt: Number(value.updatedAt), lastUsedAt: value.lastUsedAt as number | null,
+    ...(value.contextRestartedFrom === undefined ? {} : { contextRestartedFrom: value.contextRestartedFrom }) })
 }
 
 export function createPluginModelService(options: PluginModelServiceOptions) {
   const queues = new Map<string, Promise<void>>()
   const running = new Set<string>()
+  const isBusy = (sessionId: string) => running.has(sessionId) || options.isSessionBusy?.(sessionId) === true
   const rows = (namespace: string): readonly StoredRecord[] => {
     const entries: StoredRecord[] = []
     let after: string | undefined
@@ -61,7 +65,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     return entries
   }
   const readBinding = (value: unknown, revision: number) => {
-    const parsed = binding(value, revision, isRecord(value) && running.has(String(value.sessionId)))
+    const parsed = binding(value, revision, isRecord(value) && isBusy(String(value.sessionId)))
     const execution = options.store.read(EXECUTIONS, parsed.sessionId)
     if (!parsed.busy && execution && (!isRecord(execution.value)
       || !['completed', 'failed', 'rejected'].includes(String(execution.value.state)))) return snapshot({ ...parsed, state: 'unknown' as const })
@@ -91,7 +95,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
   }
   const write = (id: string, value: PluginModelBinding, revision: number | null) => {
     const saved = options.store.write(BINDINGS, id, json(value), { expectedRevision: revision })
-    return snapshot({ ...value, revision: saved.revision, busy: running.has(value.sessionId) })
+    return snapshot({ ...value, revision: saved.revision, busy: isBusy(value.sessionId) })
   }
   const listBindings = (owner?: string): readonly PluginModelBinding[] => {
     if (owner !== undefined) keyOf(owner)
@@ -115,10 +119,10 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     const previous = options.store.read(EXECUTIONS, sessionId)
     if (previous && (!isRecord(previous.value) || !['completed', 'failed', 'rejected'].includes(String(previous.value.state)))) failure('PLUGIN_MODEL_EXECUTION_UNSETTLED')
   }
-  const create = async (owner: string, request: PluginModelBindingKey & { readonly model?: PluginModelSelection }, signal: AbortSignal) => {
+  const create = async (owner: string, request: PluginModelBindingKey & { readonly model?: PluginModelSelection }, signal: AbortSignal, contextRestartedFrom?: string) => {
     const current = read(owner, request)
     compareRevision(request.expectedRevision, current.row?.revision ?? null)
-    if (current.value && running.has(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
+    if (current.value && isBusy(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
     if (current.value && current.value.state !== 'ready') failure('PLUGIN_MODEL_CREATION_UNSETTLED')
     if (current.value) assertSettled(current.value.sessionId)
     if (listBindings().length >= MAX_BINDINGS && !current.value) failure('PLUGIN_MODEL_BINDING_LIMIT')
@@ -126,7 +130,8 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     if (rows(SESSIONS).length >= MAX_BINDINGS) failure('PLUGIN_MODEL_SESSION_LIMIT')
     const at = Date.now()
     const prepared: PluginModelBinding = { revision: 0, busy: false, owner, name: current.name, conversationId: current.conversationId,
-      sessionId: `qaf-plugin-${randomUUID()}`, source: 'created', model, state: 'creating', createdAt: at, updatedAt: at, lastUsedAt: null }
+      sessionId: `qaf-plugin-${randomUUID()}`, source: 'created', model, state: 'creating', createdAt: at, updatedAt: at, lastUsedAt: null,
+      ...(contextRestartedFrom === undefined ? {} : { contextRestartedFrom }) }
     const saved = options.store.write(BINDINGS, current.id, json(prepared), { expectedRevision: current.row?.revision ?? null })
     options.store.write(SESSIONS, prepared.sessionId, json({ schema: 1, ...prepared, mode: 'persistent' }), { expectedRevision: null })
     try {
@@ -142,7 +147,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     return serial(`binding:${keyOf(owner, request).id}`, signal, async () => {
       const previous = read(owner, request)
       compareRevision(request.expectedRevision, previous.row?.revision ?? null)
-      if (previous.value && running.has(previous.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
+      if (previous.value && isBusy(previous.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
       if (previous.value) assertSettled(previous.value.sessionId)
       return options.withSessionLease(request.sessionId, signal, async () => {
         assertSettled(request.sessionId)
@@ -158,7 +163,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     const current = read(owner, key)
     compareRevision(key.expectedRevision, current.row?.revision ?? null)
     if (!current.row || !current.value) return false
-    if (running.has(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
+    if (isBusy(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
     assertSettled(current.value.sessionId)
     return options.store.delete(BINDINGS, current.id, current.row.revision)
   })
@@ -246,6 +251,33 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
       })
     },
     models(signal: AbortSignal) { return options.backend.models(signal) },
+    /** Read exact request evidence only; reconciliation never dispatches another model turn. */
+    reconcile(owner: string, key: PluginModelBindingKey, signal: AbortSignal): Promise<PluginModelBinding> {
+      return serial(`binding:${keyOf(owner, key).id}`, signal, async () => {
+        const current = read(owner, key)
+        compareRevision(key.expectedRevision, current.row?.revision ?? null)
+        if (!current.value || !current.row) failure('PLUGIN_MODEL_BINDING_NOT_FOUND')
+        if (isBusy(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
+        const previous = options.store.read(EXECUTIONS, current.value.sessionId)
+        if (previous) {
+          if (!isRecord(previous.value) || !pluginModelIdentifier(previous.value.requestId) || !pluginModelIdentifier(previous.value.owner)
+            || !['running', 'unknown', 'completed', 'failed', 'rejected'].includes(String(previous.value.state))) failure('PLUGIN_MODEL_INVALID_STATE')
+          if (['running', 'unknown'].includes(String(previous.value.state))) {
+            const observed = await options.backend.inspectRun({ sessionId: current.value.sessionId, requestId: previous.value.requestId,
+              owner: previous.value.owner, signal })
+            if (!observed.idle || !['completed', 'failed'].includes(observed.state)) return current.value
+            signal.throwIfAborted()
+            if (options.onUsage) await options.onUsage({ owner: previous.value.owner, requestId: previous.value.requestId,
+              sessionId: current.value.sessionId, conversationId: current.value.conversationId, data: observed.usage })
+            options.store.write(EXECUTIONS, current.value.sessionId, json({ ...previous.value, state: observed.state,
+              usage: observed.usage, reconciledAt: Date.now(), updatedAt: Date.now() }), { expectedRevision: previous.revision })
+          }
+        }
+        if (!(await options.backend.inspect(current.value.sessionId, signal)).exists) return current.value
+        signal.throwIfAborted()
+        return write(current.id, { ...current.value, state: 'ready', updatedAt: Date.now() }, current.row.revision)
+      })
+    },
     /** Management callers authenticate separately; owner is an explicit management target. */
     bind(owner: string, request: PluginModelBindingKey & { readonly sessionId: string }, signal: AbortSignal) { return bind(owner, request, signal) },
     unbind(owner: string, key: PluginModelBindingKey, signal: AbortSignal) { return unbind(owner, key, signal) },
@@ -280,6 +312,11 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
             const existing = read(owner, request).value
             if (existing) {
               if (existing.state !== 'ready') failure('PLUGIN_MODEL_CREATION_UNSETTLED')
+              // Only an explicit absence result permits replacement. Transport
+              // errors propagate while preserving the original binding.
+              if (!(await options.backend.inspect(existing.sessionId, signal)).exists) {
+                return create(owner, { ...request, model: request.model ?? existing.model ?? undefined }, signal, existing.sessionId)
+              }
               return existing
             }
             return create(owner, request, signal)

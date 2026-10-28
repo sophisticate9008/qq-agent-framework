@@ -5,7 +5,7 @@ import type { PluginModelBackend, PluginModelDescription } from '../contracts/pl
 import type { JsonObject, JsonValue } from '../contracts/data.ts'
 
 export type DshPluginModelMethod = 'bridgePlugin/pluginModels' | 'bridgePlugin/createPluginModelSession'
-  | 'bridgePlugin/inspectPluginModelSession' | 'bridgePlugin/startPluginModel' | 'bridgePlugin/waitPluginModelIdle'
+  | 'bridgePlugin/inspectPluginModelSession' | 'bridgePlugin/startPluginModel' | 'bridgePlugin/waitPluginModelIdle' | 'bridgePlugin/inspectPluginModelRun'
 
 export function createDshPluginModelBackend(options: {
   readonly client: DshClientPort
@@ -51,6 +51,13 @@ export function createDshPluginModelBackend(options: {
     async waitForIdle(sessionId, requestId, signal) {
       const result = await invoke('bridgePlugin/waitPluginModelIdle', { sessionId, requestId }, signal)
       if (result.sessionId !== sessionId || result.requestId !== requestId || result.idle !== true) throw new DshAdapterError('DSH_PLUGIN_MODEL_IDLE_UNKNOWN', 'DSH 插件会话尚未排空。')
+    },
+    async inspectRun(request) {
+      const result = await invoke('bridgePlugin/inspectPluginModelRun', { sessionId: request.sessionId, requestId: request.requestId, owner: request.owner }, request.signal)
+      if (result.sessionId !== request.sessionId || result.requestId !== request.requestId || result.owner !== request.owner
+        || !['running', 'completed', 'failed', 'unknown'].includes(String(result.state)) || typeof result.idle !== 'boolean'
+        || !isRecord(result.usage)) throw new DshAdapterError('DSH_PLUGIN_MODEL_INVALID', 'DSH 插件执行状态无效。')
+      return { state: result.state as 'running' | 'completed' | 'failed' | 'unknown', idle: result.idle, usage: result.usage as JsonObject }
     },
     cancel: request => adapter.cancel!(request),
   })

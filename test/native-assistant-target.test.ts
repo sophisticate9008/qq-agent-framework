@@ -68,7 +68,7 @@ async function fixture(context: TestContext) {
   context.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
   const address = server.address(); assert(address && typeof address !== 'string')
   const defaults = await new NativeConfigurationRepository(directory).read()
-  const configuration: NativeChatConfiguration = { ...defaults,
+  let configuration: NativeChatConfiguration = { ...defaults,
     catalog: { activePlanId: 'main', plans: [{ id: 'main', name: 'Main', description: '', instructions: 'Keep existing chat.', personaId: 'main',
       provider: 'main', model: 'main-model', reasoningEffort: 'off', contextLimits: { group: 64_000, private: 96_000 } }] },
     personas: [{ id: 'main', name: 'Main persona', identity: 'Main identity.', style: 'Main style.' }],
@@ -77,6 +77,10 @@ async function fixture(context: TestContext) {
     adapters: { ...defaults.adapters, dshAgent: { ...defaults.adapters.dshAgent, enabled: true, endpoint: `http://127.0.0.1:${address.port}`, auth: 'cookie:operator=fixture' } },
     deployment: { ...defaults.deployment, target: { profilePath, credentialsPath, layerPaths: [basePath], schemaVersion: '0.2.1-rc.2' },
       modelSettings: { contextWindow: 128_000, maxTokens: 4_096, reasoningEfforts: false } } }
+  await writeFile(join(directory, 'chat-providers.json'), JSON.stringify({ schema: 1, providers: configuration.providers }), { mode: 0o600 })
+  const storedProviders = await new NativeConfigurationRepository(directory).readProviders()
+  configuration = { ...configuration, providers: storedProviders.value.providers,
+    revisions: { ...configuration.revisions, providers: storedProviders.revision } }
   let assistant: ChatAssistantConfiguration = { schema: 1, mode: 'chat-assistant', provider: 'assistant', model: 'assistant-model', reasoningEffort: 'off', nickname: 'Helper' }
   const options = { directory, loadConfiguration: async () => configuration,
     loadAssistant: async () => ({ revision: revision(assistant), value: assistant }),
@@ -91,7 +95,7 @@ test('assistant explicit application creates one independent verified target whi
   assert.equal((await data.target.resolve(signal)).configuration.enabled, false)
   const before = await readFile(data.profilePath, 'utf8')
   const prepared = await data.target.prepare(data.assistant().revision, signal)
-  assert.equal(parseNativeAssistantDeploymentSnapshot(prepared)?.state, 'prepared')
+  assert.equal(parseNativeAssistantDeploymentSnapshot(prepared)?.state, 'prepared', JSON.stringify(prepared))
   assert.equal(await readFile(data.profilePath, 'utf8'), before)
   assert.equal(prepared.fullAccess, false)
   assert.equal(JSON.stringify(prepared).includes('assistant-private-key'), false)

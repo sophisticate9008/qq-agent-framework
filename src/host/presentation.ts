@@ -77,7 +77,7 @@ function requestData(input: unknown): Readonly<PresentationRequest> {
 export function createPresentationService({ capabilities, renderer, publishImage, select, nearDistance = 6,
   nearAgeMs = 120_000, timeoutMs = 15_000, maxPending = 2 }: PresentationServiceOptions) {
   const supported = snapshot(capabilities);
-  assert(Array.isArray(supported.contentTypes) && supported.contentTypes.every(type => ['text', 'image', 'audio', 'file', 'mention', 'reply', 'forward'].includes(type))
+  assert(Array.isArray(supported.contentTypes) && supported.contentTypes.every(type => ['text', 'image', 'audio', 'file', 'mention', 'reply', 'forward', 'face'].includes(type))
     && Number.isSafeInteger(nearDistance) && nearDistance >= 0 && nearDistance <= 1000
     && Number.isSafeInteger(nearAgeMs) && nearAgeMs >= 0 && nearAgeMs <= 86_400_000
     && Number.isSafeInteger(timeoutMs) && timeoutMs >= 10 && timeoutMs <= 300000

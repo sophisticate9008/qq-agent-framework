@@ -162,3 +162,9 @@ test('uncooperative selectors remain counted after abort until their real promis
   await nextTurn();
   assert.equal(service.metrics().pending, 0);
 });
+
+test('QQ face capability coexists with text presentation without enabling another format', async () => {
+  const service = createPresentationService({ capabilities: { contentTypes: ['text', 'face'] } });
+  const result = await service.prepare({ body: 'QQ text', format: 'text' }, context());
+  assert.equal(result.format, 'text');
+});

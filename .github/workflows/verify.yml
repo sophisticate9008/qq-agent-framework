@@ -1,4 +1,4 @@
-name: Verify TypeScript Framework
+name: 框架验证
 
 on:
   push:
@@ -8,8 +8,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  secrets:
+    name: Git 历史凭据扫描
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 安装并校验 Gitleaks 8.30.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+      - name: 扫描完整历史并脱敏输出
+        run: '"$RUNNER_TEMP/gitleaks" git . --log-opts="--all --full-history" --redact=100 --no-banner --no-color'
   verify:
+    name: 框架、SDK 与浏览器
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -28,16 +54,16 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run test:sdk
-      - name: Browser tests
+      - name: 浏览器验证
         id: browser
         run: npm run cli -- test --browser --with-deps
         env:
           QQ_AGENT_UI_EVIDENCE_DIR: ${{ github.workspace }}/runtime/execution-journal-smoke
-      - name: Prepare browser failure diagnostics
+      - name: 整理浏览器失败诊断
         id: diagnostics
         if: ${{ failure() && steps.browser.outcome == 'failure' }}
         run: node scripts/collect-browser-diagnostics.ts
-      - name: Upload browser failure diagnostics
+      - name: 上传浏览器失败诊断
         if: ${{ failure() && steps.browser.outcome == 'failure' && steps.diagnostics.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -49,6 +75,7 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: false
   dsh-bridge-plugin:
+    name: DSH 桥接插件
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -61,12 +88,12 @@ jobs:
           node-version: '24.12.0'
           cache: npm
           cache-dependency-path: packages/dsh-bridge-plugin/package-lock.json
-      - name: Install framework client dependencies
+      - name: 安装框架客户端依赖
         working-directory: .
         run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
-      - name: Framework client with the real offline DSH SDK and plugin
+      - name: 框架客户端与真实离线 DSH SDK 集成
         run: npm run test:framework
         env:
           QQ_FRAMEWORK_DSH_PORT_MODULE: ${{ github.workspace }}/src/adapters/dsh-jsonrpc.ts

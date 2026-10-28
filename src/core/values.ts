@@ -42,16 +42,10 @@ export function snapshot<Value>(value: Value): Value {
   return copy(value, 0) as Value;
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+export { isRecord, reference } from '../contracts/values.ts';
 
 export function identifier(value: unknown): value is string {
   return typeof value === 'string' && /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(value) && value.length <= 100;
-}
-
-export function reference(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 160 && !/[\x00-\x1f\x7f]/.test(value);
 }
 
 export function errorCode(error: unknown, fallback = 'INTERNAL_ERROR'): string {

@@ -1,5 +1,5 @@
 import { NATIVE_REVISION_PATTERN } from './native-revisions.ts'
-import { isRecord, reference } from '../core/values.ts'
+import { isRecord, reference } from './values.ts'
 
 export const NATIVE_USAGE_SESSION_DELETE_PATH = '/api/chat/usage/session/delete'
 

@@ -1,4 +1,4 @@
-import { isRecord, reference } from '../core/values.ts'
+import { isRecord, reference } from './values.ts'
 import { validSimulationRunId } from './admin-activity.ts'
 
 export interface SimulationSession {

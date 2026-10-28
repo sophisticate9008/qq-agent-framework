@@ -521,7 +521,7 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
           callStarted = true
           // This focused registry fixture supplies the same committed root event
           // that the model loop publishes before dispatching its tool pipeline.
-          agent.session.append('assistant/message', { turn: payload.turn, step: payload.step, message: createAssistantMessage({
+          agent.session.append('assistant/message', { turn: payload.turn, step: payload.step, stream: [], message: createAssistantMessage({
             source: { provider: 'local-fixture', model: 'safe-model' }, content: [{ type: 'tool-call', id: ToolCallId(sdkCallId),
               name: 'qaf_media_inspect', arguments: '{"assetId":"opaque-asset"}' }]
           }) }, { surfaceOp: 'append' })

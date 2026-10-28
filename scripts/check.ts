@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkTypeScriptSyntax } from './typescript-syntax.ts';
@@ -18,6 +19,11 @@ const authoredJavaScriptDirectories = fs.readFileSync(path.join(root, '.ci-js-ig
   });
 const findings: string[] = [];
 let checked = 0;
+// Reviewed redistributable binary; replacements require an explicit identity update.
+const publicAssets = new Map([['assets/fonts/wqy-microhei.ttc', {
+  size: 5_177_387,
+  sha256: '2420e8078af796b19a3f6ef13de527a1a91c1e7171eea115926c614ced1009b3',
+}]]);
 
 function walk(directory: string) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -27,6 +33,15 @@ function walk(directory: string) {
     if (entry.isSymbolicLink()) { findings.push(`${relative}: symbolic link requires explicit review`); continue; }
     if (entry.isDirectory()) { walk(location); continue; }
     if (!entry.isFile()) { findings.push(`${relative}: unsupported file type`); continue; }
+    const asset = publicAssets.get(relative.split(path.sep).join('/'));
+    if (asset) {
+      const bytes = fs.readFileSync(location);
+      if (bytes.length !== asset.size || createHash('sha256').update(bytes).digest('hex') !== asset.sha256) {
+        findings.push(`${relative}: public asset identity mismatch`);
+      }
+      checked++;
+      continue;
+    }
     if (fs.statSync(location).size > 1024 * 1024) { findings.push(`${relative}: oversized public file`); continue; }
     if (/^\.env(?:\.|$)/.test(entry.name) && entry.name !== '.env.example') findings.push(`${relative}: private environment file`);
     const source = fs.readFileSync(location, 'utf8');

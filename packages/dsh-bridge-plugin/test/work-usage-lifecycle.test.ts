@@ -39,7 +39,9 @@ test('SDK registry detaches before subagent/end: exact disposed child usage is p
     resident = false
     const wrong = { ...child, session: { ...child.session, header: { origin: 'subagent', parentSession: 'another-parent' } } } as unknown as Agent
     channel.recordDisposedChild(wrong)
-    assert.equal((await channel.inspect(request)).usage.length, 0)
+    const unrelated = await channel.inspect(request)
+    assert(unrelated.state !== 'unknown')
+    assert.equal(unrelated.usage.length, 0)
     channel.recordDisposedChild(child)
     channel.recordEnd({ id: 'child', stopReason: 'completed', lastAssistantMessage: [{ type: 'text', text: 'Done' }] })
     finish({ stopReason: 'completed', output: [{ type: 'text', text: 'Done' }] })
@@ -49,6 +51,10 @@ test('SDK registry detaches before subagent/end: exact disposed child usage is p
     assert.deepEqual(observed.usage[0]?.usage, { inputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 0, totalTokens: 170 })
     assert.deepEqual((await journal.read(request.id))?.usage, observed.usage)
     const restored = createWorkChannel(options)
-    try { assert.deepEqual((await restored.inspect(request)).usage, observed.usage) } finally { await restored.close() }
+    try {
+      const reloaded = await restored.inspect(request)
+      assert.equal(reloaded.state, 'completed')
+      assert.deepEqual(reloaded.usage, observed.usage)
+    } finally { await restored.close() }
   } finally { await channel.close() }
 })

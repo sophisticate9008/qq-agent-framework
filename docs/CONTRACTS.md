@@ -2,6 +2,8 @@
 
 公共接口的类型和校验集中在 [src/contracts](../src/contracts)、[src/core](../src/core) 与 SDK 导出。HTTP、协议响应和持久文件均在边界校验；TypeScript 类型不能替代运行时解码。扩展 API 用法见 [扩展开发](EXTENDING.md)，操作恢复见 [恢复手册](RECOVERY.md)。
 
+契约的运行时校验仅依赖同层纯函数；通用对象和引用校验位于 `src/contracts/values.ts`，核心原有导出继续兼容。契约层不运行时导入核心实现，也不引入 Node.js 专用模块，供浏览器共同使用。
+
 内置角色参考图功能已移除：`/api/chat/appearance` 不再注册，`qaf_role_reference` 工具和聊天输入中的 `appearance` 字段不再提供。旧私有素材及配置文件保留在原位置，运行时不再读取，也不阻止人设编辑或删除。角色来源与多图参考由插件接入。
 
 ## 身份、范围与权限

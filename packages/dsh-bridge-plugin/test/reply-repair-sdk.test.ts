@@ -160,7 +160,7 @@ test('actual SDK repair stays inside the original turn and user claim until its 
     assert.fail('SDK tool request did not arrive')
   }
   for (const example of cases) {
-    const before = adapter.requests
+    const before: number = adapter.requests
     adapter.responses.push('tool', ...example.terminal ? [] : ['silent' as const])
     agent.followup(createUserMessage({ source: { kind: 'user', rpcId: example.name }, content: original.content }))
     const call = await queuedCall()

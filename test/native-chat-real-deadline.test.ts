@@ -6,7 +6,7 @@ import { createNativeChatGatewayFixture, nativeGatewayFixtureObject as object,
   nativeGatewayFixtureUntil as until } from './fixtures/native-chat-gateway.ts'
 
 test('explicit CLI-native sixty-second deadline expires despite real stream progress and another conversation remains usable',
-  { timeout: 80_000 }, async context => {
+  { timeout: 100_000 }, async context => {
     const fixture = await createNativeChatGatewayFixture(context)
     await fixture.launch()
     const { save, api, runtime, start, inbound, event } = fixture
@@ -45,14 +45,20 @@ test('explicit CLI-native sixty-second deadline expires despite real stream prog
     await until(() => fixture.sends.length === 1, 65_000)
     clearInterval(progress)
     assert(performance.now() - began >= 59_000)
+    await until(async () => {
+      const journal = await api('/api/chat/executions')
+      return (journal.items as unknown[]).map(object).some(row => row.id === original.id && row.cancelStatus === 'accepted')
+    })
     const expiredPage = await api('/api/chat/executions')
     const expired = object((expiredPage.items as unknown[])[0])
     assert.equal(expired.deadlineAt, original.deadlineAt)
     assert.equal(expired.deadlineReached, true)
     assert.equal(expired.status, 'timed-out')
     assert.equal(expired.isolated, true)
-    assert.equal(expired.cancelStatus, 'rejected')
-    assert.equal(fixture.calls.filter(call => call.method === 'session/cancel').length, 0)
+    assert.equal(expired.cancelStatus, 'accepted')
+    const cancellations = fixture.calls.filter(call => call.method === 'session/cancel')
+    assert.equal(cancellations.length, 1)
+    assert.equal(cancellations[0]!.input.sessionId, object(original.binding).sessionId)
     inbound(2)
     await delay(100)
     assert.equal(fixture.calls.filter(call => call.method === 'session/prompt').length, 1)
@@ -60,11 +66,16 @@ test('explicit CLI-native sixty-second deadline expires despite real stream prog
       { type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: 'An independent explicit new request.' } }
     ] })
     await until(() => fixture.calls.filter(call => call.method === 'session/prompt').length === 2)
+    assert.equal((await fixture.reply('Independent result.')).status, 'confirmed')
     event('assistant/message', { turn: 1, message: { id: 'independent-final', content: [{ type: 'text', text: 'Independent result.' }] } })
     event('turn/end', { turn: 1, reason: { kind: 'completed' } })
     await until(() => fixture.sends.length === 2)
     assert.equal(fixture.controls.creates, 2)
     assert.equal(fixture.sendActions[1], '/onebot/send_group_msg')
+    await until(async () => {
+      const journal = await api('/api/chat/executions')
+      return (journal.items as unknown[]).map(object).some(row => object(row.binding).conversationId === 'group:456' && row.status === 'completed')
+    })
     const journal = await api('/api/chat/executions')
     const rows = (journal.items as unknown[]).map(object)
     assert.equal(rows.find(row => row.id === original.id)?.isolated, true)

@@ -64,6 +64,7 @@ export function createNativeSessionManagementRoutes(options: {
           if (error.code === 'SESSION_MANAGEMENT_EXECUTION_UNSETTLED') throw new AdminRequestError(409, 'session_bind_execution_unsettled')
           if (error.code === 'SESSION_MANAGEMENT_TARGET_OCCUPIED') throw new AdminRequestError(409, 'session_bind_target_occupied')
           if (error.code === 'SESSION_MANAGEMENT_TARGET_OWNED') throw new AdminRequestError(409, 'session_bind_target_owned')
+          if (error.code === 'PLUGIN_MODEL_ASSISTANT_SESSION_RESERVED') throw new AdminRequestError(409, 'session_bind_target_reserved')
           if (error.code === 'SESSION_MANAGEMENT_TARGET_NOT_FOUND') throw new AdminRequestError(404, 'session_bind_target_not_found')
           if (error.code === 'SESSION_MANAGEMENT_INVALID_TARGET') throw new AdminRequestError(400, 'invalid_session_bind')
           if (error.code === 'SESSION_MANAGEMENT_UNKNOWN') throw new AdminRequestError(504, 'session_bind_unknown')

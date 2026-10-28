@@ -17,7 +17,7 @@ export function createPluginSessionRoutes(options: {
     if (signal.aborted) throw new AdminRequestError(504, 'plugin_session_operation_unknown')
     const code = errorCode(error, 'PLUGIN_SESSION_OPERATION_UNKNOWN')
     throw new AdminRequestError(/INVALID/.test(code) ? 400 : /NOT_FOUND/.test(code) ? 404
-      : /CONFLICT|REVISION|BUSY|UNSETTLED|LIMIT/.test(code) ? 409 : /UNKNOWN/.test(code) ? 504 : 503, code.toLowerCase())
+      : /CONFLICT|REVISION|BUSY|UNSETTLED|LIMIT|RESERVED/.test(code) ? 409 : /UNKNOWN/.test(code) ? 504 : 503, code.toLowerCase())
   }
   return [{ method: 'GET', pathname: '/api/chat/plugin-sessions', maxResponseBytes: 4_194_304,
     handle({ query }) {

@@ -29,6 +29,7 @@ const selectClass = 'h-[27px] min-w-0 rounded border border-input bg-background 
 
 function managementError(error: unknown): string {
   if (error instanceof ApiError) {
+    if (/assistant_session_reserved/.test(error.code)) return '这是助手专用工作会话，请绑定 QQ 会话或新建插件独立会话。';
     if (/binding_conflict/.test(error.code)) return '绑定已变化，请关闭弹窗并刷新后重新选择。';
     if (/session_busy/.test(error.code)) return '此模型会话正在使用，请结束当前执行后再操作。';
     if (/unsettled/.test(error.code)) return '会话仍有未确认的执行或创建操作，请先核对实际状态。';

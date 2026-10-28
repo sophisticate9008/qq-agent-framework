@@ -20,6 +20,7 @@ function bindError(error: unknown): string {
     if (error.code === 'session_bind_execution_unsettled') return '会话仍有未确认的执行，请先核对状态。';
     if (/target_occupied/.test(error.code)) return '目标会话已有其他 QQ 会话使用，请选择其他模型会话。';
     if (/target_owned/.test(error.code)) return '目标会话的历史属于其他 QQ 会话，请选择独立会话或插件会话。';
+    if (/target_reserved/.test(error.code)) return '这是助手专用工作会话，请选择 QQ 会话或插件独立会话。';
     if (/not_found/.test(error.code)) return '目标模型会话不存在，请核对完整会话 ID。';
   }
   return errorMessage(error);

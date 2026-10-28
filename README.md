@@ -55,6 +55,7 @@ npm start
 | 本机模拟 QQ 消息 | [本机 QQ 模拟](docs/SIMULATION.md) |
 | 排版、视频、动图与空间 | [图片排版](docs/MARKDOWN.md) · [视频](docs/VIDEO.md) · [GIF](docs/GIF.md) · [空间](docs/QZONE.md) |
 | QQ 协议基础能力与尚未接入项目 | [QQ 能力清单](docs/QQ_CAPABILITIES.md) |
+| 插件能力分层与会话服务设计 | [设计文档](docs/PLUGIN_CAPABILITIES_AND_SESSIONS.md) |
 | 编写扩展及使用 SDK | [扩展开发](docs/EXTENDING.md) · [SDK](packages/framework-sdk/README.md) |
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |
 | 处理未决执行、会话和恢复 | [恢复手册](docs/RECOVERY.md) |

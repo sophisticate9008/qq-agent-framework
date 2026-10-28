@@ -55,9 +55,26 @@ const ledgerSectionClass = 'rounded-none border-0 shadow-none [&>.panel-header]:
 
 type ResetState = 'idle' | 'saving' | 'conflict' | 'unknown' | 'error';
 type RefreshReason = 'initial' | 'manual' | 'automatic';
+type LedgerSource = 'all' | 'qq' | 'simulation';
+type LedgerDeleteTarget = ConversationUsage & {
+  readonly ledgerKey: string;
+  readonly sessionId: string;
+  readonly revision: string;
+};
 
 function ledgerIdentity(conversation: ConversationUsage): string {
   return conversation.ledgerKey ?? conversation.key;
+}
+
+function canDeleteLedger(conversation: ConversationUsage): conversation is LedgerDeleteTarget {
+  return typeof conversation.ledgerKey === 'string' && typeof conversation.sessionId === 'string'
+    && typeof conversation.revision === 'string' && /^[a-f0-9]{64}$/.test(conversation.revision);
+}
+
+function matchesLedgerSource(conversation: ConversationUsage, source: LedgerSource): boolean {
+  const identity = describeConversationKey(conversation.key);
+  return source === 'all' || (source === 'simulation' ? Boolean(identity.simulationRunId)
+    : !identity.simulationRunId && (identity.kind === 'group' || identity.kind === 'private'));
 }
 
 function formatTimestamp(value: string | number): string {
@@ -183,9 +200,13 @@ export function UsagePage(props: PageProps) {
   const [resetState, setResetState] = useState<ResetState>('idle');
   const [resetError, setResetError] = useState('');
   const [resetRevision, setResetRevision] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ConversationUsage | null>(null);
+  const [ledgerSource, setLedgerSource] = useState<LedgerSource>('all');
+  const [checkedLedgerKeys, setCheckedLedgerKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [deleteTargets, setDeleteTargets] = useState<readonly LedgerDeleteTarget[] | null>(null);
   const [deleteState, setDeleteState] = useState<ResetState>('idle');
   const [deleteError, setDeleteError] = useState('');
+  const [deleteCompleted, setDeleteCompleted] = useState(0);
+  const [deleteFailure, setDeleteFailure] = useState<LedgerDeleteTarget | null>(null);
   const [ledgerWriting, setLedgerWriting] = useState(false);
   const summaryController = useRef<AbortController | null>(null);
   const seriesController = useRef<AbortController | null>(null);
@@ -195,6 +216,8 @@ export function UsagePage(props: PageProps) {
   const deleteController = useRef<AbortController | null>(null);
   const conversationsRef = useRef<readonly ConversationUsage[]>([]);
   const ledgerWriteBusy = useRef(false);
+  const connection = useRef({ api, connected });
+  connection.current = { api, connected };
   const summaryRequest = useRef(0);
   const seriesRequest = useRef(0);
   const turnsRequest = useRef(0);
@@ -218,6 +241,8 @@ export function UsagePage(props: PageProps) {
       if (controller.signal.aborted || summaryRequest.current !== request) return;
       setUsage(parsed);
       conversationsRef.current = parsed.conversations;
+      setCheckedLedgerKeys(current => new Set([...current].filter(key => parsed.native
+        && parsed.conversations.some(conversation => canDeleteLedger(conversation) && conversation.ledgerKey === key))));
       setRuntimeUnavailable(false);
       setSummaryError('');
       if (!parsed.conversations.some(conversation => ledgerIdentity(conversation) === selectedKeyRef.current)) {
@@ -330,22 +355,35 @@ export function UsagePage(props: PageProps) {
 
   useEffect(() => {
     lifecycleEpoch.current += 1;
+    setUsage(null);
+    setSeries(null);
+    setTurns(null);
+    setRecent(null);
+    conversationsRef.current = [];
+    selectedKeyRef.current = '';
+    setSelectedKey('');
+    setRefreshMessage('');
+    setSummaryError('');
+    setSeriesError('');
+    setTurnsError('');
+    setRecentError('');
+    setRuntimeUnavailable(false);
+    setResetOpen(false);
+    setResetState('idle');
+    setResetRevision(null);
+    setResetText('');
+    setCheckedLedgerKeys(new Set());
+    setDeleteTargets(null);
+    setDeleteState('idle');
+    setDeleteError('');
+    setDeleteCompleted(0);
+    setDeleteFailure(null);
+    setLedgerWriting(false);
     if (!connected) {
       summaryController.current?.abort();
       seriesController.current?.abort();
       turnsController.current?.abort();
       recentController.current?.abort();
-      setUsage(null);
-      setSeries(null);
-      setTurns(null);
-      setRecent(null);
-      conversationsRef.current = [];
-      selectedKeyRef.current = '';
-      setSelectedKey('');
-      setDeleteTarget(null);
-      setDeleteState('idle');
-      setDeleteError('');
-      setLedgerWriting(false);
     } else {
       void runRefresh('initial');
     }
@@ -379,6 +417,10 @@ export function UsagePage(props: PageProps) {
     [selectedKey, usage]
   );
   const selectableConversations = usage?.conversations ?? [];
+  const visibleConversations = useMemo(() => usage?.conversations.filter(conversation => matchesLedgerSource(conversation, ledgerSource)) ?? [], [usage, ledgerSource]);
+  const deletableVisible = useMemo(() => usage?.native ? visibleConversations.filter(canDeleteLedger) : [], [usage?.native, visibleConversations]);
+  const allVisibleChecked = deletableVisible.length > 0 && deletableVisible.every(conversation => checkedLedgerKeys.has(conversation.ledgerKey));
+  const someVisibleChecked = deletableVisible.some(conversation => checkedLedgerKeys.has(conversation.ledgerKey));
 
   function selectRange(hours: number): void {
     rangeHoursRef.current = hours;
@@ -395,8 +437,36 @@ export function UsagePage(props: PageProps) {
     void loadTurns(key);
   }
 
+  function selectLedgerSource(source: LedgerSource): void {
+    if (ledgerWriteBusy.current || deleteTargets) return;
+    setLedgerSource(source);
+    setCheckedLedgerKeys(new Set());
+  }
+
+  function toggleLedger(conversation: ConversationUsage, checked: boolean): void {
+    if (!usage?.native || !canDeleteLedger(conversation) || ledgerWriteBusy.current || resetOpen || deleteTargets) return;
+    setCheckedLedgerKeys(current => {
+      const next = new Set(current);
+      if (checked) next.add(conversation.ledgerKey);
+      else next.delete(conversation.ledgerKey);
+      return next;
+    });
+  }
+
+  function toggleAllVisible(checked: boolean): void {
+    if (ledgerWriteBusy.current || resetOpen || deleteTargets) return;
+    setCheckedLedgerKeys(current => {
+      const next = new Set(current);
+      for (const conversation of deletableVisible) {
+        if (checked) next.add(conversation.ledgerKey);
+        else next.delete(conversation.ledgerKey);
+      }
+      return next;
+    });
+  }
+
   function openReset(): void {
-    if (usage?.resetAvailable === false || ledgerWriteBusy.current || deleteState === 'saving' || deleteTarget) return;
+    if (usage?.resetAvailable === false || ledgerWriteBusy.current || deleteState === 'saving' || deleteTargets) return;
     setResetText('');
     setResetState('idle');
     setResetError('');
@@ -455,70 +525,107 @@ export function UsagePage(props: PageProps) {
     }
   }
 
-  function openDelete(conversation: ConversationUsage): void {
-    if (!usage?.native || !conversation.ledgerKey || !conversation.sessionId || !conversation.revision
-      || resetOpen || ledgerWriteBusy.current) return;
-    setDeleteTarget(conversation);
+  function openDelete(conversations: readonly ConversationUsage[]): void {
+    if (!usage?.native || resetOpen || ledgerWriteBusy.current || conversations.length === 0
+      || !conversations.every(canDeleteLedger)) return;
+    setDeleteTargets(Object.freeze(conversations.map(conversation => Object.freeze({ ...conversation }))));
     setDeleteState('idle');
     setDeleteError('');
+    setDeleteCompleted(0);
+    setDeleteFailure(null);
   }
 
   function closeDelete(): void {
     if (deleteState === 'saving') return;
-    const verify = deleteState === 'conflict' || deleteState === 'unknown';
-    setDeleteTarget(null);
+    const verify = deleteState === 'conflict' || deleteState === 'unknown' || deleteState === 'error';
+    setDeleteTargets(null);
     setDeleteState('idle');
     setDeleteError('');
     if (verify) void runRefresh('manual');
   }
 
-  async function deleteSessionLedger(): Promise<void> {
-    const target = deleteTarget;
-    if (ledgerWriteBusy.current || !target?.sessionId || !target.revision
-      || deleteState !== 'idle' && deleteState !== 'error') return;
+  async function deleteSessionLedgers(): Promise<void> {
+    const targets = deleteTargets;
+    if (ledgerWriteBusy.current || !targets?.length || deleteState !== 'idle'
+      || !connection.current.connected || connection.current.api !== api) return;
     ledgerWriteBusy.current = true;
     setLedgerWriting(true);
     const controller = new AbortController();
     deleteController.current = controller;
+    let operationEpoch = lifecycleEpoch.current;
+    const current = () => !controller.signal.aborted && deleteController.current === controller
+      && lifecycleEpoch.current === operationEpoch && connection.current.api === api && connection.current.connected;
     setDeleteState('saving');
     setDeleteError('');
+    let completed = 0;
+    let affected = 0;
+    let failed: LedgerDeleteTarget | null = null;
+    let failureState: ResetState = 'idle';
     try {
-      const result = await api.post('/api/chat/usage/session/delete', {
-        conversationId: target.key, sessionId: target.sessionId, revision: target.revision,
-      }, controller.signal);
-      if (!isRecord(result) || result.ok !== true || !Number.isSafeInteger(result.affected)
-        || typeof result.affected !== 'number' || result.affected < 0
-        || typeof result.operationId !== 'string' || result.operationId.length === 0
-        || result.conversationId !== undefined && result.conversationId !== target.key
-        || result.sessionId !== undefined && result.sessionId !== target.sessionId) {
-        throw new ApiError('usage_session_delete_unknown', 504);
+      for (const target of targets) {
+        if (!current()) return;
+        try {
+          const result = await api.post('/api/chat/usage/session/delete', {
+            conversationId: target.key, sessionId: target.sessionId, revision: target.revision,
+          }, controller.signal);
+          if (!current()) return;
+          if (!isRecord(result) || result.ok !== true || typeof result.affected !== 'number'
+            || !Number.isSafeInteger(result.affected) || result.affected < 0
+            || typeof result.operationId !== 'string' || result.operationId.length === 0
+            || result.conversationId !== undefined && result.conversationId !== target.key
+            || result.sessionId !== undefined && result.sessionId !== target.sessionId) {
+            throw new ApiError('usage_session_delete_unknown', 504);
+          }
+          completed++;
+          affected += result.affected;
+          setDeleteCompleted(completed);
+          setCheckedLedgerKeys(previous => {
+            const next = new Set(previous);
+            next.delete(target.ledgerKey);
+            return next;
+          });
+          if (selectedKeyRef.current === target.ledgerKey) {
+            selectedKeyRef.current = '';
+            setSelectedKey('');
+            setTurns(null);
+          }
+        } catch (error) {
+          if (!current()) return;
+          failed = target;
+          failureState = resetErrorState(error);
+          setDeleteFailure(target);
+          setDeleteState(failureState);
+          setDeleteError(errorMessage(error));
+          break;
+        }
       }
-      if (controller.signal.aborted) return;
-      setDeleteTarget(null);
-      setDeleteState('idle');
-      if (selectedKeyRef.current === ledgerIdentity(target)) {
-        selectedKeyRef.current = '';
-        setSelectedKey('');
+      if (!current()) return;
+      const remaining = targets.length - completed - (failed ? 1 : 0);
+      const message = failed
+        ? `已确认删除 ${completed}/${targets.length} 个模型会话账本；当前目标${failureState === 'unknown' ? '删除结果未知' : '未完成删除'}，另有 ${remaining} 个尚未提交。`
+        : `已删除 ${completed} 个模型会话账本，共 ${affected} 条记录。`;
+      if (!failed) {
+        setDeleteTargets(null);
+        setDeleteState('idle');
       }
+      setRefreshMessage(message);
       setTurns(null);
       setTurnsError('');
       setTurnsLoading(false);
-      lifecycleEpoch.current += 1;
+      operationEpoch = ++lifecycleEpoch.current;
       refreshInFlight.current = null;
       summaryController.current?.abort();
       seriesController.current?.abort();
       turnsController.current?.abort();
       recentController.current?.abort();
       await runRefresh('manual');
-      if (controller.signal.aborted) return;
-      setRefreshMessage(`已删除该模型会话的 ${formatCount(result.affected)} 条账本记录。`);
-    } catch (error) {
-      if (controller.signal.aborted) return;
-      setDeleteState(resetErrorState(error));
-      setDeleteError(errorMessage(error));
+      if (current()) setRefreshMessage(message);
     } finally {
-      ledgerWriteBusy.current = false;
-      if (!controller.signal.aborted) setLedgerWriting(false);
+      if (deleteController.current === controller) {
+        ledgerWriteBusy.current = false;
+        if (!controller.signal.aborted && connection.current.api === api && connection.current.connected) setLedgerWriting(false);
+        deleteController.current = null;
+      }
     }
   }
 
@@ -563,7 +670,7 @@ export function UsagePage(props: PageProps) {
 
   return <div className="page-stack gap-2" data-page="usage">
     <PageHeading title="用量与费用" description="查看当前账本、用量走势和入账费用。" />
-    <div className="flex flex-wrap items-center gap-2"><span className="mr-1 text-xs text-muted-foreground">{usage ? `生成于 ${formatTimestamp(usage.generatedAt)}` : '正在读取账本'}</span><label className="flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-detailed-counts"><Switch id="usage-detailed-counts" size="sm" checked={detailedCounts} onCheckedChange={setDetailedCounts} /><span>详细数值</span></label><label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-auto-refresh"><span>自动刷新</span><select id="usage-auto-refresh" className="h-[27px] rounded border bg-background px-2 text-xs text-foreground" value={automaticValue} onChange={event => setAutoRefreshMs(event.target.value === 'off' ? null : Number(event.target.value))} disabled={runtimeUnavailable}><option value="off">关闭</option><option value="3000">3 秒</option><option value="10000">10 秒</option><option value="30000">30 秒</option></select></label><Button id="usage-refresh" variant="outline" onClick={() => void runRefresh('manual')} disabled={summaryLoading || seriesLoading || recentLoading || ledgerWriting}><RefreshCw className={summaryLoading || seriesLoading || recentLoading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button><UsagePricingManager {...props} onSaved={() => { void runRefresh("manual"); }} /><Button id="usage-reset-open" variant="outline" onClick={openReset} disabled={!usage?.revision || usage.resetAvailable === false || summaryLoading || deleteTarget !== null || ledgerWriting}><Trash2 className="size-3.5" />清空账本</Button></div>
+    <div className="flex flex-wrap items-center gap-2"><span className="mr-1 text-xs text-muted-foreground">{usage ? `生成于 ${formatTimestamp(usage.generatedAt)}` : '正在读取账本'}</span><label className="flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-detailed-counts"><Switch id="usage-detailed-counts" size="sm" checked={detailedCounts} onCheckedChange={setDetailedCounts} /><span>详细数值</span></label><label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-auto-refresh"><span>自动刷新</span><select id="usage-auto-refresh" className="h-[27px] rounded border bg-background px-2 text-xs text-foreground" value={automaticValue} onChange={event => setAutoRefreshMs(event.target.value === 'off' ? null : Number(event.target.value))} disabled={runtimeUnavailable}><option value="off">关闭</option><option value="3000">3 秒</option><option value="10000">10 秒</option><option value="30000">30 秒</option></select></label><Button id="usage-refresh" variant="outline" onClick={() => void runRefresh('manual')} disabled={summaryLoading || seriesLoading || recentLoading || ledgerWriting}><RefreshCw className={summaryLoading || seriesLoading || recentLoading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button><UsagePricingManager {...props} onSaved={() => { void runRefresh("manual"); }} /><Button id="usage-reset-open" variant="outline" onClick={openReset} disabled={!usage?.revision || usage.resetAvailable === false || summaryLoading || deleteTargets !== null || ledgerWriting}><Trash2 className="size-3.5" />清空账本</Button></div>
     {refreshMessage && <p className="text-xs text-muted-foreground" role="status">{refreshMessage}</p>}
 
     {summaryLoading && !usage ? <Section id="usage-summary" title={usageSectionLabels.summary} className={compactSectionClass}><LoadingBlock>正在读取用量账本</LoadingBlock></Section>
@@ -596,12 +703,13 @@ export function UsagePage(props: PageProps) {
           <TabsList aria-label="用量记录视图" className="h-[34px] w-full justify-start bg-muted/30 px-2"><TabsTrigger value="conversations">按会话</TabsTrigger><TabsTrigger value="turns">逐轮明细</TabsTrigger><TabsTrigger value="recent">调用记录</TabsTrigger></TabsList>
           <TabsContent value="conversations" keepMounted className="[&[hidden]]:hidden">
         <Section id="conversation-usage" title={usageSectionLabels.conversations} description={`最多 ${formatCount(usage.limit)} 条；选择会话后加载逐轮明细。`} actions={usage.limited ? <StatusPill tone="warning">结果已截断</StatusPill> : <StatusPill tone="success">完整结果</StatusPill>} className={ledgerSectionClass}>
-          {usage.conversations.length === 0 ? <EmptyState title="暂无用量记录" description="聊天账本已成功读取，但当前没有会话用量。" /> : <div data-usage-conversations-panel><div className="tablewrap min-h-0 overscroll-contain border-t" data-usage-conversations-scroll tabIndex={0} role="region" aria-label="会话用量列表"><table aria-rowcount={usage.conversations.length + 1} className="w-full min-w-[76rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 text-right font-medium">轮 / 步</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">命中率</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="min-w-36 px-2 py-1 text-right font-medium">成本占比</th><th className="px-2 py-1 font-medium">模型</th><th className="px-2 py-1 font-medium">最近记录</th><th className="px-2 py-1 font-medium">操作</th></tr></thead><VirtualTableBody items={usage.conversations} getItemKey={conversation => ledgerIdentity(conversation)} columns={12} estimateSize={30}>{conversation => {
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs"><label className="flex items-center gap-1.5"><span className="text-muted-foreground">来源</span><select aria-label="账本会话来源" className="h-[27px] rounded border bg-background px-2 text-xs" value={ledgerSource} disabled={ledgerWriting || deleteTargets !== null} onChange={event => selectLedgerSource(event.target.value === 'simulation' ? 'simulation' : event.target.value === 'qq' ? 'qq' : 'all')}><option value="all">全部</option><option value="qq">QQ 会话</option><option value="simulation">模拟会话</option></select></label><span>已选 <strong className="tabular-nums">{checkedLedgerKeys.size}</strong> 条</span><Button size="sm" variant="ghost" disabled={checkedLedgerKeys.size === 0 || ledgerWriting || deleteTargets !== null} onClick={() => setCheckedLedgerKeys(new Set())}>取消选择</Button><Button id="usage-delete-selected" size="sm" variant="outline" className="text-destructive" disabled={checkedLedgerKeys.size === 0 || ledgerWriting || resetOpen || deleteTargets !== null} onClick={() => openDelete(deletableVisible.filter(conversation => checkedLedgerKeys.has(conversation.ledgerKey)))}><Trash2 className="size-3.5" />删除所选 {checkedLedgerKeys.size} 条</Button><span className="text-muted-foreground">显示 {visibleConversations.length} 条；全选仅包含当前筛选下已加载的可删除行。</span></div>
+          {visibleConversations.length === 0 ? <EmptyState title={usage.conversations.length === 0 ? "暂无用量记录" : "当前来源下暂无已加载记录"} description={usage.conversations.length === 0 ? "聊天账本已成功读取，但当前没有会话用量。" : "来源筛选仅作用于本次已加载记录，可切换来源查看。"} /> : <div data-usage-conversations-panel><div className="tablewrap min-h-0 overscroll-contain border-t" data-usage-conversations-scroll tabIndex={0} role="region" aria-label="会话用量列表"><table aria-rowcount={visibleConversations.length + 1} className="w-full min-w-[76rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="w-9 px-2 py-1"><input type="checkbox" aria-label="全选当前筛选下已加载的可删除账本" aria-checked={someVisibleChecked && !allVisibleChecked ? 'mixed' : allVisibleChecked} className="size-3.5 align-middle accent-primary" checked={allVisibleChecked} ref={element => { if (element) element.indeterminate = someVisibleChecked && !allVisibleChecked; }} disabled={deletableVisible.length === 0 || ledgerWriting || resetOpen || deleteTargets !== null} onChange={event => toggleAllVisible(event.target.checked)} /></th><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 text-right font-medium">轮 / 步</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">命中率</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="min-w-36 px-2 py-1 text-right font-medium">成本占比</th><th className="px-2 py-1 font-medium">模型</th><th className="px-2 py-1 font-medium">最近记录</th><th className="px-2 py-1 font-medium">操作</th></tr></thead><VirtualTableBody items={visibleConversations} getItemKey={conversation => ledgerIdentity(conversation)} columns={13} estimateSize={30}>{conversation => {
             const identity = describeConversationKey(conversation.key);
             const buckets = conversation.buckets;
             const share = usage.totals.cost === null || conversation.cost === null ? null : usage.totals.cost > 0 ? conversation.cost / usage.totals.cost : 0;
             const shareLabel = formatPercentage(share);
-            return <tr key={ledgerIdentity(conversation)} data-usage-key={conversation.key} data-usage-ledger-key={ledgerIdentity(conversation)} className={selectedKey === ledgerIdentity(conversation) ? 'bg-accent/45 align-top' : 'align-top hover:bg-muted/30'}><td className="px-2 py-1"><button type="button" className="text-left outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-pressed={selectedKey === ledgerIdentity(conversation)} onClick={() => selectConversation(ledgerIdentity(conversation), true)}><UsageConversation conversationKey={conversation.key} sessionId={conversation.sessionId} /></button></td><td className="px-2 py-1 text-right tabular-nums">{formatCount(conversation.turns)} / {formatCount(conversation.steps)}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheMiss) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheHit) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheWrite) : "不可用"}</td><td className="px-2 py-1">{buckets ? <span className="block text-right tabular-nums">{formatCount(buckets.output)}</span> : <span className="block text-right text-muted-foreground">不可用</span>}</td><td className="px-2 py-1 text-right tabular-nums">{conversation.cacheHitRate === null ? '不可用' : formatPercentage(conversation.cacheHitRate)}</td><td className="px-2 py-1 text-right tabular-nums"><strong className="font-medium">{formatActivityCost(conversation.cost, usage.currency, usage.symbol)}</strong></td><td className="min-w-36 px-2 py-1"><span className="block text-right tabular-nums">{shareLabel}</span></td><td className="max-w-52 px-2 py-1"><span className="block max-w-40 truncate" title={conversation.models.join("、")}>{conversation.models.join("、") || "未记录"}</span></td><td className="whitespace-nowrap px-2 py-1 text-muted-foreground">{conversation.lastAt ? formatTimestamp(conversation.lastAt) : '未记录'}</td><td className="px-2 py-1"><div className="flex items-center gap-1"><ReadOnlyDetails title="会话用量详情" description={`${identity.label} ${identity.identifier}`}><UsageConversation conversationKey={conversation.key} sessionId={conversation.sessionId} showRun /><KnownCosts costs={conversation.knownCosts} />{buckets && <><UsageTokenBreakdown values={buckets} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={buckets} side="output" formatCount={formatCount} /></>}<TechnicalDetails fields={[{ label: '完整汇总', value: conversation }]} /></ReadOnlyDetails>{usage.native && conversation.ledgerKey && conversation.sessionId && <span title={!conversation.revision ? '暂时无法核对该会话账本，请刷新后重试' : undefined}><Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`删除${identity.label} ${identity.identifier}${usageSessionSuffix(conversation.sessionId)}的账本`} title={!conversation.revision ? '暂时无法核对该会话账本，请刷新后重试' : undefined} disabled={!conversation.revision || ledgerWriting || resetOpen || deleteTarget !== null} onClick={() => openDelete(conversation)}><Trash2 className="size-3.5" />删除</Button></span>}</div></td></tr>;
+            return <tr key={ledgerIdentity(conversation)} data-usage-key={conversation.key} data-usage-ledger-key={ledgerIdentity(conversation)} className={selectedKey === ledgerIdentity(conversation) ? 'bg-accent/45 align-top' : 'align-top hover:bg-muted/30'}><td className="w-9 px-2 py-1"><span title={!canDeleteLedger(conversation) ? '暂时无法核对该会话账本，请刷新后重试' : undefined}><input type="checkbox" className="size-3.5 align-middle accent-primary" aria-label={`选择${identity.label} ${identity.identifier}${usageSessionSuffix(conversation.sessionId)}的账本`} checked={checkedLedgerKeys.has(ledgerIdentity(conversation))} disabled={!usage.native || !canDeleteLedger(conversation) || ledgerWriting || resetOpen || deleteTargets !== null} onChange={event => toggleLedger(conversation, event.target.checked)} /></span></td><td className="px-2 py-1"><button type="button" className="text-left outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-pressed={selectedKey === ledgerIdentity(conversation)} onClick={() => selectConversation(ledgerIdentity(conversation), true)}><UsageConversation conversationKey={conversation.key} sessionId={conversation.sessionId} /></button></td><td className="px-2 py-1 text-right tabular-nums">{formatCount(conversation.turns)} / {formatCount(conversation.steps)}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheMiss) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheHit) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheWrite) : "不可用"}</td><td className="px-2 py-1">{buckets ? <span className="block text-right tabular-nums">{formatCount(buckets.output)}</span> : <span className="block text-right text-muted-foreground">不可用</span>}</td><td className="px-2 py-1 text-right tabular-nums">{conversation.cacheHitRate === null ? '不可用' : formatPercentage(conversation.cacheHitRate)}</td><td className="px-2 py-1 text-right tabular-nums"><strong className="font-medium">{formatActivityCost(conversation.cost, usage.currency, usage.symbol)}</strong></td><td className="min-w-36 px-2 py-1"><span className="block text-right tabular-nums">{shareLabel}</span></td><td className="max-w-52 px-2 py-1"><span className="block max-w-40 truncate" title={conversation.models.join("、")}>{conversation.models.join("、") || "未记录"}</span></td><td className="whitespace-nowrap px-2 py-1 text-muted-foreground">{conversation.lastAt ? formatTimestamp(conversation.lastAt) : '未记录'}</td><td className="px-2 py-1"><div className="flex items-center gap-1"><ReadOnlyDetails title="会话用量详情" description={`${identity.label} ${identity.identifier}`}><UsageConversation conversationKey={conversation.key} sessionId={conversation.sessionId} showRun /><KnownCosts costs={conversation.knownCosts} />{buckets && <><UsageTokenBreakdown values={buckets} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={buckets} side="output" formatCount={formatCount} /></>}<TechnicalDetails fields={[{ label: '完整汇总', value: conversation }]} /></ReadOnlyDetails>{usage.native && conversation.ledgerKey && conversation.sessionId && <span title={!conversation.revision ? '暂时无法核对该会话账本，请刷新后重试' : undefined}><Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`删除${identity.label} ${identity.identifier}${usageSessionSuffix(conversation.sessionId)}的账本`} title={!conversation.revision ? '暂时无法核对该会话账本，请刷新后重试' : undefined} disabled={!conversation.revision || ledgerWriting || resetOpen || deleteTargets !== null} onClick={() => openDelete([conversation])}><Trash2 className="size-3.5" />删除</Button></span>}</div></td></tr>;
           }}</VirtualTableBody></table></div></div>}
           {usage.limited && <p className="mt-3 text-xs leading-5 text-amber-700 dark:text-amber-400" role="status">结果达到接口上限；总计来自完整账本汇总，会话表仅显示本次返回的部分记录。</p>}
         </Section>
@@ -646,12 +754,12 @@ export function UsagePage(props: PageProps) {
 
       </>}
 
-    <Dialog open={deleteTarget !== null} onOpenChange={open => { if (!open) closeDelete(); }}>
+    <Dialog open={deleteTargets !== null} onOpenChange={open => { if (!open) closeDelete(); }}>
       <DialogContent showCloseButton={deleteState !== 'saving'}>
-        <DialogHeader><DialogTitle>删除该模型会话的账本？</DialogTitle><DialogDescription>删除下列模型会话已记录的用量与费用，无法撤销。会话历史、当前绑定与其他模型会话的账本保留；之后新产生的用量继续记录。</DialogDescription></DialogHeader>
-        {deleteTarget && <dl className="grid gap-3 text-sm"><div><dt className="text-xs text-muted-foreground">QQ 会话</dt><dd className="mt-1"><UsageConversation conversationKey={deleteTarget.key} sessionId={deleteTarget.sessionId} showRun /></dd></div><div><dt className="text-xs text-muted-foreground">完整模型会话 ID</dt><dd className="mt-1 break-all font-mono text-xs">{deleteTarget.sessionId}</dd></div><div><dt className="text-xs text-muted-foreground">已记录用量</dt><dd className="mt-1">{formatCount(deleteTarget.turns)} 轮 · {formatCount(deleteTarget.steps)} 个处理步骤</dd></div></dl>}
-        {deleteState !== 'idle' && deleteState !== 'saving' && <p className="text-xs leading-5 text-destructive" role="alert">{deleteState === 'conflict' ? '该模型会话的账本已变化。请关闭并刷新，核对最新记录后重新选择。' : deleteState === 'unknown' ? '删除结果暂时无法确认，可能已删除部分记录。请勿重复提交；关闭弹窗并刷新，核对实际剩余账本。' : deleteError}</p>}
-        <DialogFooter><Button variant="outline" disabled={deleteState === 'saving'} onClick={closeDelete}>{deleteState === 'conflict' || deleteState === 'unknown' ? '关闭并刷新核对' : '取消'}</Button><Button id="usage-session-delete-submit" variant="destructive" disabled={!deleteTarget?.revision || deleteState === 'saving' || deleteState === 'conflict' || deleteState === 'unknown' || resetState === 'saving'} onClick={() => void deleteSessionLedger()}>{deleteState === 'saving' && <LoaderCircle className="size-3.5 animate-spin" />}{deleteState === 'saving' ? '正在删除' : '确认删除账本'}</Button></DialogFooter>
+        <DialogHeader><DialogTitle>{deleteTargets?.length === 1 ? '删除该模型会话的账本？' : `删除所选 ${deleteTargets?.length ?? 0} 个模型会话的账本？`}</DialogTitle><DialogDescription>删除下列已选模型会话的用量与费用，无法撤销。会话历史与当前绑定保留，之后的新用量继续记录。逐项提交，遇到未完成或未知结果即停止后续项。</DialogDescription></DialogHeader>
+        {deleteTargets && <><ol className="max-h-72 space-y-2 overflow-auto overscroll-contain rounded border p-2" aria-label="待删除的模型会话账本">{deleteTargets.map((target, index) => <li key={target.ledgerKey} className="grid gap-1 border-b pb-2 text-xs last:border-b-0 last:pb-0"><div className="flex flex-wrap items-start justify-between gap-1"><UsageConversation conversationKey={target.key} sessionId={target.sessionId} showRun /><span className="text-muted-foreground">{index < deleteCompleted ? '已确认删除' : deleteFailure?.ledgerKey === target.ledgerKey ? deleteState === 'unknown' ? '删除结果未知' : '未完成删除' : deleteState === 'saving' && index === deleteCompleted ? '正在提交' : '尚未提交'}</span></div><code className="break-all text-muted-foreground" title="完整模型会话 ID">{target.sessionId}</code><span className="text-muted-foreground">{formatCount(target.turns)} 轮 · {formatCount(target.steps)} 个处理步骤</span></li>)}</ol><p className="text-xs tabular-nums" role="status" aria-live="polite">已确认删除 {deleteCompleted}/{deleteTargets.length} 个模型会话账本{deleteFailure ? `；另有 ${Math.max(0, deleteTargets.length - deleteCompleted - 1)} 个尚未提交。` : ''}</p></>}
+        {deleteFailure && <div className="grid gap-1 text-xs text-destructive" role="alert"><p>已停止后续删除。{deleteState === 'conflict' ? '该目标账本已变化。' : deleteState === 'unknown' ? '当前目标可能已删除部分记录，结果尚未确认。' : deleteError}请关闭弹窗并刷新核对；本批次不会再次提交。</p><div>停止目标：<UsageConversation conversationKey={deleteFailure.key} sessionId={deleteFailure.sessionId} showRun /></div><code className="break-all">{deleteFailure.sessionId}</code></div>}
+        <DialogFooter><Button variant="outline" disabled={deleteState === 'saving'} onClick={closeDelete}>{deleteState === 'idle' ? '取消' : '关闭并刷新核对'}</Button><Button id="usage-session-delete-submit" variant="destructive" disabled={!deleteTargets?.length || deleteState !== 'idle' || ledgerWriting || resetState === 'saving'} onClick={() => void deleteSessionLedgers()}>{deleteState === 'saving' && <LoaderCircle className="size-3.5 animate-spin" />}{deleteState === 'saving' ? `正在删除 ${deleteCompleted}/${deleteTargets?.length ?? 0}` : deleteTargets?.length === 1 ? '确认删除账本' : `确认删除 ${deleteTargets?.length ?? 0} 个账本`}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
 

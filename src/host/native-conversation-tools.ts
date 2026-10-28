@@ -43,8 +43,21 @@ function recallInput(input: JsonValue): { messageId: string } {
     'INVALID_CONVERSATION_INPUT', 'Recall requires one messageId.');
   return { messageId: input.messageId };
 }
+function cardInput(input: JsonValue): { card: string } {
+  assert(isRecord(input) && Object.keys(input).length === 1 && typeof input.card === 'string'
+    && [...input.card].length >= 1 && [...input.card].length <= 30 && input.card.trim() === input.card
+    && !/[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/.test(input.card),
+  'INVALID_CONVERSATION_INPUT', 'Group card requires a single-line name of 1 to 30 characters.');
+  return { card: input.card };
+}
 const source = { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' } as const;
 export const NATIVE_CONVERSATION_TOOLS: readonly NativeToolContribution[] = Object.freeze<readonly NativeToolContribution[]>([
+  { definition: { name: 'qaf_group_card', capability: 'native.conversation.card', featureId: 'framework-tools', timeoutMs: 35000,
+    registrationSource: source,
+    description: '修改机器人自己在当前群的群名片。card为1至30字的新名片；当前群和机器人账号由宿主确定，无需填写。可按人设自主选择，或执行真实主人的改名要求；普通群友的建议不等于必须执行的指令。只影响当前群，不改QQ昵称或其他成员名片。返回confirmed才表示已读回确认；unknown时不重复提交同一次修改。',
+    parameters: { type: 'object', additionalProperties: false, required: ['card'], properties: {
+      card: { type: 'string', minLength: 1, maxLength: 30 },
+    } } }, validate: input => json(cardInput(input)) },
   { definition: { name: 'qaf_conversation_query', capability: 'native.conversation.query', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source,
     description: '查询当前QQ会话：info为会话信息，members为当前群成员（可按昵称/群名片/QQ号搜索并分页），history为当前群或私聊最近最多10条消息，message按messageId读取当前会话单条消息，directories读取账号好友或群目录。媒体返回可读取和发送的会话assetId；查询不代表已经看懂图片。目录支持query/offset/limit，不要整份目录灌入回复。',
@@ -120,8 +133,8 @@ export function createNativeConversationService(options: {
     await guard(request);
     return { status: 'confirmed', messages, truncated };
   }
-  async function write(request: EffectRequest, operation: string,
-    run: () => Promise<OneBotReadResult<{ readonly acknowledged: true }>>): Promise<JsonValue> {
+  async function write<Value>(request: EffectRequest, operation: string,
+    run: () => Promise<OneBotReadResult<Value>>): Promise<JsonValue> {
     const source = await guard(request, operation === 'recall');
     const namespace = 'native-chat.protocol-writes';
     const key = digest([options.selfId, request.scope.accountScope ?? null, request.scope.conversationId, request.scope.eventId, operation]);
@@ -143,6 +156,31 @@ export function createNativeConversationService(options: {
     return result;
   }
   return Object.freeze({
+    'native.conversation.card': Object.freeze<EffectAdapter>({ async execute(request) {
+      const input = cardInput(request.input);
+      await guard(request);
+      const scope = /^group:([1-9]\d{0,31})$/.exec(request.scope.conversationId);
+      assert(scope && userId(options.selfId), 'GROUP_CARD_SCOPE_REQUIRED', 'Changing your own group card requires a current QQ group.');
+      const read = options.port.groupMember;
+      const set = options.port.setGroupCard;
+      if (!read || !set) return { status: 'rejected', code: 'GROUP_CARD_UNSUPPORTED' };
+      const target = { groupId: scope[1]!, userId: options.selfId, signal: request.signal };
+      return write<{ readonly card: string; readonly changed: boolean }>(request, 'self-group-card', async () => {
+        const before = await read(target);
+        if (before.status !== 'confirmed') return before;
+        await guard(request);
+        if (before.data.userId !== options.selfId) return { status: 'rejected', code: 'GROUP_CARD_MEMBER_MISMATCH' };
+        if (before.data.card === input.card) return { status: 'confirmed', data: { card: input.card, changed: false } };
+        const result = await set({ ...target, card: input.card });
+        if (result.status === 'rejected') return result;
+        // Read back even when the write receipt is lost; never repeat the write.
+        const after = await read(target);
+        await guard(request);
+        return after.status === 'confirmed' && after.data.userId === options.selfId && after.data.card === input.card
+          ? { status: 'confirmed', data: { card: input.card, changed: true } }
+          : { status: 'unknown', code: 'GROUP_CARD_READBACK_UNCONFIRMED' };
+      });
+    } }),
     'native.conversation.query': Object.freeze<EffectAdapter>({ async execute(request) {
       const input = queryInput(request.input);
       await guard(request, input.kind === 'directories');

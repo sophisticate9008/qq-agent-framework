@@ -10,6 +10,8 @@ export interface OneBotConversationMessage { readonly messageId: string; readonl
 export interface OneBotConversationPort {
   groupInfo(request: { readonly groupId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<OneBotConversationGroup>>;
   groupMembers(request: { readonly groupId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationMember[]>>;
+  groupMember?(request: { readonly groupId: string; readonly userId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<OneBotConversationMember>>;
+  setGroupCard?(request: { readonly groupId: string; readonly userId: string; readonly card: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<{ readonly acknowledged: true }>>;
   groupHistory(request: { readonly groupId: string; readonly limit: number; readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationMessage[]>>;
   privateHistory(request: { readonly userId: string; readonly selfId: string; readonly limit: number; readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationMessage[]>>;
   groups(request: { readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationGroup[]>>;
@@ -115,6 +117,18 @@ export function createOneBotConversationPort(options: {
   return Object.freeze<OneBotConversationPort>({
     groupInfo: request => invoke('get_group_info', id(request.groupId) ? { group_id: request.groupId, no_cache: true } : null,
       request.signal, value => group(value, request.groupId)),
+    groupMember: request => invoke('get_group_member_info', id(request.groupId) && id(request.userId)
+      ? { group_id: request.groupId, user_id: request.userId, no_cache: true } : null,
+      request.signal, value => {
+        if (!isRecord(value) || id(value.user_id) !== request.userId
+          || value.group_id !== undefined && id(value.group_id) !== request.groupId) return null;
+        return { userId: request.userId, nickname: text(value.nickname), card: text(value.card), role: text(value.role, 32) };
+      }),
+    setGroupCard: request => invoke('set_group_card', id(request.groupId) && id(request.userId)
+      && typeof request.card === 'string' && [...request.card].length >= 1 && [...request.card].length <= 30
+      && request.card.trim() === request.card && !/[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/.test(request.card)
+      ? { group_id: request.groupId, user_id: request.userId, card: request.card } : null,
+      request.signal, () => ({ acknowledged: true as const })),
     groupMembers: request => invoke('get_group_member_list', id(request.groupId) ? { group_id: request.groupId, no_cache: true } : null,
       request.signal, value => list(value, entry => {
         if (!isRecord(entry) || entry.group_id !== undefined && id(entry.group_id) !== request.groupId) return null;

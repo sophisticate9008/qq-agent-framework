@@ -30,7 +30,7 @@ npm start
 | 日常聊天 | @、昵称、引用和短时续聊进入参与判断，群聊合并未读后选择性发言；提供可编辑的“小鲸鱼”人设与日常聊天方案模板 |
 | 图片、文件与转发 | 按需读取当前会话资源；图片需要模型支持看图，语音转写需要外接服务 |
 | GIF 与视频 | GIF 动画按真实时序抽样；视频观察默认关闭，启用后还需 FFmpeg/FFprobe，只观察抽样画面 |
-| QQ 回复与交互 | 文字、图片、语音、文件、QQ 表情、收藏表情、分气泡、长文转发，以及协议支持的戳一戳和撤回 |
+| QQ 回复与交互 | 文字、图片、语音、文件、QQ 表情、收藏表情、分气泡、长文转发，以及协议支持的戳一戳、撤回和修改自身群名片 |
 | Markdown 图片 | 本机排版中文、表格、代码和公式，生成最多六页 PNG，无需浏览器 |
 | 后台助手 | 配置并启用独立助手后，主人可从 QQ 委派、追加、查询和停止工作，结果与实际附件回传原会话 |
 | 空间说说 | 依据协议实际能力登记发布、删除工具；支持文字、图片和图文，未知结果不自动重试 |
@@ -54,6 +54,7 @@ npm start
 | DSH 兼容版本、插件安装与加载 | [DSH 接入](docs/DSH.md) |
 | 本机模拟 QQ 消息 | [本机 QQ 模拟](docs/SIMULATION.md) |
 | 排版、视频、动图与空间 | [图片排版](docs/MARKDOWN.md) · [视频](docs/VIDEO.md) · [GIF](docs/GIF.md) · [空间](docs/QZONE.md) |
+| QQ 协议基础能力与尚未接入项目 | [QQ 能力清单](docs/QQ_CAPABILITIES.md) |
 | 编写扩展及使用 SDK | [扩展开发](docs/EXTENDING.md) · [SDK](packages/framework-sdk/README.md) |
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |
 | 处理未决执行、会话和恢复 | [恢复手册](docs/RECOVERY.md) |

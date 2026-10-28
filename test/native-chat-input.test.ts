@@ -40,16 +40,22 @@ test('participation distinguishes explicit calls and bounded conversation contin
   assert.equal(nativeParticipation({ ...message, isSelf: true, directed: true }, history, options, 100), 'ambient');
 });
 
-function prepare(content: InboundMessage['content'], entries = history, budget = 5000) {
-  const event: FrameworkEvent = { id: message.id, type: 'message.received', conversationId: message.conversationId,
-    userId: message.userId, data: { directed: true, content: JSON.parse(JSON.stringify(content)) } };
+function prepare(content: InboundMessage['content'], entries = history, budget = 5000, context: {
+  conversationId?: string; senderDisplayName?: string;
+  groupWake?: Parameters<typeof prepareNativeChatInput>[2]['groupWake'];
+  quotedMessages?: readonly HistoryMessage[];
+} = {}) {
+  const event: FrameworkEvent = { id: message.id, type: 'message.received', conversationId: context.conversationId ?? message.conversationId,
+    userId: message.userId, data: { directed: true, content: JSON.parse(JSON.stringify(content)),
+      ...(context.senderDisplayName === undefined ? {} : { senderDisplayName: context.senderDisplayName }) } };
   const result = prepareNativeChatInput(event, entries, { owner: '123', partial: false,
-    maxHistoryCharacters: budget, participation: 'reply' });
+    maxHistoryCharacters: budget, participation: 'reply', groupWake: context.groupWake, quotedMessages: context.quotedMessages });
   const text = result.map(part => part.type === 'text' ? part.text : '').join('');
   const start = text.indexOf('\n') + 1;
   const end = text.indexOf('本批最新消息（结合未读消息选择回应对象）：\n');
   const envelope = JSON.parse(text.slice(start, end)) as { senderId: string; senderIsConfiguredOwner: boolean;
     conversationId: string; participation: string; recent: { id: string; actor: string }[];
+    participants: { userId: string; displayName: string | null }[]; participantsLimited?: boolean;
     quoted: { id: string; available: boolean; text: string }[]; historyTruncated: boolean; currentTruncated: boolean };
   return { result, text, envelope };
 }
@@ -89,4 +95,49 @@ test('unread metadata distinguishes retained context from newly consumed bounded
   const text = result.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
   assert.match(text, /"unread":\{"readThrough":1,"through":3,"count":2,"included":1,"partial":false\}/);
   assert.doesNotMatch(text, /"id":"answer"/, 'Assistant output already belongs to the DSH conversation.');
+});
+
+test('participant names preserve distinct account identities across current, unread and quoted messages', () => {
+  const entries: HistoryMessage[] = [
+    { ...history[0]!, displayName: '旧名片' },
+    { id: 'other', actor: '456', displayName: '同名', receivedAt: 30, content: message.content },
+    { id: 'legacy', actor: '789', receivedAt: 40, content: message.content },
+    { id: 'robot', actor: 'assistant', displayName: '机器人名', receivedAt: 50, content: message.content },
+  ];
+  const result = prepare([{ type: 'reply', messageId: 'quoted' }, ...message.content], entries, 5000, {
+    senderDisplayName: '同名',
+    quotedMessages: [{ id: 'quoted', actor: '999', displayName: '引用群友', receivedAt: 5, content: message.content }],
+  });
+  assert.deepEqual(result.envelope.participants, [
+    { userId: '123', displayName: '同名' },
+    { userId: '789', displayName: null },
+    { userId: '456', displayName: '同名' },
+    { userId: '999', displayName: '引用群友' },
+  ]);
+  assert.equal(result.envelope.senderId, '123');
+  assert.equal(result.envelope.senderIsConfiguredOwner, true);
+  assert.deepEqual(result.envelope.recent.map(item => item.actor), ['123', '456', '789']);
+  assert.match(result.text, /本批最新消息（结合未读消息选择回应对象）：\n发言者：\{"userId":"123","displayName":"同名"\}\n/);
+  assert.equal(result.envelope.participantsLimited, undefined);
+});
+
+test('participant observations stay in their conversation and legacy nameless history remains usable', () => {
+  const named: HistoryMessage[] = [{ ...history[0]!, displayName: '本群名片' }];
+  assert.deepEqual(prepare(message.content, named).envelope.participants, [{ userId: '123', displayName: '本群名片' }]);
+  const otherGroup = prepare(message.content, history, 5000, { conversationId: 'group:987' });
+  assert.equal(otherGroup.envelope.conversationId, 'group:987');
+  assert.deepEqual(otherGroup.envelope.participants, [{ userId: '123', displayName: null }]);
+  assert.deepEqual(prepare(message.content, [], 5000, { senderDisplayName: '无效\n名字' }).envelope.participants,
+    [{ userId: '123', displayName: null }]);
+});
+
+test('participant mapping bounds names and account count while keeping the current sender first', () => {
+  const result = prepare(message.content, [], 5000, {
+    senderDisplayName: '名'.repeat(200),
+    groupWake: Array.from({ length: 40 }, (_, index) => ({ messageId: `wake-${index}`, actor: String(1000 + index), reason: 'ambient' as const })),
+  });
+  assert.equal(result.envelope.participants.length, 32);
+  assert.deepEqual(result.envelope.participants[0], { userId: '123', displayName: '名'.repeat(128) });
+  assert.equal(result.envelope.participantsLimited, true);
+  assert.equal(new Set(result.envelope.participants.map(item => item.userId)).size, 32);
 });

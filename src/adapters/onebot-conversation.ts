@@ -2,10 +2,11 @@ import type { JsonObject } from '../core/types.ts';
 import { isRecord } from '../core/values.ts';
 import { decodeOneBotMessageSegments, type OneBotReadResult } from './onebot-actions.ts';
 import { classifyOneBotResponse } from './onebot-response.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 export interface OneBotConversationMember { readonly userId: string; readonly nickname: string | null; readonly card: string | null; readonly role: string | null }
 export interface OneBotConversationGroup { readonly groupId: string; readonly name: string | null; readonly memberCount: number | null; readonly maxMemberCount: number | null }
-export interface OneBotConversationMessage { readonly messageId: string; readonly userId: string; readonly conversationId: string; readonly time: number | null; readonly message: readonly JsonObject[] }
+export interface OneBotConversationMessage { readonly messageId: string; readonly userId: string; readonly displayName?: string; readonly conversationId: string; readonly time: number | null; readonly message: readonly JsonObject[] }
 export interface OneBotConversationPort {
   groupInfo(request: { readonly groupId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<OneBotConversationGroup>>;
   groupMembers(request: { readonly groupId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationMember[]>>;
@@ -46,7 +47,9 @@ function message(value: unknown, groupId: string): OneBotConversationMessage | n
   const userId = id(value.sender.user_id ?? value.user_id);
   const content = decodeOneBotMessageSegments(value.message);
   if (!messageId || !userId || !content) return null;
-  return { messageId, userId, conversationId: `group:${groupId}`, time: count(value.time), message: content };
+  const displayName = normalizeSenderDisplayName(value.sender.card) ?? normalizeSenderDisplayName(value.sender.nickname);
+  return { messageId, userId, conversationId: `group:${groupId}`, time: count(value.time), message: content,
+    ...(displayName === undefined ? {} : { displayName }) };
 }
 function privateMessage(value: unknown, peerId: string, selfId: string): OneBotConversationMessage | null {
   if (!isRecord(value) || !isRecord(value.sender) || id(value.group_id) !== null
@@ -60,7 +63,9 @@ function privateMessage(value: unknown, peerId: string, selfId: string): OneBotC
     || [value.user_id, value.target_id].some(field => field !== undefined && id(field) !== peerId && id(field) !== selfId)) return null;
   // The fixed user_id history request supplies the peer for self-authored messages.
   // A general get_msg response has no such provenance and cannot use this rule.
-  return { messageId, userId, conversationId: `private:${peerId}`, time: count(value.time), message: content };
+  const displayName = normalizeSenderDisplayName(value.sender.nickname);
+  return { messageId, userId, conversationId: `private:${peerId}`, time: count(value.time), message: content,
+    ...(displayName === undefined ? {} : { displayName }) };
 }
 
 /** Fixed basic QQ actions shared by installed NapCat and SnowLuma. No model-controlled action names. */

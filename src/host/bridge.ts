@@ -21,6 +21,7 @@ import type { AgentAdapter, AgentEvent, DurableStore, DurableStoreStatsOptions, 
 import { bridgeTimeouts, createBoundedAgent, createBoundedTransport, withDeadline, type BridgeTimeouts } from './deadlines.ts';
 import { createReplyWatchdog } from './replies.ts';
 import { createRoutedMessageEvent, routedMessageRelaysToAgent, type MessageRouter } from './routing.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 type HostEventValidators = NonNullable<EngineOptions['eventValidators']>;
 type HostEffectAdapters = NonNullable<EngineOptions['effectAdapters']>;
@@ -609,7 +610,9 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');
       const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
       signal.throwIfAborted();
-      const message = snapshot({ ...snapshot(input), content: normalizeContent(input.content) });
+      const { displayName: providedName, ...inputFields } = snapshot(input);
+      const displayName = normalizeSenderDisplayName(providedName);
+      const message = snapshot({ ...inputFields, ...(displayName === undefined ? {} : { displayName }), content: normalizeContent(input.content) });
       assertAccountScope(accountScope, message.accountScope);
       assert(reference(message.id) && reference(message.conversationId) && reference(message.userId)
         && Number.isFinite(message.receivedAt) && typeof message.directed === 'boolean' && typeof message.isSelf === 'boolean',
@@ -647,7 +650,8 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         catch (error) { return snapshot({ status: 'rejected', eventId: message.id, errorCode: errorCode(error, 'INBOUND_ROUTING_FAILED') }); }
       }
       if (options.historySequence === undefined) {
-        history.append(message.conversationId, { id: message.id, actor: message.userId, content: message.content, receivedAt: message.receivedAt });
+        history.append(message.conversationId, { id: message.id, actor: message.userId,
+          ...(message.displayName === undefined ? {} : { displayName: message.displayName }), content: message.content, receivedAt: message.receivedAt });
       } else {
         const original = history.snapshot(message.conversationId, { afterSequence: 0, limit: 100 });
         const retained = original.messages.find(entry => entry.id === message.id);
@@ -661,7 +665,8 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
       }
       return processEvent(routed ?? { id: message.id, type: 'message.received', conversationId: message.conversationId, userId: message.userId,
         data: { content: json(message.content), text: message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
-          directed: message.directed, isSelf: message.isSelf } }, signal);
+          directed: message.directed, isSelf: message.isSelf,
+          ...(message.displayName === undefined ? {} : { senderDisplayName: message.displayName }) } }, signal);
     },
     start() {
       assert(!controller.signal.aborted, 'HOST_STOPPED', 'The host is stopped.');

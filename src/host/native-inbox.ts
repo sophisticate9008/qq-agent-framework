@@ -1,4 +1,5 @@
 import type { NativeInboxSummary } from '../contracts/native-inbox.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 import { normalizeContent } from '../core/content.ts';
 import { assert, errorCode, isRecord, reference, snapshot } from '../core/values.ts';
 import { digest, json, object } from './data.ts';
@@ -43,9 +44,11 @@ function decode(record: StoredRecord): Queue {
       'NATIVE_INBOX_CORRUPT', 'Invalid input trigger.');
     assert(item.historySequence === undefined || Number.isSafeInteger(item.historySequence) && Number(item.historySequence) > 0,
       'NATIVE_INBOX_CORRUPT', 'Invalid original input history sequence.');
+    const displayName = normalizeSenderDisplayName(item.message.displayName);
     return { ...(item.historySequence === undefined ? {} : { historySequence: Number(item.historySequence) }),
       ...(item.trigger === undefined ? {} : { trigger: item.trigger as NativeInboxEntry['trigger'] }),
       message: { id: item.message.id, conversationId, userId: item.message.userId,
+      ...(displayName === undefined ? {} : { displayName }),
       receivedAt: Number(item.message.receivedAt), directed: item.message.directed, isSelf: item.message.isSelf,
       content: normalizeContent(item.message.content) }, admittedAt: Number(item.admittedAt), deadlineAt: Number(item.deadlineAt) };
   });
@@ -199,7 +202,8 @@ export function createNativeInbox(options: {
         phase: 'pending', entries: [], receipts: [], errorCode: null };
       const duplicate = queue.entries.find(item => item.message.id === entry.message.id);
       if (duplicate) {
-        assert(digest({ ...duplicate.message, receivedAt: 0 }) === digest({ ...entry.message, receivedAt: 0 }), 'NATIVE_INBOX_CONFLICT', 'Queued message identity changed.');
+        assert(digest({ ...duplicate.message, displayName: null, receivedAt: 0 })
+          === digest({ ...entry.message, displayName: null, receivedAt: 0 }), 'NATIVE_INBOX_CONFLICT', 'Queued message identity changed.');
         return 'duplicate' as const;
       }
       if (queue.receipts.some(item => item.id === entry.message.id)) return 'duplicate' as const;

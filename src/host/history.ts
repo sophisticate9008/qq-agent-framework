@@ -1,10 +1,15 @@
 import { normalizeContent } from '../core/content.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 import { FrameworkError, assert, isRecord, reference, snapshot } from '../core/values.ts';
 import type { MessageContent } from '../core/types.ts';
 import type { DurableStore } from './types.ts';
 import { digest, json, object } from './data.ts';
 
-export interface HistoryMessage { id: string; actor: string; content: readonly MessageContent[]; receivedAt: number }
+export interface HistoryMessage {
+  id: string; actor: string; content: readonly MessageContent[]; receivedAt: number;
+  /** Optional sender-controlled label, scoped to this history's conversation. */
+  displayName?: string;
+}
 export interface HistoryEntry extends HistoryMessage { sequence: number }
 interface Timeline { sequence: number; readThrough: number; droppedThrough: number; messages: HistoryEntry[] }
 const namespace = 'history';
@@ -19,7 +24,9 @@ function decode(value: unknown): Timeline {
   const messages = data.messages.map(message => {
     assert(isRecord(message) && reference(message.id) && reference(message.actor) && Number.isFinite(message.receivedAt)
       && Number.isSafeInteger(message.sequence), 'INVALID_STORED_DATA', 'Stored history message is invalid.');
+    const displayName = normalizeSenderDisplayName(message.displayName);
     return { id: message.id, actor: message.actor, receivedAt: Number(message.receivedAt),
+      ...(displayName === undefined ? {} : { displayName }),
       sequence: Number(message.sequence), content: normalizeContent(message.content) };
   });
   return { sequence: Number(data.sequence), readThrough: Number(data.readThrough), droppedThrough: Number(data.droppedThrough), messages };
@@ -48,7 +55,9 @@ export function createConversationHistory({ store, maxMessages = 100, maxBytes =
 
   return Object.freeze({
     append(conversationId: string, input: HistoryMessage) {
-      const message = { ...snapshot(input), content: normalizeContent(input.content) };
+      const { displayName: providedName, ...fields } = snapshot(input);
+      const displayName = normalizeSenderDisplayName(providedName);
+      const message = { ...fields, ...(displayName === undefined ? {} : { displayName }), content: normalizeContent(input.content) };
       assert(reference(message.id) && reference(message.actor) && Number.isFinite(message.receivedAt),
         'INVALID_HISTORY_MESSAGE', 'A valid history message is required.');
       const result = mutate(conversationId, timeline => {

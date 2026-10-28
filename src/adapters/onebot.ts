@@ -12,6 +12,7 @@ import type {
 import { normalizeContent } from '../core/content.ts'
 import { normalizeOutboundScope, personaKey } from '../core/scope.ts'
 import type { InboundMessage } from '../contracts/ports.ts'
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts'
 import { classifyOneBotResponse } from './onebot-response.ts'
 import { normalizeOneBotProtocolEvent, projectOneBotNoticeForChat } from './onebot-events.ts'
 
@@ -575,11 +576,15 @@ async function normalizeOneBotEvent(
   const eventTime = typeof event.time === 'number' && Number.isFinite(event.time) && event.time >= 0
     ? Math.trunc(event.time * 1000)
     : (options.now ?? Date.now)()
+  const sender = record(event.sender) && positiveIdentifier(event.sender.user_id) === userId ? event.sender : null
+  const displayName = (event.message_type === 'group' ? normalizeSenderDisplayName(sender?.card) : undefined)
+    ?? normalizeSenderDisplayName(sender?.nickname)
   return Object.freeze({
     message: Object.freeze({
       id: messageId,
       conversationId,
       userId,
+      ...(displayName === undefined ? {} : { displayName }),
       receivedAt: eventTime,
       content,
       directed: event.message_type === 'private' || normalized.mentioned.has(configuredSelfId),

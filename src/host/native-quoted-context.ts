@@ -6,6 +6,7 @@ import type { InboundMessage } from './types.ts';
 import { withDeadline } from './deadlines.ts';
 import type { NativeMediaDiagnostics } from '../contracts/native-media-diagnostics.ts';
 import { mediaObservationCode } from './native-media-diagnostics.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 /** Only an already received reply reference may request bounded context in the same verified QQ scope. */
 export function createNativeQuotedContext(options: {
@@ -48,7 +49,9 @@ export function createNativeQuotedContext(options: {
         const content = await normalizeOneBotContent(found.data.message, { messageId: id, conversationId: message.conversationId,
           registerIncomingAsset: options.register, signal });
         if (!content || content.length === 0) { observe(message.conversationId, id, 'rejected', 'QUOTED_CONTENT_UNSUPPORTED'); continue; }
+        const displayName = normalizeSenderDisplayName(found.data.displayName);
         const quoted: HistoryMessage = snapshot({ id, actor: found.data.userId === options.selfId ? 'assistant' : found.data.userId,
+          ...(displayName === undefined ? {} : { displayName }),
           content, receivedAt: 0 });
         if (cache.size >= 256) cache.delete(cache.keys().next().value!);
         cache.set(key, { message: quoted, until: now() + 30_000 });

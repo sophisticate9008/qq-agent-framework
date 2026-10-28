@@ -2,6 +2,7 @@ import { normalizeContent } from '../core/content.ts';
 import { FrameworkError, assert, identifier, isRecord, reference, snapshot } from '../core/values.ts';
 import type { FeatureDefinition, FeatureHandler, FeatureSetup, FrameworkEvent, MessageContent } from '../core/types.ts';
 import type { InboundMessage } from './types.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 export type FrozenInboundMessage = Readonly<Omit<InboundMessage, 'content'> & {
   content: readonly Readonly<MessageContent>[];
@@ -105,7 +106,9 @@ function normalizedMessage(input: InboundMessage): FrozenInboundMessage {
     && Number.isFinite(value.receivedAt) && typeof value.directed === 'boolean' && typeof value.isSelf === 'boolean',
   'INVALID_INBOUND', 'A normalized authenticated message is required for routing.');
   const content = normalizeContent(value.content);
+  const displayName = normalizeSenderDisplayName(value.displayName);
   return snapshot({ id: value.id, conversationId: value.conversationId, userId: value.userId,
+    ...(displayName === undefined ? {} : { displayName }),
     receivedAt: value.receivedAt, content, directed: value.directed, isSelf: value.isSelf });
 }
 
@@ -182,7 +185,8 @@ export function createRoutedMessageEvent(input: InboundMessage, routing: Message
   return snapshot({ id: message.id, type: 'message.received', conversationId: message.conversationId,
     userId: message.userId, data: { content: message.content,
       text: message.content.filter(block => block.type === 'text').map(block => block.text).join('\n'),
-      directed: message.directed, isSelf: message.isSelf, routing: trustedRouting } }) as unknown as FrameworkEvent;
+      directed: message.directed, isSelf: message.isSelf, routing: trustedRouting,
+      ...(message.displayName === undefined ? {} : { senderDisplayName: message.displayName }) } }) as unknown as FrameworkEvent;
 }
 
 export function routedMessageRelaysToAgent(event: FrameworkEvent): boolean {

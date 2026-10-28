@@ -8,6 +8,7 @@ import type { NativeToolContribution } from './native-framework-tools.ts';
 import type { NativeMessageSourceReader } from './native-message-sources.ts';
 import type { DurableStore } from './types.ts';
 import { readScopedProtocolMessage } from './native-protocol-message.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 interface QueryInput {
   kind: 'info' | 'members' | 'history' | 'message' | 'directories'; query: string; offset: number; limit: number;
@@ -94,7 +95,7 @@ export function createNativeConversationService(options: {
     const next = input.offset + selected.length;
     return { status: 'confirmed', items: json(selected), totalMatched: matches.length, nextOffset: next < matches.length ? next : null };
   }
-  async function normalizeMessages(items: readonly { readonly messageId: string; readonly userId: string; readonly conversationId: string;
+  async function normalizeMessages(items: readonly { readonly messageId: string; readonly userId: string; readonly conversationId: string; readonly displayName?: string;
     readonly time?: number | null; readonly message: readonly JsonObject[] }[], request: EffectRequest): Promise<JsonObject> {
     const messages: JsonValue[] = [];
     let remaining = 16000;
@@ -111,7 +112,9 @@ export function createNativeConversationService(options: {
         if (text.length < part.text.length) truncated = true;
         return { type: 'text' as const, text };
       }).filter(part => part.type !== 'text' || part.text.length > 0);
+      const displayName = normalizeSenderDisplayName(item.displayName);
       messages.push({ messageId: item.messageId, userId: item.userId, time: item.time ?? null,
+        ...(displayName === undefined ? {} : { displayName }),
         actor: item.userId === options.selfId ? 'assistant' : 'user', content: json(bounded), contentRead: false });
     }
     await guard(request);

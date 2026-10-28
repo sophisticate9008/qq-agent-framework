@@ -1,6 +1,7 @@
 import type { JsonObject } from '../core/types.ts';
 import { isRecord, snapshot } from '../core/values.ts';
 import { classifyOneBotResponse } from './onebot-response.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 export const ONEBOT_READ_ACTIONS = Object.freeze(['get_image', 'get_record', 'get_msg', 'get_forward_msg', 'get_file', 'get_group_file_url', 'get_private_file_url'] as const);
 export type OneBotReadAction = typeof ONEBOT_READ_ACTIONS[number];
@@ -16,6 +17,7 @@ export interface OneBotForwardNode {
 export interface OneBotMessageInfo {
   readonly messageId: string;
   readonly userId: string;
+  readonly displayName?: string;
   readonly conversationId: string;
   readonly message: readonly JsonObject[];
 }
@@ -109,7 +111,10 @@ function message(value: unknown, expectedId: string, conversationId: string): On
   if (messageId !== expectedId || userId === null || scope !== conversationId || content === null
     || value.user_id !== undefined && id(value.user_id) !== userId
     || value.message_type === 'private' && userId !== peerId) return null;
-  return snapshot({ messageId, userId, conversationId, message: content });
+  const displayName = (scope.startsWith('group:') ? normalizeSenderDisplayName(value.sender.card) : undefined)
+    ?? normalizeSenderDisplayName(value.sender.nickname);
+  return snapshot({ messageId, userId, conversationId, message: content,
+    ...(displayName === undefined ? {} : { displayName }) });
 }
 
 /** Trusted host I/O port. Callers must resolve an authorized scoped handle before using source pointers. */

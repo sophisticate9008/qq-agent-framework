@@ -194,6 +194,7 @@ export function createNativeInboundController(options: {
           if (!runtime.inbox || runtime.lifetime !== generation || generation!.signal.aborted) failure('NATIVE_CHAT_STOPPED')
           const historySequence = runtime.inbox.contains(message.conversationId, message.id) ? undefined
             : current.history.append(message.conversationId, { id: message.id, actor: message.userId,
+              ...(message.displayName === undefined ? {} : { displayName: message.displayName }),
               content, receivedAt: message.receivedAt })
           runtime.inbox.enqueue({ message: incoming, admittedAt, deadlineAt: admittedAt + configuration.execution.turnTimeoutMs,
             ...(historySequence === undefined ? {} : { historySequence }),

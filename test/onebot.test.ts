@@ -502,3 +502,31 @@ test('normalizer uses the configured self boundary and preserves self-sent priva
     isSelf: true,
   })
 })
+
+test('normalizer binds bounded group cards and nicknames to the authenticated sender', async () => {
+  const event = {
+    post_type: 'message', message_type: 'group', self_id: 1,
+    group_id: 456, user_id: 123, message_id: 6, message: 'hello',
+  }
+  const cases = [
+    { sender: { user_id: 123, card: ' 群名片 ', nickname: '昵称' }, expected: '群名片' },
+    { sender: { user_id: '123', card: ' ', nickname: '昵称' }, expected: '昵称' },
+    { sender: { user_id: 123, card: '坏\n名片', nickname: '昵称' }, expected: '昵称' },
+    { sender: { user_id: 999, card: '主人', nickname: '昵称' }, expected: undefined },
+    { sender: { card: '无账号', nickname: '昵称' }, expected: undefined },
+    { sender: { user_id: 123, card: '名'.repeat(127) + '😀尾', nickname: '昵称' }, expected: '名'.repeat(127) },
+  ]
+  for (const fixture of cases) {
+    const result = await normalizeOneBotMessage({ ...event, sender: fixture.sender }, { selfId: 1 })
+    assert(result)
+    assert.equal(result.userId, '123')
+    assert.equal(result.conversationId, 'group:456')
+    assert.equal(result.displayName, fixture.expected)
+    assert.equal(Object.hasOwn(result, 'displayName'), fixture.expected !== undefined)
+  }
+  const privateMessage = await normalizeOneBotMessage({ ...event, message_type: 'private',
+    sender: { user_id: 123, card: '其他群名片', nickname: '私聊昵称' } }, { selfId: 1 })
+  assert.equal(privateMessage?.displayName, '私聊昵称')
+  const legacy = await normalizeOneBotMessage(event, { selfId: 1 })
+  assert.equal(legacy?.displayName, undefined)
+})

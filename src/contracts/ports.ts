@@ -97,6 +97,8 @@ export interface InboundMessage {
   id: string;
   conversationId: string;
   userId: string;
+  /** Untrusted display text from this message's conversation; userId remains the identity. */
+  displayName?: string;
   receivedAt: number;
   content: readonly MessageContent[];
   directed: boolean;

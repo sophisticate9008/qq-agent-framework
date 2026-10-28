@@ -4,6 +4,7 @@ import type { FrameworkEvent, MessageContent } from '../core/types.ts';
 import type { HistoryMessage } from './history.ts';
 import type { InboundMessage } from './types.ts';
 import type { NativeMemoryContext } from '../contracts/native-memory.ts';
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 
 export type NativeParticipationReason = 'direct' | 'nickname' | 'reply' | 'continuation' | 'ambient';
 export interface NativeParticipationOptions {
@@ -104,6 +105,21 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
     return { id: part.messageId, available: entry !== undefined, actor: entry?.actor ?? null,
       text: full.slice(0, 300), truncated: full.length > 300 };
   });
+  // Names are scoped observations, never lookup keys or authorization facts. Include each relevant
+  // account once instead of repeating its display text on every history and quote item.
+  const displayNames = new Map<string, string>();
+  for (const entry of [...(options.quotedMessages ?? []), ...history]) {
+    const displayName = normalizeSenderDisplayName(entry.displayName);
+    if (displayName !== undefined && entry.actor !== 'assistant' && entry.actor !== 'system') displayNames.set(entry.actor, displayName);
+  }
+  const currentDisplayName = normalizeSenderDisplayName(event.data.senderDisplayName);
+  if (event.userId && currentDisplayName !== undefined) displayNames.set(event.userId, currentDisplayName);
+  const relevantActors = [...new Set([event.userId, ...recent.slice().reverse().map(item => item.actor),
+    ...quoted.map(item => item.actor),
+    ...history.filter(item => options.unsentReplyMessageIds?.includes(item.id)).slice(-4).map(item => item.actor),
+    ...(options.groupWake?.map(item => item.actor) ?? [])])]
+    .filter((actor): actor is string => typeof actor === 'string' && actor !== 'assistant' && actor !== 'system');
+  const participants = relevantActors.slice(0, 32).map(userId => ({ userId, displayName: displayNames.get(userId) ?? null }));
   const envelope = (currentTruncated: boolean) => JSON.stringify({ schema: 1, conversationId: event.conversationId, messageId: event.id,
     ...(options.sentWhileQueued?.length ? { replyTiming: {
       sentAfterCurrentMessage: options.sentWhileQueued.slice(-4).map(message => ({ id: message.id, text: contentText(message.content).slice(0, 200) })),
@@ -112,8 +128,9 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
     ...(options.unsentReplyMessageIds?.length ? { replyDelivery: { unsentFor: options.unsentReplyMessageIds,
       requests: history.filter(item => options.unsentReplyMessageIds?.includes(item.id)).slice(-4)
         .map(item => ({ id: item.id, actor: item.actor, text: contentText(item.content).slice(0, 400) })),
-      note: '这些旧消息的模型回复尚未发送，因为会话有新消息需要结合理解。先合并原请求与后续纠正，保留数量等未被修改的要求；其他人的顺嘴闲聊不是新的答复任务。不把此前模型输出当作用户已收到的答复；已执行的工具动作仍有效，不重复执行。' } } : {}),
+      note: '这些旧消息的模型回复尚未发送，因为会话有新消息需要结合理解。先合并原请求与后续纠正，保留数量等未被修改的要求；其他人的顺嘴闲聊不是新的答复任务。此前模型回复未送达，不能把其中新编的玩笑、称呼、约定或事实当成双方共同语境，也不能把后续消息当作对这些草稿的回应。重新依据真实用户消息与已确认发送的内容判断；已执行的其他工具动作仍以真实结果为准，不重复执行。' } } : {}),
     senderId: event.userId ?? null, senderIsConfiguredOwner: options.owner !== null && event.userId === options.owner,
+    participants, ...(relevantActors.length > participants.length ? { participantsLimited: true } : {}),
     participation, ...(groupParticipation ? { groupParticipation, groupWake: options.groupWake ?? [] } : {}),
     unread: options.unread ? { readThrough: options.unread.readThrough, through: options.unread.through,
       count: options.unread.ids.length, included: recent.filter(item => item.unread).length + (options.unread.ids.includes(event.id) ? 1 : 0),
@@ -124,7 +141,12 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
     const parts: MessageContent[] = [];
     const context = `会话事实：\n${envelope(length < text.length)}`;
     for (let offset = 0; offset < context.length; offset += 8_000) parts.push({ type: 'text', text: context.slice(offset, offset + 8_000) });
-    const current = `${event.conversationId.startsWith('group:') ? '本批最新消息（结合未读消息选择回应对象）' : '当前消息'}：\n${text.slice(0, length)}${length < text.length ? '\n[当前消息超出输入预算，部分内容未提供]' : ''}`;
+    const groupMessage = event.conversationId.startsWith('group:');
+    // Keep the current speaker beside their words as well as in the structured facts.
+    // A shared DSH user role does not imply every group message is from the same person.
+    const speaker = groupMessage ? `发言者：${JSON.stringify({ userId: event.userId ?? null,
+      displayName: event.userId ? displayNames.get(event.userId) ?? null : null })}\n` : '';
+    const current = `${groupMessage ? '本批最新消息（结合未读消息选择回应对象）' : '当前消息'}：\n${speaker}${text.slice(0, length)}${length < text.length ? '\n[当前消息超出输入预算，部分内容未提供]' : ''}`;
     for (let offset = 0; offset < current.length; offset += 8_000) parts.push({ type: 'text', text: current.slice(offset, offset + 8_000) });
     return parts;
   }

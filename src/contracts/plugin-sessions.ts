@@ -17,6 +17,7 @@ export type PluginSessionManagementRequest = ManagementTarget & (
   { readonly action: 'bind'; readonly sessionId: string; readonly qqConversationId?: string }
   | { readonly action: 'create'; readonly model?: PluginModelSelection }
   | { readonly action: 'unbind' }
+  | { readonly action: 'reconcile' }
 )
 const conversation = (value: unknown): value is string => typeof value === 'string' && /^(group|private):[1-9]\d{0,31}$/.test(value)
 const timestamp = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -29,8 +30,8 @@ export function parsePluginSessionManagementRequest(value: unknown): PluginSessi
   const base = { owner: value.owner, ...(value.name === undefined ? {} : { name: value.name }),
     ...(value.conversationId === undefined ? {} : { conversationId: value.conversationId }), revision: value.revision, confirm: true as const }
   const keys = ['action', 'owner', 'name', 'conversationId', 'revision', 'confirm']
-  if (value.action === 'unbind') {
-    return value.revision === null || Object.keys(value).some(key => !keys.includes(key)) ? null : { ...base, action: 'unbind' }
+  if (value.action === 'unbind' || value.action === 'reconcile') {
+    return value.revision === null || Object.keys(value).some(key => !keys.includes(key)) ? null : { ...base, action: value.action }
   }
   if (value.action === 'bind') {
     if (!pluginModelIdentifier(value.sessionId) || value.qqConversationId !== undefined && !conversation(value.qqConversationId)
@@ -48,12 +49,13 @@ export function parsePluginSessionBinding(value: unknown): PluginModelBinding | 
     || value.conversationId !== null && !conversation(value.conversationId) || !pluginModelIdentifier(value.sessionId)
     || value.source !== 'created' && value.source !== 'existing' || !['ready', 'creating', 'unknown'].includes(String(value.state))
     || !timestamp(value.createdAt) || !timestamp(value.updatedAt) || value.lastUsedAt !== null && !timestamp(value.lastUsedAt)
-    || !timestamp(value.revision) || value.revision < 1 || typeof value.busy !== 'boolean') return null
+    || !timestamp(value.revision) || value.revision < 1 || typeof value.busy !== 'boolean'
+    || value.contextRestartedFrom !== undefined && !pluginModelIdentifier(value.contextRestartedFrom)) return null
   try {
     return { owner: value.owner, name: value.name, conversationId: value.conversationId, sessionId: value.sessionId,
       source: value.source, state: value.state as PluginModelBinding['state'], model: value.model === null ? null : parsePluginModelSelection(value.model),
       createdAt: value.createdAt, updatedAt: value.updatedAt, lastUsedAt: value.lastUsedAt, revision: value.revision,
-      busy: value.busy }
+      busy: value.busy, ...(value.contextRestartedFrom === undefined ? {} : { contextRestartedFrom: value.contextRestartedFrom }) }
   } catch { return null }
 }
 export function parsePluginSessionSnapshot(value: unknown): PluginSessionSnapshot | null {

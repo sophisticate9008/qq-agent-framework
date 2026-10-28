@@ -54,6 +54,11 @@ export function createPluginSessionRoutes(options: {
           return { schema: 1, ok: true, action: input.action, owner: input.owner, name: input.name ?? 'default',
             conversationId: input.conversationId ?? null, historyPreserved: true }
         }
+        if (input.action === 'reconcile') {
+          const binding = parsePluginSessionBinding(await target.reconcile(input.owner, key, signal))
+          if (!binding) throw new AdminRequestError(503, 'plugin_sessions_invalid_state')
+          return { schema: 1, ok: true, action: input.action, binding, historyPreserved: true, executionRepeated: false }
+        }
         if (input.action === 'bind' && input.qqConversationId !== undefined) {
           if (!options.resolveQQ) throw new AdminRequestError(503, 'plugin_session_qq_lookup_unavailable')
           const source = await options.resolveQQ(input.qqConversationId, signal)

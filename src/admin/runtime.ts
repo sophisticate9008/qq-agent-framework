@@ -2,6 +2,7 @@ import { withDeadline } from '../host/deadlines.ts'
 import { readAdminActivity } from './simulation-activity.ts'
 import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
 import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
+import { createPluginSessionRoutes } from './plugin-sessions.ts'
 import { createSimulationSessionRoutes } from './simulation-sessions.ts'
 import { NATIVE_USAGE_SESSION_DELETE_PATH, parseNativeUsageSessionDeleteRequest } from '../contracts/native-usage-session.ts'
 import { isNativeEventCursor, isNativeEventFilter } from '../contracts/native-events.ts'
@@ -978,19 +979,27 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   routes.push(...createNativeInteractionRoutes(options.interactions ?? (() => undefined)))
   routes.push(...createNativeExtensionReloadRoutes(chatRuntime))
   routes.push(...createSimulationSessionRoutes(directory))
+  routes.push(...createPluginSessionRoutes({ getService: () => chatRuntime?.isClosed() ? undefined : chatRuntime?.pluginModelService(),
+    async resolveQQ(conversationId, signal) {
+      signal.throwIfAborted()
+      if (chatRuntime?.isClosed()) requestError(503, 'plugin_sessions_unavailable')
+      const binding = chatRuntime?.host()?.sessions.get(conversationId)
+      return binding?.sessionId ? { sessionId: binding.sessionId } : null
+    } }))
   routes.push(...createNativeToolInventoryRoutes(options.toolInventory ?? (chatRuntime ? signal => chatRuntime.toolInventory(signal) : undefined)))
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))
   if (chatRuntime !== undefined) {
     routes.push(...nativeChatControlRoutes(directory, chatRuntime, options.deploymentRuntime === undefined ? undefined : checkedNativeDeploymentRuntime(options.deploymentRuntime)))
-    routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state, unbind: target => chatRuntime.unbindSession(target) })
+    routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state,
+      unbind: target => chatRuntime.unbindSession(target), bind: (target, sessionId, signal) => chatRuntime.bindSession(target, sessionId, signal) })
       .map(route => ({ ...route, handle: (request: Parameters<AdminRoute['handle']>[0]) =>
         nativeControl(directory, async () => route.handle(request)) })))
     routes.push(...createNativeSessionMigrationRoutes({ runtime: chatRuntime,
       readRevisions: async () => (await readNativeChatConfiguration(directory)).revisions,
       control: operation => nativeControl(directory, operation) }))
-  } else routes.push({ method: 'POST', pathname: '/api/chat/sessions/reset',
-    handle() { requestError(503, 'runtime_not_connected') } })
+  } else routes.push(...['reset', 'bind'].map(action => ({ method: 'POST' as const, pathname: `/api/chat/sessions/${action}`,
+    handle() { requestError(503, 'runtime_not_connected') } })))
   const documents = new Set(['plans', 'personas', 'model', 'providers', 'access', 'adapters', 'authorization', 'deployment', 'execution', 'usage/pricing']
     .map(name => `/api/chat/${name}`))
   return Object.freeze(routes.map(route => Object.freeze(route.method === 'POST' && documents.has(route.pathname)

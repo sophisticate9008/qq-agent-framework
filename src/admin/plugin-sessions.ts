@@ -23,7 +23,8 @@ export function createPluginSessionRoutes(options: {
     handle({ query }) {
       if (query.size) throw new AdminRequestError(400, 'invalid_plugin_session_query')
       try {
-        const result = parsePluginSessionSnapshot({ schema: 1, bindings: service().listBindings() })
+        const current = service()
+        const result = parsePluginSessionSnapshot({ schema: 1, bindings: current.listBindings(), managedSessions: current.listManagedSessions() })
         if (!result) throw new AdminRequestError(503, 'plugin_sessions_invalid_state')
         return result
       } catch (error) {

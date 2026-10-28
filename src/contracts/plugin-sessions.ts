@@ -1,10 +1,11 @@
 import { isRecord } from './values.ts'
 import { parsePluginModelSelection, pluginModelIdentifier } from './plugin-model.ts'
-import type { PluginModelBinding, PluginModelDescription, PluginModelSelection } from './plugin-model.ts'
+import type { PluginModelBinding, PluginModelDescription, PluginModelManagedSession, PluginModelSelection } from './plugin-model.ts'
 
 export interface PluginSessionSnapshot {
   readonly schema: 1
   readonly bindings: readonly PluginModelBinding[]
+  readonly managedSessions?: readonly PluginModelManagedSession[]
 }
 interface ManagementTarget {
   readonly owner: string
@@ -58,6 +59,13 @@ export function parsePluginSessionBinding(value: unknown): PluginModelBinding | 
       busy: value.busy, ...(value.contextRestartedFrom === undefined ? {} : { contextRestartedFrom: value.contextRestartedFrom }) }
   } catch { return null }
 }
+export function parsePluginManagedSession(value: unknown): PluginModelManagedSession | null {
+  if (!isRecord(value) || !pluginModelIdentifier(value.owner) || !pluginModelIdentifier(value.name)
+    || !pluginModelIdentifier(value.sessionId) || value.conversationId !== null && !conversation(value.conversationId)
+    || value.mode !== 'persistent' && value.mode !== 'stateless' || !timestamp(value.createdAt)) return null
+  return { owner: value.owner, name: value.name, sessionId: value.sessionId, conversationId: value.conversationId,
+    mode: value.mode, createdAt: value.createdAt }
+}
 export function parsePluginSessionSnapshot(value: unknown): PluginSessionSnapshot | null {
   if (!isRecord(value) || value.schema !== 1 || !Array.isArray(value.bindings) || value.bindings.length > 4096) return null
   const bindings: PluginModelBinding[] = []
@@ -70,7 +78,17 @@ export function parsePluginSessionSnapshot(value: unknown): PluginSessionSnapsho
     keys.add(key)
     bindings.push(parsed)
   }
-  return { schema: 1, bindings }
+  if (value.managedSessions === undefined) return { schema: 1, bindings }
+  if (!Array.isArray(value.managedSessions) || value.managedSessions.length > 4096) return null
+  const managedSessions: PluginModelManagedSession[] = []
+  const sessions = new Set<string>()
+  for (const row of value.managedSessions) {
+    const parsed = parsePluginManagedSession(row)
+    if (!parsed || sessions.has(parsed.sessionId)) return null
+    sessions.add(parsed.sessionId)
+    managedSessions.push(parsed)
+  }
+  return { schema: 1, bindings, managedSessions }
 }
 export function parsePluginSessionModels(value: unknown): readonly PluginModelDescription[] | null {
   if (!isRecord(value) || value.schema !== 1 || !Array.isArray(value.models) || value.models.length > 4096) return null

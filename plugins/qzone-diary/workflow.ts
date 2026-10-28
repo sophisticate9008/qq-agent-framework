@@ -127,7 +127,7 @@ export function createQzoneDiary(options: DiaryOptions) {
           current.throwIfAborted()
           if (!config().enabled || now() >= slot.until) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_CLOSED'; save(day); return }
           slot.attempts = attempt; slot.state = 'generating'; save(day); observe('generating', date, index, attempt)
-          const image = await options.images.generate({ idempotencyKey: `${date}:${index}:${attempt}`, subject: 'self',
+          const image = await options.images.generate({ idempotencyKey: `qzone-diary:${date}:${index}:${attempt}`, subject: 'self',
             prompt: slot.prompt + (correction ? `\n修正上一版的具体问题：${correction}` : ''), signal: current })
           const artifact = await options.media.save(`${date}-${index}-${attempt}`, image)
           slot.artifactId = artifact.id; slot.protocolImage = artifact.protocolImage; slot.state = 'reviewing'; save(day); observe('reviewing', date, index, attempt)

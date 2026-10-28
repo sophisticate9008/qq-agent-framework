@@ -1,3 +1,4 @@
+import { parseAccountScope } from '../contracts/account-scope.ts';
 import type { NativeInboxSummary } from '../contracts/native-inbox.ts';
 import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 import { normalizeContent } from '../core/content.ts';
@@ -44,10 +45,13 @@ function decode(record: StoredRecord): Queue {
       'NATIVE_INBOX_CORRUPT', 'Invalid input trigger.');
     assert(item.historySequence === undefined || Number.isSafeInteger(item.historySequence) && Number(item.historySequence) > 0,
       'NATIVE_INBOX_CORRUPT', 'Invalid original input history sequence.');
+    const accountScope = item.message.accountScope === undefined ? undefined : parseAccountScope(item.message.accountScope);
+    assert(accountScope !== null, 'NATIVE_INBOX_CORRUPT', 'Invalid queued account identity.');
     const displayName = normalizeSenderDisplayName(item.message.displayName);
     return { ...(item.historySequence === undefined ? {} : { historySequence: Number(item.historySequence) }),
       ...(item.trigger === undefined ? {} : { trigger: item.trigger as NativeInboxEntry['trigger'] }),
       message: { id: item.message.id, conversationId, userId: item.message.userId,
+      ...(accountScope === undefined ? {} : { accountScope }),
       ...(displayName === undefined ? {} : { displayName }),
       receivedAt: Number(item.message.receivedAt), directed: item.message.directed, isSelf: item.message.isSelf,
       content: normalizeContent(item.message.content) }, admittedAt: Number(item.admittedAt), deadlineAt: Number(item.deadlineAt) };

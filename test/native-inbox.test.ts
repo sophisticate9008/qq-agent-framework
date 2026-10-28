@@ -235,3 +235,36 @@ test('queued history boundaries survive persistence and reject invalid original 
     assert.equal(delivered[0]?.[0]?.historySequence, 7);
   } finally { await inbox.stop(); store.close(); }
 });
+
+test('queued account identity survives persistence and recovery and cannot change on duplicate delivery', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  const accountScope = { protocolId: 'onebot', accountId: '999' };
+  const original = { ...entry('account-message'), message: { ...entry('account-message').message, accountScope } };
+  const first = createNativeInbox({ store, clock: () => 20, readiness: () => 'busy',
+    async deliver() { assert.fail('Busy input must stay queued'); } });
+  first.enqueue(original);
+  assert.equal(first.enqueue(original), 'duplicate');
+  assert.throws(() => first.enqueue({ ...original, message: { ...original.message,
+    accountScope: { protocolId: 'onebot', accountId: '1000' } } }), { code: 'NATIVE_INBOX_CONFLICT' });
+  await first.stop();
+  let delivered = false;
+  const restored = createNativeInbox({ store, clock: () => 20, readiness: () => 'ready',
+    async deliver(entries) { assert.deepEqual(entries[0]?.message.accountScope, accountScope); delivered = true; return { status: 'accepted' }; } });
+  try { restored.recover(); await restored.tick(); assert.equal(delivered, true); }
+  finally { await restored.stop(); store.close(); }
+});
+
+test('a corrupt queued account identity is rejected before dispatch', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  const inbox = createNativeInbox({ store, clock: () => 20, readiness: () => 'busy',
+    async deliver() { assert.fail('Corrupt identity must not dispatch'); } });
+  try {
+    inbox.enqueue(entry('corrupt-account'));
+    const row = store.list('native-chat.inbox')[0]!;
+    assert(row);
+    const data = structuredClone(row.value) as { entries: { message: Record<string, unknown> }[] };
+    data.entries[0]!.message.accountScope = { protocolId: 'onebot', accountId: '' };
+    store.write(row.namespace, row.key, data);
+    assert.throws(() => inbox.list(), { code: 'NATIVE_INBOX_CORRUPT' });
+  } finally { await inbox.stop(); store.close(); }
+});

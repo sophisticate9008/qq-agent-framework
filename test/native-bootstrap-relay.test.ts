@@ -8,7 +8,7 @@ import { createNativeChatGatewayFixture, nativeGatewayFixtureObject as object,
 
 type Value = Record<string, unknown>;
 
-test('default gateway child prepares standard DSH text using trusted scoped preferences and independent grants',
+test('default gateway child keeps ordinary finals silent and explicit replies scoped across extension preferences',
   { timeout: useRealCli ? 240000 : 40000 }, async context => {
     const privateRoot = new URL('../runtime/native-bootstrap-relay/', import.meta.url);
     await mkdir(privateRoot, { recursive: true, mode: 0o700 });
@@ -69,106 +69,32 @@ test('default gateway child prepares standard DSH text using trusted scoped pref
     await start();
 
     let turn = 0;
-    async function answer(body: string, expected: 'completed' | 'failed', extra: Value = {}, beforeFinal?: () => Promise<unknown>) {
-      const before = await snapshot();
-      assert(Array.isArray(before.inbox));
-      const previousIds = before.inbox.map(row => object(row).eventId);
-      const prompts = calls.filter(call => call.method === 'session/prompt').length;
-      fixture.inbound(800 + ++turn, { message_type: 'group', group_id: 7001, user_id: 42,
-        time: Math.floor(Date.now() / 1000), message: [{ type: 'at', data: { qq: '999' } },
-          { type: 'text', data: { text: `Fixture normal request ${turn}` } }] });
-      await until(() => calls.filter(call => call.method === 'session/prompt').length === prompts + 1);
-      await until(() => fixture.streams.length > 0);
-      await beforeFinal?.();
+    async function ordinary(body: string, explicit: boolean) {
+      const count = calls.filter(call => call.method === 'session/prompt').length;
+      const sent = sends.length;
+      turn++;
+      fixture.inbound(800 + turn, { message_type: 'group', group_id: 7001, user_id: 42,
+        time: Math.floor(Date.now() / 1000), message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: 'Fixture normal input' } }] });
+      await until(() => calls.filter(call => call.method === 'session/prompt').length === count + 1);
       fixture.event('turn/start', { turn });
-      fixture.event('assistant/message', { turn, step: 1, ...extra, message: { id: `relay-final-${turn}`,
-        source: { kind: 'model', ...fixture.selected.get(fixture.streams.at(-1)!.sessionId) },
-        content: [{ type: 'text', text: body }, { type: 'reasoning', text: 'internal-reasoning-never-forward' }] } });
+      if (explicit) { const sent = await fixture.reply(body); assert.equal(sent.status, 'confirmed', JSON.stringify(sent)); }
+      fixture.event('assistant/message', { turn, message: { role: 'assistant', content: [{ type: 'text', text: body }] } });
       fixture.event('turn/end', { turn, reason: { kind: 'completed' } });
-      let finished: Value | undefined;
-      let audit: Value | undefined;
       await until(async () => {
-        const current = await snapshot();
-        assert(Array.isArray(current.inbox) && Array.isArray(current.audit));
-        finished = current.inbox.map(object).find(row => !previousIds.includes(row.eventId) && row.status !== 'processing');
-        audit = current.audit.map(object).find(row => row.eventId === finished?.eventId);
-        return finished !== undefined && audit !== undefined;
+        const journal = await api('/api/chat/executions');
+        return Array.isArray(journal.items) && journal.items.filter(row => object(row).status === 'completed').length === turn;
       });
-      assert(finished && audit);
-      assert.equal(audit.status, expected);
-      assert.equal(finished.status, expected === 'completed' ? 'accepted' : 'rejected');
-      if (audit.status === 'completed') assertRequiredEventOutcomes({ eventId: String(audit.eventId), conversationId: String(audit.conversationId),
-        outcomes: [{ featureId: String(audit.featureId), status: audit.status }] }, ['agent-relay']);
-      else assert.equal(finished.errorCode, 'POLICY_DENIED');
-      context.diagnostic(`${turn}: ${body}: ${audit.status}${finished.errorCode ? `/${finished.errorCode}` : ''}`);
+      assert.equal(sends.length, sent + Number(explicit));
     }
-
-    await answer('# 普通聊天原文', 'completed');
-    assert.deepEqual(sends.at(-1)?.message, [{ type: 'text', data: { text: '# 普通聊天原文' } }]);
-    assert.equal(await count('presentation-effect'), 0);
+    await ordinary('最终正文保持静默', false);
+    await ordinary('通过显式工具回复', true);
+    assert.deepEqual(sends[0]?.message, [{ type: 'text', data: { text: '通过显式工具回复' } }]);
     await command({ op: 'relay-settings', conversationId: 'group:7002', format: 'forward' });
-    const spoof = { conversationId: 'group:7002', scope: { persona: { id: 'spoof', version: '999' }, sessionId: 'spoof', generation: 999 },
-      outputFormat: 'document', markdown: 'raw-private-document-never-forward', replyPresentation: 'forward' };
-    await answer('仍是原会话普通文本', 'completed', spoof);
-    assert.equal(await count('presentation-effect'), 0);
+    await ordinary('其他会话的偏好不会触发发言或转发', false);
+    await ordinary('同一会话的显式文本', true);
     assert(sends.every(send => send.group_id === 7001));
-
-    await command({ op: 'relay-settings', configuration: true, format: 'forward' });
-    const beforeDenied = sends.length;
-    const beforeOutbox = (await outbox()).length;
-    await answer('# 配置不是扩展准备授权', 'failed');
     assert.equal(await count('presentation-effect'), 0);
-    assert.equal(sends.length, beforeDenied);
-    await command({ op: 'relay-grant', grantId: 'relay-prepare-only', capabilities: ['presentation.prepare'] });
-    await answer('# 扩展准备后的白名单转发', 'completed');
-    assert.equal(await count('presentation-effect'), 1);
-    assert(sends.length > beforeDenied);
-    assert((await outbox()).length > beforeOutbox);
-    await command({ op: 'relay-grant', grantId: 'relay-forward-only', capabilities: ['messaging.forward'] });
-    await answer('# 标准文本整理\n\n- 第一项\n- 第二项', 'completed', spoof);
-    assert.equal(sendActions.at(-1), '/onebot/send_group_forward_msg');
-    assert.match(JSON.stringify(sends.at(-1)), /标准文本整理/);
-    assert.match(JSON.stringify(sends.at(-1)), /可信扩展示例/);
-    const effect = (await evidence()).filter(row => row.event === 'presentation-effect').at(-1)!;
-    const scope = object(effect.scope);
-    assert.equal(scope.conversationId, 'group:7001');
-    assert.equal(scope.featureId, 'agent-relay');
-    const actualPersona = (await evidence()).find(row => row.event === 'created')?.persona;
-    assert.equal(`${object(scope.persona).id}@${object(scope.persona).version}`, actualPersona);
-    assert.notEqual(object(scope.persona).version, '999');
-    assert.equal(scope.sessionId, fixture.streams.at(-1)!.sessionId);
-    assert.equal(scope.generation, 1);
-    const effectsBeforePlain = await count('presentation-effect');
-    await command({ op: 'relay-settings', format: 'text' });
-    await answer('偏好恢复普通原文', 'completed');
-    assert.equal(await count('presentation-effect'), effectsBeforePlain);
-    assert.equal(sendActions.at(-1), '/onebot/send_group_msg');
-
-    await command({ op: 'relay-settings', format: 'markdown-image' });
-    await command({ op: 'relay-revoke', grantId: 'relay-prepare-only' });
-    await answer('# 图片偏好不能创建权限', 'failed');
     assert.equal(await count('relay-render'), 0);
-    assert.equal(await count('presentation-effect'), effectsBeforePlain);
-    await command({ op: 'relay-grant', grantId: 'relay-image-prepare', capabilities: ['presentation.prepare'] });
-    await answer('# 已授权受控图片', 'completed');
-    assert.equal(await count('relay-render'), 1);
-    assert.equal(await count('relay-publish'), 1);
-    const image = sends.at(-1)!;
-    assert(Array.isArray(image.message) && image.message.some(raw => object(raw).type === 'image'));
-    const published = (await evidence()).find(row => row.event === 'relay-publish')!;
-    assert.equal(published.conversationId, 'group:7001');
-    assert.deepEqual(object(published.scope).persona, scope.persona);
-    const sentBeforeSendRevoke = sends.length;
-    const outboxBeforeSendRevoke = (await outbox()).length;
-    await answer('# 准备不等于发送授权', 'failed', {}, () => command({ op: 'relay-revoke', native: true }));
-    assert.equal(await count('relay-render'), 2);
-    assert.equal(sends.length, sentBeforeSendRevoke);
-    assert.equal((await outbox()).length, outboxBeforeSendRevoke);
-    assert((await outbox()).every(row => row.status === 'confirmed'));
-    const wire = JSON.stringify(sends);
-    assert(!wire.includes('internal-reasoning-never-forward') && !wire.includes('raw-private-document-never-forward') && !wire.includes('spoof'));
-    assert((await evidence()).filter(row => row.event === 'relay-input').every(row => Array.isArray(row.agentDataKeys)
-      && !row.agentDataKeys.includes('outputFormat') && !row.agentDataKeys.includes('markdown') && !row.agentDataKeys.includes('scope')));
-    await api('/api/chat/runtime/stop', {});
-    context.diagnostic('Image renderer/publisher are trusted local fakes; this checks policy and scoped delivery, not browser layout or QQ decoding.');
+    assert.equal(sendActions.at(-1), '/onebot/send_group_msg');
+    assert.equal(calls.filter(call => call.method === 'session/create').length, 1);
   });

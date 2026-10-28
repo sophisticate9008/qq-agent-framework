@@ -7,6 +7,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { parse, stringify } from 'yaml'
+import { createNativeDshDeploymentRuntime } from '../../src/host/native-dsh-deployment.ts'
+import { createNativeCapabilityApprovalResolver } from '../../src/admin/native-capabilities.ts'
 import { startGatewayAdmin } from '../../src/admin/gateway.ts'
 import { createDshToolScopeReader } from '../../src/adapters/dsh-tool-scope.ts'
 import { createDshClaimPluginFixture } from './dsh-claim-plugin.ts'
@@ -109,7 +111,7 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
         response.writeHead(302, { location: './api/remote.mux', 'set-cookie': 'capability_fixture=owner; HttpOnly' }).end()
         return
       }
-      assert(url.pathname.startsWith('/dsh/api/'))
+      if (!url.pathname.startsWith('/dsh/api/')) { response.writeHead(404).end(); return }
       assert.equal(request.headers.cookie, 'capability_fixture=owner')
       let body = ''
       for await (const chunk of request) body += String(chunk)
@@ -253,7 +255,11 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
   await writeFile(join(directory, 'gateway.token'), 'synthetic-gateway-token-0123456789', { mode: 0o600 })
   await writeFile(gatewayConfiguration, JSON.stringify({ port: 0, upstreamEndpoint: `${base}/onebot`,
     tokenFile: './gateway.token', storeFilename: './unused-egress.sqlite', allowedConversations: [], persona: { id: 'egress', version: '1' } }), { mode: 0o600 })
-  gateway = await startGatewayAdmin({ host: '127.0.0.1', port: 0, tokenFile, gatewayConfiguration })
+  gateway = await startGatewayAdmin({ host: '127.0.0.1', port: 0, tokenFile, gatewayConfiguration }, {
+      deploymentRuntime: createNativeDshDeploymentRuntime({ sessionDirectory: join(directory, 'runtime'),
+        resolveCapabilityApproval: createNativeCapabilityApprovalResolver(join(directory, 'runtime')),
+        async reloadSessions() { /* The local fake reads the current preset document on every RPC. */ } })
+    })
   let origin = `http://127.0.0.1:${gateway.address.port}`
   let cookie = ''
   async function api(path: string, body?: Value, expected = 200, authenticated = true) {
@@ -277,7 +283,11 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
   }
   async function reopen() {
     await gateway?.close()
-    gateway = await startGatewayAdmin({ host: '127.0.0.1', port: 0, tokenFile, gatewayConfiguration })
+    gateway = await startGatewayAdmin({ host: '127.0.0.1', port: 0, tokenFile, gatewayConfiguration }, {
+      deploymentRuntime: createNativeDshDeploymentRuntime({ sessionDirectory: join(directory, 'runtime'),
+        resolveCapabilityApproval: createNativeCapabilityApprovalResolver(join(directory, 'runtime')),
+        async reloadSessions() { /* The local fake reads the current preset document on every RPC. */ } })
+    })
     origin = `http://127.0.0.1:${gateway.address.port}`
     cookie = ''
     await login()
@@ -327,7 +337,10 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
     assert.equal(prepared.state, 'prepared')
     return api('/api/chat/deployment/apply', { revisions: (await status()).revisions, targetRevision: prepared.targetRevision })
   }
-  const start = async (expected = 200) => api('/api/chat/runtime/start', { revisions: (await status()).revisions }, expected)
+  const start = async (expected = 200) => api('/api/chat/runtime/start', { revisions: (await status()).revisions }, expected).catch(async error => {
+    const current = await status()
+    throw new Error(JSON.stringify({ state: current.state, lastError: current.lastError, missingReasons: current.missingReasons }), { cause: error })
+  })
   function inbound(messageId: number, conversation: 'private' | 'group' = 'private') {
     assert(onebots.size)
     const message = [...(conversation === 'group' ? [{ type: 'at', data: { qq: '999' } }] : []),
@@ -343,6 +356,8 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
   }
   async function reply(content: string, stream = streams.at(-1)) {
     assert(stream)
+    const requestId = String(calls.findLast(call => call.method === 'session/prompt' && call.input.sessionId === stream.sessionId)!.input.requestId)
+    await capabilityUntil(() => plugin.ready(stream.sessionId, 'qaf_reply', requestId), 'Reply requires its acknowledged prompt and installed tool lease')
     const ticket = plugin.queue(stream.sessionId, 'qaf_reply', { content })
     await capabilityUntil(() => plugin.result(ticket) !== undefined, 'Explicit reply tool did not settle')
     return plugin.result(ticket)!

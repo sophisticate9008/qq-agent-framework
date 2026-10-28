@@ -29,6 +29,10 @@ export function createDshClaimPluginFixture(readJournal?: () => ReturnType<typeo
         generation: lease.generation, ...claim, name, input, expiresAt: Date.now() + 30_000 } })
       return ticket
     },
+    ready(sessionId: string, name: string, requestId?: string) {
+      const claim = claims.get(sessionId)
+      return Boolean(leases.get(sessionId)?.names.includes(name) && claim && (requestId === undefined || claim.requestId === requestId))
+    },
     result(ticket: string) { return results.get(ticket) },
     invoke(method: string, request: Record<string, unknown>): unknown {
       const currentJournal = readJournal?.() ?? journal

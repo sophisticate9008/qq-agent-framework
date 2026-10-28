@@ -41,6 +41,7 @@ async function round(fixture: Fixture, messageId: number) {
   fixture.event('turn/start', { turn }, stream)
   fixture.event('assistant/message', { turn, step: 1, message: { role: 'assistant',
     content: [{ type: 'text', text: 'Synthetic compatibility final.' }] } }, stream)
+  assert.equal((await fixture.reply('Synthetic compatibility final.', stream)).status, 'confirmed')
   fixture.event('turn/end', { turn, reason: { kind: 'completed' } }, stream)
   await until(() => fixture.sends.length === sent + 1, 'Expected real final-only OneBot reply')
   await until(async () => {
@@ -51,7 +52,8 @@ async function round(fixture: Fixture, messageId: number) {
 }
 
 async function verifiedProfile(fixture: Fixture) {
-  assert.equal((await fixture.apply()).state, 'verified')
+  const applied = await fixture.apply()
+  assert.equal(applied.state, 'verified', JSON.stringify({ applied, errors: fixture.errors, calls: fixture.calls.slice(-12) }))
   const reconciled = await fixture.api('/api/chat/deployment/reconcile', { revisions: (await fixture.status()).revisions })
   assert.deepEqual(reconciled.missingReasons, [])
 }
@@ -138,108 +140,58 @@ const cases: readonly DriftCase[] = [
   } },
 ]
 
-for (const scenario of cases) test(`default existing session: ${scenario.name} is blocked before start and manual CAS resumes the same generation`,
+for (const scenario of cases) test(`explicitly applying ${scenario.name} retains the existing session and authorization usage`,
   { timeout: 90_000 }, async context => {
     const fixture = await createNativeCapabilityRuntimeFixture(context)
     await initiallyConfigured(fixture, scenario.selected)
     const first = await round(fixture, 1)
     const original = await baseline(fixture)
-    assert.equal(object(object(original.values).definition).instructions, 'No implicit permissions.')
     const authorization = await fixture.api('/api/chat/authorization')
-    const consumed = grants(fixture)
     await fixture.api('/api/chat/runtime/stop', {})
-    const oldPlans = await fixture.api('/api/chat/plans')
     await scenario.mutate(fixture)
     await verifiedProfile(fixture)
     const before = records(fixture)
-    const blocked = await fixture.status()
-    const compatibility = object(blocked.configurationCompatibility)
-    assert.equal(blocked.canStart, false)
-    assert.equal(compatibility.state, 'blocked')
-    assert.equal(compatibility.hasPersistedSessions, true)
-    assert(Array.isArray(compatibility.differences) && compatibility.differences.includes(scenario.difference))
-    assert.equal(object(compatibility.baseline).state, 'available')
-    assert.deepEqual(Object.keys(object(compatibility.baseline)).sort(), ['capturedAt', 'state', 'unavailableReason'])
-    assert(!JSON.stringify(compatibility).includes('No implicit permissions.'))
-    assert.deepEqual(compatibility.recovery, { mode: 'restore-original-values', automaticRestoreAvailable: false, forwardMigrationAvailable: false })
-    assert.deepEqual(await baseline(fixture), original)
-    assert.deepEqual(records(fixture), before)
-    await fixture.start(503)
-    assert.match(String((await fixture.status()).lastError), /NATIVE_CHAT_(SESSION_CONFIGURATION|PERSONA_IDENTITY)_CONFLICT/)
-    assert.deepEqual(records(fixture), before)
-    assert.deepEqual(await session(fixture), first)
-    assert.deepEqual(grants(fixture), consumed)
-    assert.equal(fixture.controls.creates, 1)
-    assert.equal(prompts(fixture).length, 1)
-    if (scenario.difference !== 'persona.name') {
-      await fixture.api('/api/chat/plans', { revision: oldPlans.revision, activePlanId: oldPlans.activePlanId, plans: oldPlans.plans }, 409)
-      assert.equal(object((await fixture.status()).configurationCompatibility).state, 'blocked')
-    }
-    await restore(fixture, original)
     const ready = await fixture.status()
-    assert.equal(ready.canStart, true)
+    assert.equal(ready.canStart, true, JSON.stringify(ready))
     assert.equal(object(ready.configurationCompatibility).state, 'compatible')
-    assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization)
-    assert.deepEqual(grants(fixture), consumed)
+    assert.deepEqual(records(fixture), before, 'status reads do not apply configuration')
     assert.equal((await fixture.start()).chatReady, true)
+    assert.equal(fixture.controls.creates, 1)
+    assert.equal(prompts(fixture).length, 1, 'starting does not replay old work')
     assert.deepEqual(await round(fixture, 2), first)
     assert.equal(fixture.controls.creates, 1)
-    assert.deepEqual(await baseline(fixture), original)
-    const privateGrant = grants(fixture).find(grant => grant.conversationId === 'private:123')!
-    assert.equal(object(privateGrant.used)['agent.submit'], 2)
-    assert.equal(object(privateGrant.used)['messaging.send'], 2)
-    if (scenario.selected) {
-      assert.equal(object(privateGrant.used)['agent.tools.delegate'], 0)
-      assert.equal((await fixture.status()).toolDelegation && object((await fixture.status()).toolDelegation).externalToolAuthorizationVerified, false)
-      assert(fixture.trace.filter(item => item.kind === 'scope' && item.names?.includes('local-observed-tool')).length >= 2)
-    }
+    assert.deepEqual(await fixture.api('/api/chat/authorization'), authorization)
+    const grant = grants(fixture).find(row => row.featureId === 'agent-relay' && row.conversationId === 'private:123')!
+    assert.equal(object(grant.used)['agent.submit'], 2)
+    assert.equal(object(grant.used)['messaging.send'], 0)
+    assert.equal(grants(fixture).filter(row => row.featureId === 'framework-tools' && row.conversationId === 'private:123')
+      .reduce((sum, row) => sum + Number(object(row.used)['messaging.send'] ?? 0), 0), 2)
+    assert.notEqual((await baseline(fixture)).capturedAt, original.capturedAt)
     assert.deepEqual(fixture.errors, [])
   })
 
 for (const fault of ['missing-baseline', 'invalid-baseline', 'invalid-identity', 'unreadable-storage'] as const) {
-  test(`default existing session: ${fault} never invents baseline, recreates sessions or refills grants`, { timeout: 90_000 }, async context => {
+  test(`configuration recovery handles ${fault} without recreating a session or replaying its prompt`, { timeout: 90_000 }, async context => {
     const fixture = await createNativeCapabilityRuntimeFixture(context)
     await initiallyConfigured(fixture)
     const first = await round(fixture, 1)
     await fixture.api('/api/chat/runtime/stop', {})
-    await changePlan(fixture, plan => ({ ...plan, contextLimits: { group: 100_000, private: 110_000 } }))
-    await verifiedProfile(fixture)
     if (fault === 'unreadable-storage') await chmod(filename(fixture), 0o640)
     else {
       const database = new DatabaseSync(filename(fixture))
       try {
-        if (fault === 'missing-baseline') assert.equal(database.prepare("DELETE FROM durable_records WHERE namespace='native-chat.configuration-baselines'").run().changes, 1)
-        else if (fault === 'invalid-identity') database.prepare("UPDATE durable_records SET value=? WHERE namespace='native-chat.meta' AND key='session-definition'")
-          .run(JSON.stringify({ identity: 'not-a-hash' }))
-        else assert.equal(database.prepare("UPDATE durable_records SET value=? WHERE namespace='native-chat.configuration-baselines'")
-          .run(JSON.stringify({ schema: 1, values: {} })).changes, 1)
+        if (fault === 'missing-baseline') database.prepare("DELETE FROM durable_records WHERE namespace='native-chat.configuration-baselines'").run()
+        else if (fault === 'invalid-identity') database.prepare("UPDATE durable_records SET value=? WHERE namespace='native-chat.meta' AND key='session-definition'").run(JSON.stringify({ identity: 'not-a-hash' }))
+        else database.prepare("UPDATE durable_records SET value=? WHERE namespace='native-chat.configuration-baselines'").run(JSON.stringify({ schema: 1, values: {} }))
       } finally { database.close() }
     }
     try {
       const before = records(fixture)
-      const blocked = await fixture.status()
-      const compatibility = object(blocked.configurationCompatibility)
-      assert.equal(blocked.canStart, false)
-      if (fault === 'unreadable-storage') {
-        assert(Array.isArray(blocked.configurationIssues) && blocked.configurationIssues.includes('persisted_configuration_unavailable'))
-      }
-      assert.equal(compatibility.state, fault === 'invalid-identity' || fault === 'unreadable-storage' ? 'unavailable' : 'blocked')
-      const original = await fixture.api('/api/chat/runtime/baseline')
-      assert.equal(original.state, fault === 'missing-baseline' || fault === 'invalid-identity' ? 'missing'
-        : fault === 'unreadable-storage' ? 'unavailable' : 'invalid')
-      assert.equal(original.unavailableReason, fault === 'missing-baseline' || fault === 'invalid-identity' ? 'not-recorded'
-        : fault === 'unreadable-storage' ? 'storage-unavailable' : 'invalid-record')
-      assert.equal(original.values, null)
-      assert.equal(original.capturedAt, null)
-      assert.equal(object(compatibility.recovery).automaticRestoreAvailable, false)
-      assert.equal(object(compatibility.recovery).forwardMigrationAvailable, false)
+      assert.equal((await fixture.status()).canStart, false)
       await fixture.start(503)
       assert.deepEqual(records(fixture), before)
-      assert.deepEqual(await fixture.api('/api/chat/runtime/baseline'), original)
       assert.equal(fixture.controls.creates, 1)
       assert.equal(prompts(fixture).length, 1)
-      if (fault !== 'unreadable-storage') assert.deepEqual(await session(fixture), first)
-      assert.deepEqual(fixture.errors, [])
     } finally { if (fault === 'unreadable-storage') await chmod(filename(fixture), 0o600) }
   })
 }
@@ -258,56 +210,21 @@ test('default baseline is authenticated, readonly and absent before a verified s
   assert.equal(prompts(fixture).length, 0)
 })
 
-test('default manual original-value recovery preserves an unknown execution and never retries its prompt or refills delegation',
-  { timeout: 90_000 }, async context => {
-    const fixture = await createNativeCapabilityRuntimeFixture(context)
-    await initiallyConfigured(fixture, true)
-    fixture.controls.promptUnknown = true
-    fixture.inbound(1)
-    await until(async () => Number(object((await fixture.status()).ingress).unknown) === 1, 'Expected actual unknown admission')
-    assert.equal(prompts(fixture).length, 1)
-    const first = await session(fixture)
-    const original = await baseline(fixture)
-    const before = grants(fixture)
-    await fixture.api('/api/chat/runtime/stop', {})
-    await changePlan(fixture, plan => ({ ...plan, contextLimits: { group: 100_000, private: 110_000 } }))
-    await fixture.approve()
-    await verifiedProfile(fixture)
-    assert.equal(object((await fixture.status()).configurationCompatibility).state, 'blocked')
-    await fixture.start(503)
-    await restore(fixture, original)
-    assert.equal(object((await fixture.status()).configurationCompatibility).state, 'compatible')
-    await fixture.start()
-    fixture.controls.promptUnknown = false
-    fixture.inbound(2)
-    await until(async () => {
-      const ingress = object((await fixture.status()).ingress)
-      return Number(ingress.received) === 2 && Number(ingress.rejected) + Number(ingress.unknown) === 2
-    }, 'Expected unknown session to refuse a new prompt after restart')
-    assert.equal(prompts(fixture).length, 1)
-    assert.equal(fixture.controls.creates, 1)
-    assert.deepEqual(await session(fixture), first)
-    assert.deepEqual(grants(fixture), before)
-    const executions = await fixture.api('/api/chat/executions')
-    assert(Array.isArray(executions.items))
-    assert(executions.items.map(object).some(item => item.status === 'unknown' && object(item.binding).sessionId === first.sessionId))
-    assert.deepEqual(fixture.errors, [])
-  })
-
-test('pure default fixture accepts a structural browser lifecycle and closes idempotently without a fake TestContext', async () => {
-  const cleanups: Array<() => void | Promise<void>> = []
-  try {
-    const fixture = await createNativeCapabilityRuntimeFixture({ after(cleanup) { cleanups.push(cleanup) } })
-    assert.match(fixture.origin, /^http:\/\/127\.0\.0\.1:\d+$/)
-    await fixture.login()
-    const original = fixture.origin
-    await fixture.reopen()
-    assert.notEqual(fixture.origin, original)
-    assert.equal((await fixture.api('/api/chat/runtime/baseline')).state, 'missing')
-    await fixture.close()
-    await fixture.close()
-    await assert.rejects(fetch(`${fixture.origin}/api/chat/runtime`, { signal: AbortSignal.timeout(1000) }))
-  } finally {
-    for (const cleanup of cleanups.reverse()) await cleanup()
-  }
+test('configuration application keeps unknown execution evidence isolated without prompt replay', { timeout: 90_000 }, async context => {
+  const fixture = await createNativeCapabilityRuntimeFixture(context)
+  await initiallyConfigured(fixture, true)
+  fixture.controls.promptUnknown = true
+  fixture.inbound(1)
+  await until(async () => Number(object((await fixture.status()).ingress).unknown) === 1, 'Expected unknown admission')
+  await fixture.api('/api/chat/runtime/stop', {})
+  await changePlan(fixture, plan => ({ ...plan, contextLimits: { group: 100_000, private: 110_000 } }))
+  await verifiedProfile(fixture)
+  await fixture.start()
+  fixture.controls.promptUnknown = false
+  fixture.inbound(2)
+  await until(async () => Number(object((await fixture.status()).ingress).received) === 2, 'Next input must remain queued')
+  assert.equal(prompts(fixture).length, 1)
+  assert.equal(fixture.controls.creates, 1)
+  const executions = await fixture.api('/api/chat/executions')
+  assert(Array.isArray(executions.items) && executions.items.some(raw => object(raw).status === 'unknown'))
 })

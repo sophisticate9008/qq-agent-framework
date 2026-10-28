@@ -105,7 +105,7 @@ test('restore requires every persisted revision and fresh stopped canStart, with
   assert.deepEqual(await unavailable.lifecycle.restore(signal()), { state: 'skipped', reason: 'runtime_not_ready' })
   const unknown = fixture(runningIntent)
   unknown.setState('error')
-  assert.deepEqual(await unknown.lifecycle.restore(signal()), { state: 'skipped', reason: 'runtime_not_stopped' })
+  assert.deepEqual(await unknown.lifecycle.restore(signal()), { state: 'restored', reason: null })
 })
 
 test('startup restores once and preserves the already authorized persisted intent', async () => {

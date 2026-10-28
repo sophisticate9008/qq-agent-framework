@@ -49,7 +49,7 @@ async function fixture(context: TestContext, denied: Error) {
   async function message(id: number, segments: readonly { type: string; data: Record<string, string> }[]) {
     assert(inbound.handlers.onEvent)
     await inbound.handlers.onEvent({ post_type: 'message', self_id: 999, message_type: 'group',
-      group_id: 456, user_id: 123, message_id: id, time: 1000, message: [...segments] },
+      group_id: 456, user_id: 123, message_id: id, time: Math.floor(Date.now() / 1000), message: [...segments] },
     { selfId: '999', receivedAt: Date.now(), signal: lifetime.signal })
   }
   return { message, inbound, store, activity, counts: () => ({ reads, sends, prompts, commands, registrations }) }

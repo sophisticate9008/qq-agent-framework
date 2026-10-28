@@ -45,7 +45,7 @@ test('unselected catalog edits and display-only plan/provider edits require no r
   assert.equal(impact.fingerprints.previous, impact.fingerprints.next)
 })
 
-test('selected persona content, instructions, model and context changes require session migration', () => {
+test('selected persona content, instructions, model and context changes require explicit application while preserving sessions', () => {
   const previous = fixture()
   const changes: NativeChatConfiguration[] = [
     changed(previous, 'personas', { personas: [{ ...previous.personas[0]!, identity: 'Changed identity.' }] }),
@@ -56,8 +56,8 @@ test('selected persona content, instructions, model and context changes require 
   for (const next of changes) {
     const impact = analyzeNativeConfigurationImpact(previous, next)
     assert.equal(impact.state, 'verified')
-    assert.equal(impact.action, 'migrate')
-    assert.equal(impact.sessionMigrationRequired, true)
+    assert.equal(impact.action, 'restart')
+    assert.equal(impact.sessionMigrationRequired, false)
     assert.equal(impact.canContinue, false)
   }
 })
@@ -157,41 +157,29 @@ test('runtime access comparisons retain 32 digit OneBot identifiers and deny pre
 })
 
 
-test('guard coalesces only concurrent identical deployment reads and rechecks every delivery authority', async () => {
+test('guard checks every delivery authority using current configuration without per-turn deployment RPC', async () => {
   const { createNativeConfigurationGuard } = await import('../src/host/native-configuration-guard.ts')
-  const { awaitCondition } = await import('./fixtures/await-condition.ts')
   const active = fixture()
   let current = active
   const controller = new AbortController()
   const definition = buildChatSessionDefinition(active.catalog.plans[0], active.personas[0])
   const bindings = [{ agentPreset: 'chat', definition }]
-  let release = () => {}
-  let hold = new Promise<void>(resolve => { release = resolve })
   let reads = 0
   const guard = createNativeConfigurationGuard({ current: () => ({ state: 'running', signal: controller.signal, configuration: active, bindings }),
     definition: () => definition, loadConfiguration: async () => current,
-    resolveDeployment: async () => { reads++; await hold; return { missingReasons: [], presetBindings: bindings } } })
-  const requests = Array.from({ length: 16 }, () => guard.check('private:456', controller.signal, false, 'delivery'))
-  await awaitCondition(() => guard.describe().coalescedReads === 15, { timeoutMs: 1500, message: 'Expected shared in-flight reads' })
-  assert.equal(reads, 1)
-  current = { ...active, revisions: { ...active.revisions, access: 'b'.repeat(64) }, access: { ...active.access, deny: ['private:456'] } }
-  release()
-  const results = await Promise.allSettled(requests)
-  assert(results.every(result => result.status === 'rejected'))
-  assert.equal(guard.describe().phases.delivery.configurationReads, 32)
-  assert.equal(guard.describe().activeDeploymentReads, 0)
-  current = active; hold = Promise.resolve()
-  await guard.check('private:456', controller.signal, false, 'delivery')
-  await guard.check('private:456', controller.signal, false, 'delivery')
-  assert.equal(reads, 3, 'settled deployment results are never cached')
+    resolveDeployment: async () => { reads++; throw new Error('Deployment is verified at startup and application') } })
+  await Promise.all(Array.from({ length: 16 }, () => guard.check('private:456', controller.signal, false, 'delivery')))
+  assert.equal(reads, 0)
+  assert.equal(guard.describe().phases.delivery.configurationReads, 16)
+  current = { ...active, access: { ...active.access, deny: ['private:456'] } }
+  await assert.rejects(guard.check('private:456', controller.signal, false, 'delivery'), { code: 'NATIVE_CHAT_ACCESS_DENIED' })
   assert.equal(guard.describe().permissionCaching, false)
 })
 
-test('guard keeps different configuration revisions and runtime lifetimes out of shared reads', async () => {
+test('guard fences asynchronous configuration reads against changed runtime lifetimes', async () => {
   const { createNativeConfigurationGuard } = await import('../src/host/native-configuration-guard.ts')
   const { awaitCondition } = await import('./fixtures/await-condition.ts')
   const active = fixture()
-  let current = active
   let lifetime = new AbortController()
   const initial = lifetime
   const definition = buildChatSessionDefinition(active.catalog.plans[0], active.personas[0])
@@ -200,19 +188,12 @@ test('guard keeps different configuration revisions and runtime lifetimes out of
   const hold = new Promise<void>(resolve => { release = resolve })
   let reads = 0
   const guard = createNativeConfigurationGuard({ current: () => ({ state: 'running', signal: lifetime.signal, configuration: active, bindings }),
-    definition: () => definition, loadConfiguration: async () => current,
-    resolveDeployment: async () => { reads++; await hold; return { missingReasons: [], presetBindings: bindings } } })
+    definition: () => definition, loadConfiguration: async () => { reads++; await hold; return active },
+    resolveDeployment: async () => { throw new Error('No deployment RPC during a turn') } })
   const first = guard.check('private:456', initial.signal)
-  await awaitCondition(() => reads === 1, { timeoutMs: 1500, message: 'Expected separate deployment read 1' })
-  current = { ...active, revisions: { ...active.revisions, personas: 'b'.repeat(64) },
-    personas: [...active.personas, { id: 'unused', name: 'Unused', identity: 'Unused identity.', style: 'Unused style.' }] }
-  const second = guard.check('private:456', initial.signal)
-  await awaitCondition(() => reads === 2, { timeoutMs: 1500, message: 'Expected separate deployment read 2' })
+  await awaitCondition(() => reads === 1, { timeoutMs: 1500, message: 'Configuration read must enter before the runtime changes' })
   lifetime = new AbortController()
-  const third = guard.check('private:456', lifetime.signal)
-  await awaitCondition(() => reads === 3, { timeoutMs: 1500, message: 'Expected separate deployment read 3' })
-  const settled = Promise.allSettled([first, second, third]); release()
-  const results = await settled
-  assert.deepEqual(results.map(result => result.status), ['rejected', 'rejected', 'fulfilled'])
-  assert.equal(guard.describe().coalescedReads, 0)
+  const second = guard.check('private:456', lifetime.signal)
+  const settled = Promise.allSettled([first, second]); release()
+  assert.deepEqual((await settled).map(result => result.status), ['rejected', 'fulfilled'])
 })

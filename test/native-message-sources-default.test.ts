@@ -139,7 +139,7 @@ test('default gateway bootstrap actually checks owner-only effects while preserv
     function inbound(messageId: number, userId: number, text: string, extra: Record<string, unknown> = {}) {
       assert(onebot.clients.size)
       for (const socket of onebot.clients) socket.send(JSON.stringify({ post_type: 'message', self_id: 999,
-        message_type: 'group', group_id: 456, user_id: userId, message_id: messageId, time: 1,
+        message_type: 'group', group_id: 456, user_id: userId, message_id: messageId, time: Math.floor(Date.now() / 1000),
         isOwner: true, sender: { nickname: 'Owner', card: 'Owner', user_id: 123 },
         message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text } }], ...extra }))
     }
@@ -200,6 +200,7 @@ test('default gateway bootstrap actually checks owner-only effects while preserv
     const stream = fixture.streams.findLast(value => value.sessionId === sessionId)!
     fixture.event('turn/start', { turn: 1 }, stream)
     fixture.event('assistant/message', { turn: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'Controlled friend chat final.' }] } }, stream)
+    assert.equal((await fixture.reply('Controlled friend chat final.', stream)).status, 'confirmed')
     fixture.event('turn/end', { turn: 1, reason: { kind: 'completed' } }, stream)
     await until(() => fixture.sends.length === 1, 'Ordinary friend must receive the controlled final')
     await settled(6)

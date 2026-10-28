@@ -231,6 +231,7 @@ test('native ingress expires in FIFO and late authorization cannot create or pro
   assert.equal(storedRows(fake.directory, 'host.sessions').length, 0)
   assert.equal(fake.runtime.executionJournal()!.length, 0)
   const status = await fake.runtime.status()
+  assert(status.ingress.queue)
   assert.equal(status.ingress.queue.items.length, 2)
   assert(status.ingress.queue.items.every(item => item.lastError === 'NATIVE_CHAT_DEADLINE_EXPIRED' && item.expired === 1))
   context.diagnostic(JSON.stringify({ case: 'short-queued-expiry', arrivedAt, calls: fake.calls, status }))

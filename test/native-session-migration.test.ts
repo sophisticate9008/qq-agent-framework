@@ -249,7 +249,7 @@ test('actual readonly compatibility releases retired bindings but retains person
   const directory = mkdtempSync(join(tmpdir(), 'migration-compatibility-'))
   const fake = fixture(context, 1, join(directory, 'native-chat.sqlite'))
   context.after(() => rmSync(directory, { recursive: true, force: true }))
-  assert.equal(inspectNativeConfigurationCompatibility(directory, fake.candidate).state, 'blocked')
+  assert.equal(inspectNativeConfigurationCompatibility(directory, fake.candidate).state, 'compatible')
   fake.store.write('host.sessions', 'private:1', { schema: 1, state: 'retired', generation: 2, requestId: null, sessionId: null, updatedAt: 2 })
   const released = inspectNativeConfigurationCompatibility(directory, fake.candidate)
   assert.equal(released.state, 'no-history')
@@ -258,7 +258,7 @@ test('actual readonly compatibility releases retired bindings but retains person
   const persona = { ...fake.candidate.persona, style: 'Different identity content' }
   const definition = buildChatSessionDefinition(fake.options.configuration.catalog.plans[0], persona)
   const changed = { ...fake.candidate, persona, definition, bindings: [{ definition, agentPreset: 'changed-persona-preset' }] }
-  assert(inspectNativeConfigurationCompatibility(directory, changed).reasons.includes('persisted_persona_identity_conflict'))
+  assert.equal(inspectNativeConfigurationCompatibility(directory, changed).state, 'no-history')
 })
 
 test('actual readonly compatibility blocks an interrupted migration even after identity finalization', async context => {
@@ -310,8 +310,9 @@ test('same-ID persona identity and style receive new content and scope versions 
   const before = ['policy.grants', 'native-chat.whitelist-policy', 'outbox', 'native-usage.turns', 'native-chat.tool-scopes']
     .map(namespace => [namespace, digest(fake.store.list(namespace))] as const)
   const prior = inspectNativeConfigurationCompatibility(directory, options.candidate)
-  assert(prior.reasons.includes('persisted_session_configuration_conflict'))
-  assert(prior.reasons.includes('persisted_persona_identity_conflict'))
+  assert.equal(prior.state, 'compatible')
+  assert(prior.differences.includes('persona.identity'))
+  assert(prior.differences.includes('persona.style'))
   assert.deepEqual(nativeSessionMigrationEligibility(readNativeConfigurationBaselineFromStore(fake.store), options.candidate), [])
   const prepared = await previewNativeSessionMigration(options)
   assert.equal(prepared.state, 'available')

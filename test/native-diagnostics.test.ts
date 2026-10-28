@@ -37,7 +37,7 @@ test('participation, per-conversation budgets and QQ-only pending answers give c
   const result = projectNativeDiagnostics({ ...base, authorized: false, input: resolveChatInputConfiguration({ ...DEFAULT_CHAT_INPUT_CONFIGURATION,
     scopes: { ...DEFAULT_CHAT_INPUT_CONFIGURATION.scopes, exclude: ['group:123'] } }, 'group:123'), history: null, pendingInteractions: 1 })
   assert.equal(result.state, 'blocked')
-  assert(result.checks.some(item => item.code === 'input_excluded'))
+  assert(!result.checks.some(item => item.code === 'input_excluded'))
   assert(result.checks.some(item => item.code === 'conversation_budget_unavailable'))
   assert(result.checks.some(item => item.code === 'qq_interaction_pending' && item.href === null && item.nextAction?.includes('QQ')))
 })

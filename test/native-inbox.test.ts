@@ -1,3 +1,4 @@
+import { json } from '../src/host/data.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createNativeInbox, type NativeInboxEntry } from '../src/host/native-inbox.ts';
@@ -264,7 +265,7 @@ test('a corrupt queued account identity is rejected before dispatch', async () =
     assert(row);
     const data = structuredClone(row.value) as { entries: { message: Record<string, unknown> }[] };
     data.entries[0]!.message.accountScope = { protocolId: 'onebot', accountId: '' };
-    store.write(row.namespace, row.key, data);
+    store.write(row.namespace, row.key, json(data));
     assert.throws(() => inbox.list(), { code: 'NATIVE_INBOX_CORRUPT' });
   } finally { await inbox.stop(); store.close(); }
 });

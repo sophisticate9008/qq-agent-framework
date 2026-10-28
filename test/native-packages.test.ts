@@ -164,19 +164,18 @@ test('chat-input and media packages coexist with hot CAS configuration, owned st
   context.after(() => store.close())
   const configurations = createPackageConfigurationRegistry({ store: createPackageConfigurationFileStore(directory) })
   let authorizations = 0
+  let wake = { nicknames: [] as string[], wakeOnReply: true, continuationMs: 90_000 }
   const manager = createNativePackages({ configurationRegistry: configurations, packages: [
-    createChatInputNativePackage({ directory }), createMediaNativePackage({ registry: createNativeMediaRegistry({ store, accountId: '999',
+    createChatInputNativePackage({ directory, readPersona: async () => ({ id: 'fixture', name: 'Fixture', identity: 'Fixture identity', style: 'Brief', wake }) }), createMediaNativePackage({ registry: createNativeMediaRegistry({ store, accountId: '999',
       async authorize() { authorizations++ } }) })] })
   assert((await manager.start()).every(item => item.state === 'running'))
   const chat = manager.service('chat-input', 1) as NativeChatInputPackageService
   const media = manager.service('media', 1) as NativeMediaPackageService
   const signal = new AbortController().signal
   assert.equal((await chat.read('group:123')).effective.enabled, true)
-  const before = await configurations.read('chat-input')
-  await configurations.compareAndSet('chat-input', before.revision, { ...DEFAULT_CHAT_INPUT_CONFIGURATION,
-    nicknames: ['小助手'], continuationMs: 0 }, signal)
+  wake = { ...wake, nicknames: ['小助手'], continuationMs: 0 }
   const updated = await chat.read('group:123')
-  assert.deepEqual(updated.effective.names, ['小助手'])
+  assert.deepEqual(updated.effective.names, ['小助手', 'Fixture'])
   assert.equal(updated.effective.continuationMs, 0)
   const assetId = await media.register({ kind: 'image', messageId: '456', conversationId: 'group:123', source: { file: 'opaque-id' } }, signal)
   const inspected = await media.inspect.execute({ input: { assetId }, signal,
@@ -189,7 +188,7 @@ test('chat-input and media packages coexist with hot CAS configuration, owned st
   await assert.rejects(chat.read('group:123'))
   await assert.rejects(media.register({ kind: 'image', messageId: '789', conversationId: 'group:123', source: { file: 'opaque-id' } }, signal))
   assert.equal(store.list('native-chat.media').length, 1)
-  assert.equal((await configurations.read('chat-input')).revision, updated.revision)
+  await assert.rejects(configurations.read('chat-input'), { code: 'PACKAGE_CONFIGURATION_NOT_FOUND' })
   assert.equal(configurations.descriptors().length, 1)
   // Stopping a package neither closes shared storage nor removes persistent facts/configuration.
   store.write('another-package', 'alive', { ok: true })

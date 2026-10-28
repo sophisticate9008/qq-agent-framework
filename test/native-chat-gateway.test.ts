@@ -15,7 +15,7 @@ type Value = Record<string, unknown>
 test('CLI-admin subprocess default mount applies real fixture YAML then manually chats, records usage, restores and safely stops/times out',
   { timeout: useRealCli ? 240_000 : 40_000 }, async context => {
     const { directory, bootstrapFile, lifecycleFile, profilePath, credentialsPath, base,
-      calls, sends, streams, selected, onebots, api, save, runtime, start, inbound, event, launch, shutdown, controls } =
+      calls, sends, streams, selected, onebots, api, save, runtime, start, inbound, event, reply, launch, shutdown, controls } =
       await createNativeChatGatewayFixture(context)
     await launch()
     assert.equal((await runtime()).state, 'stopped')
@@ -113,6 +113,7 @@ test('CLI-admin subprocess default mount applies real fixture YAML then manually
       usage: { inputTokens: 20, outputTokens: 6, cacheReadTokens: 7, cacheWriteTokens: 0, totalTokens: 33 } })
     await delay(60)
     assert.equal(sends.length, 0)
+    await reply('Only this final answer.')
     event('turn/end', { turn: 1, reason: { kind: 'completed' } })
     await until(() => sends.length === 1)
     await until(async () => (await api('/api/chat/usage')).records === 2)

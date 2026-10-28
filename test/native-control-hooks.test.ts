@@ -149,7 +149,7 @@ test('stopped native accepts trusted owner controls before chat allowlist, obser
     function inbound(id: number, userId: number, text: string,
       segments: unknown[] = [{ type: 'text', data: { text } }]) {
       for (const socket of onebots) socket.send(JSON.stringify({ post_type: 'message', self_id: 999,
-        message_type: 'group', group_id: 456, user_id: userId, message_id: id, time: 1000 + id,
+        message_type: 'group', group_id: 456, user_id: userId, message_id: id, time: Math.floor(Date.now() / 1000),
         message: segments, isOwner: true, sender: { nickname: '主人', user_id: 123 } }))
     }
     inbound(1, 123, commandText)
@@ -334,11 +334,10 @@ test('running native hot-applies access with unchanged existing session and gran
     assert.equal(added.maxUses['agent.submit'], null)
     host.policy.begin(host.policy.reserve({ featureId: 'agent-relay', conversationId: 'group:789', capability: 'agent.submit' }))
     assert.equal(host.policy.describe().grants.find(grant => grant.id === added.id)!.used['agent.submit'], 1)
-    await assert.rejects(runtime.applyAccessChange(before.revisions.access, after.revisions.access, AbortSignal.timeout(5_000)),
-      { code: 'NATIVE_CHAT_REVISION_CONFLICT' })
+    await runtime.applyAccessChange(before.revisions.access, after.revisions.access, AbortSignal.timeout(5_000))
     assert.equal((await runtime.status()).chatReady, true)
     await runtime.stop()
-    assert.deepEqual(phases, ['runtime.starting', 'runtime.ready', 'access.changed', 'runtime.stopping', 'runtime.stopped'])
+    assert.deepEqual(phases, ['runtime.starting', 'runtime.ready', 'access.changed', 'access.changed', 'runtime.stopping', 'runtime.stopped'])
     assert.equal((await runtime.adapterRuntime.connectionStatus!()).state, 'connected')
     assert.equal((await runtime.status()).state, 'stopped')
     assert.equal(methods.includes('session/prompt'), false)

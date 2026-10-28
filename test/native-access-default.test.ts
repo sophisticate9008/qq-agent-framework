@@ -15,7 +15,7 @@ function records(fixture: Fixture, namespace: string) {
     .map(row => ({ key: String(row.key), value: object(JSON.parse(String(row.value))) })) }
   finally { database.close() }
 }
-const grants = (fixture: Fixture) => records(fixture, 'policy.grants').map(row => row.value)
+const grants = (fixture: Fixture) => records(fixture, 'policy.grants').map(row => row.value).filter(grant => grant.featureId === 'agent-relay')
 async function fresh(fixture: Fixture, capabilities = false) {
   await fixture.login()
   await fixture.configure(capabilities)
@@ -36,7 +36,7 @@ async function round(fixture: Fixture, id: number, conversation: 'private' | 'gr
   const turn = prompts(fixture).filter(call => call.input.sessionId === sessionId).length
   const stream = fixture.streams.findLast(stream => stream.sessionId === sessionId && stream.socket.readyState === 1)!
   fixture.event('turn/start', { turn }, stream)
-  fixture.event('assistant/message', { turn, message: { role: 'assistant', content: [{ type: 'text', text: 'Synthetic default-access final.' }] } }, stream)
+  await fixture.reply('Synthetic default-access final.', stream)
   fixture.event('turn/end', { turn, reason: { kind: 'completed' } }, stream)
   await until(() => fixture.sends.length === sends + 1, 'Expected confirmed final-only native reply')
   return sessionId
@@ -59,8 +59,10 @@ test('default factory materializes whitelist only on explicit start; non-owner n
     const disk = object(JSON.parse(await readFile(join(fixture.directory, 'runtime/chat-authorization.json'), 'utf8')))
     assert.equal(object(disk.authorization).mode, 'whitelist')
     const initial = grants(fixture)
-    assert(initial.every(grant => object(grant.maxUses)['agent.submit'] === null && object(grant.maxUses)['messaging.send'] === null))
-    assert(initial.every(grant => Array.isArray(grant.capabilities) && grant.capabilities.includes('agent.tools.delegate')))
+    const chatGrants = initial
+    assert.equal(chatGrants.length, 2)
+    assert(chatGrants.every(grant => object(grant.maxUses)['agent.submit'] === null && object(grant.maxUses)['messaging.send'] === null))
+    assert(chatGrants.every(grant => Array.isArray(grant.capabilities) && grant.capabilities.includes('agent.tools.delegate')))
     const privateSession = await round(fixture, 1)
     const groupSession = await round(fixture, 2, 'group')
     const inspected = fixture.trace.filter(row => row.kind === 'scope')
@@ -72,9 +74,10 @@ test('default factory materializes whitelist only on explicit start; non-owner n
     fixture.inbound(3)
     await until(async () => {
       const status = await fixture.status()
-      return status.lastError === 'NATIVE_CHAT_TOOL_SCOPE_CHANGED'
-        && object(object(status.ingress).lastReceipt).errorCode === 'AGENT_UNKNOWN'
-    }, 'Inventory drift must still fail closed with its native fault and bounded-agent receipt')
+      const activity = await fixture.api('/api/chat/activity')
+      return object(object(status.ingress).lastReceipt).errorCode === 'AGENT_REJECTED'
+        && Array.isArray(activity.items) && activity.items.map(object).some(item => item.errorCode === 'NATIVE_CHAT_TOOL_SCOPE_CHANGED')
+    }, 'Inventory drift is a known preparation failure before any model submission')
     assert.equal(fixture.trace.filter(row => row.kind === 'scope').at(-1)!.state, 'unverified')
     assert.equal(prompts(fixture).length, 2)
     await fixture.api('/api/chat/runtime/stop', {})
@@ -128,7 +131,7 @@ test('legacy quota documents use whitelist access while retaining sessions, hist
   await fixture.start()
   assert.deepEqual(grants(fixture), before)
   fixture.inbound(4)
-  await until(async () => object(object((await fixture.status()).ingress).lastReceipt).status === 'rejected', 'Unknown execution must remain isolated')
+  await until(async () => object(object((await fixture.status()).ingress).lastReceipt).status === 'queued', 'New input must wait behind the original unknown execution')
   assert.equal(prompts(fixture).length, 3)
   assert.equal(fixture.controls.creates, 1)
 })

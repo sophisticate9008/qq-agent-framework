@@ -95,6 +95,7 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
         assert.equal(request.headers.authorization, 'Bearer fixture-onebot-http')
         record({ kind: 'onebot', method: url.pathname })
         if (url.pathname.endsWith('/get_login_info')) response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { user_id: 999 } }))
+        else if (url.pathname.endsWith('/get_version_info')) response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { app_name: 'SyntheticOneBot', app_version: '1.0.0' } }))
         else {
           let body = ''
           for await (const chunk of request) body += String(chunk)
@@ -340,7 +341,13 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
     sequences.set(stream.sessionId, seq + 1)
     stream.socket.send(JSON.stringify({ type: 'item', streamId: stream.streamId, value: { type: 'event', event: { type, data, seq } } }))
   }
+  async function reply(content: string, stream = streams.at(-1)) {
+    assert(stream)
+    const ticket = plugin.queue(stream.sessionId, 'qaf_reply', { content })
+    await capabilityUntil(() => plugin.result(ticket) !== undefined, 'Explicit reply tool did not settle')
+    return plugin.result(ticket)!
+  }
   return { directory, profilePath, credentialsPath, get origin() { return origin }, adminToken, close,
     api, login, reopen, save, status, configure, selection, preview, approve, apply, start,
-    inbound, event, documents, controls, calls, trace, sends, errors, streams, selected, agents }
+    inbound, event, reply, documents, controls, calls, trace, sends, errors, streams, selected, agents }
 }

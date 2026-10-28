@@ -129,8 +129,11 @@ export function createNativeAgentCoordinator(options: {
               await dsh.configureSession({ sessionId: request.sessionId, conversationId: binding.conversationId, signal: request.signal })
               configuredSessions.add(request.sessionId)
             }
-            const delegatesTools = await inspectToolScope(request, binding)
-            try { await runtime.frameworkTools?.project(binding, request.signal) }
+            let delegatesTools: boolean
+            try {
+              delegatesTools = await inspectToolScope(request, binding)
+              await runtime.frameworkTools?.project(binding, request.signal)
+            }
             catch (error) {
               activity.record('tool_projection_failed', binding.conversationId, undefined,
                 { requestId: request.requestId }, errorCode(error, 'TOOL_PROJECTION_UNKNOWN'))

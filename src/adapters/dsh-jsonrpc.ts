@@ -214,7 +214,10 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
       if (!identifier(request.sessionId) || !identifier(request.requestId) || request.mode !== 'queue') {
         return rejected('DSH_PROMPT_UNSUPPORTED')
       }
-      const content = await prepareDshPromptContent(request, options.resolvePromptImage)
+      const content = await prepareDshPromptContent(request, options.resolvePromptImage).catch(error => {
+        if (request.signal.aborted) throw failure('DSH_ABORTED')
+        throw error
+      })
       if (content === null) return rejected('DSH_PROMPT_UNSUPPORTED')
       const result = await rpc('session/prompt', { sessionId: request.sessionId, requestId: request.requestId, mode: 'queue', content }, request.signal)
       if (result.ok && (!record(result.value) || result.value.accepted !== true)) throw failure('DSH_INVALID_RESPONSE')

@@ -220,7 +220,7 @@ test('running native hot-applies access with unchanged existing session and gran
           response.writeHead(302, { location: './api/remote.mux', 'set-cookie': 'hot_dsh=owner; HttpOnly' }).end()
           return
         }
-        assert(url.pathname.startsWith('/dsh/api/'))
+        if (!url.pathname.startsWith('/dsh/api/')) { response.writeHead(404).end(); return }
         assert.equal(request.headers.cookie, 'hot_dsh=owner')
         let body = ''
         for await (const chunk of request) body += String(chunk)

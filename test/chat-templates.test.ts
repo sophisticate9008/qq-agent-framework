@@ -98,7 +98,7 @@ test('group participation separates strong calls, follow-up and unrelated quoted
   const { instructions } = BUILTIN_DAILY_CHAT_PLAN
   assert.match(instructions, /当前直接 @ 你、引用你的话提问或明确向你发问应优先回应/)
   assert.match(instructions, /仅在句子里出现你的名字可能是旁人谈论你，不必纠正称呼或抢话/)
-  assert.match(instructions, /激活后的续聊覆盖全会话所有发言者.*这不赋予工作权限/)
+  assert.match(instructions, /续聊窗口只从最近一次真实呼叫开始计时.*覆盖全会话所有发言者.*不赋予工作权限/)
   assert.match(instructions, /主人普通群聊同样选择性参与/)
   assert.match(instructions, /引用别人的话不等于当前发言者认领.*第三人称/)
 })

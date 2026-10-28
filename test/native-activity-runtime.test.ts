@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,7 +22,16 @@ async function disk(directory: string) {
   const result: Record<string, string> = {}
   for (const name of await readdir(directory)) {
     const filename = join(directory, name)
-    if ((await stat(filename)).isFile()) result[name] = createHash('sha256').update(await readFile(filename)).digest('hex')
+    if (/\.sqlite-(?:wal|shm|journal)$/.test(name)) continue
+    if (!(await stat(filename)).isFile()) continue
+    if (name.endsWith('.sqlite')) {
+      const database = new DatabaseSync(filename, { readOnly: true })
+      try {
+        const tables = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all()
+        const rows = tables.map(table => ({ table: table.name, rows: database.prepare(`SELECT * FROM \"${String(table.name).replaceAll('\"', '\"\"')}\" ORDER BY rowid`).all() }))
+        result[name] = createHash('sha256').update(JSON.stringify(rows)).digest('hex')
+      } finally { database.close() }
+    } else result[name] = createHash('sha256').update(await readFile(filename)).digest('hex')
   }
   return result
 }

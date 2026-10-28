@@ -178,19 +178,19 @@ test('each browser alias selects exactly its named test and the default selects 
   }
 });
 
-test('execution browser target keeps both TypeScript runners inside the isolated no-emit typecheck', () => {
+test('execution browser target and native runtime acceptance remain inside the isolated no-emit typecheck', () => {
   const root = dirname(dirname(browserToolchainPaths().directory));
   assert.deepEqual(browserSmokeFiles('execution-journal'), ['scripts/execution-journal-smoke.ts']);
   const configuration: unknown = JSON.parse(readFileSync(join(root, 'tsconfig.browser.json'), 'utf8'));
   assert(isRecord(configuration) && isRecord(configuration.compilerOptions));
   assert.equal(configuration.compilerOptions.noEmit, true);
   assert.deepEqual(configuration.include, ['scripts/**/*-smoke.ts']);
-  for (const filename of ['scripts/execution-journal-smoke.ts', 'scripts/execution-runtime-browser-smoke.ts']) {
+  for (const filename of ['scripts/execution-journal-smoke.ts', 'scripts/native-chat-ui-smoke.ts']) {
     assert(filename.endsWith('-smoke.ts'));
     assert.equal(existsSync(join(root, filename)), true);
   }
-  assert.match(readFileSync(join(root, 'scripts/execution-journal-smoke.ts'), 'utf8'),
-    /import \{ verifyExecutionRuntimeUi, verifyExecutionThemes \} from '\.\/execution-runtime-browser-smoke\.ts'/);
+  assert(browserSmokeFiles().includes('scripts/native-chat-ui-smoke.ts'));
+  assert.match(readFileSync(join(root, 'scripts/native-chat-ui-smoke.ts'), 'utf8'), /createNativeCapabilityRuntimeFixture/);
 });
 
 test('optional SDK CI installs, tests and verifies the package tarball in its own locked job', () => {

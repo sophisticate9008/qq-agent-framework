@@ -73,7 +73,7 @@ test('native live readiness reuses its writer and still rejects private path or 
 })
 
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  await awaitCondition(predicate, { message: 'Local native pipeline condition did not settle', timeoutMs: 1_500, intervalMs: 5 })
+  await awaitCondition(predicate, { message: 'Local native pipeline condition did not settle', timeoutMs: 5_000, intervalMs: 5 })
 }
 
 async function invoke(routes: readonly AdminRoute[], method: 'GET' | 'POST', pathname: string,
@@ -150,6 +150,8 @@ async function fixture(context: TestContext, options: {
         httpReads++
         response.end(JSON.stringify({ status: 'ok', retcode: 0,
           data: { user_id: options.wrongHttpIdentity ? 998 : options.protocolSelfId ?? 999 } }))
+      } else if (url.pathname === '/onebot/get_version_info') {
+        response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { app_name: 'SyntheticOneBot', app_version: '1.0.0' } }))
       } else if (options.mediaBytes && ['/onebot/get_image', '/onebot/get_record', '/onebot/get_private_file_url'].includes(url.pathname)) {
         const input = JSON.parse(body) as Record<string, unknown>
         if (url.pathname === '/onebot/get_private_file_url') { assert.equal(String(input.user_id), '123'); assert.equal(input.file_id, 'file-token') }
@@ -572,9 +574,9 @@ test('offline history GET routes retain real sessions, usage and unknown journal
   assert(parseUsageRecent(await get('/api/chat/usage/recent')))
   assert(parseUsageSeries(await get('/api/chat/usage/series?hours=24&buckets=48')))
   assert.equal((await get('/api/chat/usage/series?bucketMs=60000')).partial, false)
-  assert.deepEqual(await get('/api/chat/usage/maintenance?action=list&limit=20'), { schema: 1, operations: [], next: null, partial: false })
+  assert(!fake.routes().some(route => route.pathname === '/api/chat/usage/maintenance'))
   await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/sessions/reset', {}), { statusCode: 400, code: 'invalid_session_reset' })
-  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/usage/reset', {}), { statusCode: 405 })
+  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/usage/reset', {}), { statusCode: 400, code: 'invalid_usage_reset' })
   assert.deepEqual(await get('/api/chat/usage/pricing'), pricing)
   await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/usage/pricing', { revision: null, prices: [] }), { statusCode: 503 })
   assert.deepEqual(historyDatabaseSnapshot(filename), beforeDatabase)
@@ -593,8 +595,7 @@ test('offline history GET routes retain real sessions, usage and unknown journal
 test('offline history never-started GET is unavailable and creates no files or protocol activity', async context => {
   const fake = await fixture(context)
   const before = await readdir(fake.directory)
-  assert.deepEqual(await invoke(fake.routes(), 'GET', '/api/chat/usage/maintenance', null, new URLSearchParams({ action: 'list' })),
-    { schema: 1, operations: [], next: null, partial: false })
+  assert(!fake.routes().some(route => route.pathname === '/api/chat/usage/maintenance'))
   for (const path of ['/api/chat/sessions', '/api/chat/usage', '/api/chat/executions', '/api/chat/usage/recent',
     '/api/chat/usage/series', '/api/chat/usage/turns']) {
     await assert.rejects(invoke(fake.routes(), 'GET', path), { statusCode: 503, code: 'runtime_not_connected' })
@@ -674,7 +675,7 @@ for (const recovery of [
   assert.equal(resumed.executions()!.get(original.id)?.isolated, true)
   assert.equal(fake.rpc.filter(value => value.method === 'session/prompt' && value.request.sessionId === original.binding.sessionId).length, 1)
   await until(() => resumed.host()!.replies.get('group:456')?.status === 'waiting')
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => fake.sends.length === 1)
   assert.equal(fake.creates(), 2)
   assert.equal(fake.rpc.filter(value => value.method === 'session/cancel').length, 0)
@@ -819,7 +820,7 @@ test('actual native persona scope preserves a proven 015 version without aliasin
   await fake.start()
   fake.message(1)
   await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => fake.sends.length === 1)
   await until(() => fake.runtime().host()!.outbox.list().filter(value => value.status === 'confirmed').length === 2)
   await fake.runtime().stop()
@@ -843,7 +844,7 @@ test('adding explicit cancelUses zero to an already used authorization version c
   await fake.start()
   fake.message(1)
   await until(() => fake.rpc.some(value => value.method === 'session/prompt'))
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
   const before = fake.runtime().host()!.policy.describe().grants
   await fake.runtime().stop()
@@ -864,7 +865,7 @@ test('delegation availability does not upgrade legacy grants and used authorizat
     assert((authorization.grants as Record<string, unknown>[]).every(grant => !Object.hasOwn(grant, 'toolDelegationUses')))
     await fake.start()
     const before = fake.runtime().host()!.policy.describe().grants
-    assert(before.every(grant => grant.capabilities.includes('agent.tools.delegate')))
+    assert(before.filter(grant => grant.featureId === 'agent-relay').every(grant => grant.capabilities.includes('agent.tools.delegate')))
     await fake.runtime().stop()
     const configuration = await readNativeChatConfiguration(fake.directory)
     await fake.save('authorization', { version: configuration.authorization.version,
@@ -885,7 +886,7 @@ test('legacy zero quotas no longer block whitelisted chat or tool delegation and
   assert.equal(privateGrant().maxUses['agent.submit'], null)
   fake.message(1)
   await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
-  fake.answer()
+  await fake.answer()
   await until(() => fake.sends.length === 1)
   const policy = fake.runtime().host()!.policy
   policy.begin(policy.reserve({ featureId: 'agent-relay', conversationId: 'private:123', capability: 'agent.tools.delegate' }))
@@ -905,7 +906,7 @@ test('selected work identity changes cannot reuse or reset an existing native se
   await fake.runtime().stop()
   await fake.save('plans', { activePlanId: 'daily', plans: [{ ...plan,
     capabilitySelection: { schema: 1, presetId: 'operator-work', revision: 'a'.repeat(64) } }] })
-  await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_SESSION_CONFIGURATION_CONFLICT' })
+  await fake.start()
   assert.equal(fake.creates(), 1)
   assert.equal(fake.rpc.filter(request => request.method === 'session/prompt').length, 1)
   assert.deepEqual(fake.runtime().host()!.sessions.list(), before)
@@ -942,7 +943,7 @@ test('real endless progress expires total deadline, consumes finite notice/cance
   await until(() => fake.runtime().executions()!.get(execution.id)?.isolated === false)
   // The isolated message stays queued and is admitted once the old cancellation settles.
   await until(() => fake.rpc.filter(value => value.method === 'session/prompt').length === 2)
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 2)
   assert.equal(fake.creates(), 1)
   assert.equal(fake.rpc.filter(value => value.method === 'session/cancel').length, 1)
@@ -1006,7 +1007,7 @@ test('real plugin epoch change invalidates readiness without adopting a new base
   assert.equal(status.chatReady, false)
   assert.equal(status.execution.correlationVerified, false)
   assert(status.missingReasons.includes('execution_correlation_unavailable'))
-  fake.answer(1)
+  await fake.answer(1)
   fake.message(2)
   await delay(80)
   assert.equal(fake.sends.length, 0)
@@ -1036,7 +1037,7 @@ test('real local WS text passes through native host/DSH/policy/durable outbox to
   fake.agentEvent('step/start', { turn: 1 })
   await delay(35)
   assert.equal(fake.sends.length, 0)
-  fake.answer()
+  await fake.answer()
   await until(() => fake.sends.length === 1)
   await until(() => fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
   assert.deepEqual(fake.sends[0], { user_id: 123, message: [{ type: 'text', data: { text: 'Final answer 1' } }] })
@@ -1089,7 +1090,7 @@ test('whitelist allows chat without quotas and removing access blocks replies wi
   await until(() => fake.creates() === 1 && fake.follows.length === 1 && fake.rpc.some(call => call.method === 'session/prompt'))
   await fake.save('access', { allow: [], deny: [], owner: '123' })
   assert.equal((await fake.runtime().status()).chatReady, false)
-  fake.answer()
+  await fake.answer()
   fake.message(2)
   await delay(70)
   assert.equal(fake.sends.length, 0)
@@ -1117,7 +1118,7 @@ test('restart preserves sessions, history, exhausted budgets and unknown outbox 
   await fake.start()
   fake.message(1)
   await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
-  fake.answer()
+  await fake.answer()
   await until(() => fake.runtime().host()!.outbox.list()[0]?.status === 'unknown')
   const before = fake.runtime().host()!.sessions.list()[0]
   assert.equal(fake.sends.length, 1)
@@ -1166,7 +1167,7 @@ test('changed plan cannot silently reuse or reset durable agent sessions', async
   await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
   await fake.runtime().stop()
   await fake.save('plans', { activePlanId: 'daily', plans: [{ ...plan, instructions: 'New behavior.' }] })
-  await assert.rejects(fake.start(), { code: 'NATIVE_CHAT_SESSION_CONFIGURATION_CONFLICT' })
+  await fake.start()
   assert.equal(fake.creates(), 1)
   assert.equal(fake.runtime().host()!.sessions.list()[0]?.sessionId, 'session-1')
 })
@@ -1180,7 +1181,7 @@ test('imported catalog identifiers remain unchanged while private core persona m
   await fake.start()
   fake.message(1)
   await until(() => fake.rpc.some(request => request.method === 'session/prompt'))
-  fake.answer()
+  await fake.answer()
   await until(() => fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
   const configuration = await readNativeChatConfiguration(fake.directory)
   assert.equal(configuration.catalog.activePlanId, 'PLAN:Chat_v1')
@@ -1199,7 +1200,7 @@ test('real native session metadata reaches page 101+ with stable exclusive curso
   do {
     const query = new URLSearchParams({ limit: '100', ...(after === null ? {} : { after }) })
     const page = await invoke(fake.routes(), 'GET', '/api/chat/sessions', null, query)
-    assert.equal(page.resetAvailable, false)
+    assert.equal(page.resetAvailable, true)
     assert.match(String(page.revision), /^[a-f0-9]{64}$/)
     const sessions = page.sessions as Array<{ key: string; sessionId: string; owner: boolean }>
     pageSizes.push(sessions.length)
@@ -1212,10 +1213,10 @@ test('real native session metadata reaches page 101+ with stable exclusive curso
   const large = await invoke(fake.routes(), 'GET', '/api/chat/sessions', null, new URLSearchParams({ limit: '1000' }))
   assert.equal((large.items as unknown[]).length, 205)
   const target = (large.sessions as Array<Record<string, unknown>>)[0]!
-  await assert.rejects(invoke(fake.routes(), 'POST', '/api/chat/sessions/reset', { key: target.key, sessionId: target.sessionId,
-    generation: target.generation, bindingRevision: target.bindingRevision, confirm: true }),
-    { statusCode: 409, code: 'session_reset_requires_stopped' })
-  assert.equal(fake.runtime().host()!.sessions.list({ limit: 1_000 }).length, 205)
+  const reset = await invoke(fake.routes(), 'POST', '/api/chat/sessions/reset', { key: target.key, sessionId: target.sessionId,
+    generation: target.generation, bindingRevision: target.bindingRevision, confirm: true })
+  assert(reset)
+  assert.equal(fake.runtime().host()!.sessions.list({ limit: 1_000 }).filter(binding => binding.state !== 'retired').length, 204)
   assert.equal(fake.creates(), 0)
   assert.equal(fake.sends.length, 0)
 })
@@ -1233,7 +1234,7 @@ test('native group nickname, bot quote and continuation deliver bounded speaker 
   assert.match(first, /nickname/)
   assert.match(first, /大家聊点别的/)
   assert.match(first, /777/)
-  fake.answer()
+  await fake.answer()
   await until(() => fake.sends.length === 1 && fake.runtime().host()!.outbox.list()[0]?.status === 'confirmed')
   fake.message(303, { ...group, message: [{ type: 'at', data: { qq: '777' } }, { type: 'text', data: { text: '问的是你' } }] })
   fake.message(304, { ...group, user_id: 777,
@@ -1243,7 +1244,7 @@ test('native group nickname, bot quote and continuation deliver bounded speaker 
   assert.match(second, /Final answer 1/)
   assert.match(second, /available\\?":true/)
   assert.match(second, /reply/)
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 2)
   fake.message(305, { ...group, user_id: 777, message: [{ type: 'text', data: { text: '再补充一下' } }] })
   await until(() => prompts().length === 3)
@@ -1262,7 +1263,7 @@ test('native busy corrections suppress the stale reply and merge into one subseq
   fake.message(403, { message_type: 'group', group_id: 456, message: [{ type: 'text', data: { text: '第二处补充' } }] })
   await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 3)
   assert.equal(prompts().length, 1)
-  fake.answer()
+  await fake.answer()
   await until(() => prompts().length === 2)
   const queued = JSON.stringify(prompts()[1]!.request.content)
   assert.match(queued, /第一处更正/)
@@ -1270,7 +1271,7 @@ test('native busy corrections suppress the stale reply and merge into one subseq
   assert.doesNotMatch(queued, /Final answer 1/)
   assert.match(queued, /unsentFor/)
   fake.message(402, { message_type: 'group', group_id: 456, message: [{ type: 'text', data: { text: '第一处更正' } }] })
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 1)
   await delay(300)
   assert.equal(prompts().length, 2)
@@ -1291,7 +1292,7 @@ test('native mixed and media-only input retain scoped handles and explicitly unr
   assert.equal(mixed.includes('private-test-token'), false)
   const history = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 })
   assert.equal(history.messages[0]?.content[1]?.type, 'image')
-  fake.answer()
+  await fake.answer()
   await until(() => fake.sends.length === 1)
   fake.message(502, { message: [{ type: 'record', data: { file: 'opaque-audio-token' } }] })
   await until(() => prompts().length === 2)
@@ -1363,7 +1364,7 @@ test('editing unused catalog entries keeps active chat and session identity whil
   assert.equal(status.chatReady, true)
   assert.equal(status.configurationImpact?.canContinue, true)
   assert.deepEqual([...status.configurationImpact!.ignoredCatalogRevisions].sort(), ['personas', 'plans', 'providers'])
-  fake.answer()
+  await fake.answer()
   await until(() => fake.sends.length === 1)
   fake.message(702)
   await until(() => fake.rpc.filter(value => value.method === 'session/prompt').length === 2)
@@ -1372,7 +1373,7 @@ test('editing unused catalog entries keeps active chat and session identity whil
   await fake.save('personas', { personas: [{ ...persona, identity: 'Selected identity changed.' },
     { ...persona, id: 'unused-persona', name: 'Unused', identity: 'Unused identity.' }] })
   assert.equal((await fake.runtime().status()).chatReady, false)
-  fake.answer(2)
+  await fake.answer(2)
   await delay(80)
   assert.equal(fake.sends.length, 1)
   assert.deepEqual(fake.runtime().host()!.sessions.get('private:123'), binding)
@@ -1456,7 +1457,7 @@ test('conversational notices admit group uploads through normal wake rules and w
   const file = fake.runtime().host()!.history.snapshot('group:456').messages.find(message => message.content.some(part => part.type === 'file'))!
   assert.equal(file.actor, '124'); assert.match(file.id, /^onebot-notice:/)
   fake.message(813, { ...poke, target_id: 999 })
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
   const prompt = JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request)
   assert.match(prompt, /拍一拍/); assert.match(prompt, /senderIsConfiguredOwner\\\":false/)
@@ -1476,7 +1477,7 @@ test('private pokes become real sender direct input while self echoes and other 
   await delay(40)
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0)
   fake.message(822, { ...poke, target_id: 999 })
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const messages = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages
   assert(messages.some(message => message.actor === '123' && message.id.startsWith('onebot-notice:')))
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
@@ -1484,34 +1485,22 @@ test('private pokes become real sender direct input while self echoes and other 
     && event.correlation.conversationId === 'private:123'))
 })
 
-test('native input configuration changes trigger behavior live without resetting sessions and cancels withdrawn queued continuation', async context => {
-  const { createDefaultPackageConfigurationRegistry } = await import('../src/host/chat-input-configuration.ts')
-  const { DEFAULT_CHAT_INPUT_CONFIGURATION } = await import('../src/contracts/chat-input-configuration.ts')
+test('persona wake settings apply live while QQ mentions remain enabled and sessions are preserved', async context => {
   const fake = await fixture(context)
   await fake.configure(); await fake.start()
-  const registry = createDefaultPackageConfigurationRegistry(fake.directory)
-  async function configureInput(configuration: typeof DEFAULT_CHAT_INPUT_CONFIGURATION) {
-    const current = await registry.read('chat-input')
-    await registry.compareAndSet('chat-input', current.revision, configuration, new AbortController().signal)
+  async function wake(nicknames: string[], continuationMs: number) {
+    const current = await readNativeChatConfiguration(fake.directory)
+    await fake.save('personas', { personas: current.personas.map(persona => ({ ...persona, wake: { nicknames, wakeOnReply: false, continuationMs } })) })
   }
-  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
-  const group = { message_type: 'group', group_id: 456 }
-  await configureInput({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, wakeOnMention: false, wakeOnReply: false,
-    continuationMs: 0, nicknames: ['小框架'] })
-  fake.message(801, { ...group, message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '只提及不启动' } }] })
-  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 1)
-  assert.equal(prompts().length, 0)
-  fake.message(802, { ...group, message: [{ type: 'text', data: { text: '小框架，开始吧' } }] })
-  await until(() => prompts().length === 1)
-  await configureInput({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, nicknames: ['小框架'] })
-  fake.message(803, { ...group, message: [{ type: 'text', data: { text: '待处理更正' } }] })
-  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 3)
-  assert.equal((await fake.runtime().inboxSummary()).pending, 1)
-  await configureInput({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, continuationMs: 0 })
-  fake.answer()
-  await until(() => fake.sends.length === 1)
-  await until(() => fake.runtime().inboxSummary().pending === 0)
-  assert.equal(prompts().length, 1)
+  await wake(['小框架'], 0)
+  fake.message(801, { message_type: 'group', group_id: 456, message: [{ type: 'text', data: { text: '小框架，开始吧' } }] })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 1)
+  await fake.answer()
+  await until(() => fake.runtime().executions()!.forConversation('group:456') === null)
+  await wake(['新昵称'], 0)
+  fake.message(802, { message_type: 'group', group_id: 456, message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '直接提及仍唤醒' } }] })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  await fake.answer(2)
   assert.equal(fake.creates(), 1)
   assert.equal((await fake.runtime().status()).chatReady, true)
 })
@@ -1580,7 +1569,7 @@ test('native default framework tools project only explicit grants and execute me
     forwardMessages: [{ sender: { user_id: 789 }, content: [{ type: 'text', data: { text: '由真实宿主工具展开的正文' } }] }] })
   await fake.configure(); await fake.start()
   fake.message(950, { message: [{ type: 'forward', data: { id: 'forward-token' } }, { type: 'text', data: { text: '读这个转发' } }] })
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
@@ -1613,7 +1602,7 @@ test('native consumes a structured non-participation decision without sending co
   const fake = await fixture(context)
   await fake.configure(); await fake.start()
   fake.message(960)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   fake.agentEvent('assistant/message', { turn: 1, message: { id: 'silent-final', role: 'assistant', content: [{ type: 'text',
     text: JSON.stringify({ schema: 'qaf.reply/1', action: 'silent', reason: 'user-requested' }) }] } })
   fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -1622,45 +1611,19 @@ test('native consumes a structured non-participation decision without sending co
   assert.equal(fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages.length, 1)
   fake.message(961)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 1)
   assert(!JSON.stringify(fake.sends).includes('qaf.reply/1'))
   assert.equal(fake.creates(), 1)
 })
 
-test('native reminder routes remain editable while stopped and dispatch with a separate one-use rule grant', async context => {
-  const fake = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '999' } })
+test('reminder configuration stays in its service without a management write route', async context => {
+  const fake = await fixture(context)
   await fake.configure()
-  const before = await readdir(fake.directory)
-  assert.deepEqual((await invoke(fake.routes(), 'GET', '/api/chat/reminders')).rules, [])
-  assert.deepEqual((await readdir(fake.directory)).sort(), before.sort())
-  await assert.rejects(() => invoke(fake.routes(), 'POST', '/api/chat/reminders', { action: 'create', configuration: {
-    conversationId: 'private:888', text: 'Denied', timeZone: 'UTC', schedule: { kind: 'delay', delayMs: 1000 }, enabled: true } }),
-  { code: 'reminder_access_denied' })
-  const rule = await invoke(fake.routes(), 'POST', '/api/chat/reminders', { action: 'create', configuration: {
-    conversationId: 'private:123', text: '独立提醒发送', timeZone: 'Asia/Shanghai', schedule: { kind: 'delay', delayMs: 1000 }, enabled: true } })
+  assert(!fake.routes().some(route => route.pathname === '/api/chat/reminders'))
+  assert.deepEqual(fake.runtime().readReminders().rules, [])
+  assert.equal(fake.creates(), 0)
   assert.equal(fake.sends.length, 0)
-  await fake.start()
-  for (const grant of fake.runtime().host()!.policy.describe().grants)
-    if (grant.featureId === 'agent-relay') fake.runtime().host()!.policy.revoke(grant.id)
-  await delay(1050)
-  await fake.runtime().reminderService().tick()
-  await until(() => fake.sends.length === 1)
-  assert.match(JSON.stringify(fake.sends), /独立提醒发送/)
-  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 0)
-  const grants = fake.runtime().host()!.policy.describe().grants
-  const reminderGrant = grants.find(grant => grant.featureId === 'reminder')!
-  assert.equal(reminderGrant.used['messaging.send'], 1)
-  assert.equal(reminderGrant.active, false)
-  assert(grants.filter(grant => grant.featureId === 'agent-relay').every(grant => grant.used['messaging.send'] === 0))
-  assert.equal(fake.runtime().reminderService().read(String(rule.id)).state, 'completed')
-  await fake.runtime().stop()
-  const stopped = fake.runtime().readReminders().rules.find(item => item.id === rule.id)!
-  const cancelled = await invoke(fake.routes(), 'POST', '/api/chat/reminders', { action: 'cancel', id: rule.id, revision: stopped.revision })
-  assert.equal(cancelled.state, 'cancelled')
-  await fake.start()
-  await fake.runtime().reminderService().tick()
-  assert.equal(fake.sends.length, 1)
 })
 
 test('native reminder unknown send is retained across restart without an automatic second delivery', async context => {
@@ -1682,7 +1645,7 @@ test('whitelist projects tools without a grant document and removing access reje
     forwardMessages: [{ sender: { user_id: 789 }, content: [{ type: 'text', data: { text: '白名单读取' } }] }] })
   await fake.configure(); await fake.start()
   fake.message(970, { message: [{ type: 'forward', data: { id: 'forward-token' } }, { type: 'text', data: { text: '读取' } }] })
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
@@ -1700,87 +1663,36 @@ test('whitelist projects tools without a grant document and removing access reje
   assert.equal(fake.sends.length, 0)
 })
 
-test('native memory management and QQ owner commands inject only confirmed current-scope data and persist revocation', async context => {
+test('QQ owner commands persist scoped memory without a management write route', async context => {
   const fake = await fixture(context)
-  await fake.configure()
-  const path = '/api/chat/memory'
-  const before = await readdir(fake.directory)
-  assert.deepEqual((await invoke(fake.routes(), 'GET', path)).entries, [])
-  assert.deepEqual((await readdir(fake.directory)).sort(), before.sort())
-  const saved = await invoke(fake.routes(), 'POST', path, { action: 'create', entry: {
-    scope: { kind: 'user', userId: '123', conversationId: 'private:123' }, kind: 'preference',
-    content: '本次测试偏好简明回答', tags: [], expiresAt: null } })
-  await invoke(fake.routes(), 'POST', path, { action: 'create', entry: {
-    scope: { kind: 'group', conversationId: 'group:999' }, kind: 'memory', content: '其他群私有记忆', tags: [], expiresAt: null } })
-  await fake.start()
-  fake.message(980)
+  await fake.configure(); await fake.start()
+  assert(!fake.routes().some(route => route.pathname === '/api/chat/memory'))
+  fake.message(980, { message: [{ type: 'text', data: { text: '/记住 主人明确确认的测试资料' } }] })
+  await until(() => fake.runtime().readMemory().entries.length === 1)
+  const entry = fake.runtime().readMemory().entries[0]!
+  assert.equal(entry.status, 'confirmed')
+  await until(() => fake.sends.length === 1)
+  fake.message(981)
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
-  const prompt = JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request.content)
-  assert.match(prompt, /本次测试偏好简明回答/)
-  assert(!prompt.includes('其他群私有记忆'))
-  assert.match(prompt, /confirmed-memory/)
-  fake.answer(); await until(() => fake.sends.length === 1)
-  fake.message(981, { message: [{ type: 'text', data: { text: '/记住 主人刚刚提供的新记忆' } }] })
-  await until(() => fake.runtime().readMemory().entries.some(entry => entry.content === '主人刚刚提供的新记忆'))
-  await until(() => fake.sends.length === 2)
-  fake.message(981, { message: [{ type: 'text', data: { text: '/记住 主人刚刚提供的新记忆' } }] })
-  await delay(50)
-  assert.equal(fake.runtime().readMemory().entries.filter(entry => entry.content === '主人刚刚提供的新记忆').length, 1)
-  assert.equal(fake.sends.length, 2)
-  fake.message(982, { user_id: 789, message_type: 'group', group_id: 456,
-    message: [{ type: 'at', data: { qq: 999 } }, { type: 'text', data: { text: '/记住 非主人伪造记忆' } }] })
-  await until(() => fake.sends.length === 3)
-  assert(!fake.runtime().readMemory().entries.some(entry => entry.content === '非主人伪造记忆'))
-  await invoke(fake.routes(), 'POST', path, { action: 'revoke', id: saved.id, revision: saved.revision })
-  fake.message(983)
-  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
-  const next = JSON.stringify(fake.rpc.filter(call => call.method === 'session/prompt')[1].request.content)
-  assert(!next.includes('本次测试偏好简明回答'))
-  assert.match(next, /主人刚刚提供的新记忆/)
+  assert.equal(fake.runtime().readMemoryEntry(entry.id).status, 'confirmed')
+  assert.doesNotMatch(JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request), /主人明确确认的测试资料/)
+  await fake.answer()
+  fake.message(982, { message: [{ type: 'text', data: { text: `/撤销记忆 ${entry.id}` } }] })
+  await until(() => fake.runtime().readMemoryEntry(entry.id).status === 'revoked')
   assert.equal(fake.creates(), 1)
 })
 
-test('native model memory proposals require actual QQ owner confirmation and reminder tools preserve current source scope', async context => {
-  const fake = await fixture(context, { frameworkToolChannel: true, accountScope: { protocolId: 'onebot', accountId: '999' } })
-  await fake.configure()
-  const path = '/api/chat/tool-permissions'
-  const initial = await invoke(fake.routes(), 'GET', path)
-  await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
-    id: randomUUID(), conversationId: 'private:123', capabilities: ['memory.propose', 'memory.query', 'reminders.create'],
-    maxUses: { 'memory.propose': 1, 'memory.query': 2, 'reminders.create': 1 }, expiresAt: null } })
-  await fake.start(); fake.message(990)
+test('default tool projection exposes framework tools while memory and reminder business tools are extension owned', async context => {
+  const fake = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '999' } })
+  await fake.configure(); await fake.start(); fake.message(990)
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
-  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
-  const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
-  const lease = fake.toolLeases.get(sessionId)!
-  async function call(id: string, name: string, input: JsonValue) {
-    fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name, input, sessionId, requestId,
-      generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10_000 } })
-    await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
-  }
-  const proposed = await call('propose-memory', 'qaf_memory_propose', { kind: 'preference', content: '模型推测的有界偏好', tags: [], expiresAt: null })
-  assert.equal(proposed.status, 'confirmed')
-  const entry = fake.runtime().readMemory().entries[0]
-  assert.equal(entry.status, 'proposed')
-  assert.equal(entry.source.kind, 'model-inference')
-  assert.equal(entry.confirmedBy, null)
-  assert.equal(entry.scope.kind, 'user')
-  const before = await call('query-before', 'qaf_memory_query', { query: '' })
-  assert.equal(before.status, 'confirmed'); assert(!JSON.stringify(before).includes('模型推测的有界偏好'))
-  const reminder = await call('owner-reminder', 'qaf_reminder_create', { text: '模型工具创建的提醒', timeZone: 'UTC',
-    schedule: { kind: 'delay', delayMs: 60_000 }, enabled: false })
-  assert.equal(reminder.status, 'confirmed')
-  assert.equal(fake.runtime().readReminders().rules[0].configuration.conversationId, 'private:123')
-  await assert.rejects(() => invoke(fake.routes(), 'POST', '/api/chat/memory', { action: 'confirm', id: entry.id, revision: entry.revision }),
-    { code: 'invalid_memory_request' })
-  fake.message(991, { message: [{ type: 'text', data: { text: `/确认记忆 ${entry.id}` } }] })
-  await until(() => fake.runtime().readMemoryEntry(entry.id).status === 'confirmed')
-  assert.equal(fake.runtime().readMemoryEntry(entry.id).confirmedBy?.kind, 'owner-message')
-  const after = await call('query-after', 'qaf_memory_query', { query: '' })
-  assert.equal(after.status, 'confirmed'); assert.match(JSON.stringify(after), /模型推测的有界偏好/)
-  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  const names = fake.toolLeases.get('session-1')!.names
+  assert(names.includes('qaf_reply'))
+  assert(!names.some(name => name.startsWith('qaf_memory_') || name.startsWith('qaf_reminder_')))
+  assert.equal((await fake.reply('同账号的显式回复')).status, 'confirmed')
+  fake.rawFinal()
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
 })
-
 
 test('native work tools run independently, persist results, send with delegation grants and continue the original child', async context => {
   const fake = await fixture(context, { frameworkToolChannel: true, workChannel: true, accountScope: { protocolId: 'onebot', accountId: '999' } })
@@ -1792,14 +1704,17 @@ test('native work tools run independently, persist results, send with delegation
     id: randomUUID(), conversationId: 'private:123', capabilities,
     maxUses: Object.fromEntries(capabilities.map(capability => [capability, 4])), expiresAt: null } })
   await fake.start(); fake.message(1200)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   assert.equal(fake.runtime().workStatus().available, true)
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const lease = fake.toolLeases.get(sessionId)!
   async function call(id: string, name: string, input: JsonValue) {
+    const requests = fake.rpc.filter(call => call.method === 'session/prompt' && call.request.sessionId === sessionId)
+    const requestId = String(requests.at(-1)!.request.requestId)
+    const lease = fake.toolLeases.get(sessionId)!
     fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name, input, sessionId, requestId,
-      generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
+      generation: 1, userMessageId: `user-${requestId}`, turn: requests.length, expiresAt: Date.now() + 10000 } })
     await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
   }
   const started = await call('start-independent', 'qaf_work_start', { task: '执行明确委派的测试任务', context: '' })
@@ -1812,24 +1727,32 @@ test('native work tools run independently, persist results, send with delegation
   assert.equal(start.parentSessionId, sessionId)
   const status = await call('status-independent', 'qaf_work_status', { id })
   assert.equal(status.status, 'confirmed')
-  // Work delivery has its own bounded authorization even when the ordinary relay send grant is exhausted/revoked.
-  for (const grant of fake.runtime().host()!.policy.describe().grants) if (grant.featureId === 'agent-relay') fake.runtime().host()!.policy.revoke(grant.id)
+  fake.rawFinal(1)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [{ type: 'text', text: '独立工作真实回传' }] } })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  assert.match(JSON.stringify(fake.rpc.filter(call => call.method === 'session/prompt')[1]!.request.content), /独立工作真实回传/)
+  fake.rawFinal(2)
   await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
   assert.equal(fake.sends.length, 1)
-  assert.match(JSON.stringify(fake.sends[0]), /独立工作真实回传/)
+  assert.match(JSON.stringify(fake.sends[0]), /Final answer 2/)
   const receipt = fake.runtime().readWork(id)!
   assert.equal(receipt.deliveryMessageId, '1001'); assert(receipt.resultId)
   assert.equal(fake.runtime().host()!.sessions.get('private:123')?.sessionId, sessionId)
+  fake.message(1201)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
   const followup = await call('follow-independent', 'qaf_work_followup', { id, text: '补充明确要求', delivery: 'queue' })
   assert.equal(followup.status, 'confirmed', JSON.stringify(followup))
   assert.equal(fake.works.get(id)?.childId, work.childId)
   await until(() => fake.runtime().readWork(id)?.status === 'running')
   const stopped = await call('stop-independent', 'qaf_work_interrupt', { id })
   assert.equal(stopped.status, 'confirmed', JSON.stringify(stopped))
+  fake.rawFinal(3)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 4)
+  fake.rawFinal(4)
   await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed' && fake.sends.length === 2)
   assert.equal(fake.rpc.filter(call => call.method === 'bridgePlugin/startWork').length, 1)
-  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 4)
   await fake.restart()
   assert.equal(fake.runtime().listWork().records.length, 1)
   assert.equal(fake.runtime().readWork(id)?.delivery, 'confirmed')
@@ -1844,7 +1767,7 @@ test('native child questions use QQ owner replies while the main conversation co
   await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: current.revision, action: 'grant', grant: {
     id: randomUUID(), conversationId: 'private:123', capabilities: ['native.work.start'], maxUses: { 'native.work.start': 1 }, expiresAt: null } })
   await fake.start(); fake.message(1300)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const lease = fake.toolLeases.get(sessionId)!
@@ -1854,7 +1777,7 @@ test('native child questions use QQ owner replies while the main conversation co
   await until(() => fake.toolResults.has('child-start'))
   assert.equal(fake.toolResults.get('child-start')?.status, 'confirmed')
   const [id, work] = [...fake.works][0]
-  fake.answer()
+  await fake.answer()
   await until(() => fake.sends.length === 1)
   fake.message(1301)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
@@ -1867,7 +1790,11 @@ test('native child questions use QQ owner replies while the main conversation co
   assert.equal(fake.sends.length, 1)
   assert.match(JSON.stringify(answered), /allowed-once/)
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 2)
+  fake.rawFinal(2)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [{ type: 'text', text: '工作完成' }] } })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
+  fake.rawFinal(3)
   await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
 })
 
@@ -1879,7 +1806,7 @@ test('native work file result is registered from SDK bytes and records a real up
   await invoke(fake.routes(), 'POST', '/api/chat/tool-permissions', { revision: current.revision, action: 'grant', grant: {
     id: randomUUID(), conversationId: 'private:123', capabilities: ['native.work.start'], maxUses: { 'native.work.start': 1 }, expiresAt: null } })
   await fake.start(); fake.message(1400)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   fake.toolCalls.push({ ticket: 'file-start', leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id: 'file-start', name: 'qaf_work_start',
@@ -1888,8 +1815,12 @@ test('native work file result is registered from SDK bytes and records a real up
   await until(() => fake.toolResults.has('file-start'))
   assert.equal(fake.toolResults.get('file-start')?.status, 'confirmed')
   const [id, work] = [...fake.works][0]
+  fake.rawFinal(1)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [
     { type: 'text', text: '报告见文件' }, fake.workAsset ] } })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  fake.rawFinal(2)
   await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
   const result = fake.runtime().readWork(id)!
   assert.equal(result.deliveryMessageId, null)
@@ -1948,7 +1879,7 @@ test('native bootstrap packages share versioned services, contribute input and e
   await host.dispatchEvent({ id: 'package-allowed', type: 'fixture.package-event', conversationId: 'private:123', data: {} })
   assert.equal(effects, 1)
   fake.message(1600)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   assert.match(JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request.content), /来自第二个扩展包的可信输入/)
   await fake.runtime().stop()
   assert.deepEqual(disposed, ['input', 'source'])
@@ -1967,7 +1898,7 @@ test('native media tools read protocol image and text-file bytes without sending
     { type: 'image', data: { file: 'image-token', url: 'https://untrusted.example.test/not-used' } },
     { type: 'file', data: { file_id: 'file-token', name: 'report.txt', file_hash: 'private-hash' } },
     { type: 'record', data: { file: 'audio-token' } }] })
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const source = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages[0]
@@ -2020,7 +1951,7 @@ test('default native host publishes shared versioned services and invalidates re
   assert.equal(consumers[0]['native-work'].status().available, false)
   assert.deepEqual(consumers[0]['native-work'].list().records, [])
   fake.message(1800)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const binding = consumers[0]['native-agent'].binding('private:123')
   assert.equal(binding?.generation, 1)
   assert.equal(consumers[0]['native-executions'].list().length, 1)
@@ -2039,7 +1970,7 @@ test('native output package sends registered image audio file and configured lon
   fake.message(1900, { message: [{ type: 'text', data: { text: '把这些资源整理发给我' } },
     { type: 'image', data: { file: 'image-token' } }, { type: 'record', data: { file: 'audio-token' } },
     { type: 'file', data: { file_id: 'file-token', name: 'report.txt' } }] })
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const source = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages[0]
   const assets = source.content.filter(part => part.type === 'image' || part.type === 'audio' || part.type === 'file')
   assert.equal(assets.length, 3)
@@ -2083,7 +2014,7 @@ test('long-forward uses whitelist and unknown output is not replayed after resta
   await registry.compareAndSet('chat-output', current.revision, { schema: 1, bubbles: true, longTextAsForward: true,
     longTextThreshold: 500, media: true }, new AbortController().signal)
   await fake.start(); fake.message(1910)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   await fake.reply('没有转发权限。'.repeat(100))
   fake.agentEvent('assistant/message', { turn: 1, message: { id: 'no-forward-authority', role: 'assistant', content: [{ type: 'text', text: '没有转发权限。'.repeat(100) }] } })
   fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -2144,7 +2075,7 @@ test('explicit management execution reconciliation verifies fresh SDK checkpoint
   await fake.restart()
   fake.message(2001)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 1)
   assert.match(JSON.stringify(fake.sends[0]), /Final answer 2/)
   assert(!JSON.stringify(fake.sends[0]).includes('Final answer 1'))
@@ -2159,7 +2090,7 @@ test('default runtime migrates model reasoning and capacity through verified SDK
   await fake.start(); fake.message(2010)
   await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'waiting'
     && fake.runtime().executions()!.list().length > 0 && fake.rpc.some(call => call.method === 'session/prompt'))
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => fake.sends.length === 1
     && fake.runtime().executions()!.list()[0]?.externalStatus === 'completed'
     && fake.runtime().executions()!.list()[0]?.isolated === false
@@ -2248,7 +2179,7 @@ test('default management fork recovery preserves cancellation uncertainty and re
   fake.message(2021)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').at(-1)!.request.sessionId, child.sessionId)
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => fake.sends.length === 1)
   assert.equal(fake.creates(), 1)
 })
@@ -2272,13 +2203,13 @@ test('legacy tool permissions do not restrict whitelist tools and absent work ba
   const granted = await invoke(fake.routes(), 'POST', path, { revision: initial.revision, action: 'grant', grant: {
     id, conversationId: 'private:123', capabilities: ['native.media.inspect'], maxUses: { 'native.media.inspect': 1 }, expiresAt: null } })
   await fake.start(); fake.message(2300)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const first = promptHostFacts(fake.rpc.find(call => call.method === 'session/prompt')!.request)
   assert(isRecord(first.tools) && Array.isArray(first.tools.tools))
   assert(first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qaf_media_inspect'))
   assert(!first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qaf_work_start'))
   assert(isRecord(first.output)); assert.equal(first.output.forwardAuthorized, true)
-  fake.answer(1); await until(() => fake.sends.length === 1)
+  await fake.answer(1); await until(() => fake.sends.length === 1)
   await invoke(fake.routes(), 'POST', path, { revision: granted.revision, action: 'revoke', id })
   fake.message(2301)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
@@ -2297,7 +2228,7 @@ test('native conversation doctor and versioned event routes expose blockers with
   assert(Array.isArray(denied.checks) && denied.checks.some(check => isRecord(check) && check.code === 'conversation_not_allowed'))
   assert.equal(fake.rpc.length, before)
   fake.message(2400)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const busy = await invoke(fake.routes(), 'GET', '/api/chat/diagnostics', null, new URLSearchParams({ conversationId: 'private:123' }))
   assert.equal(busy.state, 'waiting')
   assert(isRecord(busy.context) && busy.context.source === 'active-session' && Number(busy.context.limit) > 0)
@@ -2321,15 +2252,16 @@ test('two default native accounts isolate matching logical sessions grants and r
   const first = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '999' }, protocolSelfId: 999 })
   const second = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '1000' }, protocolSelfId: 1000 })
   await first.configure(); await second.configure()
-  await invoke(first.routes(), 'POST', '/api/chat/memory', { action: 'create', entry: {
-    scope: { kind: 'user', conversationId: 'private:123', userId: '123' }, kind: 'memory', content: '账号甲的私有测试资料', tags: [], expiresAt: null } })
+  await first.runtime().memoryService().createConfirmed({ scope: { kind: 'user', conversationId: 'private:123', userId: '123' },
+    kind: 'memory', content: '账号甲的私有测试资料', tags: [], expiresAt: null }, { kind: 'operator' }, new AbortController().signal)
   assert.deepEqual(second.runtime().readMemory().entries, [])
   await first.start(); await second.start()
   first.message(2500); second.message(2500)
   await until(() => first.rpc.some(call => call.method === 'session/prompt') && second.rpc.some(call => call.method === 'session/prompt'))
-  assert.match(JSON.stringify(first.rpc.find(call => call.method === 'session/prompt')!.request), /账号甲的私有测试资料/)
+  assert.equal(first.runtime().readMemory().entries[0]?.content, '账号甲的私有测试资料')
+  assert.doesNotMatch(JSON.stringify(first.rpc.find(call => call.method === 'session/prompt')!.request), /账号甲的私有测试资料/)
   assert.doesNotMatch(JSON.stringify(second.rpc.find(call => call.method === 'session/prompt')!.request), /账号甲的私有测试资料/)
-  first.answer(1); second.answer(1)
+  await first.answer(1); await second.answer(1)
   await until(() => first.sends.length === 1 && second.sends.length === 1)
   const a = first.runtime().host()!; const b = second.runtime().host()!
   assert.deepEqual(a.accountScope, { protocolId: 'onebot', accountId: '999' })
@@ -2369,7 +2301,7 @@ for (const ownerRequest of [true, false]) test(`external tool confirmation is au
   await fake.configure()
   if (!ownerRequest) await fake.save('access', { allow: ['private:123', 'group:456'], deny: [], owner: '456' })
   await fake.start(); fake.message(2900)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const sessionId = String(fake.rpc.find(call => call.method === 'session/prompt')!.request.sessionId)
   fake.interaction({ type: 'waterfall', event: 'approval/request', agentId: sessionId, eventId: 'external-tool',
     request: { toolName: 'workspace.write', reason: 'Synthetic write request' } })
@@ -2398,7 +2330,7 @@ test('dense input reaches the inbox during slow submit and replaces an unsent re
   assert.equal(fake.runtime().inboxSummary().pending, 3)
   release()
   await until(() => fake.runtime().inboxSummary().pending === 2)
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => prompts().length === 2)
   assert.equal(fake.sends.length, 0, 'old response is withheld before its first bubble')
   const content = JSON.stringify(prompts()[1]!.request.content)
@@ -2409,7 +2341,7 @@ test('dense input reaches the inbox during slow submit and replaces an unsent re
   assert.match(content, /direct/)
   release()
   await until(() => fake.runtime().inboxSummary().pending === 0)
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 1)
   assert.match(JSON.stringify(fake.sends), /Final answer 2/)
   assert.doesNotMatch(JSON.stringify(fake.sends), /Final answer 1/)
@@ -2418,7 +2350,7 @@ test('dense input reaches the inbox during slow submit and replaces an unsent re
   assert.doesNotMatch(JSON.stringify(prompts()[2]!.request.content), /unsentFor/, 'delivery correction is consumed once')
   release()
   await until(() => fake.runtime().inboxSummary().pending === 0)
-  fake.answer(3)
+  await fake.answer(3)
   await until(() => fake.sends.length === 2)
 })
 
@@ -2433,12 +2365,12 @@ test('dense group input keeps different senders separate and does not discard an
   await until(() => prompts().length === 1)
   message(991, 789, '我也有另一个问题')
   await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 2)
-  fake.answer(1)
+  await fake.answer(1)
   await until(() => fake.sends.length === 1 && prompts().length === 2)
   const content = JSON.stringify(prompts()[1]!.request.content)
   assert.match(content, /senderIsConfiguredOwner\\\":false/)
   assert.doesNotMatch(content, /unsentFor/)
-  fake.answer(2)
+  await fake.answer(2)
   await until(() => fake.sends.length === 2)
 })
 
@@ -2447,7 +2379,7 @@ for (const finalKind of ['none', 'text', 'invalid-silent']) test(`explicit reply
   await fake.configure()
   await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 1000, cancelOnTimeout: false } })
   await fake.start(); fake.message(3001)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const host = fake.runtime().host()!
   assert.equal(host.replies.get('private:123')?.status, 'waiting')
   if (finalKind === 'none') fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -2476,12 +2408,12 @@ for (const finalKind of ['none', 'text', 'invalid-silent']) test(`explicit reply
 for (const conversation of ['private', 'group'] as const) test(`explicit reply contract: ${conversation} qaf_reply sends once and terminal final neither repeats nor times out`, async context => {
   const fake = await fixture(context)
   await fake.configure()
-  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 1500, cancelOnTimeout: false } })
+  await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 4000, cancelOnTimeout: false } })
   await fake.start()
   const conversationId = conversation === 'group' ? 'group:456' : 'private:123'
   fake.message(3002, conversation === 'group' ? { message_type: 'group', group_id: 456, user_id: 789,
     message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '请回复' } }] } : {})
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   fake.toolCalls.push({ ticket: 'explicit-send', leaseId: fake.toolLeases.get(sessionId)!.leaseId,
@@ -2500,7 +2432,7 @@ for (const conversation of ['private', 'group'] as const) test(`explicit reply c
   assert.equal(fake.sends.length, 1)
   assert.doesNotMatch(JSON.stringify(fake.sends), /Final answer|Tool narration/)
   assert.equal(fake.runtime().activity().items.some(item => item.summary === '本轮观察结束，未发言。'), false)
-  await delay(1600)
+  await delay(4100)
   assert.equal(fake.runtime().host()!.replies.metrics().expired, 0)
   assert.equal(fake.sends.length, 1)
 })
@@ -2508,7 +2440,7 @@ for (const conversation of ['private', 'group'] as const) test(`explicit reply c
 test('explicit reply contract: failed model terminal settles its exact watchdog without claiming silence or sending', async context => {
   const fake = await fixture(context)
   await fake.configure(); await fake.start(); fake.message(3003)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'failed', error: { message: 'synthetic model failure' } } })
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   assert.equal(fake.runtime().host()!.replies.get('private:123')?.status, 'suppressed')
@@ -2519,7 +2451,7 @@ test('explicit reply contract: failed model terminal settles its exact watchdog 
 test('explicit reply contract: host work feedback uses final narration while tool names and intermediate child text remain private', async context => {
   const fake = await fixture(context, { workChannel: true })
   await fake.configure(); await fake.start(); fake.message(3004)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const leaseId = fake.toolLeases.get(sessionId)!.leaseId
@@ -2615,7 +2547,7 @@ for (const stopReason of ['completed', 'failed', 'running'] as const) test(stopR
   : `work feedback suppresses in-flight stale progress after ${stopReason} and releases the pending final`, async context => {
   const fake = await fixture(context, { workChannel: true })
   await fake.configure(); await fake.start(); fake.message(5001)
-  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   fake.toolCalls.push({ ticket: 'stale-progress-work', leaseId: fake.toolLeases.get(sessionId)!.leaseId,

@@ -17,6 +17,7 @@ export interface OneBotConversationPort {
   groups(request: { readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationGroup[]>>;
   friends(request: { readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly { readonly userId: string; readonly nickname: string | null; readonly remark: string | null }[]>>;
   poke(request: { readonly conversationId: string; readonly userId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<{ readonly acknowledged: true }>>;
+  reaction?(request: { readonly messageId: string; readonly emojiId: string; readonly add: boolean; readonly signal: AbortSignal }): Promise<OneBotReadResult<{ readonly acknowledged: true }>>;
   recall(request: { readonly messageId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<{ readonly acknowledged: true }>>;
 }
 
@@ -160,6 +161,11 @@ export function createOneBotConversationPort(options: {
         ? { user_id: request.userId, ...(scope[1] === 'group' ? { group_id: scope[2]! } : {}) } : null,
       request.signal, () => ({ acknowledged: true as const }));
     },
+    reaction: request => invoke('set_msg_emoji_like', id(request.messageId, true)
+      && typeof request.emojiId === 'string' && /^(0|[1-9]\d{0,31})$/.test(request.emojiId) && typeof request.add === 'boolean'
+      ? { message_id: request.messageId, emoji_id: request.emojiId, set: request.add } : null,
+      request.signal, value => value === false || isRecord(value) && (value.result === false
+        || typeof value.result === 'number' && value.result !== 0) ? null : ({ acknowledged: true as const })),
     recall: request => invoke('delete_msg', id(request.messageId, true) ? { message_id: request.messageId } : null,
       request.signal, () => ({ acknowledged: true as const })),
   });

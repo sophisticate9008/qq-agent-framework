@@ -43,6 +43,14 @@ function recallInput(input: JsonValue): { messageId: string } {
     'INVALID_CONVERSATION_INPUT', 'Recall requires one messageId.');
   return { messageId: input.messageId };
 }
+function reactionInput(input: JsonValue): { action: 'add' | 'remove'; messageId: string; emojiId: string } {
+  assert(isRecord(input) && Object.keys(input).length === 3
+    && Object.keys(input).every(key => ['action', 'messageId', 'emojiId'].includes(key))
+    && (input.action === 'add' || input.action === 'remove') && messageId(input.messageId)
+    && typeof input.emojiId === 'string' && /^(0|[1-9]\d{0,31})$/.test(input.emojiId),
+  'INVALID_CONVERSATION_INPUT', 'Reaction requires add or remove, a messageId and a decimal emojiId.');
+  return { action: input.action, messageId: input.messageId, emojiId: input.emojiId };
+}
 function cardInput(input: JsonValue): { card: string } {
   assert(isRecord(input) && Object.keys(input).length === 1 && typeof input.card === 'string'
     && [...input.card].length >= 1 && [...input.card].length <= 30 && input.card.trim() === input.card
@@ -70,6 +78,12 @@ export const NATIVE_CONVERSATION_TOOLS: readonly NativeToolContribution[] = Obje
     registrationSource: source, description: '在当前QQ会话戳一戳。userId省略时戳当前真实发言者；私聊固定当前对端，群聊目标必须是当前群成员。根据真实协议回执报告成功或失败；结果unknown时不能重复提交同一次动作。',
     parameters: { type: 'object', additionalProperties: false, properties: { userId: { type: 'string', pattern: '^[1-9][0-9]{0,31}$' } } } },
     validate: input => json(pokeInput(input)) },
+  { definition: { name: 'qaf_reaction', capability: 'native.conversation.reaction', featureId: 'framework-tools', timeoutMs: 15000,
+    registrationSource: source, description: '给当前QQ会话的真实消息贴QQ表情回应，或取消机器人自己的回应。action为add或remove，messageId来自当前会话消息，emojiId为QQ表情编号。宿主核验消息归属；remove只取消自己贴的同一表情。unknown时不重复提交同一次动作。',
+    parameters: { type: 'object', additionalProperties: false, required: ['action', 'messageId', 'emojiId'], properties: {
+      action: { enum: ['add', 'remove'] }, messageId: { type: 'string', pattern: '^-?[1-9][0-9]{0,31}$' },
+      emojiId: { type: 'string', pattern: '^(0|[1-9][0-9]{0,31})$' },
+    } } }, validate: input => json(reactionInput(input)) },
   { definition: { name: 'qaf_recall', capability: 'native.conversation.recall', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source, description: '撤回当前QQ会话中机器人自己发送的一条消息。messageId须来自真实消息记录；先核对消息归属再执行，不能撤回其他发言者消息。结果unknown时不能重复提交同一次动作。',
     parameters: { type: 'object', additionalProperties: false, required: ['messageId'], properties: {
@@ -94,11 +108,11 @@ export function createNativeConversationService(options: {
     request.signal.throwIfAborted();
     return owner ? sources().requireOwner(request.scope, request.signal) : sources().lookup(request.scope, request.signal);
   }
-  async function readMessage(request: EffectRequest, expectedMessageId: string, requireOutbound = false) {
+  async function readMessage(request: EffectRequest, expectedMessageId: string) {
     const result = await readScopedProtocolMessage({ port: options.messagePort, store: options.store, selfId: options.selfId,
       messageId: expectedMessageId, conversationId: request.scope.conversationId, signal: request.signal,
-      requireOutboundEvidence: requireOutbound, ...(request.scope.accountScope ? { accountScope: request.scope.accountScope } : {}) });
-    await guard(request, requireOutbound);
+      ...(request.scope.accountScope ? { accountScope: request.scope.accountScope } : {}) });
+    await guard(request);
     return result;
   }
   function page<Value>(items: readonly Value[], input: QueryInput, label: (item: Value) => string): JsonObject {
@@ -133,9 +147,17 @@ export function createNativeConversationService(options: {
     await guard(request);
     return { status: 'confirmed', messages, truncated };
   }
+  function previousWrite(request: EffectRequest, operation: string): JsonValue | undefined {
+    const key = digest([options.selfId, request.scope.accountScope ?? null, request.scope.conversationId, request.scope.eventId, operation]);
+    const prior = options.store.read('native-chat.protocol-writes', key);
+    if (!prior) return undefined;
+    const value = object(prior.value);
+    assert(value.fingerprint === digest(request.input), 'PROTOCOL_WRITE_CONFLICT', 'The protocol operation input changed.');
+    return value.result ?? { status: 'unknown', code: 'PROTOCOL_WRITE_ALREADY_DISPATCHED', retry: false };
+  }
   async function write<Value>(request: EffectRequest, operation: string,
     run: () => Promise<OneBotReadResult<Value>>): Promise<JsonValue> {
-    const source = await guard(request, operation === 'recall');
+    const source = await guard(request);
     const namespace = 'native-chat.protocol-writes';
     const key = digest([options.selfId, request.scope.accountScope ?? null, request.scope.conversationId, request.scope.eventId, operation]);
     const fingerprint = digest(request.input);
@@ -149,7 +171,10 @@ export function createNativeConversationService(options: {
       conversationId: request.scope.conversationId, sourceMessageId: source.sourceMessageId,
       status: 'dispatching', at: Date.now() }, { expectedRevision: null });
     let result: JsonValue;
-    try { result = json(await run()); }
+    try {
+      result = json(await run());
+      if (isRecord(result) && result.status === 'unknown') result = { ...result, retry: false };
+    }
     catch { result = { status: 'unknown', code: 'PROTOCOL_WRITE_RESULT_UNKNOWN', retry: false }; }
     options.store.write(namespace, key, { ...object(record.value), status: isRecord(result) ? String(result.status) : 'unknown', result },
       { expectedRevision: record.revision });
@@ -238,10 +263,26 @@ export function createNativeConversationService(options: {
       }
       return write(request, 'poke', () => options.port.poke({ conversationId: request.scope.conversationId, userId: target, signal: request.signal }));
     } }),
+    'native.conversation.reaction': Object.freeze<EffectAdapter>({ async execute(request) {
+      const input = reactionInput(request.input);
+      await guard(request);
+      const prior = previousWrite(request, 'reaction');
+      if (prior !== undefined) return prior;
+      const reaction = options.port.reaction;
+      if (!reaction) return { status: 'rejected', code: 'REACTION_UNSUPPORTED' };
+      const found = await readMessage(request, input.messageId);
+      if (found.status !== 'confirmed') return json(found);
+      assert(found.data.conversationId === request.scope.conversationId && found.data.messageId === input.messageId,
+        'REACTION_MESSAGE_SCOPE_MISMATCH', 'Reactions require a verified message in this conversation.');
+      return write(request, 'reaction', () => reaction({ messageId: input.messageId, emojiId: input.emojiId,
+        add: input.action === 'add', signal: request.signal }));
+    } }),
     'native.conversation.recall': Object.freeze<EffectAdapter>({ async execute(request) {
       const input = recallInput(request.input);
-      await guard(request, true);
-      const found = await readMessage(request, input.messageId, true);
+      await guard(request);
+      const prior = previousWrite(request, 'recall');
+      if (prior !== undefined) return prior;
+      const found = await readMessage(request, input.messageId);
       if (found.status !== 'confirmed') return json(found);
       assert(found.data.conversationId === request.scope.conversationId && found.data.messageId === input.messageId && found.data.userId === options.selfId,
         'RECALL_MESSAGE_SCOPE_MISMATCH', 'Only this bot\'s verified message in the current conversation can be recalled.');

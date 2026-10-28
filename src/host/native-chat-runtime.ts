@@ -1,6 +1,8 @@
 import { createOneBotCapabilitiesPort } from '../adapters/onebot-capabilities.ts'
 import { createPluginCapabilityService, type PluginCapabilityService } from './plugin-capability-service.ts'
 import { createPluginModelService, type PluginModelService } from './plugin-model-service.ts'
+import { createPluginSchedulerService, type PluginSchedulerService } from './plugin-scheduler.ts'
+import { createPluginToolDirectory } from './plugin-tool-directory.ts'
 import { createSessionTurnQueue } from './session-turns.ts'
 import type { PluginRuntimeServices } from './plugin-runtime.ts'
 import { createNativeCapabilityDirectory, NATIVE_DIRECTORY_TOOLS } from './native-capability-directory.ts'
@@ -239,6 +241,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let packages: ReturnType<typeof createNativePackages> | undefined
   let pluginCapabilities: PluginCapabilityService | undefined
   let pluginModels: PluginModelService | undefined
+  let pluginScheduler: PluginSchedulerService | undefined
+  let pluginTools: ReturnType<typeof createPluginToolDirectory> | undefined
   let sessionTurns: ReturnType<typeof createSessionTurnQueue> | undefined
   let sessionIntents: ReturnType<typeof createNativeSessionIntents> | undefined
   function assertShareableSession(sessionId: string) {
@@ -253,6 +257,12 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     const capabilities = () => { check(); if (!pluginCapabilities) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginCapabilities.forPlugin(owner, signal, check) }
     const models = () => { check(); if (!pluginModels) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginModels.forPlugin(owner, signal) }
     return Object.freeze({
+      scheduler: { registerHandler: (kind, handler) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).registerHandler(kind, handler) },
+        schedule: (input, options) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).schedule(input, options) },
+        list: options => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).list(options) },
+        cancel: (id, options) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).cancel(id, options) },
+        history: options => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).history(options) } },
+      tools: { register: tool => { check(); if (!pluginTools) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginTools.forPlugin(owner, signal, check).register(tool) } },
       capabilities: { catalog: query => capabilities().catalog(query), call: request => capabilities().call(request) },
       models: { models: requested => models().models(requested), list: () => models().list(),
         bind: request => models().bind(request), unbind: key => models().unbind(key),
@@ -717,7 +727,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   async function cleanup() {
     frozenRecoveryConversations.clear()
     const resources = { lifetime, host, dsh, work, workFeedback, claims, executions, bootstrap: bootstrapMount,
-      tools: frameworkTools, packages, inbox, quotedContext, reminders, memory,
+      tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, scheduler: pluginScheduler,
       releaseInteractions, closeInteractions: stopInteractions, claimTimer,
       clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
     releaseInteractions = undefined
@@ -731,6 +741,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     stickers = undefined
     pluginCapabilities = undefined
     pluginModels = undefined
+    pluginScheduler = undefined
+    pluginTools = undefined
     sessionIntents = undefined
     directoryInventory = []
     inputPackage = undefined
@@ -970,6 +982,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               if (!binding || scope.sessionId !== binding.sessionId || scope.generation !== binding.generation) failure('SESSION_STALE')
             }
           } })
+        pluginTools = createPluginToolDirectory({ store })
+        pluginScheduler = createPluginSchedulerService({ store, callbackTimeoutMs: 30 * 60 * 1000,
+          onFault: code => activity.record('error', null, undefined, {}, code) })
         bootstrapMount = options.bootstrap ? await createNativeBootstrapMount({ bootstrap: options.bootstrap,
           context: { directory: options.directory, store, context, persona: personaReference, signal: controller.signal,
             messageSources: messageSources.reader, extensions,
@@ -1056,7 +1071,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           inventory: capabilityInspection.status === 'confirmed' ? capabilityInspection.data : null,
           store, selfId, sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource'),
-          tools: () => [...qzoneTools.map(tool => ({ tool, effect: qzoneEffects[tool.definition.capability]!, category: 'qzone', permission: 'autonomous' as const })),
+          tools: () => [...(pluginTools?.entries() ?? []), ...qzoneTools.map(tool => ({ tool, effect: qzoneEffects[tool.definition.capability]!, category: 'qzone', permission: 'autonomous' as const })),
             ...createNativeSessionDirectoryTools({ sources: () => messageSources?.reader, modelService: () => pluginModels,
               resolveQQ: key => host?.sessions.get(key) ?? null, listQQ: () => host?.sessions.list({ limit: 1000 }) ?? [],
               bindQQ: (target, id, signal) => runtime.bindSession(target, id, signal), unbindQQ: target => runtime.unbindSession(target),
@@ -1488,6 +1503,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           closeInteractions: stopInteractions, claimTimer, clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
         runningResources.lifetime.signal.throwIfAborted()
         state = 'running'
+        pluginScheduler.start()
         await reminderService.start()
         await checkpoint('runtime.ready', { state: 'running', planId: definition.planId }, controller.signal)
         activity.record('running')
@@ -1750,10 +1766,10 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           } catch { signal.throwIfAborted() }
         }
         signal.throwIfAborted()
-        return withFrameworkToolInventory(inventory, frameworkTools ? [...frameworkTools.inventory(), ...directoryInventory] : undefined, sessionNames)
+        return withFrameworkToolInventory(inventory, frameworkTools ? [...frameworkTools.inventory(), ...directoryInventory, ...(pluginTools?.entries().map(entry => ({ name: entry.tool.definition.name, description: entry.tool.definition.description, loadedInSession: false, registrationSource: entry.tool.definition.registrationSource })) ?? [])] : undefined, sessionNames)
       } catch {
         signal.throwIfAborted()
-        return withFrameworkToolInventory(unavailableToolInventory('tool_inventory_connection_unavailable'), frameworkTools ? [...frameworkTools.inventory(), ...directoryInventory] : undefined)
+        return withFrameworkToolInventory(unavailableToolInventory('tool_inventory_connection_unavailable'), frameworkTools ? [...frameworkTools.inventory(), ...directoryInventory, ...(pluginTools?.entries().map(entry => ({ name: entry.tool.definition.name, description: entry.tool.definition.description, loadedInSession: false, registrationSource: entry.tool.definition.registrationSource })) ?? [])] : undefined)
       } finally { await temporary?.close() }
     },
     async tools(signal: AbortSignal) {

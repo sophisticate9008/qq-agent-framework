@@ -22,7 +22,7 @@ function callInput(input: JsonValue): { id: string; input: JsonValue } {
 }
 export const NATIVE_DIRECTORY_TOOLS: readonly NativeToolContribution[] = [
   { definition: { name: 'qaf_capability_catalog', capability: 'native.capabilities.catalog', featureId: 'framework-tools', registrationSource: source, timeoutMs: 10000,
-    description: '按需查找低频能力，包括空间说说、账号资料、好友和群管理、文件、协议运维、会话绑定管理。无参数返回分类；category或query只返回工具摘要；id返回该工具的完整参数和调用范围。找到后用qaf_capability_call调用。不需要先展开全部工具。',
+    description: '按需查找能力，包括已安装扩展的任务与日程、空间说说、账号资料、好友和群管理、文件、协议运维、会话绑定管理。无参数返回分类；category或query只返回工具摘要；id返回该工具的完整参数和调用范围。找到后用qaf_capability_call调用。不需要先展开全部工具。',
     parameters: { type: 'object', additionalProperties: false, properties: { id: { type: 'string', maxLength: 160 }, category: { type: 'string', maxLength: 160 }, query: { type: 'string', maxLength: 160 } } } }, validate: input => json(catalogInput(input)) },
   { definition: { name: 'qaf_capability_call', capability: 'native.capabilities.call', featureId: 'framework-tools', registrationSource: source, timeoutMs: 120000,
     description: '调用能力目录中的一个工具。先读取该id的参数说明，再提交id和input对象。返回结果区分confirmed、rejected、unknown；unknown不重复写操作。日常回复、贴表情和收藏使用直接提供的常用工具。',
@@ -74,7 +74,8 @@ export function createNativeCapabilityDirectory(options: {
       await guard(request, false)
       const input = catalogInput(request.input), all = entries()
       if (input.id) { const entry = all.find(t => t.id === input.id); return entry ? json(entry) : { status: 'rejected', code: 'CAPABILITY_NOT_FOUND' } }
-      if (!input.category && !input.query) return json({ categories: [...QQ_CAPABILITY_CATEGORIES, { id: 'sessions', label: '会话管理', description: '查询和切换QQ与插件会话绑定' }]
+      if (!input.category && !input.query) return json({ categories: [...QQ_CAPABILITY_CATEGORIES, { id: 'sessions', label: '会话管理', description: '查询和切换QQ与插件会话绑定' },
+        { id: 'extensions', label: '已安装扩展', description: '插件任务、日程、状态与其他扩展能力，按需查看参数' }]
         .map(c => ({ ...c, count: all.filter(t => t.category === c.id).length })).filter(c => c.count > 0) })
       const matches = all.filter(t => (!input.category || t.category === input.category)
         && (!input.query || `${t.id} ${t.description}`.toLocaleLowerCase().includes(input.query.toLocaleLowerCase())))

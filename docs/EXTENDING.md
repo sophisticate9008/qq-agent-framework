@@ -59,6 +59,16 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 目前没有独立的插件市场、目录自动发现或一站式工具插件注册器。控制台读取注册元数据和实际运行状态，不能把尚未接入的源码目录显示为已安装。工具页分别呈现声明、注册与会话加载状态，框架服务页展示基础设施。
 
+## 插件定时任务与按需工具目录
+
+插件通过 `context.runtime.scheduler` 登记 once/daily/weekly 任务，日历和业务发生记录由宿主持久保存；框架只启动一套有界调度循环。先 `registerHandler`，再 `schedule`，构造插件本身不会执行任务。停止、错过窗口、重启及未知结果的语义见 [插件调度](TRIGGERS.md)。
+
+`context.runtime.tools.register({ id, description, parameters, permission, readOnly, execute })` 将工具加入二级目录，返回撤销函数，应交给 `context.own` 管理。宿主固定插件身份，完整名称为 `extension.<插件标识>.<id>`。`permission` 在工具说明之外声明：`owner` 核验当前 QQ 主人，`autonomous` 仍经过当前会话准入；定时任务直接使用插件宿主服务，不伪造 QQ 发言者。写调用按事件身份持久去重，未确认结果保留且不自动重放。
+
+模型通过 `qaf_capability_catalog` 查分类或搜索摘要，指定单个 `id` 才读取其参数，再用 `qaf_capability_call` 执行。二级目录条目不会额外投影到每轮顶层工具 schema；控制台仍显示其真实扩展来源。模型是否使用目录，需要结合实际会话及模型请求日志观察。
+
+可选的 `image-generation` v1 服务使用 `ImageGenerationService` 契约：接受提示词、稳定幂等键、主体选择和取消信号，返回原始图片字节、类型与 SHA-256，不隐式发送。服务实现由生图扩展提供，自己的形象参考可在服务内部组合；依赖它的业务插件无需复制 QQ 发送或会话鉴权链路。完整实例见 [空间生活日记插件](../plugins/qzone-diary/README.md)。
+
 ## 插件代码重载与配置即时更新
 
 可信 bootstrap 可以通过 `createReloadableExtension()` 管理实例，再用 `context.extensions?.register(manager)` 登记到当前宿主。登记返回撤销函数，应随 bootstrap 生命周期清理。只有主动接入该管理器并登记的插件出现在重载目录；已有插件需要完成这一接入。重载请求只接受登记的稳定插件标识，不接受模块路径或执行表达式。宿主维护入口和插件每次调用的真实主人、白名单检查分别执行，登记不扩大权限。

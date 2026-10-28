@@ -87,7 +87,7 @@ function defaults(schema: JsonObject, value: JsonValue, depth = 0): JsonValue {
 }
 
 /** Returns a private, defaulted JSON snapshot. No coercion or configuration evaluation. */
-export function decodeQqCapabilityInput(capability: QqCapabilityDefinition, input: unknown): JsonObject | null {
+export function decodeQqCapabilityInput(capability: Pick<QqCapabilityDefinition, 'inputSchema'>, input: unknown): JsonObject | null {
   try {
     if (!isRecord(input) || !isBoundedQqJson(input)) return null;
     const encoded = JSON.stringify(input);

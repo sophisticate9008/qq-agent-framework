@@ -41,6 +41,10 @@ export { normalizeAccountScope, assertAccountScope } from '../core/account-scope
 
 export { createQzoneNativePackage, NATIVE_QZONE_SERVICE_ID, NATIVE_QZONE_SERVICE_VERSION } from '../host/native-qzone.ts';
 export { createPluginModelService } from '../host/plugin-model-service.ts';
+export { createPluginSchedulerService } from '../host/plugin-scheduler.ts';
+export type { PluginSchedulerClient, PluginSchedulerService, PluginScheduleInput, PluginScheduledRule, PluginScheduledOccurrence, PluginScheduledHistory } from '../host/plugin-scheduler.ts';
+export { createPluginToolDirectory } from '../host/plugin-tool-directory.ts';
+export type { PluginDirectoryTool, PluginToolDirectoryClient } from '../host/plugin-tool-directory.ts';
 export type { PluginModelService, PluginModelServiceOptions } from '../host/plugin-model-service.ts';
 export type * from '../contracts/plugin-model.ts';
 export type { PluginRuntimeServices } from '../host/plugin-runtime.ts';

@@ -29,6 +29,10 @@ const result = await client.run({
 
 调用结果包含 `requestId`、`sessionId`、`text` 和实际 DSH 终态提供的 `usage`。返回正文不会自动发送到 QQ。默认正文上限 32000 个 UTF-16 码元，可指定 `maxOutputChars`（1 至 64000）；适配器原有正文容量也继续生效。输入最多 128000 个码元、256 KiB。默认期限五分钟，可指定 `timeoutMs`（一秒至一小时，包含排队时间）。超出正文容量仍保留终态用量，不返回截断正文冒充成功。
 
+图片通过 `run({ prompt, images: [{ mediaType, data }], model })` 输入。`mediaType` 为 `image/png`、`image/jpeg` 或 `image/webp`，`data` 为原始字节的规范 Base64 编码；最多四张，每张不超过 8 MiB，合计不超过 16 MiB。桥接插件核验真实格式、MIME 与所选模型的图像输入声明，再通过 DSH 附件服务送入原生图像内容，不将 Base64 拼入提示词。图像能力不支持或附件无效时在提交模型前明确拒绝。
+
+独立会话的归属使用 SDK 的可忽略插件记录保存；会话携带 SDK 查询要求的工作目录元数据，不因此获得文件或命令工具。监听和核对使用真实请求来源、收件认领和终态证据；配置错误发生在用户消息落盘之前时也保留该次失败，避免无故等到超时。
+
 `run({ prompt, images, model? })` 可同时提交图片。`images` 为 `{ mediaType: 'image/png' | 'image/jpeg' | 'image/webp', data: string }[]`，`data` 使用规范 Base64 编码实际文件字节；最多四张、单张 8 MiB、合计 16 MiB。宿主先核验编码和容量，DSH 附件服务再完整解码图片、核对真实格式并登记持久附件。模型接收原生图片附件，Base64 不作为文字提示词发送，不接受 URL、路径或自报附件标识。
 
 图片提交前核验所选模型的实际 SDK `image` 输入能力；能力缺失或未知返回 `PLUGIN_MODEL_IMAGE_UNSUPPORTED`，图片编码、容量或解码失败返回 `PLUGIN_MODEL_INVALID_IMAGES`，不把图片替换成文本继续生成。DSH 自身的附件策略仍可施加更小限制。生成前已明确拒绝的请求记录为 rejected，绑定保持可继续使用；输入已经交给模型后才发生的连接或执行异常仍按未知结果隔离。

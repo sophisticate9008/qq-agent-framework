@@ -159,7 +159,7 @@ export function createDshJsonRpcPort(options: DshJsonRpcOptions): DshJsonRpcPort
   const pluginModels = createDshPluginModelBackend({ client: {
     createSession: request => port.createSession(request), prompt: request => port.prompt(request),
     follow: request => pluginFollow(request), cancel: request => port.cancel(request),
-  }, invoke: (method, input, signal) => rpc(method, input, signal) })
+  }, invoke: (method, input, signal) => rpc(method, method === 'bridgePlugin/pluginModels' ? undefined : input, signal) })
   const port: DshJsonRpcPort = Object.freeze({
     pluginModels,
     bridgePlugin,

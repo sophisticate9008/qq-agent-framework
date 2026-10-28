@@ -478,4 +478,10 @@ const result = await runtime.models.run({ name: 'daily-writing', prompt: '接着
 
 `runtime.sessions.resolve('group:123456')` 或 `private:123456` 返回实际 QQ 绑定及可直接用于管理的 `target` 版本；`bind(target, sessionId, signal)`、`unbind(target)` 要求完整当前版本，保留 DSH 历史。插件可以解析 QQ 绑定后把该实际 ID 交给 `runtime.models.bind`。插件固定绑定该 ID，QQ 后来换绑不会自动改变插件上下文。
 
+`runtime.media?.readImage({ conversationId, referenceId, signal })` 读取当前账号与 QQ 会话已登记的原图，返回 `{ assetId, data: Uint8Array, mediaType, sha256, expiresAt }`。图片最大 8 MiB，支持 PNG、JPEG、WebP、GIF；`sha256` 是返回原图字节的 SHA256。插件在实际工具调用中使用宿主核验的所属会话，不接受模型另指定的目标会话。该接口不接收 URL 或文件路径，只从对应登记取得协议来源；每次读取及返回前重新核验访问规则和插件生命周期。
+
+`referenceId` 优先使用 `media-<64 位十六进制>` 登记编号；也兼容图片附件的 SHA256（可带 `sha256:` 前缀）。模型实际读取的静态图片可能经过缩放压缩，框架把该附件字节的指纹保存为原图登记的别名，每图最多四个、每次最多扫描一千条登记，账号、会话和原有效期均保持一致；指纹本身不授予跨会话访问。不存在别名的旧指纹不会触发扫描下载或猜测匹配。读取原图供生成、编辑等插件使用，不把原图读取等同于已交给模型理解。
+
+读取错误通过 `FrameworkError.code` 区分：`NATIVE_IMAGE_REFERENCE_NOT_FOUND` 表示当前会话找不到登记或附件别名（记录可能已清理），`NATIVE_IMAGE_REFERENCE_SCOPE_MISMATCH` 表示登记账号或会话不符，`NATIVE_IMAGE_REFERENCE_EXPIRED` 表示可读取元数据中的原有效期已到，`NATIVE_IMAGE_REFERENCE_READ_FAILED` 表示登记、原图下载、大小或格式不符合读取要求。存储已隐藏或清理的过期登记按 `NOT_FOUND` 返回，插件应据实际错误说明原因，不把所有失败归为登记过期。
+
 对 QQ 命令开放这些内部接口时，插件入口负责校验真实发言者；定时任务以已登记插件身份执行，不需要伪造主人消息。生命周期结束后旧实例不能继续提交调用。对模型开放的管理动作使用框架二级能力目录，由宿主核验实际主人。

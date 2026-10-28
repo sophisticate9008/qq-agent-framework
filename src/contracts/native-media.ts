@@ -1,3 +1,16 @@
+import type { FrameworkImageMediaType } from './framework-media.ts';
+
+/** Reads original bytes from a current conversation's registered image only. */
+export interface NativeImageReferenceReader {
+  readImage(request: { readonly conversationId: string; readonly referenceId: string; readonly signal: AbortSignal }): Promise<{
+    readonly assetId: string;
+    readonly data: Uint8Array;
+    readonly mediaType: FrameworkImageMediaType;
+    readonly sha256: string;
+    readonly expiresAt: number;
+  }>;
+}
+
 export interface NativeMediaContentReader {
   read(request: { readonly kind: 'image' | 'audio' | 'file' | 'video'; readonly conversationId?: string; readonly source: { readonly file?: string; readonly url?: string; readonly id?: string; readonly busId?: number; readonly fileHash?: string };
     readonly signal: AbortSignal }): Promise<{ readonly status: 'confirmed'; readonly data: Uint8Array;

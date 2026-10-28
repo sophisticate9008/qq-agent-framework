@@ -44,5 +44,7 @@ export { createPluginModelService } from '../host/plugin-model-service.ts';
 export type { PluginModelService, PluginModelServiceOptions } from '../host/plugin-model-service.ts';
 export type * from '../contracts/plugin-model.ts';
 export type { PluginRuntimeServices } from '../host/plugin-runtime.ts';
+export type { NativeImageReferenceReader } from '../contracts/native-media.ts';
+export type { FrameworkImageMediaType } from '../contracts/framework-media.ts';
 export { createPluginCapabilityService } from '../host/plugin-capability-service.ts';
 export type { PluginCapabilityService, PluginCapabilityClient, PluginCapabilityCatalogQuery, PluginCapabilityCall } from '../host/plugin-capability-service.ts';

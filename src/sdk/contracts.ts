@@ -10,6 +10,8 @@ export type * from '../contracts/framework-tools.ts';
 export { validateDshModelSettings, parseDshInputModalities } from '../contracts/dsh-model-settings.ts';
 export type { DshDeploymentModelSettings, DshInputModality } from '../contracts/dsh-model-settings.ts';
 export type * from '../contracts/native-services.ts';
+export type * from '../contracts/native-media.ts';
+export type { FrameworkImageMediaType } from '../contracts/framework-media.ts';
 export type * from '../contracts/native-package-state.ts';
 
 export type * from '../contracts/account-scope.ts';

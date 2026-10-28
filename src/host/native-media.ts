@@ -1,4 +1,5 @@
 import { withDeadline } from './deadlines.ts';
+import { createNativeImageReferences, nativeImageType as imageType } from './native-image-references.ts';
 import { normalizeModelImage } from '../adapters/image-normalization.ts';
 import { observeGif } from '../adapters/gif-observation.ts';
 import { recordNativeMediaRead, mediaObservationCode } from './native-media-diagnostics.ts';
@@ -26,6 +27,7 @@ export function createNativeMediaRegistry(options: {
 }) {
   assert(reference(options.accountId), 'INVALID_MEDIA_ACCOUNT', 'A verified protocol account is required.');
   const clock = options.clock ?? Date.now;
+  const imageReferences = createNativeImageReferences({ ...options, clock });
   function read(assetId: string, conversationId: string) {
     assert(reference(assetId) && reference(conversationId), 'INVALID_MEDIA_REFERENCE', 'A scoped media reference is required.');
     const record = options.store.read(namespace, assetId);
@@ -49,14 +51,6 @@ export function createNativeMediaRegistry(options: {
       interpretation: value.kind === 'video' ? 'sampled-video-frames-not-complete-video' : value.kind === 'image' ? 'requires-current-model-image-input' : value.kind === 'audio' ? 'requires-transcriber' : 'text-content',
       missingReasons: readingAvailable ? [] : [value.kind === 'video' ? !videoEnabled ? 'native_video_observation_disabled' : 'native_video_observer_not_connected' : value.kind === 'audio' ? 'native_media_transcriber_not_connected' : 'native_media_reader_not_connected'] });
   }
-  function imageType(data: Uint8Array): FrameworkImageMediaType | null {
-    const bytes = Buffer.from(data);
-    if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png';
-    if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
-    if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))) return 'image/gif';
-    if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-    return null;
-  }
   async function readContent(assetId: string, value: JsonObject, request: { readonly conversationId: string; readonly signal: AbortSignal }, maxImageBytes = FRAMEWORK_MEDIA_IMAGE_BYTES, purpose: 'tool' | 'prompt' = 'tool'): Promise<JsonObject> {
     const kind = value.kind;
     assert(kind === 'image' || kind === 'audio' || kind === 'file', 'NATIVE_MEDIA_READER_UNAVAILABLE', 'This media kind has no content reader.');
@@ -77,6 +71,7 @@ export function createNativeMediaRegistry(options: {
     }
     if (kind !== 'image' && result.data.byteLength > 1024 * 1024) return unavailable('native_media_too_large');
     let envelope: JsonObject;
+    let imageData: Uint8Array | undefined;
     if (kind === 'image') {
       const mediaType = imageType(result.data);
       if (!mediaType) return unavailable('unsupported_image_format');
@@ -101,6 +96,7 @@ export function createNativeMediaRegistry(options: {
       } else {
         const prepared = await normalizeModelImage({ data: result.data, mediaType, maxBytes: maxImageBytes, signal: request.signal });
         if (prepared.status !== 'confirmed') return unavailable(prepared.code);
+        imageData = prepared.data;
         envelope = { schema: FRAMEWORK_MEDIA_PROTOCOL, contentRead: true, kind: 'image', mediaType: prepared.mediaType,
           data: Buffer.from(prepared.data).toString('base64') };
       }
@@ -121,6 +117,7 @@ export function createNativeMediaRegistry(options: {
     }
     await options.authorize(request.conversationId, request.signal);
     request.signal.throwIfAborted(); read(assetId, request.conversationId);
+    if (imageData) imageReferences.rememberImage(assetId, request.conversationId, imageData);
     const current = options.store.read(namespace, assetId)!;
     options.store.write(namespace, assetId, { ...object(current.value), bytesRead: true, contentRead: kind !== 'image' },
       { expectedRevision: current.revision, expiresAt: Number(value.expiresAt) });
@@ -204,6 +201,7 @@ export function createNativeMediaRegistry(options: {
   }
   const effectAdapter: EffectAdapter = Object.freeze({ execute: inspect });
   const registry = Object.freeze({
+    readImage: imageReferences.readImage,
     async register(asset: OneBotIncomingAsset, signal: AbortSignal): Promise<string> {
       signal.throwIfAborted();
       assert(reference(asset.messageId) && reference(asset.conversationId)

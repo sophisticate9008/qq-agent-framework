@@ -257,6 +257,18 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       models: { models: requested => models().models(requested), list: () => models().list(),
         bind: request => models().bind(request), unbind: key => models().unbind(key),
         create: request => models().create(request), run: request => models().run(request) },
+      media: { async readImage(request) {
+        check()
+        verifyPersistedAccount()
+        if (!media) failure('PLUGIN_RUNTIME_UNAVAILABLE')
+        const requestedSignal = AbortSignal.any([signal, request.signal])
+        const result = await media.readImage({ ...request, signal: requestedSignal })
+        check()
+        verifyPersistedAccount()
+        await guard(request.conversationId, requestedSignal, true, 'resource')
+        check()
+        return result
+      } },
       sessions: { resolve(conversationId) {
         check()
         const binding = host?.sessions.get(conversationId)

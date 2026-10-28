@@ -3,7 +3,9 @@ import { FrameworkError, assert, isRecord } from '../core/values.ts';
 import type { DurableStore, StoredRecord, DurableCasMutation } from '../contracts/ports.ts';
 import { NATIVE_USAGE_MAINTENANCE_ROWS, parseNativeUsageMaintenanceOperation, parseNativeUsageMaintenanceScope, isNativeUsageMaintenanceId,
   type NativeUsageMaintenanceOperation, type NativeUsageMaintenanceRequest, type NativeUsageMaintenanceScope, type NativeUsageExport, type NativeUsageMaintenanceListQuery, type NativeUsageMaintenanceListSnapshot } from '../contracts/native-usage-maintenance.ts';
-import { NATIVE_USAGE_TURNS_NAMESPACE, NATIVE_USAGE_ARCHIVE_NAMESPACE, NATIVE_USAGE_RETIRED_NAMESPACE, readNativeUsageStoredTurn } from './native-usage.ts';
+import { NATIVE_USAGE_TURNS_NAMESPACE, NATIVE_USAGE_ARCHIVE_NAMESPACE, NATIVE_USAGE_RETIRED_NAMESPACE,
+  readNativeUsageStoredTurn, readNativeUsageSessionLedgers } from './native-usage.ts';
+import { parseNativeUsageSessionDeleteRequest, type NativeUsageSessionDeleteRequest } from '../contracts/native-usage-session.ts';
 import { digest, json, object } from './data.ts';
 
 const namespace = 'native-usage.maintenance';
@@ -55,6 +57,60 @@ export function createNativeUsageMaintenance(options: { readonly store: DurableS
   }
   return Object.freeze({
     get,
+    clearSessionLedger(input: NativeUsageSessionDeleteRequest) {
+      const target = parseNativeUsageSessionDeleteRequest(input);
+      if (!target) fail('USAGE_SESSION_DELETE_INVALID');
+      if (!store.compareAndSetBatch) fail('USAGE_MAINTENANCE_UNAVAILABLE');
+      const index = readNativeUsageSessionLedgers(store);
+      if (index.partial) fail('USAGE_SESSION_SCAN_LIMIT');
+      const selected = index.items.find(entry => entry.conversationId === target.conversationId
+        && entry.sessionId === target.sessionId);
+      if (!selected || selected.revision !== target.revision) fail('USAGE_MAINTENANCE_CONFLICT');
+      const operationId = randomUUID(); const startedAt = now(); const resetNamespace = 'native-usage.resets';
+      let affected = 0;
+      const metadata = { schema: 1, kind: 'session-delete', conversationId: target.conversationId,
+        sessionId: target.sessionId, revision: target.revision, startedAt, protectedUnknown: 0 };
+      let progress = store.write(resetNamespace, operationId, json({ ...metadata, state: 'running', affected }), { expectedRevision: null });
+      try {
+        // Keep the confirmed reference set fixed. Rows appended after this snapshot survive deletion.
+        for (let offset = 0; offset < selected.references.length; offset += 60) {
+          const batch = selected.references.slice(offset, offset + 60);
+          const mutations: DurableCasMutation[] = [];
+          const retiring = new Map<string, string>();
+          for (const reference of batch) {
+            const source = store.read(reference.namespace, reference.key);
+            if (!source || source.revision !== reference.revision
+              || object(source.value).fingerprint !== reference.fingerprint) fail('USAGE_MAINTENANCE_CONFLICT');
+            const retired = store.read(NATIVE_USAGE_RETIRED_NAMESPACE, source.key);
+            const fingerprint = retired ? object(retired.value).fingerprint : retiring.get(source.key);
+            if (fingerprint !== undefined && fingerprint !== reference.fingerprint) fail('USAGE_MAINTENANCE_CONFLICT');
+            if (!retired && !retiring.has(source.key)) {
+              retiring.set(source.key, reference.fingerprint);
+              mutations.push({ kind: 'write', namespace: NATIVE_USAGE_RETIRED_NAMESPACE, key: source.key,
+                expectedRevision: null, value: json({ schema: 1, fingerprint: reference.fingerprint,
+                  retiredAt: startedAt, operationId }) });
+            }
+            mutations.push({ kind: 'delete', namespace: reference.namespace, key: reference.key, expectedRevision: reference.revision });
+          }
+          const nextAffected = affected + batch.length;
+          mutations.push({ kind: 'write', namespace: resetNamespace, key: operationId, expectedRevision: progress.revision,
+            value: json({ ...metadata, state: 'running', affected: nextAffected }) });
+          const results = store.compareAndSetBatch(mutations);
+          const saved = results.at(-1);
+          if (!saved) fail('USAGE_SESSION_DELETE_UNKNOWN');
+          progress = saved; affected = nextAffected;
+        }
+        store.write(resetNamespace, operationId, json({ ...metadata, state: 'completed', affected,
+          completedAt: now() }), { expectedRevision: progress.revision });
+        return { ok: true as const, operationId, affected };
+      } catch (error) {
+        try { store.write(resetNamespace, operationId, json({ ...metadata, state: 'unknown', affected }), { expectedRevision: progress.revision }); }
+        catch { /* The last committed batch already records its confirmed progress. */ }
+        if (affected === 0 && error instanceof FrameworkError
+          && ['STORE_CONFLICT', 'USAGE_MAINTENANCE_CONFLICT'].includes(error.code)) fail('USAGE_MAINTENANCE_CONFLICT');
+        fail('USAGE_SESSION_DELETE_UNKNOWN');
+      }
+    },
     clearLedger() {
       if (!store.compareAndSetBatch) fail('USAGE_MAINTENANCE_UNAVAILABLE');
       const operationId = randomUUID(); const timestamp = now();

@@ -7,7 +7,7 @@ import { ConnectPrompt, EmptyState, PageHeading, Section, StatusPill } from '../
 import { VirtualTableBody } from '../components/virtual-list.tsx';
 import { UsageModelCosts } from '../components/usage-model-costs.tsx';
 import { UsageChart } from '../components/usage-chart.tsx';
-import { UsageConversation } from '../components/usage-conversation.ts';
+import { UsageConversation, usageSessionSuffix } from '../components/usage-conversation.ts';
 import { UsageTokenBreakdown } from '../components/usage-token-breakdown.tsx';
 import { UsagePricingManager } from '../components/usage-pricing-manager.tsx';
 import { Badge } from '../components/ui/badge.tsx';
@@ -15,7 +15,7 @@ import { Button } from '../components/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx';
 import { Input } from '../components/ui/input.tsx';
 import { Switch } from '../components/ui/switch.tsx';
-import { ApiError, errorMessage } from '../lib/api.ts';
+import { ApiError, errorMessage, isRecord } from '../lib/api.ts';
 import {
   describeConversationKey,
   formatActivityCost,
@@ -26,6 +26,7 @@ import {
   type UsageNowTier,
   type UsagePriceTable,
   type UsageSnapshot,
+  type ConversationUsage,
 } from '../lib/activity.ts';
 import {
   parseUsageConversation,
@@ -54,6 +55,10 @@ const ledgerSectionClass = 'rounded-none border-0 shadow-none [&>.panel-header]:
 
 type ResetState = 'idle' | 'saving' | 'conflict' | 'unknown' | 'error';
 type RefreshReason = 'initial' | 'manual' | 'automatic';
+
+function ledgerIdentity(conversation: ConversationUsage): string {
+  return conversation.ledgerKey ?? conversation.key;
+}
 
 function formatTimestamp(value: string | number): string {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'medium', hour12: false }).format(new Date(value));
@@ -178,11 +183,18 @@ export function UsagePage(props: PageProps) {
   const [resetState, setResetState] = useState<ResetState>('idle');
   const [resetError, setResetError] = useState('');
   const [resetRevision, setResetRevision] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ConversationUsage | null>(null);
+  const [deleteState, setDeleteState] = useState<ResetState>('idle');
+  const [deleteError, setDeleteError] = useState('');
+  const [ledgerWriting, setLedgerWriting] = useState(false);
   const summaryController = useRef<AbortController | null>(null);
   const seriesController = useRef<AbortController | null>(null);
   const turnsController = useRef<AbortController | null>(null);
   const recentController = useRef<AbortController | null>(null);
   const resetController = useRef<AbortController | null>(null);
+  const deleteController = useRef<AbortController | null>(null);
+  const conversationsRef = useRef<readonly ConversationUsage[]>([]);
+  const ledgerWriteBusy = useRef(false);
   const summaryRequest = useRef(0);
   const seriesRequest = useRef(0);
   const turnsRequest = useRef(0);
@@ -205,11 +217,17 @@ export function UsagePage(props: PageProps) {
       if (!parsed) throw new Error('invalid_usage_response');
       if (controller.signal.aborted || summaryRequest.current !== request) return;
       setUsage(parsed);
+      conversationsRef.current = parsed.conversations;
       setRuntimeUnavailable(false);
       setSummaryError('');
-      if (!selectedKeyRef.current && parsed.conversations[0]) {
-        selectedKeyRef.current = parsed.conversations[0].key;
-        setSelectedKey(parsed.conversations[0].key);
+      if (!parsed.conversations.some(conversation => ledgerIdentity(conversation) === selectedKeyRef.current)) {
+        const next = parsed.conversations[0] ? ledgerIdentity(parsed.conversations[0]) : '';
+        selectedKeyRef.current = next;
+        setSelectedKey(next);
+        turnsController.current?.abort();
+        setTurns(null);
+        setTurnsError('');
+        setTurnsLoading(false);
       }
     } catch (error) {
       if (!controller.signal.aborted && summaryRequest.current === request) {
@@ -268,6 +286,8 @@ export function UsagePage(props: PageProps) {
 
   const loadTurns = useCallback(async (key: string): Promise<void> => {
     if (!key) return;
+    const conversation = conversationsRef.current.find(item => ledgerIdentity(item) === key);
+    if (!conversation) return;
     turnsController.current?.abort();
     const controller = new AbortController();
     const request = turnsRequest.current + 1;
@@ -276,7 +296,9 @@ export function UsagePage(props: PageProps) {
     setTurnsLoading(true);
     setTurnsError('');
     try {
-      const parsed = parseUsageConversation(await api.get(`/api/chat/usage/turns?key=${encodeURIComponent(key)}&limit=200`, controller.signal), key);
+      const sessionId = conversation.sessionId ?? undefined;
+      const query = new URLSearchParams({ key: conversation.key, limit: '200', ...(sessionId ? { sessionId } : {}) });
+      const parsed = parseUsageConversation(await api.get(`/api/chat/usage/turns?${query}`, controller.signal), conversation.key, sessionId);
       if (!parsed) throw new Error('invalid_usage_turns_response');
       if (controller.signal.aborted || turnsRequest.current !== request || selectedKeyRef.current !== key) return;
       setTurns(parsed);
@@ -317,6 +339,13 @@ export function UsagePage(props: PageProps) {
       setSeries(null);
       setTurns(null);
       setRecent(null);
+      conversationsRef.current = [];
+      selectedKeyRef.current = '';
+      setSelectedKey('');
+      setDeleteTarget(null);
+      setDeleteState('idle');
+      setDeleteError('');
+      setLedgerWriting(false);
     } else {
       void runRefresh('initial');
     }
@@ -328,11 +357,12 @@ export function UsagePage(props: PageProps) {
       turnsController.current?.abort();
       recentController.current?.abort();
       resetController.current?.abort();
+      deleteController.current?.abort();
     };
   }, [connected, runRefresh]);
 
   useEffect(() => {
-    if (!connected || runtimeUnavailable || autoRefreshMs === null) return;
+    if (!connected || runtimeUnavailable || autoRefreshMs === null || ledgerWriting) return;
     const refreshVisiblePage = (): void => {
       if (document.visibilityState === 'visible') void runRefresh('automatic');
     };
@@ -342,19 +372,13 @@ export function UsagePage(props: PageProps) {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', refreshVisiblePage);
     };
-  }, [autoRefreshMs, connected, runRefresh, runtimeUnavailable]);
+  }, [autoRefreshMs, connected, ledgerWriting, runRefresh, runtimeUnavailable]);
 
   const selectedConversation = useMemo(
-    () => usage?.conversations.find(conversation => conversation.key === selectedKey) ?? null,
+    () => usage?.conversations.find(conversation => ledgerIdentity(conversation) === selectedKey) ?? null,
     [selectedKey, usage]
   );
-  const selectableConversations = useMemo(() => {
-    if (!usage || !selectedKey || usage.conversations.some(conversation => conversation.key === selectedKey)) return usage?.conversations ?? [];
-    return [{ key: selectedKey, sessionCount: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0,
-      cacheHitTokens: 0, cost: 0, estimated: false, turns: 0, steps: 0, lastAt: null, models: [],
-      buckets: null, attributedCost: null, unattributedCost: null, byTier: null, cacheHitRate: null, firstAt: null },
-    ...usage.conversations];
-  }, [selectedKey, usage]);
+  const selectableConversations = usage?.conversations ?? [];
 
   function selectRange(hours: number): void {
     rangeHoursRef.current = hours;
@@ -372,7 +396,7 @@ export function UsagePage(props: PageProps) {
   }
 
   function openReset(): void {
-    if (usage?.resetAvailable === false) return;
+    if (usage?.resetAvailable === false || ledgerWriteBusy.current || deleteState === 'saving' || deleteTarget) return;
     setResetText('');
     setResetState('idle');
     setResetError('');
@@ -392,7 +416,9 @@ export function UsagePage(props: PageProps) {
   }
 
   async function resetLedger(): Promise<void> {
-    if (!resetRevision || resetText !== resetConfirmation || resetState !== 'idle' && resetState !== 'error') return;
+    if (ledgerWriteBusy.current || !resetRevision || resetText !== resetConfirmation || resetState !== 'idle' && resetState !== 'error') return;
+    ledgerWriteBusy.current = true;
+    setLedgerWriting(true);
     resetController.current?.abort();
     const controller = new AbortController();
     resetController.current = controller;
@@ -404,6 +430,7 @@ export function UsagePage(props: PageProps) {
         confirm: resetConfirmation,
       }, controller.signal));
       if (!accepted) throw new ApiError('usage_reset_unknown', 504);
+      if (controller.signal.aborted) return;
       setResetOpen(false);
       setResetText('');
       setResetState('idle');
@@ -416,11 +443,82 @@ export function UsagePage(props: PageProps) {
       turnsController.current?.abort();
       recentController.current?.abort();
       await runRefresh('manual');
+      if (controller.signal.aborted) return;
       setRefreshMessage('已清空全部账本记录，统计已刷新。');
     } catch (error) {
       if (controller.signal.aborted) return;
       setResetState(resetErrorState(error));
       setResetError(errorMessage(error));
+    } finally {
+      ledgerWriteBusy.current = false;
+      if (!controller.signal.aborted) setLedgerWriting(false);
+    }
+  }
+
+  function openDelete(conversation: ConversationUsage): void {
+    if (!usage?.native || !conversation.ledgerKey || !conversation.sessionId || !conversation.revision
+      || resetOpen || ledgerWriteBusy.current) return;
+    setDeleteTarget(conversation);
+    setDeleteState('idle');
+    setDeleteError('');
+  }
+
+  function closeDelete(): void {
+    if (deleteState === 'saving') return;
+    const verify = deleteState === 'conflict' || deleteState === 'unknown';
+    setDeleteTarget(null);
+    setDeleteState('idle');
+    setDeleteError('');
+    if (verify) void runRefresh('manual');
+  }
+
+  async function deleteSessionLedger(): Promise<void> {
+    const target = deleteTarget;
+    if (ledgerWriteBusy.current || !target?.sessionId || !target.revision
+      || deleteState !== 'idle' && deleteState !== 'error') return;
+    ledgerWriteBusy.current = true;
+    setLedgerWriting(true);
+    const controller = new AbortController();
+    deleteController.current = controller;
+    setDeleteState('saving');
+    setDeleteError('');
+    try {
+      const result = await api.post('/api/chat/usage/session/delete', {
+        conversationId: target.key, sessionId: target.sessionId, revision: target.revision,
+      }, controller.signal);
+      if (!isRecord(result) || result.ok !== true || !Number.isSafeInteger(result.affected)
+        || typeof result.affected !== 'number' || result.affected < 0
+        || typeof result.operationId !== 'string' || result.operationId.length === 0
+        || result.conversationId !== undefined && result.conversationId !== target.key
+        || result.sessionId !== undefined && result.sessionId !== target.sessionId) {
+        throw new ApiError('usage_session_delete_unknown', 504);
+      }
+      if (controller.signal.aborted) return;
+      setDeleteTarget(null);
+      setDeleteState('idle');
+      if (selectedKeyRef.current === ledgerIdentity(target)) {
+        selectedKeyRef.current = '';
+        setSelectedKey('');
+      }
+      setTurns(null);
+      setTurnsError('');
+      setTurnsLoading(false);
+      lifecycleEpoch.current += 1;
+      refreshInFlight.current = null;
+      summaryController.current?.abort();
+      seriesController.current?.abort();
+      turnsController.current?.abort();
+      recentController.current?.abort();
+      await runRefresh('manual');
+      if (controller.signal.aborted) return;
+      setRefreshMessage(`已删除该模型会话的 ${formatCount(result.affected)} 条账本记录。`);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setDeleteState(resetErrorState(error));
+      setDeleteError(errorMessage(error));
+    } finally {
+      ledgerWriteBusy.current = false;
+      if (!controller.signal.aborted) setLedgerWriting(false);
     }
   }
 
@@ -465,7 +563,7 @@ export function UsagePage(props: PageProps) {
 
   return <div className="page-stack gap-2" data-page="usage">
     <PageHeading title="用量与费用" description="查看当前账本、用量走势和入账费用。" />
-    <div className="flex flex-wrap items-center gap-2"><span className="mr-1 text-xs text-muted-foreground">{usage ? `生成于 ${formatTimestamp(usage.generatedAt)}` : '正在读取账本'}</span><label className="flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-detailed-counts"><Switch id="usage-detailed-counts" size="sm" checked={detailedCounts} onCheckedChange={setDetailedCounts} /><span>详细数值</span></label><label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-auto-refresh"><span>自动刷新</span><select id="usage-auto-refresh" className="h-[27px] rounded border bg-background px-2 text-xs text-foreground" value={automaticValue} onChange={event => setAutoRefreshMs(event.target.value === 'off' ? null : Number(event.target.value))} disabled={runtimeUnavailable}><option value="off">关闭</option><option value="3000">3 秒</option><option value="10000">10 秒</option><option value="30000">30 秒</option></select></label><Button id="usage-refresh" variant="outline" onClick={() => void runRefresh('manual')} disabled={summaryLoading || seriesLoading || recentLoading}><RefreshCw className={summaryLoading || seriesLoading || recentLoading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button><UsagePricingManager {...props} onSaved={() => { void runRefresh("manual"); }} /><Button id="usage-reset-open" variant="outline" onClick={openReset} disabled={!usage?.revision || usage.resetAvailable === false || summaryLoading}><Trash2 className="size-3.5" />清空账本</Button></div>
+    <div className="flex flex-wrap items-center gap-2"><span className="mr-1 text-xs text-muted-foreground">{usage ? `生成于 ${formatTimestamp(usage.generatedAt)}` : '正在读取账本'}</span><label className="flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-detailed-counts"><Switch id="usage-detailed-counts" size="sm" checked={detailedCounts} onCheckedChange={setDetailedCounts} /><span>详细数值</span></label><label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground" htmlFor="usage-auto-refresh"><span>自动刷新</span><select id="usage-auto-refresh" className="h-[27px] rounded border bg-background px-2 text-xs text-foreground" value={automaticValue} onChange={event => setAutoRefreshMs(event.target.value === 'off' ? null : Number(event.target.value))} disabled={runtimeUnavailable}><option value="off">关闭</option><option value="3000">3 秒</option><option value="10000">10 秒</option><option value="30000">30 秒</option></select></label><Button id="usage-refresh" variant="outline" onClick={() => void runRefresh('manual')} disabled={summaryLoading || seriesLoading || recentLoading || ledgerWriting}><RefreshCw className={summaryLoading || seriesLoading || recentLoading ? 'size-3.5 animate-spin' : 'size-3.5'} />刷新</Button><UsagePricingManager {...props} onSaved={() => { void runRefresh("manual"); }} /><Button id="usage-reset-open" variant="outline" onClick={openReset} disabled={!usage?.revision || usage.resetAvailable === false || summaryLoading || deleteTarget !== null || ledgerWriting}><Trash2 className="size-3.5" />清空账本</Button></div>
     {refreshMessage && <p className="text-xs text-muted-foreground" role="status">{refreshMessage}</p>}
 
     {summaryLoading && !usage ? <Section id="usage-summary" title={usageSectionLabels.summary} className={compactSectionClass}><LoadingBlock>正在读取用量账本</LoadingBlock></Section>
@@ -498,27 +596,27 @@ export function UsagePage(props: PageProps) {
           <TabsList aria-label="用量记录视图" className="h-[34px] w-full justify-start bg-muted/30 px-2"><TabsTrigger value="conversations">按会话</TabsTrigger><TabsTrigger value="turns">逐轮明细</TabsTrigger><TabsTrigger value="recent">调用记录</TabsTrigger></TabsList>
           <TabsContent value="conversations" keepMounted className="[&[hidden]]:hidden">
         <Section id="conversation-usage" title={usageSectionLabels.conversations} description={`最多 ${formatCount(usage.limit)} 条；选择会话后加载逐轮明细。`} actions={usage.limited ? <StatusPill tone="warning">结果已截断</StatusPill> : <StatusPill tone="success">完整结果</StatusPill>} className={ledgerSectionClass}>
-          {usage.conversations.length === 0 ? <EmptyState title="暂无用量记录" description="聊天账本已成功读取，但当前没有会话用量。" /> : <div data-usage-conversations-panel><div className="tablewrap min-h-0 overscroll-contain border-t" data-usage-conversations-scroll tabIndex={0} role="region" aria-label="会话用量列表"><table aria-rowcount={usage.conversations.length + 1} className="w-full min-w-[76rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 text-right font-medium">轮 / 步</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">命中率</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="min-w-36 px-2 py-1 text-right font-medium">成本占比</th><th className="px-2 py-1 font-medium">模型</th><th className="px-2 py-1 font-medium">最近记录</th><th className="px-2 py-1 font-medium">详情</th></tr></thead><VirtualTableBody items={usage.conversations} getItemKey={conversation => conversation.key} columns={12} estimateSize={30}>{conversation => {
+          {usage.conversations.length === 0 ? <EmptyState title="暂无用量记录" description="聊天账本已成功读取，但当前没有会话用量。" /> : <div data-usage-conversations-panel><div className="tablewrap min-h-0 overscroll-contain border-t" data-usage-conversations-scroll tabIndex={0} role="region" aria-label="会话用量列表"><table aria-rowcount={usage.conversations.length + 1} className="w-full min-w-[76rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 text-right font-medium">轮 / 步</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">命中率</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="min-w-36 px-2 py-1 text-right font-medium">成本占比</th><th className="px-2 py-1 font-medium">模型</th><th className="px-2 py-1 font-medium">最近记录</th><th className="px-2 py-1 font-medium">操作</th></tr></thead><VirtualTableBody items={usage.conversations} getItemKey={conversation => ledgerIdentity(conversation)} columns={12} estimateSize={30}>{conversation => {
             const identity = describeConversationKey(conversation.key);
             const buckets = conversation.buckets;
             const share = usage.totals.cost === null || conversation.cost === null ? null : usage.totals.cost > 0 ? conversation.cost / usage.totals.cost : 0;
             const shareLabel = formatPercentage(share);
-            return <tr key={conversation.key} data-usage-key={conversation.key} className={selectedKey === conversation.key ? 'bg-accent/45 align-top' : 'align-top hover:bg-muted/30'}><td className="px-2 py-1"><button type="button" className="text-left outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-pressed={selectedKey === conversation.key} onClick={() => selectConversation(conversation.key, true)}><UsageConversation conversationKey={conversation.key} /></button></td><td className="px-2 py-1 text-right tabular-nums">{formatCount(conversation.turns)} / {formatCount(conversation.steps)}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheMiss) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheHit) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheWrite) : "不可用"}</td><td className="px-2 py-1">{buckets ? <span className="block text-right tabular-nums">{formatCount(buckets.output)}</span> : <span className="block text-right text-muted-foreground">不可用</span>}</td><td className="px-2 py-1 text-right tabular-nums">{conversation.cacheHitRate === null ? '不可用' : formatPercentage(conversation.cacheHitRate)}</td><td className="px-2 py-1 text-right tabular-nums"><strong className="font-medium">{formatActivityCost(conversation.cost, usage.currency, usage.symbol)}</strong></td><td className="min-w-36 px-2 py-1"><span className="block text-right tabular-nums">{shareLabel}</span></td><td className="max-w-52 px-2 py-1"><span className="block max-w-40 truncate" title={conversation.models.join("、")}>{conversation.models.join("、") || "未记录"}</span></td><td className="whitespace-nowrap px-2 py-1 text-muted-foreground">{conversation.lastAt ? formatTimestamp(conversation.lastAt) : '未记录'}</td><td className="px-2 py-1"><ReadOnlyDetails title="会话用量详情" description={`${identity.label} ${identity.identifier}`}><UsageConversation conversationKey={conversation.key} showRun /><KnownCosts costs={conversation.knownCosts} />{buckets && <><UsageTokenBreakdown values={buckets} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={buckets} side="output" formatCount={formatCount} /></>}<TechnicalDetails fields={[{ label: '完整汇总', value: conversation }]} /></ReadOnlyDetails></td></tr>;
+            return <tr key={ledgerIdentity(conversation)} data-usage-key={conversation.key} data-usage-ledger-key={ledgerIdentity(conversation)} className={selectedKey === ledgerIdentity(conversation) ? 'bg-accent/45 align-top' : 'align-top hover:bg-muted/30'}><td className="px-2 py-1"><button type="button" className="text-left outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-pressed={selectedKey === ledgerIdentity(conversation)} onClick={() => selectConversation(ledgerIdentity(conversation), true)}><UsageConversation conversationKey={conversation.key} sessionId={conversation.sessionId} /></button></td><td className="px-2 py-1 text-right tabular-nums">{formatCount(conversation.turns)} / {formatCount(conversation.steps)}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheMiss) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheHit) : "不可用"}</td><td className="px-2 py-1 text-right tabular-nums">{buckets ? formatCount(buckets.cacheWrite) : "不可用"}</td><td className="px-2 py-1">{buckets ? <span className="block text-right tabular-nums">{formatCount(buckets.output)}</span> : <span className="block text-right text-muted-foreground">不可用</span>}</td><td className="px-2 py-1 text-right tabular-nums">{conversation.cacheHitRate === null ? '不可用' : formatPercentage(conversation.cacheHitRate)}</td><td className="px-2 py-1 text-right tabular-nums"><strong className="font-medium">{formatActivityCost(conversation.cost, usage.currency, usage.symbol)}</strong></td><td className="min-w-36 px-2 py-1"><span className="block text-right tabular-nums">{shareLabel}</span></td><td className="max-w-52 px-2 py-1"><span className="block max-w-40 truncate" title={conversation.models.join("、")}>{conversation.models.join("、") || "未记录"}</span></td><td className="whitespace-nowrap px-2 py-1 text-muted-foreground">{conversation.lastAt ? formatTimestamp(conversation.lastAt) : '未记录'}</td><td className="px-2 py-1"><div className="flex items-center gap-1"><ReadOnlyDetails title="会话用量详情" description={`${identity.label} ${identity.identifier}`}><UsageConversation conversationKey={conversation.key} sessionId={conversation.sessionId} showRun /><KnownCosts costs={conversation.knownCosts} />{buckets && <><UsageTokenBreakdown values={buckets} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={buckets} side="output" formatCount={formatCount} /></>}<TechnicalDetails fields={[{ label: '完整汇总', value: conversation }]} /></ReadOnlyDetails>{usage.native && conversation.ledgerKey && conversation.sessionId && <span title={!conversation.revision ? '暂时无法核对该会话账本，请刷新后重试' : undefined}><Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`删除${identity.label} ${identity.identifier}${usageSessionSuffix(conversation.sessionId)}的账本`} title={!conversation.revision ? '暂时无法核对该会话账本，请刷新后重试' : undefined} disabled={!conversation.revision || ledgerWriting || resetOpen || deleteTarget !== null} onClick={() => openDelete(conversation)}><Trash2 className="size-3.5" />删除</Button></span>}</div></td></tr>;
           }}</VirtualTableBody></table></div></div>}
           {usage.limited && <p className="mt-3 text-xs leading-5 text-amber-700 dark:text-amber-400" role="status">结果达到接口上限；总计来自完整账本汇总，会话表仅显示本次返回的部分记录。</p>}
         </Section>
 
           </TabsContent>
           <TabsContent value="turns" keepMounted className="[&[hidden]]:hidden">
-        <Section id="usage-turns" title={usageSectionLabels.turns} description="最多 200 轮；累计历史可能早于逐轮保留窗口。" actions={<div className="flex flex-wrap items-center justify-end gap-2"><select id="usage-key-select" className="h-8 max-w-64 rounded-lg border bg-background px-2 text-xs" value={selectedKey} onChange={event => selectConversation(event.target.value)} aria-label="选择逐轮明细会话">{selectableConversations.map(conversation => <option key={conversation.key} value={conversation.key} title={describeConversationKey(conversation.key).simulationRunId ? `模拟运行：${describeConversationKey(conversation.key).simulationRunId}` : undefined}>{describeConversationKey(conversation.key).label} · {describeConversationKey(conversation.key).identifier}</option>)}</select><Button id="usage-turns-load" size="sm" variant="outline" disabled={!selectedKey || turnsLoading} onClick={() => void loadTurns(selectedKey)}>{turnsLoading && <LoaderCircle className="size-3.5 animate-spin" />}加载明细</Button></div>} className={ledgerSectionClass}>
+        <Section id="usage-turns" title={usageSectionLabels.turns} description="最多 200 轮；累计历史可能早于逐轮保留窗口。" actions={<div className="flex flex-wrap items-center justify-end gap-2"><select id="usage-key-select" className="h-8 max-w-64 rounded-lg border bg-background px-2 text-xs" value={selectedKey} onChange={event => selectConversation(event.target.value)} aria-label="选择逐轮明细会话">{selectableConversations.map(conversation => <option key={ledgerIdentity(conversation)} value={ledgerIdentity(conversation)} title={describeConversationKey(conversation.key).simulationRunId ? `模拟运行：${describeConversationKey(conversation.key).simulationRunId}` : undefined}>{describeConversationKey(conversation.key).label} · {describeConversationKey(conversation.key).identifier}{usageSessionSuffix(conversation.sessionId)}</option>)}</select><Button id="usage-turns-load" size="sm" variant="outline" disabled={!selectedKey || turnsLoading} onClick={() => void loadTurns(selectedKey)}>{turnsLoading && <LoaderCircle className="size-3.5 animate-spin" />}加载明细</Button></div>} className={ledgerSectionClass}>
           <div data-usage-turns-panel>
             
             <div className="pt-3" data-usage-turns-body>
           {!selectedKey ? <EmptyState title="选择一条会话" description="从会话汇总或下拉列表选择要查看的会话。" />
             : turnsLoading && !turns ? <LoadingBlock>正在读取逐轮明细</LoadingBlock>
               : turnsError ? <BlockUnavailable title="逐轮明细暂时不可用" description={turnsError} />
-                : turns ? <div className="grid min-w-0 gap-3"><div className="flex max-h-24 shrink-0 flex-wrap gap-x-4 gap-y-1.5 overflow-auto text-xs text-muted-foreground"><span>会话：<strong className="text-foreground"><UsageConversation conversationKey={turns.key} showRun /></strong></span><span>{formatCount(turns.sessionCount)} 个技术会话</span><span>可追溯 {formatCount(turns.turns.length)} 轮</span><span>已归属 {formatActivityCost(turns.attributedCost, turns.currency, turns.symbol)}</span><span>未逐轮归属 {formatActivityCost(turns.unattributedCost, turns.currency, turns.symbol)}</span>{turns.byTier ? <span>峰 {formatActivityCost(turns.byTier.peak, turns.currency, turns.symbol)} · 闲 {formatActivityCost(turns.byTier.off, turns.currency, turns.symbol)}</span> : <span>固定单价 · 无峰谷价档</span>}<span>{turns.firstAt === 0 ? '起始未记录' : `始于 ${formatTimestamp(turns.firstAt)}`} · {turns.lastAt === 0 ? '末次未记录' : `末于 ${formatTimestamp(turns.lastAt)}`}</span>{turns.native && <span>时间为框架观察时刻；响应事件数不是重试次数。{turns.partial && "扫描结果不完整。"}</span>}<span>模型：{turns.models.length > 0 ? turns.models.join('、') : '未记录'}</span>{turns.limited && <StatusPill tone="warning">结果已截断</StatusPill>}</div>{turns.turns.length === 0 ? <EmptyState title="没有可追溯轮次" description="该会话只有累计值，逐轮采样可能已被容量上限淘汰。" /> : <div data-usage-turns-scroll tabIndex={0} role="region" aria-label="逐轮用量列表" className="tablewrap min-h-0 overscroll-contain rounded-lg border"><table aria-rowcount={turns.turns.length + 1} className="w-full min-w-[86rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">起止时间</th><th className="px-2 py-1 text-right font-medium">轮</th><th className="px-2 py-1 text-right font-medium">{turns.native ? "步骤 / 响应事件" : "步骤 / 重试"}</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">命中率</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="px-2 py-1 font-medium">时段</th><th className="px-2 py-1 font-medium">模型 / Provider</th><th className="px-2 py-1 font-medium">详情</th></tr></thead><VirtualTableBody items={turns.turns} getItemKey={turn => `${turn.sessionId}-${turn.generation ?? ""}-${turn.turnId ?? turn.turn}-${turn.endedAt}`} columns={12} estimateSize={30}>{(turn, index) => <tr key={`${turn.sessionId}-${turn.generation ?? ""}-${turn.turnId ?? turn.turn}-${turn.endedAt}`} data-usage-turn={index}><td className="whitespace-nowrap px-2 py-1"><span title={`${formatTimestamp(turn.startedAt)} — ${formatTimestamp(turn.endedAt)}`}>{new Date(turn.startedAt).toLocaleTimeString('zh-CN', { hour12: false })} — {new Date(turn.endedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span></td><td className="px-2 py-1 text-right tabular-nums">{turn.turnId ?? `#${formatCount(turn.turn)}`}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.steps)} / {formatCount(turn.attempts)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.buckets.cacheMiss)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.buckets.cacheHit)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.buckets.cacheWrite)}</td><td className="px-2 py-1"><span className="block text-right tabular-nums">{formatCount(turn.buckets.output)}</span></td><td className="px-2 py-1 text-right tabular-nums">{formatPercentage(cacheHitRate(turn.buckets))}</td><td className="px-2 py-1 text-right tabular-nums">{formatActivityCost(turn.cost, turns.currency, turns.symbol)}{turn.cost === null && <KnownCosts costs={turn.knownCosts} />}{turn.costRecovery && <span className="block text-xs text-muted-foreground">{turn.costRecovery === "historical-reference" ? "含历史参考估价" : "含原快照补估"}</span>}{turn.coverage && turn.coverage !== "complete" && <span className="block text-xs text-muted-foreground">覆盖不完整</span>}</td><td className="px-2 py-1"><TierBadge tier={turn.tier} /></td><td className="px-2 py-1"><span className="block max-w-52 truncate" title={`${turn.model ?? '未记录'} / ${turn.provider ?? 'Provider 未记录'}`}>{turn.model ?? '未记录'}</span></td><td className="px-2 py-1"><ReadOnlyDetails title="逐轮用量详情"><UsageConversation conversationKey={turns.key} showRun /><UsageTokenBreakdown values={turn.buckets} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={turn.buckets} side="output" formatCount={formatCount} /><TechnicalDetails fields={[{ label: "完整记录", value: turn }]} /></ReadOnlyDetails></td></tr>}</VirtualTableBody></table></div>}</div>
-                  : <EmptyState title="尚未加载逐轮明细" description={selectedConversation ? `已选择${describeConversationKey(selectedConversation.key).label} ${describeConversationKey(selectedConversation.key).identifier}，点击“加载明细”读取。` : '点击会话汇总中的一行，或使用上方下拉列表选择会话。'} />}
+                : turns ? <div className="grid min-w-0 gap-3"><div className="flex max-h-24 shrink-0 flex-wrap gap-x-4 gap-y-1.5 overflow-auto text-xs text-muted-foreground"><span>会话：<strong className="text-foreground"><UsageConversation conversationKey={turns.key} sessionId={selectedConversation?.sessionId ?? (turns.sessionIds.length === 1 ? turns.sessionIds[0] : undefined)} showRun /></strong></span><span>{formatCount(turns.sessionCount)} 个技术会话</span><span>可追溯 {formatCount(turns.turns.length)} 轮</span><span>已归属 {formatActivityCost(turns.attributedCost, turns.currency, turns.symbol)}</span><span>未逐轮归属 {formatActivityCost(turns.unattributedCost, turns.currency, turns.symbol)}</span>{turns.byTier ? <span>峰 {formatActivityCost(turns.byTier.peak, turns.currency, turns.symbol)} · 闲 {formatActivityCost(turns.byTier.off, turns.currency, turns.symbol)}</span> : <span>固定单价 · 无峰谷价档</span>}<span>{turns.firstAt === 0 ? '起始未记录' : `始于 ${formatTimestamp(turns.firstAt)}`} · {turns.lastAt === 0 ? '末次未记录' : `末于 ${formatTimestamp(turns.lastAt)}`}</span>{turns.native && <span>时间为框架观察时刻；响应事件数不是重试次数。{turns.partial && "扫描结果不完整。"}</span>}<span>模型：{turns.models.length > 0 ? turns.models.join('、') : '未记录'}</span>{turns.limited && <StatusPill tone="warning">结果已截断</StatusPill>}</div>{turns.turns.length === 0 ? <EmptyState title="没有可追溯轮次" description="该会话只有累计值，逐轮采样可能已被容量上限淘汰。" /> : <div data-usage-turns-scroll tabIndex={0} role="region" aria-label="逐轮用量列表" className="tablewrap min-h-0 overscroll-contain rounded-lg border"><table aria-rowcount={turns.turns.length + 1} className="w-full min-w-[86rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">起止时间</th><th className="px-2 py-1 text-right font-medium">轮</th><th className="px-2 py-1 text-right font-medium">{turns.native ? "步骤 / 响应事件" : "步骤 / 重试"}</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">命中率</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="px-2 py-1 font-medium">时段</th><th className="px-2 py-1 font-medium">模型 / Provider</th><th className="px-2 py-1 font-medium">详情</th></tr></thead><VirtualTableBody items={turns.turns} getItemKey={turn => `${turn.sessionId}-${turn.generation ?? ""}-${turn.turnId ?? turn.turn}-${turn.endedAt}`} columns={12} estimateSize={30}>{(turn, index) => <tr key={`${turn.sessionId}-${turn.generation ?? ""}-${turn.turnId ?? turn.turn}-${turn.endedAt}`} data-usage-turn={index}><td className="whitespace-nowrap px-2 py-1"><span title={`${formatTimestamp(turn.startedAt)} — ${formatTimestamp(turn.endedAt)}`}>{new Date(turn.startedAt).toLocaleTimeString('zh-CN', { hour12: false })} — {new Date(turn.endedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span></td><td className="px-2 py-1 text-right tabular-nums">{turn.turnId ?? `#${formatCount(turn.turn)}`}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.steps)} / {formatCount(turn.attempts)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.buckets.cacheMiss)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.buckets.cacheHit)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(turn.buckets.cacheWrite)}</td><td className="px-2 py-1"><span className="block text-right tabular-nums">{formatCount(turn.buckets.output)}</span></td><td className="px-2 py-1 text-right tabular-nums">{formatPercentage(cacheHitRate(turn.buckets))}</td><td className="px-2 py-1 text-right tabular-nums">{formatActivityCost(turn.cost, turns.currency, turns.symbol)}{turn.cost === null && <KnownCosts costs={turn.knownCosts} />}{turn.costRecovery && <span className="block text-xs text-muted-foreground">{turn.costRecovery === "historical-reference" ? "含历史参考估价" : "含原快照补估"}</span>}{turn.coverage && turn.coverage !== "complete" && <span className="block text-xs text-muted-foreground">覆盖不完整</span>}</td><td className="px-2 py-1"><TierBadge tier={turn.tier} /></td><td className="px-2 py-1"><span className="block max-w-52 truncate" title={`${turn.model ?? '未记录'} / ${turn.provider ?? 'Provider 未记录'}`}>{turn.model ?? '未记录'}</span></td><td className="px-2 py-1"><ReadOnlyDetails title="逐轮用量详情"><UsageConversation conversationKey={turns.key} sessionId={turn.sessionId} showRun /><UsageTokenBreakdown values={turn.buckets} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={turn.buckets} side="output" formatCount={formatCount} /><TechnicalDetails fields={[{ label: "完整记录", value: turn }]} /></ReadOnlyDetails></td></tr>}</VirtualTableBody></table></div>}</div>
+                  : <EmptyState title="尚未加载逐轮明细" description={selectedConversation ? `已选择${describeConversationKey(selectedConversation.key).label} ${describeConversationKey(selectedConversation.key).identifier}${usageSessionSuffix(selectedConversation.sessionId)}，点击“加载明细”读取。` : '点击会话汇总中的一行，或使用上方下拉列表选择会话。'} />}
             </div>
           </div>
         </Section>
@@ -531,7 +629,7 @@ export function UsagePage(props: PageProps) {
             <div className="pt-3" data-usage-recent-body>
           {recentLoading && !recent ? <LoadingBlock>正在读取最近调用</LoadingBlock>
             : recentError && !recent ? <BlockUnavailable title="最近调用暂时不可用" description={recentError} />
-              : recent && <div className="grid min-w-0 gap-3">{recentError && <p className="text-xs text-amber-700 dark:text-amber-300" role="alert">最近调用刷新失败，继续显示上次数据：{recentError}</p>}{recent.entries.length === 0 ? <EmptyState title="暂无最近调用" description="账本返回空流水；这不代表累计用量为零。" /> : <div data-usage-recent-scroll className="tablewrap min-h-0 overscroll-contain rounded-lg border"><table className="w-full min-w-[82rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">时间</th><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 text-right font-medium">{recent.native ? "轮标识 / 步 / 重试（未知）" : "轮 / 步 / 重试"}</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">Token</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="px-2 py-1 font-medium">时段</th><th className="px-2 py-1 font-medium">模型</th><th className="px-2 py-1 font-medium">详情</th></tr></thead><tbody className="divide-y">{recent.entries.map((entry, index) => <tr key={entry.id ?? `${entry.sid}-${entry.turn}-${entry.step}-${entry.retry}-${entry.time}`} data-usage-recent={index}><td className="whitespace-nowrap px-2 py-1">{formatTimestamp(entry.time)}</td><td className="px-2 py-1"><UsageConversation conversationKey={entry.key} /></td><td className="px-2 py-1 text-right tabular-nums">{entry.turnId ?? formatCount(entry.turn)} / {formatCount(entry.step)} / {formatCount(entry.retry)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.cacheMiss)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.cacheHit)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.cacheWrite)}</td><td className="px-2 py-1"><span className="block text-right tabular-nums">{formatCount(entry.output)}</span></td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.tokens)}</td><td className="px-2 py-1 text-right tabular-nums" title={entry.costRecovery === "historical-reference" ? "按记录时段的内置参考价补估，非实际账单" : entry.costRecovery === "price-snapshot" ? "按原入账价格快照补估缺失费用" : entry.knownCost?.source === "reported" ? "提供方上报费用" : entry.knownCost?.source === "operator-price-estimate" ? "按入账时保存的单价计算，旧记录不回算" : undefined}>{entry.knownCost ? formatActivityCost(entry.knownCost.amount, entry.knownCost.currency, `${entry.knownCost.currency} `) : formatActivityCost(entry.cost, usage.currency, recent.symbol)}{entry.costRecovery && <span className="block text-xs text-muted-foreground">{entry.costRecovery === "historical-reference" ? "历史参考估价" : "原快照补估"}</span>}</td><td className="px-2 py-1"><TierBadge tier={entry.tier} /></td><td className="px-2 py-1">{entry.model ?? '未记录'}</td><td className="px-2 py-1"><ReadOnlyDetails title="调用用量详情"><UsageConversation conversationKey={entry.key} showRun /><UsageTokenBreakdown values={entry} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={entry} side="output" formatCount={formatCount} /><TechnicalDetails fields={[{ label: "完整记录", value: entry }]} /></ReadOnlyDetails></td></tr>)}</tbody></table></div>}</div>}
+              : recent && <div className="grid min-w-0 gap-3">{recentError && <p className="text-xs text-amber-700 dark:text-amber-300" role="alert">最近调用刷新失败，继续显示上次数据：{recentError}</p>}{recent.entries.length === 0 ? <EmptyState title="暂无最近调用" description="账本返回空流水；这不代表累计用量为零。" /> : <div data-usage-recent-scroll className="tablewrap min-h-0 overscroll-contain rounded-lg border"><table className="w-full min-w-[82rem] text-left text-[11px]"><thead className="sticky top-0 z-10 border-b bg-muted text-xs text-muted-foreground"><tr><th className="px-2 py-1 font-medium">时间</th><th className="px-2 py-1 font-medium">会话</th><th className="px-2 py-1 text-right font-medium">{recent.native ? "轮标识 / 步 / 重试（未知）" : "轮 / 步 / 重试"}</th><th className="px-2 py-1 text-right font-medium">未命中输入</th><th className="px-2 py-1 text-right font-medium">缓存命中</th><th className="px-2 py-1 text-right font-medium">缓存写入</th><th className="px-2 py-1 text-right font-medium">输出</th><th className="px-2 py-1 text-right font-medium">Token</th><th className="px-2 py-1 text-right font-medium">费用估算</th><th className="px-2 py-1 font-medium">时段</th><th className="px-2 py-1 font-medium">模型</th><th className="px-2 py-1 font-medium">详情</th></tr></thead><tbody className="divide-y">{recent.entries.map((entry, index) => <tr key={entry.id ?? `${entry.sid}-${entry.turn}-${entry.step}-${entry.retry}-${entry.time}`} data-usage-recent={index}><td className="whitespace-nowrap px-2 py-1">{formatTimestamp(entry.time)}</td><td className="px-2 py-1"><UsageConversation conversationKey={entry.key} sessionId={entry.sid} /></td><td className="px-2 py-1 text-right tabular-nums">{entry.turnId ?? formatCount(entry.turn)} / {formatCount(entry.step)} / {formatCount(entry.retry)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.cacheMiss)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.cacheHit)}</td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.cacheWrite)}</td><td className="px-2 py-1"><span className="block text-right tabular-nums">{formatCount(entry.output)}</span></td><td className="px-2 py-1 text-right tabular-nums">{formatCount(entry.tokens)}</td><td className="px-2 py-1 text-right tabular-nums" title={entry.costRecovery === "historical-reference" ? "按记录时段的内置参考价补估，非实际账单" : entry.costRecovery === "price-snapshot" ? "按原入账价格快照补估缺失费用" : entry.knownCost?.source === "reported" ? "提供方上报费用" : entry.knownCost?.source === "operator-price-estimate" ? "按入账时保存的单价计算，旧记录不回算" : undefined}>{entry.knownCost ? formatActivityCost(entry.knownCost.amount, entry.knownCost.currency, `${entry.knownCost.currency} `) : formatActivityCost(entry.cost, usage.currency, recent.symbol)}{entry.costRecovery && <span className="block text-xs text-muted-foreground">{entry.costRecovery === "historical-reference" ? "历史参考估价" : "原快照补估"}</span>}</td><td className="px-2 py-1"><TierBadge tier={entry.tier} /></td><td className="px-2 py-1">{entry.model ?? '未记录'}</td><td className="px-2 py-1"><ReadOnlyDetails title="调用用量详情"><UsageConversation conversationKey={entry.key} sessionId={entry.sid} showRun /><UsageTokenBreakdown values={entry} side="input" formatCount={formatCount} /><UsageTokenBreakdown values={entry} side="output" formatCount={formatCount} /><TechnicalDetails fields={[{ label: "完整记录", value: entry }]} /></ReadOnlyDetails></td></tr>)}</tbody></table></div>}</div>}
             </div>
           </div>
         </Section>
@@ -547,6 +645,15 @@ export function UsagePage(props: PageProps) {
         }
 
       </>}
+
+    <Dialog open={deleteTarget !== null} onOpenChange={open => { if (!open) closeDelete(); }}>
+      <DialogContent showCloseButton={deleteState !== 'saving'}>
+        <DialogHeader><DialogTitle>删除该模型会话的账本？</DialogTitle><DialogDescription>删除下列模型会话已记录的用量与费用，无法撤销。会话历史、当前绑定与其他模型会话的账本保留；之后新产生的用量继续记录。</DialogDescription></DialogHeader>
+        {deleteTarget && <dl className="grid gap-3 text-sm"><div><dt className="text-xs text-muted-foreground">QQ 会话</dt><dd className="mt-1"><UsageConversation conversationKey={deleteTarget.key} sessionId={deleteTarget.sessionId} showRun /></dd></div><div><dt className="text-xs text-muted-foreground">完整模型会话 ID</dt><dd className="mt-1 break-all font-mono text-xs">{deleteTarget.sessionId}</dd></div><div><dt className="text-xs text-muted-foreground">已记录用量</dt><dd className="mt-1">{formatCount(deleteTarget.turns)} 轮 · {formatCount(deleteTarget.steps)} 个处理步骤</dd></div></dl>}
+        {deleteState !== 'idle' && deleteState !== 'saving' && <p className="text-xs leading-5 text-destructive" role="alert">{deleteState === 'conflict' ? '该模型会话的账本已变化。请关闭并刷新，核对最新记录后重新选择。' : deleteState === 'unknown' ? '删除结果暂时无法确认，可能已删除部分记录。请勿重复提交；关闭弹窗并刷新，核对实际剩余账本。' : deleteError}</p>}
+        <DialogFooter><Button variant="outline" disabled={deleteState === 'saving'} onClick={closeDelete}>{deleteState === 'conflict' || deleteState === 'unknown' ? '关闭并刷新核对' : '取消'}</Button><Button id="usage-session-delete-submit" variant="destructive" disabled={!deleteTarget?.revision || deleteState === 'saving' || deleteState === 'conflict' || deleteState === 'unknown' || resetState === 'saving'} onClick={() => void deleteSessionLedger()}>{deleteState === 'saving' && <LoaderCircle className="size-3.5 animate-spin" />}{deleteState === 'saving' ? '正在删除' : '确认删除账本'}</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog open={resetOpen} onOpenChange={open => { if (!open) closeReset(); }}>
       <DialogContent showCloseButton={resetState !== 'saving' && resetState !== 'conflict' && resetState !== 'unknown'}>

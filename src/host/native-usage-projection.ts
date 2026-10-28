@@ -5,6 +5,7 @@ import type { createNativeUsage, NativeUsagePrice, NativeUsageQuery } from './na
 import { DEFAULT_USAGE_PRICE_TABLE, defaultUsagePriceAt, type DefaultUsagePriceTable } from './default-usage-prices.ts'
 
 type Usage = Pick<ReturnType<typeof createNativeUsage>, 'snapshot' | 'summary' | 'recent'> & {
+  readonly sessionLedgers?: ReturnType<typeof createNativeUsage>['sessionLedgers']
   pricing(): { readonly revision: number | null; readonly prices: readonly NativeUsagePrice[]; readonly builtin?: DefaultUsagePriceTable }
 }
 type UsageRecord = ReturnType<Usage['snapshot']>['items'][number]
@@ -70,7 +71,7 @@ function totals(records: readonly UsageRecord[], partial: boolean, currency: str
   return { totalTokens: sum('total'), inputTokens: input, outputTokens: sum('output'),
     cacheHitTokens: cacheHit, cacheMissTokens: cacheMiss, cacheWriteTokens: cacheWrite, reasoningTokens: sum('reasoning'),
     cost, estimated: items.some(item => item.cost?.source === 'operator-price-estimate') || !totalsComplete,
-    conversations: new Set(records.map(item => item.conversationId)).size, turns, steps: modelRecords.length,
+    conversations: new Set(records.map(item => digest([item.conversationId, item.sessionId]))).size, turns, steps: modelRecords.length,
     attributedCost: cost, unattributedCost: 0,
     buckets: { cacheMiss, cacheHit, cacheWrite, output: sum('output'), reasoning: sum('reasoning') },
     byTier: null, cacheHitRate: !complete || missingTokens.cacheRead > 0 || inputs.some(value => value === null)
@@ -126,17 +127,23 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
       const currency = currencies(page.items, prices)
       const aggregate = totals(page.items, page.truncated, currency)
       const limit = Math.min(query.limit ?? 200, 500)
+      const ledgerIndex = usage.sessionLedgers?.()
+      const ledgerRevisions = new Map(ledgerIndex && !ledgerIndex.partial
+        ? ledgerIndex.items.map(entry => [entry.ledgerKey, entry.revision]) : [])
       const conversationRows = new Map<string, UsageRecord[]>()
       for (const item of page.items) {
-        const rows = conversationRows.get(item.conversationId)
+        const ledgerKey = digest([item.conversationId, item.sessionId])
+        const rows = conversationRows.get(ledgerKey)
         if (rows) rows.push(item)
-        else conversationRows.set(item.conversationId, [item])
+        else conversationRows.set(ledgerKey, [item])
       }
-      const conversations = [...conversationRows].map(([key, rows]) => {
-        return { key, sessionCount: new Set(rows.map(item => item.sessionId)).size,
+      const conversations = [...conversationRows].map(([ledgerKey, rows]) => {
+        const { conversationId: key, sessionId } = rows[0]
+        return { key, ledgerKey, sessionId, revision: ledgerRevisions.get(ledgerKey) ?? null, sessionCount: 1,
           ...totals(rows, page.truncated, currency), models: [...new Set(rows.map(item => item.model))],
           firstAt: Math.min(...rows.map(item => item.recordedAt)), lastAt: Math.max(...rows.map(item => item.recordedAt)) }
-      }).sort((left, right) => right.lastAt - left.lastAt || left.key.localeCompare(right.key)).slice(0, limit)
+      }).sort((left, right) => right.lastAt - left.lastAt || left.key.localeCompare(right.key)
+        || left.sessionId.localeCompare(right.sessionId)).slice(0, limit)
       const observed = page.items.filter(item => item.recordKind !== 'opening-balance')
         .reduce<UsageRecord | null>((prior, item) => prior === null || item.recordedAt > prior.recordedAt ? item : prior, null)
       const model = query.model ?? observed?.model ?? (prices.prices.length === 1 ? prices.prices[0].model : builtin.referenceModel)
@@ -183,6 +190,7 @@ export function createNativeUsageProjection({ usage, clock = Date.now }: { reado
       const limit = query.limit ?? 200
       const sessions = [...new Set(page.items.map(item => item.sessionId))]
       return snapshot({ native: true, key, generatedAt: clock(), currency, symbol: symbol(currency),
+        ...(query.sessionId === undefined ? {} : { sessionId: query.sessionId, ledgerKey: digest([key, query.sessionId]) }),
         sessionIds: sessions, sessionCount: sessions.length, buckets: aggregate.buckets, cost: aggregate.cost,
         knownCosts: aggregate.knownCosts, missingCostTurns: aggregate.missingCostTurns,
         attributedCost: aggregate.cost, unattributedCost: 0, byTier: null, estimated: aggregate.estimated,

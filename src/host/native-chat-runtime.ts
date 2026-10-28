@@ -1775,6 +1775,14 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         return createNativeUsageMaintenance({ store: writer }).clearLedger()
       } finally { if (writer !== store) writer.close() }
     },
+    deleteUsageSession(target: import('../contracts/native-usage-session.ts').NativeUsageSessionDeleteRequest) {
+      if (closed || starting || stopping) failure('NATIVE_USAGE_MAINTENANCE_BUSY')
+      const writer = store ?? createSqliteStore({ filename: join(options.directory, 'native-chat.sqlite'), requireExisting: true })
+      try {
+        bindAccountStore(writer, accountScope)
+        return createNativeUsageMaintenance({ store: writer }).clearSessionLedger(target)
+      } finally { if (writer !== store) writer.close() }
+    },
     maintainUsage(input: NativeUsageMaintenanceRequest) {
       if (closed || starting || stopping) failure('NATIVE_USAGE_MAINTENANCE_BUSY')
       const writer = store ?? createSqliteStore({ filename: join(options.directory, 'native-chat.sqlite'), requireExisting: true })

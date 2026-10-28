@@ -198,6 +198,9 @@ export interface UsageLedgerStats {
 
 export interface ConversationUsage {
   readonly key: string;
+  readonly ledgerKey?: string;
+  readonly sessionId?: string | null;
+  readonly revision?: string | null;
   readonly sessionCount: number;
   readonly totalTokens: number | null;
   readonly inputTokens: number | null;

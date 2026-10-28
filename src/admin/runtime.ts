@@ -1,6 +1,8 @@
 import { readAdminActivity } from './simulation-activity.ts'
 import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
 import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
+import { createSimulationSessionRoutes } from './simulation-sessions.ts'
+import { NATIVE_USAGE_SESSION_DELETE_PATH, parseNativeUsageSessionDeleteRequest } from '../contracts/native-usage-session.ts'
 import { isNativeEventCursor, isNativeEventFilter } from '../contracts/native-events.ts'
 import type { NativeExecutionRecoveryView } from '../contracts/native-execution-recovery.ts'
 import type { NativeExecutionRecoveryPlan } from '../host/native-execution-recovery.ts'
@@ -729,6 +731,23 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
       }
     },
     {
+      method: 'POST', pathname: NATIVE_USAGE_SESSION_DELETE_PATH,
+      handle({ query, body, signal }) {
+        requireEmptyQuery(query)
+        const target = parseNativeUsageSessionDeleteRequest(body)
+        if (!target) requestError(400, 'invalid_usage_session_delete')
+        if (!chatRuntime) requestError(503, 'runtime_not_connected')
+        signal.throwIfAborted()
+        try { return chatRuntime.deleteUsageSession(target) }
+        catch (error) {
+          if (error instanceof FrameworkError && error.code === 'USAGE_MAINTENANCE_CONFLICT') requestError(409, 'usage_revision_conflict')
+          if (error instanceof FrameworkError && error.code === 'NATIVE_USAGE_MAINTENANCE_BUSY') requestError(409, 'usage_maintenance_busy')
+          if (error instanceof FrameworkError && error.code === 'USAGE_SESSION_SCAN_LIMIT') requestError(503, 'usage_session_scan_limit')
+          requestError(503, 'usage_session_delete_unknown')
+        }
+      }
+    },
+    {
       method: 'POST', pathname: '/api/chat/usage/reset',
       handle({ query, body, signal }) {
         requireEmptyQuery(query)
@@ -850,6 +869,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
     runExclusive: run => nativeControl(directory, run) }))
   routes.push(...createNativeInteractionRoutes(options.interactions ?? (() => undefined)))
   routes.push(...createNativeExtensionReloadRoutes(chatRuntime))
+  routes.push(...createSimulationSessionRoutes(directory))
   routes.push(...createNativeToolInventoryRoutes(options.toolInventory ?? (chatRuntime ? signal => chatRuntime.toolInventory(signal) : undefined)))
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))
@@ -1373,7 +1393,7 @@ function publicDeploymentResolution(result: Awaited<ReturnType<NativeChatDeploym
 
 function usageQuery(query: URLSearchParams): NativeUsageQuery {
   const numeric = ['limit', 'since', 'until']
-  const textual = ['after', 'conversationId', 'provider', 'model']
+  const textual = ['after', 'conversationId', 'sessionId', 'provider', 'model']
   if ([...query.keys()].some(key => ![...numeric, ...textual].includes(key))
     || [...query.keys()].some(key => query.getAll(key).length !== 1)) requestError(400, 'invalid_query')
   const result: Record<string, string | number> = {}
@@ -1387,7 +1407,8 @@ function usageQuery(query: URLSearchParams): NativeUsageQuery {
   for (const key of textual) {
     const value = query.get(key)
     if (value === null) continue
-    if (value.length === 0 || value.length > 1_024 || /[\u0000-\u001f\u007f]/.test(value)) requestError(400, 'invalid_query')
+    if (value.length === 0 || value.length > (key === 'sessionId' ? 160 : 1_024)
+      || /[\u0000-\u001f\u007f]/.test(value)) requestError(400, 'invalid_query')
     result[key] = value
   }
   if (typeof result.since === 'number' && typeof result.until === 'number' && result.since >= result.until) requestError(400, 'invalid_query')

@@ -15,7 +15,8 @@ import { readNativeInboxSummary } from './native-inbox.ts';
 import { createNativeWorkHistoryReader } from './native-work-history.ts';
 
 export type NativeUsageReader = Pick<ReturnType<typeof createNativeUsage>,
-  'snapshot' | 'pricing' | 'summary' | 'recent' | 'list' | 'series'>;
+  'snapshot' | 'pricing' | 'summary' | 'recent' | 'list' | 'series'>
+  & Partial<Pick<ReturnType<typeof createNativeUsage>, 'sessionLedgers'>>;
 export interface NativeHistoryReader {
   readonly media: (options: Parameters<typeof readNativeMediaDiagnostics>[1]) => ReturnType<typeof readNativeMediaDiagnostics>;
   readonly usageMaintenance: Pick<ReturnType<typeof createNativeUsageMaintenance>, 'get' | 'export' | 'list'>;
@@ -43,7 +44,7 @@ export function readNativeHistory<Result>(directory: string, read: (history: Nat
       const executions = createNativeExecutionController({ store });
       return read(Object.freeze({ media: (options: Parameters<typeof readNativeMediaDiagnostics>[1]) => readNativeMediaDiagnostics(store, options), usageMaintenance: Object.freeze({ get: maintenance.get, export: maintenance.export, list: maintenance.list }), executionRecovery: (id: string) => readNativeExecutionRecovery(store, id), diagnostics: (conversationId: string) => readNativeDiagnosticHistory(store, conversationId), work: createNativeWorkHistoryReader(store), inbox: Object.freeze({ summary: () => readNativeInboxSummary(store) }), sessions: Object.freeze({ list: (options?: { limit?: number; after?: string }) =>
         readSessionMetadata(store, options) }),
-      usage: Object.freeze({ snapshot: usage.snapshot, pricing: usage.pricing, summary: usage.summary,
+      usage: Object.freeze({ snapshot: usage.snapshot, sessionLedgers: usage.sessionLedgers, pricing: usage.pricing, summary: usage.summary,
         recent: usage.recent, list: usage.list, series: usage.series }),
       executions: Object.freeze({ list: executions.list, get: executions.get }) }));
     });

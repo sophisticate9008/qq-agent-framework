@@ -150,9 +150,19 @@ DSH 未报告缓存读取时保持未知，不能凭输入、输出与总量恒�
 
 默认控制台不再注册提醒和记忆管理 HTTP 路由。宿主保留 `reminders`、`memory` 包服务与日历钩子供插件使用，不默认装配提醒/记忆模型工具或自动记忆输入查询；插件按业务显式注册工具和上下文贡献。
 
-## 清空账本
+## 会话账本与清空统计
 
-`POST /api/chat/usage/reset` 接受 `{ revision, confirm: "清空用量账本" }`，revision 来自用量页的 `GET /api/chat/usage?limit=200`。原生宿主核对版本后清空全部现有用量与费用统计，包括结果未知的统计记录和旧归档遗留；独立执行证据、会话历史、单价与去重防重放凭据保留。内部以最多 60 条记录一批进行 CAS 提交，并在同一批次记录清空进度，成功返回 `{ ok: true, resetAccepted: true, operationId, affected, protectedUnknown: 0 }`；`protectedUnknown` 仅为兼容字段，不再表示保留未知账本记录。中断可能已完成部分批次，不能自动重试。清空后的新用量继续入账，迟到的相同记录由去重凭据阻止再次入账。当前控制台只提供整本清空，旧 `/api/chat/usage/maintenance` 归档、范围清理、预览确认、导出和操作列表路由不再注册。
+`GET /api/chat/usage` 的 `conversations` 按来源 `conversationId` 与实际 DSH `sessionId` 的组合分行；同一 QQ 会话切换或重置后产生的模型会话分别统计，模拟等来源也保留各自的会话标识。每行 `key` 保留来源会话标识，`ledgerKey` 为 `digest([conversationId, sessionId])`，`sessionId` 为实际模型会话标识，`sessionCount` 为 1；`totals.conversations` 按这一组合计数。用量查询增加可选 `sessionId`，`/api/chat/usage/turns?key=...&sessionId=...` 仅返回该实际模型会话的明细。
+
+每行 `revision` 是对应组合在活动账本与旧归档中的全部记录引用、存储版本和指纹的摘要；与其他会话相互独立，不受当前 `provider`、`model`、时间范围、分页游标或展示 `limit` 影响。后端一次建立全量会话索引后分组读取版本，不逐行重复扫描。无法完整建立索引或读取端未提供版本索引时，`revision` 为 `null`，已有统计仍可展示，该行不能提交删除。完整索引扫描最多 100000 条活动与归档记录，达到容量且仍有记录时不提供删除版本。
+
+`POST /api/chat/usage/session/delete` 严格接受 `{ conversationId, sessionId, revision }`，删除这一组合在开始核验时确认的全部账本与相关旧归档，不受界面过滤和展示数量影响；成功返回 `{ ok: true, operationId, affected }`。聊天可以继续运行，执行证据、会话上下文、单价和防重放标记保留。目标版本变化返回 409 `usage_revision_conflict`；无法完整核对索引返回 `usage_session_scan_limit`，不开始删除。
+
+删除在开始时固定核验过的记录引用，以最多 60 条一批进行 CAS，并与 `native-usage.resets` 中的进度记录在同一批次提交；完成的进度记录按后台维护规则回收。执行期间新产生的账本记录继续正常保留；迟到的相同记录由保留的去重标记阻止再次入账。各批次分别原子提交，跨批次中断或目标记录并发更新可能留下部分已完成删除；此时返回 `usage_session_delete_unknown`，刷新核对实际统计，不自动重试。
+
+解除绑定弹窗提供可选的同时删除账本操作，默认保留。选择删除时先读取原绑定完整会话标识对应的账本版本，再按原版本化协议解除绑定；只有解绑结果已确认后才提交这一会话的账本删除。两个动作分别确认，不承诺跨操作事务；解绑成功但账本删除失败或未知时，界面明确显示已解绑并提示到用量页核对，不重放解绑或删除。
+
+`POST /api/chat/usage/reset` 接受 `{ revision, confirm: "清空用量账本" }`，revision 来自用量页的 `GET /api/chat/usage?limit=200`。原生宿主核对版本后清空全部现有用量与费用统计，包括结果未知的统计记录和旧归档遗留；独立执行证据、会话历史、单价与去重防重放凭据保留。内部以最多 60 条记录一批进行 CAS 提交，并在同一批次记录清空进度，成功返回 `{ ok: true, resetAccepted: true, operationId, affected, protectedUnknown: 0 }`；`protectedUnknown` 仅为兼容字段，不再表示保留未知账本记录。中断可能已完成部分批次，不能自动重试。清空后的新用量继续入账，迟到的相同记录由去重凭据阻止再次入账。控制台提供按实际模型会话删除和整本清空，旧 `/api/chat/usage/maintenance` 归档、范围清理、预览确认、导出和操作列表路由不再注册。
 
 ## 自动记录维护与会话操作
 
@@ -165,6 +175,12 @@ DSH 未报告缓存读取时保持未知，不能凭输入、输出与总量恒�
 `POST /api/chat/sessions/reset` 的版本化请求不变；运行中若目标绑定仍有执行占用，先有界读取该次 DSH 执行的结束证据，再同步校验目标绑定、活动入站与未结束任务，原子解除绑定，无需停止其他会话。外部执行已确认结束且占用已释放时，历史超时或未知标签不再阻止解除。核对不重新提交消息、不取消外部工作；旧 DSH 历史和用量保留。
 
 模型会话历史由 DSH 管理：`GET /api/chat/sessions` 固定返回 `deleteAvailable: false`，控制台“删除”按钮禁用并提示到 DSH 操作。`POST /api/chat/sessions/delete` 返回 HTTP 409 与 `session_delete_use_dsh`，不创建删除维护操作。已有维护操作仍可通过 `GET /api/chat/dsh/restart?id=...` 查询，并通过原 reconcile 接口核对；未知结果不重放删除。解除绑定继续按独立版本化契约处理，保留旧模型历史。
+
+模拟绑定由独立的 `GET /api/chat/simulations/sessions` 返回 `{ schema: 1, sessions, limited, unavailableRuns }`。条目包含 `origin: "simulation"`、`runId`、原数据库中的 `key` / `originalConversationId`、来源账本标识 `ledgerConversationId`、实际 `sessionId`、`generation`、`bindingRevision`、`state`、`updatedAt`、`runtimeState`、`resetAvailable` 与 `resetUnavailableReason`。非就绪记录的 session 或绑定版本可为 `null`。`runtimeState: "busy"` 表示该轮运行锁存在，不据此推测锁持有者或宣称已停止。
+
+读取只使用当前账号目录的固定 `simulation-activity-index.json` 指针，核对根目录、每轮私有 `simulation.json` 的来源归属、固定独立 native 目录与本地捕获模式，再读取该轮真实 `host.sessions`；不把模拟记录复制成生产绑定，也不返回私有路径或会话正文。该入口有界枚举同来源各轮，不受活动索引最近四轮或七天期限限制。准备轮次未创建数据库时正常忽略；目录枚举或绑定数量达到上限通过 `limited` 表示，现存轮次读取失败通过 `unavailableRuns` 表示。
+
+`POST /api/chat/simulations/sessions/reset` 严格接受 `{ runId, key, sessionId, generation, bindingRevision, confirm: true }`。只有已停止、可取得独占运行锁且执行证据允许的 `ready` 绑定可以管理；同一独占锁防止模拟宿主并发启动。后端复用绑定 CAS、历史归档和代数推进，成功返回 `{ schema: 1, runId, ok: true, key, previousSessionId, previousGeneration, nextGeneration, bridgeBindingRemoved: true, historyPreserved: true, contextReset: true }`。运行实例、旧锁、未结束执行或版本变化明确拒绝；结果未知不自动重试。操作只修改对应模拟数据库；来源账号中的 `simulation:<runId>:<key>` 账本仍通过独立逐会话删除接口管理。
 
 原生用量汇总的 `resetAvailable` 为布尔值，界面保留后端能力值；支持清空账本不影响用量解码。读取或解码失败单独报告，不误报为尚未接入数据源。人设页应用前核对当前启用方案确实引用所选人设，并将该方案版本与应用请求绑定；人设、方案应用入口各位于其编辑卡片，连接页不再重复提供。
 

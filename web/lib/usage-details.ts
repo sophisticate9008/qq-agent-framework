@@ -258,8 +258,8 @@ function parseUsageTurn(value: unknown): UsageTurn | null {
   return { sessionId, key, turn, steps, attempts, startedAt, endedAt, model, provider, buckets, cost, tier };
 }
 
-export function parseUsageConversation(value: unknown, expectedKey?: string): UsageConversationDetails | null {
-  if (isRecord(value) && value.native === true) return parseNativeUsageConversation(value, expectedKey);
+export function parseUsageConversation(value: unknown, expectedKey?: string, expectedSessionId?: string): UsageConversationDetails | null {
+  if (isRecord(value) && value.native === true) return parseNativeUsageConversation(value, expectedKey, expectedSessionId);
   if (!isRecord(value) || typeof value.estimated !== 'boolean' || !Array.isArray(value.sessionIds)
     || !Array.isArray(value.models) || !Array.isArray(value.turns) || value.sessionIds.length > 2000
     || value.models.length > 256 || value.turns.length > 1000) return null;

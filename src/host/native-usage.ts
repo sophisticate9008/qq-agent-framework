@@ -58,6 +58,7 @@ export interface NativeUsageQuery {
   readonly limit?: number
   readonly after?: string
   readonly conversationId?: string
+  readonly sessionId?: string
   readonly provider?: string
   readonly model?: string
   readonly since?: number
@@ -71,6 +72,47 @@ const namespace = NATIVE_USAGE_TURNS_NAMESPACE
 const priceNamespace = 'native-usage.pricing'
 const tokenKeys = ['input', 'output', 'cacheRead', 'cacheWrite', 'total', 'reasoning'] as const
 const priceKeys = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion'] as const
+
+export interface NativeUsageSessionReference {
+  readonly namespace: string
+  readonly key: string
+  readonly revision: number
+  readonly fingerprint: string
+}
+
+/** References are internal maintenance evidence, not query limits or a filtered display snapshot. */
+export function readNativeUsageSessionLedgers(store: Pick<DurableStore, 'list'>) {
+  const groups = new Map<string, { conversationId: string; sessionId: string; references: NativeUsageSessionReference[] }>()
+  let scanned = 0
+  let partial = false
+  sources: for (const source of [NATIVE_USAGE_TURNS_NAMESPACE, NATIVE_USAGE_ARCHIVE_NAMESPACE]) {
+    let after: string | undefined
+    for (;;) {
+      const batch = store.list(source, { limit: 256, ...(after === undefined ? {} : { after }) })
+      for (const record of batch) {
+        if (scanned >= 100_000) { partial = true; break sources }
+        scanned++
+        const value = object(record.value)
+        assert(value.schema === 1 && isRecord(value.turn) && reference(value.turn.conversationId)
+          && reference(value.turn.sessionId) && reference(value.fingerprint),
+        'USAGE_DATA_CORRUPT', 'Stored ledger scope and fingerprint are required.')
+        const { conversationId, sessionId } = value.turn
+        const ledgerKey = digest([conversationId, sessionId])
+        let group = groups.get(ledgerKey)
+        if (!group) {
+          group = { conversationId, sessionId, references: [] }
+          groups.set(ledgerKey, group)
+        }
+        group.references.push({ namespace: source, key: record.key, revision: record.revision, fingerprint: value.fingerprint })
+      }
+      if (batch.length < 256) break
+      after = batch[batch.length - 1]!.key
+    }
+  }
+  return { partial, items: [...groups].map(([ledgerKey, group]) => ({ ...group, ledgerKey,
+    revision: digest([group.conversationId, group.sessionId,
+      group.references.map(row => [row.namespace, row.key, row.revision, row.fingerprint])]) })) }
+}
 
 function token(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -183,8 +225,8 @@ function validateTurn(input: NativeUsageTurn): NativeUsageTurn {
 function validateQuery(query: NativeUsageQuery): Required<Pick<NativeUsageQuery, 'limit'>> & NativeUsageQuery {
   const limit = query.limit ?? 100
   assert(Number.isSafeInteger(limit) && limit > 0 && limit <= 1_000
-    && Object.keys(query).every(key => ['limit', 'after', 'conversationId', 'provider', 'model', 'since', 'until'].includes(key))
-    && ['after', 'conversationId', 'provider', 'model'].every(key => query[key as keyof NativeUsageQuery] === undefined
+    && Object.keys(query).every(key => ['limit', 'after', 'conversationId', 'sessionId', 'provider', 'model', 'since', 'until'].includes(key))
+    && ['after', 'conversationId', 'sessionId', 'provider', 'model'].every(key => query[key as keyof NativeUsageQuery] === undefined
       || reference(query[key as keyof NativeUsageQuery]))
     && [query.since, query.until].every(value => value === undefined || token(value))
     && (query.since === undefined || query.until === undefined || query.since < query.until),
@@ -243,6 +285,7 @@ export function readNativeUsageStoredTurn(record: StoredRecord) {
 
 function matches(turn: ReturnType<typeof readNativeUsageStoredTurn>, query: NativeUsageQuery): boolean {
   return (query.conversationId === undefined || turn.conversationId === query.conversationId)
+    && (query.sessionId === undefined || turn.sessionId === query.sessionId)
     && (query.provider === undefined || turn.provider === query.provider)
     && (query.model === undefined || turn.model === query.model)
     && (query.since === undefined || turn.recordedAt >= query.since)
@@ -326,6 +369,10 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, b
 
   return Object.freeze({
     snapshot(query: NativeUsageQuery = {}) { return snapshot(scan(query)) },
+    sessionLedgers() {
+      const index = readNativeUsageSessionLedgers(store)
+      return snapshot({ partial: index.partial, items: index.items.map(({ references: _references, ...entry }) => entry) })
+    },
     pricing,
     setPricing(prices: unknown, expectedRevision: number | null) {
       const validated = validateNativeUsagePrices(prices)

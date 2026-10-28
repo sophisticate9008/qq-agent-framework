@@ -145,7 +145,7 @@ node scripts/simulate-qq.ts --batch runtime/simulation-cases.jsonl
 
 OneBot 使用独占的本机 HTTP/WS 监听。所有消息、转发、图片和语音发送请求只在该端记录并返回本地回执；没有真实协议上游或发送代理。日志中的 `deliveredTo: local-capture` 指本地捕获，不代表 QQ 已送达。
 
-`runtime/simulations/index.json` 在本轮启动时原子发布 `latestRunId`，供只读活动入口定位最近一次模拟。源配置目录中的 `simulation-activity-index.json` 另存相同索引与绝对 `root` 指针，使管理服务从其他工作目录启动时仍能定位模拟活动；它只记录活动位置，不修改配置。每轮 `activity.json` 保留 `native.activity()` 原始结构，外层提供 `schema:1`、`source:"simulation"`、`simulation:true`、`runId`、`sourceDirectory`、`updatedAt`；关闭前刷新最终活动状态。
+`runtime/simulations/index.json` 在本轮启动时原子发布 `latestRunId`，供只读活动入口定位最近一次模拟。源配置目录中的 `simulation-activity-index.json` 另存相同索引与绝对 `root` 指针，使管理服务从其他工作目录启动时仍能定位模拟活动及同来源模拟会话；它只记录定位信息，不修改模型配置。每轮 `activity.json` 保留 `native.activity()` 原始结构，外层提供 `schema:1`、`source:"simulation"`、`simulation:true`、`runId`、`sourceDirectory`、`updatedAt`；关闭前刷新最终活动状态。
 
 DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树构建的框架 bridge 插件，不加载生产自定义 bundle、MCP、bootstrap、会话、运行意图或助手部署 journal。当前渠道与模型配置、凭据复制到权限受限的本轮目录，网页签名密钥重新生成。聊天与助手使用模拟专属命名空间，通过现有部署服务只更新模拟 profile；不修改生产 DSH 配置，不重启生产服务，不清理生产会话。
 
@@ -163,6 +163,18 @@ DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树
 真实模拟的聊天与独立助手用量都先进入本轮 `native/native-chat.sqlite` 的 `native-usage.turns`。入口每两秒将真实观测记录发布到来源账号账本，退出前再等待最终发布完成；发布使用 `simulation:<runId>:<conversation>` 独立会话标记，保留原 token/cache、时间和价格快照，重复读取不会重复记账，已清理记录不复活。发布失败记录 `usage-publish-failed`，不改变模型实际执行结果。
 
 `--batch presentation` 在完整 work 专项之后，追加私聊 Markdown 综合排版转 PNG、群聊及私聊长纯文本转发，最后保留活动与真实 chat/work 用量。渲染请求通过 `qaf_reply` 的 content 提交，格式为 `{"schema":"qaf.output/1","format":"markdown-image","body":"Markdown 正文","title":"可选标题"}`，正文最多 32000 字符及 64 KiB，标题最多 120 字符；它请求框架本机渲染图片，不是原生协议 Markdown 卡片或 Markdown 文件发送。
+
+## 查看与解除模拟绑定
+
+会话页的模拟会话独立展示每轮 `native/native-chat.sqlite` 中实际持久化的 `host.sessions`。每行显示本轮编号、原会话标识、真实 DSH session、绑定代数和状态。生产会话与模拟会话分别管理；活动快照或已发布账本中的会话标记不代替真实绑定。
+
+`GET /api/chat/simulations/sessions` 从当前账号配置目录的固定指针找到模拟根目录，再逐轮核对 `simulation.json` 的来源目录、独立 native 目录与本地捕获模式。会话管理不受最近四轮活动索引或七天活动窗口限制；根目录读取至多 2048 个目录项、256 轮和 4096 条绑定，截断返回 `limited: true`。其他来源的轮次不展示；没有创建数据库的准备轮次正常忽略，现存数据库或归属资料异常计入 `unavailableRuns`。路径、鉴权和会话正文均不返回页面。
+
+停止后的 `ready` 绑定可通过会话页解除。`POST /api/chat/simulations/sessions/reset` 接受 `{ runId, key, sessionId, generation, bindingRevision, confirm: true }`，其中 `key` 是该轮数据库中的原会话标识。后端重新核对归属、取得与模拟宿主共用的独占运行锁，核对真实绑定版本与未结束执行，再归档旧绑定并推进代数；返回的本轮编号和原绑定信息用于确认操作对象。历史与外部 DSH 会话保留，后续新输入才创建新的绑定。
+
+运行锁仍存在时显示占用，禁止通过离线入口解绑；它可能代表运行中实例或需要核对的旧锁，页面不会据此声称已停止。应先退出对应模拟进程；结果未知、执行未结束或版本变化时明确拒绝，不伪造清理成功。`creating`、`unknown`、`retired` 等非就绪记录仍可查看，但不提供这一解除操作。解绑只写该轮独立数据库。
+
+模拟账本使用 `simulation:<runId>:<原会话标识>` 作为来源账号账本中的独立标识；删除账本与解除绑定分别执行。选择同时删除账本时，先核对目标账本版本，在确认真实解绑成功后再删除来源账本中的该 session 统计。删除保留发布去重指纹，因此模拟器随后再次发布相同记录时不会恢复已删除统计。两步之间失败会保留各自实际结果，不自动重试解绑或删除。
 
 
 ## 视频抽帧观察专项

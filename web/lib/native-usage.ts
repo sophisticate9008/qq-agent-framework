@@ -110,11 +110,17 @@ export function parseNativeUsageSnapshot(value: unknown): UsageSnapshot | null {
     const conversations: ConversationUsage[] = array(source.conversations, limit).map(item => {
       const conversation = record(item);
       const aggregate = totals(conversation, count(conversation.steps) > 0);
-      return { ...aggregate, key: text(conversation.key, 160), sessionCount: count(conversation.sessionCount), models: strings(conversation.models, 256, 160),
+      const key = text(conversation.key, 160);
+      const sessionId = conversation.sessionId === undefined || conversation.sessionId === null ? null : text(conversation.sessionId);
+      const ledgerKey = conversation.ledgerKey === undefined ? key : text(conversation.ledgerKey);
+      const revision = conversation.revision === undefined || conversation.revision === null ? null : text(conversation.revision);
+      if (conversation.ledgerKey !== undefined && !sessionId || revision !== null && !/^[a-f0-9]{64}$/.test(revision)) invalid();
+      return { ...aggregate, key, ledgerKey, sessionId, revision, sessionCount: count(conversation.sessionCount), models: strings(conversation.models, 256, 160),
         knownCosts: numericMap(conversation.knownCosts),
         firstAt: conversation.firstAt === 0 ? null : new Date(time(conversation.firstAt)).toISOString(), lastAt: conversation.lastAt === 0 ? null : new Date(time(conversation.lastAt)).toISOString() };
     });
-    if (new Set(conversations.map(item => item.key)).size !== conversations.length) invalid();
+    if (new Set(conversations.map(item => item.ledgerKey)).size !== conversations.length) invalid();
+    if (new Set(conversations.map(item => JSON.stringify([item.key, item.sessionId]))).size !== conversations.length) invalid();
     const table = pricing(source.priceTable);
     const tier = nowTier(source.nowTier);
     if (tier !== null && (table === null || (table.pricingMode === 'flat') !== (tier.tier === 'flat'))) invalid();
@@ -171,11 +177,12 @@ export function parseNativeUsageSeries(value: unknown): UsageSeries | null {
   });
 }
 
-export function parseNativeUsageConversation(value: unknown, expectedKey?: string): UsageConversationDetails | null {
+export function parseNativeUsageConversation(value: unknown, expectedKey?: string, expectedSessionId?: string): UsageConversationDetails | null {
   return parse(value, source => {
     const key = text(source.key, 160);
     if (expectedKey !== undefined && key !== expectedKey || source.byTier !== null) invalid();
     const sessionIds = strings(source.sessionIds, 2000);
+    if (expectedSessionId !== undefined && sessionIds.some(sessionId => sessionId !== expectedSessionId)) invalid();
     if (count(source.sessionCount) !== sessionIds.length) invalid();
     const turnLimit = count(source.turnLimit);
     if (turnLimit < 1 || turnLimit > 1000) invalid();
@@ -188,6 +195,7 @@ export function parseNativeUsageConversation(value: unknown, expectedKey?: strin
         startedAt, endedAt, model: row.model === null ? null : text(row.model, 160), provider: row.provider === null ? null : text(row.provider, 160), buckets: buckets(row.buckets), cost: quantity(row.cost), costRecovery: costRecovery(row.costRecovery), tier, coverage: coverageState(row.coverage), knownCosts: numericMap(row.knownCosts) };
     });
     const observed = turns.length > 0;
+    if (expectedSessionId !== undefined && turns.some(turn => turn.sessionId !== expectedSessionId)) invalid();
     return { native: true, partial: bool(source.partial), knownCosts: numericMap(source.knownCosts), key, generatedAt: time(source.generatedAt), currency: text(source.currency, 16), symbol: text(source.symbol, 16), sessionIds, sessionCount: sessionIds.length,
       buckets: buckets(source.buckets, observed), cost: observed ? quantity(source.cost) : null, attributedCost: observed ? quantity(source.attributedCost) : null, unattributedCost: quantity(source.unattributedCost), byTier: null, estimated: bool(source.estimated),
       firstAt: time(source.firstAt), lastAt: time(source.lastAt), models: strings(source.models, 256, 160), turnLimit, limited: bool(source.limited), turns };

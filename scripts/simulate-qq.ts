@@ -27,23 +27,25 @@ import { createNativeChatRuntime } from '../src/host/native-chat-runtime.ts'
 import { createNativeDshDeploymentRuntime } from '../src/host/native-dsh-deployment.ts'
 import { createNativeAssistantTarget, applySavedAssistantTarget } from '../src/host/native-assistant-target.ts'
 import { prepareSimulationDsh } from './simulate-qq-dsh.ts'
+import { loadNativeBootstrap } from './bootstrap-loader.ts'
 import { simulatedMemberIndex, startSimulatedOneBot, type SimulatedAsset, type SimulatedMessage } from './simulate-qq-onebot.ts'
 
 const HELP = `本机 QQ 消息模拟（真实模型）
-node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--services <服务清单>] [--provider <已有供应商id> --model <模型id>] [--batch <JSONL|basic|work|presentation|video>] [--prepare-only]
+node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--services <服务清单>] [--provider <已有供应商id> --model <模型id>] [--bootstrap <可信本机TS文件>] [--batch <JSONL|basic|work|presentation|video>] [--prepare-only]
 
 默认从 runtime/live/runtime 与 runtime/live/services.json 读取现有配置。
 每次创建全新 runtime/simulations/qq-*/，使用独立DSH进程/鉴权/会话，OneBot发送仅写本地捕获。
 --prepare-only 只准备私有配置，不启动DSH、不发送模型请求。
+--bootstrap 显式加载可信扩展；默认不读取生产bootstrap选择，prepare-only不加载扩展代码。
 --provider 与 --model 必须成对，仅覆盖本轮复制后的启用方案，保留思考档位与上下文设置。
 交互普通文本默认主人群聊@；JSON支持 actor:owner|member、memberIndex:1..8、kind:group|private、mention、text、replyTo、segments。
 命令 /status、/settle、/quit；批量控制行 {"waitMs":1000}、{"settleMs":180000}、{"status":true}。
 批量消息默认等候稳定；waitMs:0 可制造并发追加。详细用法见 docs/SIMULATION.md。`
 
-interface Arguments { source: string; services: string; provider?: string; model?: string; batch?: string; prepareOnly: boolean }
-function argumentsFor(values: readonly string[]): Arguments | null {
+export interface SimulationArguments { source: string; services: string; provider?: string; model?: string; bootstrap?: string; batch?: string; prepareOnly: boolean }
+export function parseSimulationArguments(values: readonly string[]): SimulationArguments | null {
   if (values.length === 1 && ['-h', '--help'].includes(values[0]!)) { console.log(HELP); return null }
-  const parsed: Arguments = { source: resolve('runtime/live/runtime'), services: resolve('runtime/live/services.json'), prepareOnly: false }
+  const parsed: SimulationArguments = { source: resolve('runtime/live/runtime'), services: resolve('runtime/live/services.json'), prepareOnly: false }
   const seen = new Set<string>()
   for (let index = 0; index < values.length; index++) {
     const key = values[index]!
@@ -56,11 +58,17 @@ function argumentsFor(values: readonly string[]): Arguments | null {
     else if (key === '--services') parsed.services = resolve(value)
     else if (key === '--provider') parsed.provider = value
     else if (key === '--model') parsed.model = value
+    else if (key === '--bootstrap') parsed.bootstrap = resolve(value)
     else if (key === '--batch') parsed.batch = ['basic', 'work', 'presentation', 'video'].includes(value) ? value : resolve(value)
     else throw new Error('simulation_unknown_option')
   }
   if ((parsed.provider === undefined) !== (parsed.model === undefined)) throw new Error('simulation_provider_model_pair_required')
   return parsed
+}
+
+/** The simulator only loads an explicit trusted selection, after the prepare-only boundary. */
+export function loadSimulationBootstrap(args: Pick<SimulationArguments, 'bootstrap' | 'prepareOnly'>, signal: AbortSignal) {
+  return args.prepareOnly || args.bootstrap === undefined ? undefined : loadNativeBootstrap(args.bootstrap, { signal })
 }
 
 async function jsonFile(filename: string, value: unknown) {
@@ -321,9 +329,9 @@ async function prepareFixtures(workspace: string, withVideo = false): Promise<{ 
 }
 
 export async function simulateQq(values = process.argv.slice(2)) {
-  const parsed = argumentsFor(values)
+  const parsed = parseSimulationArguments(values)
   if (!parsed) return
-  const args: Arguments = parsed
+  const args: SimulationArguments = parsed
   process.umask(0o077)
   const original = await readNativeChatConfigurationUnlocked(args.source)
   const sourcePlan = original.catalog.plans.find(plan => plan.id === original.catalog.activePlanId)
@@ -380,10 +388,12 @@ export async function simulateQq(values = process.argv.slice(2)) {
       ...original.deployment, target: dsh.target, namespace: 'qqsim', capabilityApproval: null } })
     await jsonFile(join(directory, 'simulation.json'), { schema: 1, sourceDirectory: args.source,
       nativeDirectory, dshHome: dsh.home, workspace: dsh.workspace, dshEndpoint: dsh.endpoint,
-      protocolMode: 'local-capture', bundles: dsh.bundles, productionBootstrapMounted: false,
+      protocolMode: 'local-capture', bundles: dsh.bundles, automaticBootstrapSelection: false, explicitBootstrap: args.bootstrap ?? null,
       fixtures, prepareOnly: args.prepareOnly, ...modelSelection })
     console.log(JSON.stringify({ type: 'simulation-created', directory, fixtures, prepareOnly: args.prepareOnly, ...modelSelection }))
     if (args.prepareOnly) return
+    const bootstrap = await loadSimulationBootstrap(args, lifetime.signal)
+    if (bootstrap) record({ type: 'bootstrap-loaded', metadata: bootstrap.metadata })
     const peer = protocol!
     await dsh.start(lifetime.signal)
     const load = () => readNativeChatConfiguration(nativeDirectory)
@@ -417,7 +427,8 @@ export async function simulateQq(values = process.argv.slice(2)) {
       }
       if (result.state !== 'verified') throw new Error(`simulation_assistant_${result.state}:${result.missingReasons.join(',')}`)
     }
-    const packageConfigurationRegistry = createNativePackageConfigurationRegistry({ directory: nativeDirectory })
+    const packageConfigurationRegistry = createNativePackageConfigurationRegistry({ directory: nativeDirectory,
+      contributions: bootstrap?.packageConfigurations })
     const accessService = createAccessService({ ...createNativeAccessPersistence(nativeDirectory),
       async publish(saved, previous, signal) {
         if (!runtime) throw new Error('simulation_runtime_unavailable')
@@ -426,6 +437,7 @@ export async function simulateQq(values = process.argv.slice(2)) {
     const accessCommand = createAccessCommandHandler({ readAccess: signal => accessService.read(signal),
       change: (request, signal) => accessService.change(request, signal) })
     runtime = createNativeChatRuntime({ directory: nativeDirectory, expectedSelfId: selfId, packageConfigurationRegistry,
+      ...(bootstrap ? { bootstrap } : {}),
       prepareAuthorization: () => prepareNativeChatAuthorization(nativeDirectory),
       controlCommands: [{ id: 'access-management', replyTexts: ACCESS_COMMAND_REPLIES,
         matches: message => parseAccessCommand(message) !== null,

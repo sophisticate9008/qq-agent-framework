@@ -4,6 +4,14 @@
 
 框架 bridge 插件复制当前工作树的 `packages/dsh-bridge-plugin` 构建结果，需要先构建该包；每轮固定插件代码，不复用生产 profile 中的旧插件安装。框架运行使用当前工作树源码。
 
+模拟默认只装配框架自身的运行功能。验证本机扩展时，使用 `--bootstrap /可信目录/example.ts` 显式选择文件；相对路径会按当前工作目录解析。该文件复用正式 bootstrap 加载器的文件权限、内容指纹和契约检查，配置贡献保存在本轮独立目录。模拟器不读取生产 bootstrap 选择文件，`--prepare-only` 也不会导入所选扩展代码。所选文件记录在本轮 `simulation.json` 的 `explicitBootstrap`，实际加载元数据另写入 `events.jsonl` 的 `bootstrap-loaded` 记录。
+
+```sh
+node scripts/simulate-qq.ts --bootstrap /可信目录/example.ts --batch /本机案例/extensions.jsonl
+```
+
+扩展在宿主进程内运行，应选择专用于本轮验证的可信实现，并让外部副作用使用本轮提供的宿主服务。QQ 消息发送仍由本轮模拟 OneBot 捕获，扩展自带的任意网络请求则由其自身实现决定。
+
 先准备目录：
 
 ```sh
@@ -78,7 +86,7 @@ node scripts/simulate-qq.ts --provider deepseek-official --model deepseek-flash
 {"actor":"owner","text":"这段语音说了什么","assets":[{"kind":"record","path":"/本轮素材/example.mp3"}]}
 ```
 
-`image`、`record`、`file` 只是协议素材类别。图片理解仍需模型实际接收图像；语音理解仍需可用的转写服务。本入口不安装生产 bootstrap，原生运行时未装配的扩展或转写能力会保留其真实不可用结果，不生成转写正文。
+`image`、`record`、`file` 只是协议素材类别。图片理解仍需模型实际接收图像；语音理解仍需可用的转写服务。需要验证扩展能力时显式传入 `--bootstrap`，未装配的扩展或转写能力保留其真实不可用结果，不生成转写正文。
 
 合并转发使用 OneBot 节点格式，节点查询由模拟端提供：
 
@@ -155,7 +163,7 @@ OneBot 使用独占的本机 HTTP/WS 监听。所有消息、转发、图片和�
 
 `runtime/simulations/index.json` 在本轮启动时原子发布 `latestRunId`，供只读活动入口定位最近一次模拟。源配置目录中的 `simulation-activity-index.json` 另存相同索引与绝对 `root` 指针，使管理服务从其他工作目录启动时仍能定位模拟活动及同来源模拟会话；它只记录定位信息，不修改模型配置。每轮 `activity.json` 保留 `native.activity()` 原始结构，外层提供 `schema:1`、`source:"simulation"`、`simulation:true`、`runId`、`sourceDirectory`、`updatedAt`；关闭前刷新最终活动状态。
 
-DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树构建的框架 bridge 插件，不加载生产自定义 bundle、MCP、bootstrap、会话、运行意图或助手部署 journal。当前渠道与模型配置、凭据复制到权限受限的本轮目录，网页签名密钥重新生成。聊天与助手使用模拟专属命名空间，通过现有部署服务只更新模拟 profile；不修改生产 DSH 配置，不重启生产服务，不清理生产会话。
+DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树构建的框架 bridge 插件，不加载生产自定义 bundle、MCP、会话、运行意图或助手部署 journal。框架宿主扩展由 `--bootstrap` 显式选择，默认不加载生产选择。当前渠道与模型配置、凭据复制到权限受限的本轮目录，网页签名密钥重新生成。聊天与助手使用模拟专属命名空间，通过现有部署服务只更新模拟 profile；不修改生产 DSH 配置，不重启生产服务，不清理生产会话。
 
 模拟预设写入后若部署明确报告 `pending_reload`，入口只重启本轮启动的 DSH 进程，然后通过真实部署核对接口确认已加载。助手还通过其部署 journal 与目标解析核对结果。未知、冲突或失败不按等待加载处理，不重复提交部署写入。
 

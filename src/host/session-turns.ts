@@ -162,7 +162,11 @@ export function createSessionTurnQueue(options: { readonly signal: AbortSignal; 
       return {
         createSession: request => agent.createSession(request),
         async submit(request) {
-          const release = await acquire(request.sessionId, request.signal)
+          let release: () => void
+          try { release = await acquire(request.sessionId, request.signal) }
+          catch (error) {
+            return { status: 'rejected' as const, reason: error instanceof FrameworkError ? error.code : 'SESSION_QUEUE_UNAVAILABLE' }
+          }
           const lease: ChatLease = { requestId: request.requestId, release }
           chatLeases.set(request.sessionId, lease)
           try {

@@ -652,6 +652,15 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
       }
     },
     {
+      method: 'GET', pathname: '/api/chat/qzone',
+      async handle({ query, signal }) {
+        requireEmptyQuery(query)
+        const port = isNativeChatRuntime(chatRuntime) ? chatRuntime.qzone() : null
+        if (!port) return { schema: 1, state: 'unknown', source: 'none', implementation: null, tools: [], reason: 'QZONE_SERVICE_NOT_RUNNING' }
+        return port.inspect(signal)
+      }
+    },
+    {
       method: 'GET', pathname: '/api/chat/features',
       maxResponseBytes: 4_194_304,
       async handle({ query }) {

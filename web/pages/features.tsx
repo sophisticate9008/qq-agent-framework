@@ -1,3 +1,4 @@
+import { QzoneServiceCard } from '../components/qzone-service.tsx';
 import { validExtensionMetadata } from '../../src/contracts/extension-metadata.ts';
 import { ExtensionTools } from '../components/extension-tools.tsx';
 import { groupExtensionTools, parseToolInventory, type PresentedInventoryTool } from '../lib/chat-tools.ts';
@@ -89,7 +90,7 @@ function parseFeatures(value: unknown): NativeFeatures | null {
   };
 }
 
-const builtinIds = ['agent-relay', 'framework-tools', 'reminder', 'reminders', 'memory', 'media', 'native-services', 'chat-input', 'chat-output'];
+const builtinIds = ['agent-relay', 'framework-tools', 'reminder', 'reminders', 'memory', 'media', 'native-services', 'chat-input', 'chat-output', 'qzone'];
 const builtinServices: Readonly<Record<string, { readonly name: string; readonly description: string; readonly page?: PageId }>> = {
   'chat-input': { name: '唤醒与续聊', description: '私聊、@、昵称、引用与会话续聊；在人设中调整。', page: 'persona' },
   'chat-output': { name: '回复呈现与 Markdown 转图', description: '框架内置 Markdown 图片渲染、短回复分条与长纯文本转发。', page: 'overview' },
@@ -219,6 +220,7 @@ export function FeaturesPage(props: PageProps) {
           <div className="flex flex-wrap items-center gap-2 text-xs"><h2 className="mr-auto text-[13px] font-semibold">框架功能</h2>{refreshButton}</div>
           {(directory.error || runtime.error) && <p role="alert" className="text-xs text-destructive">服务状态读取失败，已保留上次结果；请刷新后核对。</p>}
           <div className={cardGridClass}>
+            <QzoneServiceCard api={api} connected={connected} />
             {relay && <article className="min-w-0 overflow-hidden rounded-lg border bg-card"><header className="flex items-center gap-2.5 px-3 pt-3"><FeatureIcon id="agent-relay" kind="service" /><h3 className="text-[13px] font-semibold">聊天收发</h3></header><p className="px-3 py-2 text-xs leading-5 text-muted-foreground">框架处理 QQ 消息与连续对话，按回复配置分条、引用、转发并记录发送回执。</p><footer className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-1.5"><StatusPill tone={relay.ready && !directory.error ? 'success' : 'warning'}>{directory.error ? '状态待核对' : relay.ready ? '聊天已就绪' : featureStatusLabel(relay.status)}</StatusPill><Button size="xs" variant="ghost" onClick={() => props.navigate('adapters')}>查看连接<ArrowRight className="size-3" /></Button></footer></article>}
             {packages.map(item => { const info = builtinServices[item.id]; const page = info.page; return <article key={item.id} className="min-w-0 overflow-hidden rounded-lg border bg-card"><header className="flex items-center gap-2.5 px-3 pt-3"><FeatureIcon id={item.id} kind="service" /><h3 className="text-[13px] font-semibold">{info.name}</h3></header><p className="px-3 py-2 text-xs leading-5 text-muted-foreground">{info.description}</p><footer className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-1.5"><StatusPill tone={item.state === 'running' && !runtime.error ? 'success' : 'warning'}>{runtime.error ? '状态待核对' : item.state === 'running' ? '服务运行中' : nativePackageStateLabels[item.state]}</StatusPill>{page && <Button size="xs" variant="ghost" onClick={() => props.navigate(page)}>设置<ArrowRight className="size-3" /></Button>}</footer></article>; })}
             {!relay && packages.length === 0 && <p className="col-span-full py-3 text-xs text-muted-foreground">{loading ? '正在读取服务状态…' : '当前没有可核对的运行服务，启动聊天后重新读取。'}</p>}

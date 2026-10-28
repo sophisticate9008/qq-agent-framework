@@ -1,3 +1,7 @@
 export { createOneBotQzonePort } from '../adapters/onebot-qzone.ts';
 export type { OneBotQzoneOptions } from '../adapters/onebot-qzone.ts';
 export type * from '../contracts/qzone.ts';
+
+export { createOneBotQzoneTools, ONEBOT_QZONE_TOOLS } from '../adapters/onebot-qzone-tools.ts';
+export type { OneBotQzoneToolsOptions } from '../adapters/onebot-qzone-tools.ts';
+export type * from '../contracts/qzone-tools.ts';

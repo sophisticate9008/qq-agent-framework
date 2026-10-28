@@ -38,3 +38,5 @@ export { createNativeEventObserver } from '../host/native-events.ts';
 export { createNativeAccounts, nativeAccountId } from '../host/native-accounts.ts';
 export type { NativeAccounts, NativeAccountProtocol, NativeAccountRuntime, NativeLegacyAdoptionPreview } from '../host/native-accounts.ts';
 export { normalizeAccountScope, assertAccountScope } from '../core/account-scope.ts';
+
+export { createQzoneNativePackage, NATIVE_QZONE_SERVICE_ID, NATIVE_QZONE_SERVICE_VERSION } from '../host/native-qzone.ts';

@@ -1,3 +1,6 @@
+import { createOneBotQzoneTools } from '../adapters/onebot-qzone-tools.ts'
+import { createQzoneNativePackage } from './native-qzone.ts'
+import type { QzoneToolPort } from '../contracts/qzone-tools.ts'
 import { readDshToolInventory, unavailableToolInventory } from '../adapters/dsh-tool-inventory.ts'
 import { withFrameworkToolInventory } from './native-tool-inventory.ts'
 import { startNativeOperationRetention } from './native-operation-retention.ts'
@@ -125,6 +128,8 @@ export interface NativeChatDeploymentResolution {
 }
 
 export interface NativeChatRuntimeOptions {
+  readonly qzoneSupportedActions?: (signal: AbortSignal) => Promise<readonly string[]>
+
   readonly accountScope?: AccountScope
   readonly expectedSelfId?: string
   readonly directory: string
@@ -1103,6 +1108,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             return latest.personas.find(item => item.id === plan?.personaId)
           } }),
           createMediaNativePackage({ registry: media }), createRemindersNativePackage({ service: reminderService }),
+          createQzoneNativePackage(createOneBotQzoneTools({ endpoint: configuration.adapters.onebotHttp.endpoint,
+            ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}),
+            ...(options.qzoneSupportedActions ? { readSupportedActions: options.qzoneSupportedActions } : {}) })),
           createMemoryNativePackage({ service: memory.start() }), createNativeOutputPackage(output), createNativeServicesPackage({ ports: {
             agent: { status: () => ({ available: state === 'running' && dsh !== undefined && pluginEpoch !== null,
               missingReasons: state === 'running' && dsh && pluginEpoch ? [] : ['native_agent_not_ready'] }),
@@ -1682,6 +1690,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         return { schema: 1 as const, state: 'unavailable' as const, capturedAt: null, values: null,
           unavailableReason: 'storage-unavailable' as const }
       }
+    },
+    qzone(): QzoneToolPort | null {
+      return state === 'running' && packages ? packages.service('qzone', 1) as QzoneToolPort : null
     },
     async verifyProtocolIdentity(expected: string, signal: AbortSignal) {
       if (closed || state !== 'stopped' || starting || stopping || adapterOperation || migrationOperation) failure('NATIVE_CHAT_BUSY')

@@ -22,3 +22,5 @@ export { NATIVE_TOOL_CAPABILITY_CATALOG, nativeToolCapabilityDefinition, isNativ
 export type { NativeToolCapability } from '../contracts/native-tool-capabilities.ts';
 
 export type { NativeToolRegistrationSource } from '../contracts/native-tool-inventory.ts';
+
+export type * from '../contracts/qzone-tools.ts';

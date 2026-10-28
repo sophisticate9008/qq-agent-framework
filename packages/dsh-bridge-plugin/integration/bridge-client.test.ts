@@ -673,8 +673,8 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
         // A fresh owner process reads the original association without loading an agent or invoking a model.
         const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', `
           import assert from 'node:assert/strict';
-          import { createWorkChannel } from './dist/work.js';
-          import { createWorkJournal } from './dist/work-journal.js';
+          import { createWorkChannel } from ${JSON.stringify(new URL('./work.js', import.meta.resolve('@qq-agent-framework/dsh-bridge-plugin')).href)};
+          import { createWorkJournal } from ${JSON.stringify(new URL('./work-journal.js', import.meta.resolve('@qq-agent-framework/dsh-bridge-plugin')).href)};
           const request = JSON.parse(process.argv[1]);
           const channel = createWorkChannel({issuerEpoch:'fresh-owner-epoch',journal:createWorkJournal(process.argv[2]),
             getAgent:()=>undefined,runtime:()=>{throw Error('Recovery must not start SDK work')},hasPreset:async()=>false,continuationAvailable:()=>false});

@@ -23,6 +23,7 @@ interface ModelRun {
   readonly requestId: string
   readonly owner: string
   readonly idle: Promise<void>
+  settled: boolean
 }
 export interface UsageStep {
   readonly eventId: string
@@ -34,6 +35,9 @@ export interface UsageStep {
 }
 const identifier = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/.test(value)
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
+const MAX_OWNED_HANDLES = 64
+const MAX_RUNS = 256
+const MAX_ACTIVE = 32
 function selection(value: unknown): Selection {
   if (!object(value) || !identifier(value.provider) || !identifier(value.model)
     || value.reasoningEffort !== undefined && !identifier(value.reasoningEffort)
@@ -46,6 +50,36 @@ export function createPluginModelChannel(ctx: Context) {
   const handles = new Map<string, AgentHandle>()
   const runs = new Map<string, ModelRun>()
   const active = new Set<string>()
+  const allocations = new Set<Promise<AgentHandle>>()
+  let closing = false
+  const assertOpen = () => { if (closing) throw new TypeError('Plugin model channel is closing') }
+  const allocate = async (sessionId: string, signal: AbortSignal, create: () => Promise<AgentHandle>) => {
+    assertOpen()
+    signal.throwIfAborted()
+    if (handles.has(sessionId) || handles.size + allocations.size >= MAX_OWNED_HANDLES) throw new TypeError('Plugin model handle capacity is exhausted')
+    // Reserve capacity before any asynchronous creation or model lookup starts.
+    const allocation = Promise.resolve().then(async () => {
+      signal.throwIfAborted()
+      const handle = await create()
+      handles.set(sessionId, handle)
+      return handle
+    })
+    allocations.add(allocation)
+    try { return await allocation }
+    finally { allocations.delete(allocation) }
+  }
+  const admitRun = (sessionId: string) => {
+    assertOpen()
+    if (active.has(sessionId) || active.size >= MAX_ACTIVE) throw new TypeError('Plugin model execution capacity is exhausted')
+    const previous = runs.get(sessionId)
+    if (previous?.settled) runs.delete(sessionId)
+    for (const [id, run] of runs) {
+      if (runs.size + active.size < MAX_RUNS) break
+      if (run.settled) runs.delete(id)
+    }
+    if (runs.size + active.size >= MAX_RUNS) throw new TypeError('Plugin model run capacity is exhausted')
+    active.add(sessionId)
+  }
   const resolve = async (sessionId: string, signal: AbortSignal): Promise<Agent> => {
     const live = ctx.agents.get(SessionId(sessionId))
     if (live) return live
@@ -60,10 +94,9 @@ export function createPluginModelChannel(ctx: Context) {
           const selected = [...observed.events].reverse().find(event => event.type === 'model/selection')
           if (!selected) throw new TypeError('Plugin session model is unavailable')
           const model = selection(selected.data)
-          const handle = await ctx.agents.resume({ resumeSessionId: SessionId(sessionId), signal,
+          const handle = await allocate(sessionId, signal, () => ctx.agents.resume({ resumeSessionId: SessionId(sessionId), signal,
             agentOptions: { provider: model.provider, model: model.model,
-              ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) } })
-          handles.set(sessionId, handle)
+              ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) } }))
           return handle.agent
         }
       } finally { observed[Symbol.dispose]() }
@@ -108,19 +141,21 @@ export function createPluginModelChannel(ctx: Context) {
       if (!object(request) || Object.keys(request).some(key => !['sessionId', 'owner', 'model'].includes(key))
         || !identifier(request.sessionId) || !identifier(request.owner)) throw new TypeError('Invalid plugin session creation')
       const model = selection(request.model)
-      await verifySelection(model, signal)
       const persistence = ctx.get('sessionPersistence')
       if (!persistence) throw new TypeError('Session persistence is unavailable')
-      if (ctx.agents.get(SessionId(request.sessionId)) || await persistence.stat(SessionId(request.sessionId), { signal })) throw new TypeError('Plugin session already exists')
-      const handle = await ctx.agents.create({ sessionId: SessionId(request.sessionId), signal,
-        agentOptions: { provider: model.provider, model: model.model,
-          ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) },
-        setup: (_scope, agent) => {
-          agent.session.append('qaf-plugin/session', { owner: request.owner })
-          agent.session.append('model/selection', { provider: model.provider, model: model.model,
-            ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) })
-        } })
-      handles.set(request.sessionId, handle)
+      await allocate(request.sessionId, signal, async () => {
+        await verifySelection(model, signal)
+        if (ctx.agents.get(SessionId(request.sessionId)) || await persistence.stat(SessionId(request.sessionId), { signal })) throw new TypeError('Plugin session already exists')
+        assertOpen()
+        return ctx.agents.create({ sessionId: SessionId(request.sessionId), signal,
+          agentOptions: { provider: model.provider, model: model.model,
+            ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) },
+          setup: (_scope, agent) => {
+            agent.session.append('qaf-plugin/session', { owner: request.owner })
+            agent.session.append('model/selection', { provider: model.provider, model: model.model,
+              ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) })
+          } })
+      })
       await persistence.flush()
       return { sessionId: request.sessionId, created: true }
     },
@@ -129,8 +164,7 @@ export function createPluginModelChannel(ctx: Context) {
         || !identifier(request.sessionId) || !identifier(request.requestId) || !identifier(request.owner)
         || typeof request.prompt !== 'string' || request.prompt.trim() === '' || request.prompt.length > 128_000
         || Buffer.byteLength(request.prompt) > 262_144) throw new TypeError('Invalid plugin model request')
-      if (active.has(request.sessionId)) throw new TypeError('Plugin session is busy')
-      active.add(request.sessionId)
+      admitRun(request.sessionId)
       const disposers: (() => void)[] = []
       let handedOff = false
       try {
@@ -138,6 +172,7 @@ export function createPluginModelChannel(ctx: Context) {
         const model = request.model === undefined ? undefined : selection(request.model)
         if (model) await verifySelection(model, signal)
         signal.throwIfAborted()
+        assertOpen()
         if (agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new TypeError('Plugin session is not idle')
         const ownContext = agent.session.snapshotEvents().some(event => event.type === 'qaf-plugin/session')
         // restrict() alone masks global tools only. Assembly removes scoped schemas,
@@ -157,12 +192,28 @@ export function createPluginModelChannel(ctx: Context) {
         const message = createUserMessage({ source: { kind: 'qaf-plugin', owner: request.owner, requestId: request.requestId }, content: [{ type: 'text',
           text: `本轮来源为插件 ${request.owner} 的文本生成请求。结果返回该插件；本轮没有 QQ 发言者或 QQ 主人身份，工具不可用。\n\n${request.prompt}` }] })
         agent.followup(message)
-        const idle = agent.whenIdle().finally(() => {
-          for (const dispose of disposers.reverse()) dispose()
-          active.delete(request.sessionId)
+        let run!: ModelRun
+        const idle = agent.whenIdle().finally(async () => {
+          try {
+            for (const dispose of disposers.reverse()) dispose()
+            const handle = handles.get(request.sessionId)
+            if (handle?.agent === agent && agent.status === 'idle' && agent.inbox.nextTurn.length === 0 && agent.inbox.nextStep.length === 0) {
+              const persistence = ctx.get('sessionPersistence')
+              if (!persistence) throw new TypeError('Session persistence is unavailable')
+              // Flush before releasing our live handle. The durable session ID,
+              // source and transcript remain available for resume and inspection.
+              await persistence.flush()
+              await handle.dispose()
+              if (handles.get(request.sessionId) === handle) handles.delete(request.sessionId)
+            }
+          } finally {
+            active.delete(request.sessionId)
+            run.settled = true
+          }
         })
         void idle.catch(() => undefined)
-        runs.set(request.sessionId, { requestId: request.requestId, owner: request.owner, idle })
+        run = { requestId: request.requestId, owner: request.owner, idle, settled: false }
+        runs.set(request.sessionId, run)
         handedOff = true
         return { accepted: true }
       } finally {
@@ -242,8 +293,13 @@ export function createPluginModelChannel(ctx: Context) {
       } finally { observation[Symbol.dispose]() }
     },
     async close() {
+      closing = true
+      await Promise.allSettled([...allocations])
       for (const sessionId of active) ctx.agents.get(SessionId(sessionId))?.cancel({ kind: 'disposed' })
       await Promise.allSettled([...runs.values()].map(run => run.idle))
+      const persistence = ctx.get('sessionPersistence')
+      if (handles.size && !persistence) throw new TypeError('Session persistence is unavailable')
+      await persistence?.flush()
       await Promise.allSettled([...handles.values()].map(handle => handle.dispose()))
       handles.clear(); runs.clear()
     },

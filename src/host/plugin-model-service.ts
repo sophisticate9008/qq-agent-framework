@@ -71,8 +71,13 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
   const readBinding = (value: unknown, revision: number) => {
     const parsed = binding(value, revision, isRecord(value) && isBusy(String(value.sessionId)))
     const execution = options.store.read(EXECUTIONS, parsed.sessionId)
-    if (!parsed.busy && execution && (!isRecord(execution.value)
-      || !['completed', 'failed', 'rejected'].includes(String(execution.value.state)))) return snapshot({ ...parsed, state: 'unknown' as const })
+    const locallyRunning = running.has(parsed.sessionId)
+    if (execution && (!isRecord(execution.value) || execution.value.state === 'unknown'
+      || !locallyRunning && !['completed', 'failed', 'rejected'].includes(String(execution.value.state)))) {
+      // Queue busy also includes durable isolation. That isolation must remain
+      // visible and must not disable its own read-only reconciliation entry.
+      return snapshot({ ...parsed, state: 'unknown' as const, busy: locallyRunning })
+    }
     return parsed
   }
   const combine = (lifetime: AbortSignal, signal?: AbortSignal) => AbortSignal.any([lifetime, ...(options.signal ? [options.signal] : []), ...(signal ? [signal] : [])])
@@ -289,7 +294,9 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
         const current = read(owner, key)
         compareRevision(key.expectedRevision, current.row?.revision ?? null)
         if (!current.value || !current.row) failure('PLUGIN_MODEL_BINDING_NOT_FOUND')
-        if (isBusy(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
+        // A durable unknown barrier is exactly what reconciliation observes.
+        // Only this service's active caller must finish before it can be read.
+        if (running.has(current.value.sessionId)) failure('PLUGIN_MODEL_SESSION_BUSY')
         const previous = options.store.read(EXECUTIONS, current.value.sessionId)
         if (previous) {
           if (!isRecord(previous.value) || !pluginModelIdentifier(previous.value.requestId) || !pluginModelIdentifier(previous.value.owner)

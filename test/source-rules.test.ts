@@ -57,6 +57,7 @@ test('the actual public checker fails on synthetic authored architecture and typ
     mkdirSync(join(directory, 'src/core'), { recursive: true });
     symlinkSync(join(repository, 'node_modules'), join(directory, 'node_modules'), 'dir');
     writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
+    writeFileSync(join(directory, '.ci-js-ignore'), '# No authored JavaScript exceptions in this fixture.\n');
     for (const name of ['check.ts', 'typescript-syntax.ts', 'source-rules.ts']) {
       copyFileSync(join(repository, 'scripts', name), join(directory, 'scripts', name));
     }

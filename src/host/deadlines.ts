@@ -25,7 +25,7 @@ export function bridgeTimeouts(input: Partial<BridgeTimeouts> = {}): Readonly<Br
 export function withDeadline<Value>({ run, signal, timeoutMs, code, onLate }:
   { run(signal: AbortSignal): Value | Promise<Value>; signal: AbortSignal; timeoutMs: number; code: string;
     onLate?(value: Value): void | Promise<void> }): Promise<Value> {
-  assert(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300000,
+  assert(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 3_600_000,
     'INVALID_TIMEOUT', 'A finite operation deadline is required.');
   return new Promise((resolve, reject) => {
     const controller = new AbortController();

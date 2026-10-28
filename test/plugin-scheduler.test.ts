@@ -127,6 +127,36 @@ test('unregister aborts an active handler and an interrupted result is never ret
   assert.equal(plugin.history().length, 1);
 });
 
+test('explicit long callback deadlines stay bounded and stop aborts immediately with durable unknown evidence', async context => {
+  const { service, store, setNow } = fixture(context, { callbackTimeoutMs: 30 * 60_000 });
+  assert.throws(() => createPluginSchedulerService({ store, callbackTimeoutMs: 3_600_001 }), { code: 'INVALID_CALENDAR_OPTIONS' });
+  const client = service.forPlugin('long-generation', new AbortController().signal);
+  let entered: (() => void) | undefined;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let signal: AbortSignal | undefined;
+  client.registerHandler('publish', occurrence => {
+    signal = occurrence.signal;
+    entered?.();
+    return new Promise(() => {});
+  });
+  client.schedule(once('long', initial + 60_000, { windowMs: 3_600_000 }));
+  service.start(); setNow(initial + 60_000);
+  const ticking = service.tick();
+  await started;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      service.stop(),
+      new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => reject(new Error('Stop waited for long callback')), 1000); }),
+    ]);
+  } finally { clearTimeout(timeout); }
+  await ticking;
+  assert.equal(signal?.aborted, true);
+  assert.equal(client.history()[0].status, 'unknown');
+  service.start(); await service.tick();
+  assert.equal(client.history().length, 1);
+});
+
 test('persistent once and daily rules resume after storage reopens without replaying completed work', async context => {
   const directory = mkdtempSync(join(tmpdir(), 'qaf-plugin-schedule-'));
   context.after(() => rmSync(directory, { force: true, recursive: true }));

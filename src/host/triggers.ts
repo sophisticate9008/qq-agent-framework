@@ -348,7 +348,7 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
   assert(store && typeof store === 'object' && typeof callback === 'function',
     'INVALID_CALENDAR_OPTIONS', 'A durable store and callback are required.');
   assert(Number.isSafeInteger(maxScan) && maxScan >= 1 && maxScan <= 10_000
-    && Number.isSafeInteger(callbackTimeoutMs) && callbackTimeoutMs >= 10 && callbackTimeoutMs <= 300_000
+    && Number.isSafeInteger(callbackTimeoutMs) && callbackTimeoutMs >= 10 && callbackTimeoutMs <= 3_600_000
     && Number.isSafeInteger(maxPendingCallbacks) && maxPendingCallbacks >= 1 && maxPendingCallbacks <= 256
     && Number.isSafeInteger(retentionMs) && retentionMs >= minuteMs && retentionMs <= 366 * dayMs,
   'INVALID_CALENDAR_OPTIONS', 'Finite scan, callback, pending, and retention limits are required.');

@@ -16,6 +16,8 @@ export interface DiaryConfiguration {
 export interface DiaryMedia {
   save(id: string, image: Awaited<ReturnType<ImageGenerationService['generate']>>): Promise<{ readonly id: string; readonly protocolImage: string }>
   resolve?(id: string): Promise<{ readonly protocolImage: string }>
+  /** Read-only bounded thumbnail for the authenticated management console. */
+  preview?(id: string, signal?: AbortSignal): Promise<{ readonly mediaType: 'image/webp'; readonly data: string }>
   prune?(retainedIds: readonly string[]): Promise<void>
 }
 export interface DiaryOptions {

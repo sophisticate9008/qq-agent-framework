@@ -12,8 +12,9 @@ import { PLUGIN_RUNTIME_PACKAGE_ID, PLUGIN_MODELS_SERVICE_CONTRACT, PLUGIN_PROTO
 import { serviceDeclaration, useService } from '../../src/host/service-contract.ts'
 import { DIARY_WORKFLOW_CONTRACT } from './workflow-contract.ts'
 import type { DiaryOptions, DiaryWorkflow } from './types.ts'
+import { createDiaryScheduleDetails } from './management.ts'
 
-const fixedContent = createBuiltinPackageContent(import.meta.url, ['./workflow-contract', './types'])
+const fixedContent = createBuiltinPackageContent(import.meta.url, ['./workflow-contract', './types', './management', './media-store', './time'])
 const moduleExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js'
 
 export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 'images' | 'signal'> & {
@@ -36,6 +37,9 @@ export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 
       const tools = useService(context, PLUGIN_TOOLS_SERVICE_CONTRACT)
       const extensions = useService(context, PLUGIN_EXTENSIONS_SERVICE_CONTRACT)
       const workflowOptions: DiaryOptions = { ...options, runtime: { models, capabilities, scheduler }, images, signal: context.signal }
+      for (const handler of ['plan', 'publish'] as const) {
+        context.own('subscription', `schedule-details-${handler}`, scheduler.registerDetailsProvider(handler, createDiaryScheduleDetails(handler, workflowOptions)))
+      }
       const loader = createExtensionModuleLoader({ entry: fileURLToPath(new URL(`./workflow${moduleExtension}`, import.meta.url)),
         root: fileURLToPath(new URL('./', import.meta.url)) })
       const manager = await createReloadableExtension<DiaryWorkflow>({ id: 'qzone-diary', displayName: '空间生活日记', signal: context.signal,
@@ -80,6 +84,7 @@ export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 
         execute(_input, request) { return manager.withCurrent(async () => {
           request.signal.throwIfAborted()
           scheduler.schedule({ id: `manual-${request.invocationId}`, handler: 'plan', payload: {},
+            presentation: { title: '检查今天的空间日记安排', ownerLabel: '空间生活日记', description: '沿用已有计划，不额外增加当天发布次数。' },
             schedule: { kind: 'once', at: Date.now() + 1000 }, windowMs: 1800000, timeZone: options.configuration().timeZone })
           return { status: 'confirmed', state: 'scheduled', summary: '已安排检查今日计划，已有日程不会重复创建。' }
         }) } }))

@@ -43,10 +43,22 @@ export function createQzoneDiary(options: DiaryOptions) {
     const row = store.read(namespace, date)
     return row ? structuredClone(row.value) as unknown as DiaryDay : null
   }
-  function save(day: DiaryDay) {
+  function save(day: DiaryDay, changedSlot?: number) {
     const current = store.read(namespace, day.date)
     day.updatedAt = now()
-    store.write(namespace, day.date, json(day), { expectedRevision: current?.revision ?? null })
+    if (changedSlot === undefined) {
+      store.write(namespace, day.date, json(day), { expectedRevision: current?.revision ?? null })
+      return
+    }
+    // A model/image request may be pending while another slot is skipped in the console.
+    // Persist this slot only; never overwrite a newer sibling slot with an old day snapshot.
+    const latest = current ? structuredClone(current.value) as unknown as DiaryDay : null
+    const changed = day.slots.find(slot => slot.index === changedSlot)
+    assert(current && latest && changed && latest.slots.some(slot => slot.index === changedSlot),
+      'DIARY_SLOT_MISSING', 'A saved day plan is required.')
+    latest.slots = latest.slots.map(slot => slot.index === changedSlot ? structuredClone(changed) : slot)
+    latest.updatedAt = day.updatedAt
+    store.write(namespace, day.date, json(latest), { expectedRevision: current.revision })
   }
   const observe = (phase: string, date: string, slot?: number, attempt?: number, code?: string) => {
     try { options.observe?.({ phase, day: date, ...(slot === undefined ? {} : { slot }), ...(attempt === undefined ? {} : { attempt }), ...(code ? { code } : {}) }) } catch {}
@@ -77,6 +89,7 @@ export function createQzoneDiary(options: DiaryOptions) {
       if (scheduler!.list({ limit: 1000 }).some(rule => rule.id === id)) continue
       if (slot.at < now()) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_MISSED'; save(day); continue }
       scheduler!.schedule({ id, handler: 'publish', payload: { date: day.date, slot: slot.index }, schedule: { kind: 'once', at: slot.at },
+        presentation: { title: `空间生活日记 · ${day.date} 第 ${slot.index + 1} 条`, ownerLabel: '空间生活日记', description: '生成图文并检查图片，通过后发布到空间。' },
         timeZone: config().timeZone, windowMs: slot.until - slot.at, misfire: 'skip' })
     }
   }
@@ -115,23 +128,23 @@ export function createQzoneDiary(options: DiaryOptions) {
       assert(day && slot, 'DIARY_SLOT_MISSING', 'A saved day plan is required.')
       if (slot.state !== 'scheduled') return
       if (!config().enabled || now() < slot.at || now() >= slot.until) {
-        if (now() >= slot.until || !config().enabled) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_MISSED_OR_DISABLED'; save(day) }
+        if (now() >= slot.until || !config().enabled) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_MISSED_OR_DISABLED'; save(day, index) }
         return
       }
       // Persist intent before any model/image side effect. Interrupted work is retained, never blindly replayed.
-      slot.state = 'generating'; save(day)
+      slot.state = 'generating'; save(day, index)
       try {
         const draft = await writeModel(`现在是${new Date(now()).toLocaleString('zh-CN', { timeZone: config().timeZone })}。本次日常片段：${slot.scene}，画风：${slot.style}。写一条简短第一人称生活动态（8-100字，随手记感，不必问读者问题），配一幅含自己角色的生活画面。输出 {"caption":"正文","prompt":"独立生图要求，场景服装动作构图与画风，最多2000字"}。画面不要水印或文字。`, current)
-        slot.caption = text(draft.caption, 240); slot.prompt = text(draft.prompt, 3000); save(day)
+        slot.caption = text(draft.caption, 240); slot.prompt = text(draft.prompt, 3000); save(day, index)
         let correction = ''
         for (let attempt = 1; attempt <= 3; attempt++) {
           current.throwIfAborted()
-          if (!config().enabled || now() >= slot.until) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_CLOSED'; save(day); return }
-          slot.attempts = attempt; slot.state = 'generating'; save(day); observe('generating', date, index, attempt)
+          if (!config().enabled || now() >= slot.until) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_CLOSED'; save(day, index); return }
+          slot.attempts = attempt; slot.state = 'generating'; save(day, index); observe('generating', date, index, attempt)
           const image = await options.images.generate({ idempotencyKey: `qzone-diary:${date}:${index}:${attempt}`, subject: 'self',
             prompt: slot.prompt + (correction ? `\n修正上一版的具体问题：${correction}` : ''), signal: current })
           const artifact = await options.media.save(`${date}-${index}-${attempt}`, image)
-          slot.artifactId = artifact.id; slot.protocolImage = artifact.protocolImage; slot.state = 'reviewing'; save(day); observe('reviewing', date, index, attempt)
+          slot.artifactId = artifact.id; slot.protocolImage = artifact.protocolImage; slot.state = 'reviewing'; save(day, index); observe('reviewing', date, index, attempt)
           const check = await runtime.models.run({ name: 'visual-review', mode: 'stateless', model: config().visionModel,
             prompt: `检查实际附图能否用于生活动态。目标：${slot.scene}；要求：${slot.prompt}；文案：${slot.caption}。检查手指/肢体多余或缺失、肢体连接错乱、面部严重畸形、物体穿模、画面内容与文案矛盾、严重乱码水印。风格化和合理遮挡不算错误，不要求写实。看不清关键结构时不能盲目通过。仅返回JSON {"acceptable":布尔值,"captionMatches":布尔值,"issues":["具体可见问题"],"correction":"重生成时的明确修正建议，无问题为空"}。`,
             images: [{ mediaType: image.mediaType, data: Buffer.from(image.data).toString('base64') }], timeoutMs: 180000, maxOutputChars: 4000, signal: current })
@@ -139,19 +152,19 @@ export function createQzoneDiary(options: DiaryOptions) {
           assert(typeof review.acceptable === 'boolean' && typeof review.captionMatches === 'boolean' && Array.isArray(review.issues)
             && review.issues.length <= 16 && review.issues.every(item => typeof item === 'string' && item.length <= 500)
             && typeof review.correction === 'string' && review.correction.length <= 2000, 'DIARY_REVIEW_INVALID', 'Image review must return explicit findings.')
-          slot.review = { acceptable: review.acceptable, captionMatches: review.captionMatches, issues: review.issues as string[], correction: review.correction }; save(day)
+          slot.review = { acceptable: review.acceptable, captionMatches: review.captionMatches, issues: review.issues as string[], correction: review.correction }; save(day, index)
           if (!review.acceptable || !review.captionMatches || review.issues.length) {
             correction = [review.correction, ...review.issues].join('；'); observe('image-rejected', date, index, attempt)
-            if (attempt === 3) { slot.state = 'skipped'; slot.error = 'DIARY_IMAGE_REJECTED'; save(day); return }
+            if (attempt === 3) { slot.state = 'skipped'; slot.error = 'DIARY_IMAGE_REJECTED'; save(day, index); return }
             continue
           }
           current.throwIfAborted()
-          if (!config().enabled || now() >= slot.until) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_CLOSED'; save(day); return }
-          slot.state = 'preview'; save(day)
+          if (!config().enabled || now() >= slot.until) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_CLOSED'; save(day, index); return }
+          slot.state = 'preview'; save(day, index)
           if (!config().publish) { observe('preview-ready', date, index, attempt); return }
           await publishApproved(date, index, current); return
         }
-      } catch (error) { slot.state = 'unknown'; slot.error = errorCode(error); save(day); observe('failed', date, index, slot.attempts, slot.error); throw error }
+      } catch (error) { slot.state = 'unknown'; slot.error = errorCode(error); save(day, index); observe('failed', date, index, slot.attempts, slot.error); throw error }
     })
   }
   async function publishApproved(date: string, index: number, current: AbortSignal = signal): Promise<void> {
@@ -161,7 +174,7 @@ export function createQzoneDiary(options: DiaryOptions) {
     assert(config().enabled && config().publish && slot.at <= now() && now() < slot.until
       && slot.review?.acceptable && slot.review.captionMatches && slot.review.issues.length === 0
       && slot.caption && slot.protocolImage, 'DIARY_PUBLISH_NOT_READY', 'An approved image and active publication window are required.')
-    current.throwIfAborted(); slot.state = 'publishing'; save(day)
+    current.throwIfAborted(); slot.state = 'publishing'; save(day, index)
     try {
       const image = options.media.resolve && slot.artifactId ? await options.media.resolve(slot.artifactId) : { protocolImage: slot.protocolImage }
       current.throwIfAborted()
@@ -169,8 +182,8 @@ export function createQzoneDiary(options: DiaryOptions) {
         idempotencyKey: `diary:${date}:${index}`, signal: current })
       if (receipt.status === 'confirmed') { slot.state = 'published'; slot.receipt = JSON.stringify(receipt.data).slice(0, 2000) }
       else { slot.state = receipt.status === 'rejected' ? 'skipped' : 'unknown'; slot.error = receipt.code }
-      save(day); observe(slot.state, date, index, slot.attempts)
-    } catch (error) { slot.state = 'unknown'; slot.error = errorCode(error); save(day); throw error }
+      save(day, index); observe(slot.state, date, index, slot.attempts)
+    } catch (error) { slot.state = 'unknown'; slot.error = errorCode(error); save(day, index); throw error }
   }
   function status() {
     const date = localDay(now(), config().timeZone), day = read(date)
@@ -219,9 +232,11 @@ export function createQzoneDiary(options: DiaryOptions) {
       const rules = scheduler.list({ limit: 1000 })
       const daily = rules.find(rule => rule.id === 'daily-plan')
       scheduler.schedule({ id: 'daily-plan', handler: 'plan', payload: {}, schedule: { kind: 'daily', hour: 8, minute: 30 },
+        presentation: { title: '安排当天的空间日记', ownerLabel: '空间生活日记', description: '在可用时间段内安排每天 1–3 条生活动态。' },
         timeZone: config().timeZone, windowMs: 15 * 3600000, misfire: 'coalesce' }, daily ? { expectedRevision: daily.revision } : undefined)
       const date = localDay(now(), config().timeZone)
       if (!read(date) && config().enabled && !rules.some(rule => rule.id === `start-${date}`)) scheduler.schedule({ id: `start-${date}`, handler: 'plan', payload: {},
+        presentation: { title: '检查今天的空间日记安排', ownerLabel: '空间生活日记', description: '保留已有安排，尚无计划时创建当天计划。' },
         schedule: { kind: 'once', at: now() + 5000 }, timeZone: config().timeZone, windowMs: 1800000 })
       const existing = read(date); if (existing?.state === 'planned') scheduleDay(existing)
       return release

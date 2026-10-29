@@ -5,6 +5,10 @@
 AI许愿生成的，目前自用
 
 控制台用于配置、统计和维护。模型提问发到所属 QQ 会话，由实际配置的主人在 QQ 内答复；工具随会话白名单开放，敏感操作核验真实主人身份。
+<img width="1917" height="933" alt="image" src="https://github.com/user-attachments/assets/0817d566-594b-40f7-8565-3521cd9a2eab" />
+<img width="1900" height="940" alt="image" src="https://github.com/user-attachments/assets/a3e4f7bb-90cf-4f02-a360-2d002f73eec0" />
+
+
 
 ## 安装与开始使用
 

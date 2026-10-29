@@ -19,6 +19,7 @@ import type { createControlCommands } from './control-commands.ts'
 import type { LifecycleCheckpoint } from './lifecycle-hooks.ts'
 import type { InboundMessage } from './types.ts'
 import { nativeParticipation, type NativeParticipationReason } from './native-chat-input.ts'
+import { nativeChatWakeKind } from './native-chat-wake.ts'
 import { buildChatSessionDefinition } from './chat-plans.ts'
 import { digest, json, object } from './data.ts'
 import { withDeadline } from './deadlines.ts'
@@ -137,9 +138,11 @@ export function createNativeInboundController(options: {
           reason: 'access_denied' }, context.signal)
         return
       }
-      const content = message.content.filter(part => part.type !== 'mention' || part.userId !== context.selfId)
+      const wakeKind = nativeChatWakeKind(message.id, message.content, context.selfId)
+      // Preserve a pure mention as a contact signal, including when QQ supplies no trailing space.
+      const content = wakeKind ? message.content : message.content.filter(part => part.type !== 'mention' || part.userId !== context.selfId)
       const activityContent = nativeActivityContent(content)
-      if (await runtime.interactionMessages?.receive({ ...message, content }, context.signal)) {
+      if (!wakeKind && await runtime.interactionMessages?.receive({ ...message, content }, context.signal)) {
         received++
         activity.record('received', message.conversationId, activityContent)
         return

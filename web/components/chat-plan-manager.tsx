@@ -669,7 +669,7 @@ export function ChatPlanManager(props: PageProps & { readonly children?: ReactNo
     </div></div>
     {(validationError || writeError || loadError) && <p className="text-xs text-destructive" role="alert">{validationError || writeError || loadError}</p>}
     {props.children}
-    <div className="row border-t pt-2"><Button size="sm" variant="ghost" disabled={!dirty || editingDisabled} onClick={reset}>撤销</Button><DshDeploymentManager compact minimal api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" configurationActive={catalog.activePlanId === draft.id} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /></div>
+    <div className="row"><Button size="sm" variant="ghost" disabled={!dirty || editingDisabled} onClick={reset}>撤销</Button><DshDeploymentManager compact minimal api={api} connected={connected} setDirty={setDirty} configurationDirty={dirty || editingDisabled || creating} configurationRevision={catalog.revision} configurationDocument="plans" configurationActive={catalog.activePlanId === draft.id} prepareConfiguration={prepareChatUpdate} configurationUpdateBlocked={blocked || loading || saving || updatingChat || !draft.id} /></div>
   </div>;
 
   return <div className="grid gap-2">

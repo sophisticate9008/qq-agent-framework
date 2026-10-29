@@ -279,7 +279,7 @@
   .compact-chat-editor .reply-settings-embedded { border-bottom:1px solid var(--border); }
   .compact-chat-editor .reply-settings-embedded>.panel-header { padding:10px 10px 0; }
   .compact-chat-editor .reply-settings-embedded>.panel-body { padding:8px 10px 10px; }
-  .compact-chat-editor>.row:last-child { border-top:0; padding:8px 10px; justify-content:flex-end; background:color-mix(in srgb,var(--muted) 65%,var(--card)); }
+  .compact-chat-editor>.row:last-child { padding:8px 10px; justify-content:flex-end; background:color-mix(in srgb,var(--muted) 65%,var(--card)); }
   .compact-chat-editor>.row:last-child>[data-application-controls]>.flex { justify-content:flex-end; }
 }
 @layer components {

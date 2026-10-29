@@ -19,7 +19,8 @@ export function validatePersonaWake(value: unknown): PersonaWake {
   }
   const configuration = validateChatInputConfiguration({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, ...value })
   return Object.freeze({ nicknames: configuration.nicknames, wakeOnReply: configuration.wakeOnReply,
-    continuationMs: configuration.continuationMs, replyExtensionMs: configuration.replyExtensionMs ?? 500 })
+    continuationMs: configuration.continuationMs,
+    ...(Object.hasOwn(value, 'replyExtensionMs') ? { replyExtensionMs: configuration.replyExtensionMs ?? 500 } : {}) })
 }
 
 export function isPersonaWake(value: unknown): value is PersonaWake {

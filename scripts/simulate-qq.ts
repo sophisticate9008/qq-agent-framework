@@ -39,7 +39,7 @@ node scripts/simulate-qq.ts [--source-directory <实际native配置目录>] [--s
 --bootstrap 显式加载可信扩展；默认不读取生产bootstrap选择，prepare-only不加载扩展代码。
 --provider 与 --model 必须成对，仅覆盖本轮复制后的启用方案，保留思考档位与上下文设置。
 交互普通文本默认主人群聊@；JSON支持 actor:owner|member、memberIndex:1..8、kind:group|private、mention、text、replyTo、segments。
-命令 /status、/settle、/quit；批量控制行 {"waitMs":1000}、{"settleMs":180000}、{"status":true}。
+命令 /status、/settle、/restart、/quit；/restart 保留本轮数据库与会话，重启模拟聊天运行时和独立 DSH 进程。批量控制行 {"waitMs":1000}、{"settleMs":180000}、{"status":true}。
 批量消息默认等候稳定；waitMs:0 可制造并发追加。详细用法见 docs/SIMULATION.md。`
 
 export interface SimulationArguments { source: string; services: string; provider?: string; model?: string; bootstrap?: string; batch?: string; prepareOnly: boolean }
@@ -543,6 +543,19 @@ export async function simulateQq(values = process.argv.slice(2)) {
       if (trimmed === '/quit') return false
       if (trimmed === '/status') { await status(); return true }
       if (trimmed === '/settle') { await settle(); return true }
+      if (trimmed === '/restart') {
+        await settle(60_000)
+        const before = native.readConversationTasks().items.map(task => ({ id: task.id, state: task.state, binding: task.origin.binding }))
+        record({ type: 'simulation-restart-started', tasks: before })
+        await native.stop()
+        await dsh.stop()
+        await dsh.start(lifetime.signal)
+        await native.start((await load()).revisions, lifetime.signal)
+        const after = native.readConversationTasks().items.map(task => ({ id: task.id, state: task.state, binding: task.origin.binding }))
+        record({ type: 'simulation-restarted', tasks: after })
+        console.log(JSON.stringify({ type: 'simulation-restarted', tasksBefore: before.length, tasksAfter: after.length }))
+        return true
+      }
       const input: unknown = trimmed.startsWith('{') ? JSON.parse(trimmed) : { text: line }
       if (!isRecord(input)) throw new Error('simulation_input_object_required')
       if (input.mediaSettings !== undefined) {
@@ -656,7 +669,7 @@ export async function simulateQq(values = process.argv.slice(2)) {
       for (const line of input.split(/\r?\n/)) if (!await consume(line)) break
       await settle()
     } else {
-      console.log('输入消息或 JSON；/status 查看状态，/settle 等待本轮，/quit 退出。')
+      console.log('输入消息或 JSON；/status 查看状态，/settle 等待本轮，/restart 保留数据重启本轮，/quit 退出。')
       lines = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY })
       for await (const line of lines) {
         try { if (!await consume(line)) break }

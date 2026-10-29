@@ -40,7 +40,7 @@ node scripts/simulate-qq.ts --provider deepseek-official --model deepseek-flash
 
 供应商必须已登记在来源配置中；覆盖只修改私有副本里启用方案的供应商与模型，不修改生产配置，也不自动调整思考档位、上下文或输出预算。模型与能力仍经过现有部署检查，不支持的档位会明确失败。`simulation.json`、创建及 `ready` 输出记录实际 `provider`、`model` 与布尔值 `modelOverride`；活动和账本仍归属于原 `sourceDirectory`。不同渠道的模拟结果只证明实际使用渠道的表现，不能作为原渠道已恢复的证据。
 
-启动成功输出 `ready`、本轮目录、模拟群号与非主人账号。终端中的 `/status` 读取运行状态，`/settle` 等待当前活动轮与工作结束，`/quit` 退出。Ctrl+C 只关闭本轮原生运行时和它启动的 DSH 进程。
+启动成功输出 `ready`、本轮目录、模拟群号与非主人账号。终端中的 `/status` 读取运行状态，`/settle` 等待当前活动轮与工作结束，`/restart` 等当前活动轮结束后重启本轮聊天运行时和独立 DSH 进程，保留数据库、模型会话和已安排任务，`/quit` 退出。Ctrl+C 只关闭本轮原生运行时和它启动的 DSH 进程。
 
 ## 主人与群友、群聊与私聊
 

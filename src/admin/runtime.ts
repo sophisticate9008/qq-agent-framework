@@ -1010,12 +1010,16 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))
   if (chatRuntime !== undefined) {
-    routes.push({ method: 'GET', pathname: '/api/chat/tasks/history', maxResponseBytes: 8388608,
+    routes.push({ method: 'GET', pathname: '/api/chat/tasks/history', maxResponseBytes: 4194304,
       handle({ query }) {
         const id = query.get('id')
         if (!id || !/^[a-f0-9]{64}$/.test(id) || [...query.keys()].some(key => key !== 'id') || query.getAll('id').length !== 1)
           throw new AdminRequestError(400, 'invalid_task_query')
-        return { items: chatRuntime.readConversationTaskHistory(id) }
+        return { items: chatRuntime.readConversationTaskHistory(id).map(run => Buffer.byteLength(JSON.stringify(run)) <= 8192 ? run : {
+          ...run, evidence: run.evidence.slice(0, 4).map(event => ({ id: event.id.slice(0, 160), topic: event.topic.slice(0, 160),
+            key: event.key.slice(0, 160), at: event.at, payload: { omitted: true } })),
+          outcome: run.outcome ? { status: run.outcome.status, detailsOmitted: true } : null, detailsOmitted: true
+        }) }
       } })
     routes.push({ method: 'GET', pathname: '/api/chat/tasks', maxResponseBytes: 4194304,
       handle({ query }) {

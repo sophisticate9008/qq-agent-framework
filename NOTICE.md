@@ -2,7 +2,7 @@
 
 ## qq-bridge 参考来源
 
-QQ Agent Framework 是独立的 TypeScript 重建项目，设计参考了开源项目 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 的需求、接口、运维经验与故障处理。该参考关系不构成运行时依赖。
+QQ Bridge Framework 是独立的 TypeScript 重建项目，设计参考了开源项目 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) 的需求、接口、运维经验与故障处理。该参考关系不构成运行时依赖。
 
 本仓库不是 qq-bridge 的官方版本、继任项目或 Git 分叉，未获得其作者背书；也不将参考项目的设计与运维成果声称为本仓库全部原创。改编或再分发 qq-bridge 材料时，适用以下上游版权声明及 MIT 许可。
 
@@ -53,7 +53,7 @@ SOFTWARE.
 
 Markdown 图片渲染使用未经修改的文泉驿微米黑 0.2.0-beta 字体集合，依字体内嵌许可记录按 Apache License 2.0 再分发。数字化数据版权 © 2007 Google Corporation；版权 © 2008–2009 WenQuanYi Board of Trustees 和 Qianqian Fang。集合包含 WenQuanYi Micro Hei 及 WenQuanYi Micro Hei Mono。
 
-字体、完整许可、原作者及上游声明位于 [assets/fonts](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/assets/fonts/README.md)。字体独立适用其自身许可，框架的 MIT 许可不替代它。
+字体、完整许可、原作者及上游声明位于 [assets/fonts](https://github.com/sophisticate9008/qq-bridge-framework/blob/v1.0/assets/fonts/README.md)。字体独立适用其自身许可，框架的 MIT 许可不替代它。
 
 ### OneBot 空间接口参考
 
@@ -72,10 +72,10 @@ Markdown 图片渲染使用未经修改的文泉驿微米黑 0.2.0-beta 字体�
 
 ### 控制台组件样式
 
-控制台基于 [shadcn/ui](https://github.com/shadcn-ui/ui) 的组件约定与 Base UI。`web/shadcn.css` 原样保留 npm 包 `shadcn@4.22.1` 的 `dist/tailwind.css`，SHA-256 为 `4c371f7a1ff5d219ae2f7ff28bd256b4346fd546fe46fbae22092e57db2f0fae`；随附 [MIT 许可](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/assets/licenses/shadcn-MIT.txt) 保留原作者授权。框架构建直接使用这份样式，不安装 shadcn CLI 及其传递依赖。
+控制台基于 [shadcn/ui](https://github.com/shadcn-ui/ui) 的组件约定与 Base UI。`web/shadcn.css` 原样保留 npm 包 `shadcn@4.22.1` 的 `dist/tailwind.css`，SHA-256 为 `4c371f7a1ff5d219ae2f7ff28bd256b4346fd546fe46fbae22092e57db2f0fae`；随附 [MIT 许可](https://github.com/sophisticate9008/qq-bridge-framework/blob/v1.0/assets/licenses/shadcn-MIT.txt) 保留原作者授权。框架构建直接使用这份样式，不安装 shadcn CLI 及其传递依赖。
 
 ### DSH 接入
 
-DSH 与官方 SDK 来自 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。桥接插件当前核对的是 SDK `0.2.1-rc.2` 与 Cordis `4.0.5`，实际接入条件见 [DSH 文档](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/docs/DSH.md)。
+DSH 与官方 SDK 来自 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。桥接插件当前核对的是 SDK `0.2.1-rc.2` 与 Cordis `4.0.5`，实际接入条件见 [DSH 文档](https://github.com/sophisticate9008/qq-bridge-framework/blob/v1.0/docs/DSH.md)。
 
-本框架源码按 [LICENSE](https://github.com/sophisticate9008/qq-agent-framework/blob/v1.0/LICENSE) 中的 MIT 许可分发。依赖及独立取得的协议网关、智能体运行时、模型和服务继续适用各自的许可与使用条款。本文不授予第三方软件的额外权利，也不表示与腾讯、QQ、DeepSeek、SnowLuma 或 qq-bridge 作者存在隶属或背书关系。
+本框架源码按 [LICENSE](https://github.com/sophisticate9008/qq-bridge-framework/blob/v1.0/LICENSE) 中的 MIT 许可分发。依赖及独立取得的协议网关、智能体运行时、模型和服务继续适用各自的许可与使用条款。本文不授予第三方软件的额外权利，也不表示与腾讯、QQ、DeepSeek、SnowLuma 或 qq-bridge 作者存在隶属或背书关系。

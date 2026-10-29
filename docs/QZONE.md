@@ -22,7 +22,7 @@
 扩展声明依赖内置包 `qzone`，并声明 `requires: [{ id: 'qzone', version: 1 }]`，在安装时获取：
 
 ```ts
-import type { QzoneToolPort } from '@qq-agent-framework/sdk/contracts';
+import type { QzoneToolPort } from '@qq-bridge-framework/sdk/contracts';
 
 const space = context.service('qzone', 1) as QzoneToolPort;
 const available = await space.inspect(context.signal);

@@ -6,7 +6,7 @@
 
 ## 私下报告漏洞
 
-涉及认证绕过、权限越界、跨账号数据访问、凭据泄漏或重复副作用的问题，请通过仓库 [私密漏洞报告](https://github.com/sophisticate9008/qq-agent-framework/security/advisories/new) 联系维护者，不要先在公开 Issue 中粘贴攻击细节或运行数据。
+涉及认证绕过、权限越界、跨账号数据访问、凭据泄漏或重复副作用的问题，请通过仓库 [私密漏洞报告](https://github.com/sophisticate9008/qq-bridge-framework/security/advisories/new) 联系维护者，不要先在公开 Issue 中粘贴攻击细节或运行数据。
 
 报告请提供受影响版本、最小复现、预期边界及实际影响，使用合成账号和替代数据。不要提供真实密钥、登录状态、会话原文或私有素材；必要证据先做脱敏。
 

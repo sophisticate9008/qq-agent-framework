@@ -88,7 +88,7 @@ const helperSource = await readFile(new URL('../src/adapters/responses-usage.ts'
 const compiled = ts.transpileModule(helperSource, { fileName: 'responses-usage.ts',
   compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext, strict: true }, reportDiagnostics: true })
 if (compiled.diagnostics?.some(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)) throw new Error('Unable to compile usage helper')
-const generated = '// Generated from QQ Agent Framework src/adapters/responses-usage.ts.\n' + compiled.outputText
+const generated = '// Generated from QQ Bridge Framework src/adapters/responses-usage.ts.\n' + compiled.outputText
 for (const update of updates) {
   const backup = update.target + '.qaf-usage-original'
   try { await writeFile(backup, update.original, { flag: 'wx', mode: update.mode }) }

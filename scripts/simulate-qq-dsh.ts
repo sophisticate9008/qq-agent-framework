@@ -43,11 +43,11 @@ export async function prepareSimulationDsh(options: {
   await mkdir(profile, { recursive: true, mode: 0o700 })
   await mkdir(workspace, { mode: 0o700 })
   const installed = createRequire(binary)
-  const packages = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@qq-agent-framework/dsh-bridge-plugin']
+  const packages = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@qq-bridge-framework/dsh-bridge-plugin']
   const layers: string[] = []
   for (const name of packages) {
     let moduleDirectory: string
-    if (name === '@qq-agent-framework/dsh-bridge-plugin') {
+    if (name === '@qq-bridge-framework/dsh-bridge-plugin') {
       const sourceModule = await realpath(fileURLToPath(new URL('../packages/dsh-bridge-plugin/', import.meta.url)))
       const built = await lstat(join(sourceModule, 'dist', 'index.js')).catch(() => null)
       if (!built?.isFile()) throw new Error('simulation_build_current_bridge_plugin_first')
@@ -67,7 +67,7 @@ export async function prepareSimulationDsh(options: {
     const link = join(profile, 'node_modules', name)
     await mkdir(dirname(link), { recursive: true, mode: 0o700 })
     await symlink(moduleDirectory, link, 'dir')
-    if (name !== '@qq-agent-framework/dsh-bridge-plugin') {
+    if (name !== '@qq-bridge-framework/dsh-bridge-plugin') {
       const manifest: unknown = JSON.parse(await readFile(join(moduleDirectory, 'package.json'), 'utf8'))
       const declaration = isRecord(manifest) && isRecord(manifest.dsh) && isRecord(manifest.dsh.bundle) ? manifest.dsh.bundle.patch : undefined
       const patches: unknown = typeof declaration === 'string' ? [declaration] : declaration
@@ -95,7 +95,7 @@ export async function prepareSimulationDsh(options: {
     { id: 'llm-pi-ai', config: provider.config },
     { id: 'session-title-llm', disabled: true },
     { id: 'tool-plugin-manager', disabled: true },
-    { insert: [{ id: 'qaf-bridge-evidence', name: '@qq-agent-framework/dsh-bridge-plugin' }] }
+    { insert: [{ id: 'qaf-bridge-evidence', name: '@qq-bridge-framework/dsh-bridge-plugin' }] }
   ]), { mode: 0o600, flag: 'wx' })
   const port = await unusedPort()
   const endpoint = `http://127.0.0.1:${port}`

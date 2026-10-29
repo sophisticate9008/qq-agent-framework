@@ -1,5 +1,7 @@
 # 公共契约与修改约束
 
+产品名称为 QQ Bridge Framework。已有线协议、工具名、持久标识和旧包名兼容范围见 [名称与兼容升级](RENAMING.md)；产品更名不改变协议与数据身份。
+
 公共接口的类型和校验集中在 [src/contracts](../src/contracts)、[src/core](../src/core) 与 SDK 导出。HTTP、协议响应和持久文件均在边界校验；TypeScript 类型不能替代运行时解码。扩展 API 用法见 [扩展开发](EXTENDING.md)，操作恢复见 [恢复手册](RECOVERY.md)。
 
 契约的运行时校验仅依赖同层纯函数；通用对象和引用校验位于 `src/contracts/values.ts`，核心原有导出继续兼容。契约层不运行时导入核心实现，也不引入 Node.js 专用模块，供浏览器共同使用。

@@ -83,7 +83,7 @@ const DEFAULT_IO: CliIo = {
   stderr: message => console.error(message)
 };
 
-const GENERAL_HELP = `QQ Agent Framework 命令行
+const GENERAL_HELP = `QQ Bridge Framework 命令行
 
 用法：
   npm run cli -- init [--config <管理配置>] [--service-manager <可信程序>] [--host <地址>] [--port <端口>]

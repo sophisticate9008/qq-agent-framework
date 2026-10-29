@@ -63,7 +63,7 @@ test('official session/create and selectModel publish the preset live agent befo
     ctx.llm.registerAdapter(['safe-fixture'], adapter)
     await ctx.agentPresets.register({ id: 'chosen-group', plugins: [] })
     await ctx.agentPresets.register({ id: 'chosen-private', plugins: [] })
-    await ctx.loader.create({ name: import.meta.resolve('@qq-agent-framework/dsh-bridge-plugin') })
+    await ctx.loader.create({ name: import.meta.resolve('@qq-bridge-framework/dsh-bridge-plugin') })
     await ctx.loader.await()
     const peer = new Peer(ctx, { principal: { kind: 'owner' }, interactions: 'none' })
     const invoke = (namespace: string, method: string, request?: Record<string, unknown>) => ctx.typertGateway.invoke({

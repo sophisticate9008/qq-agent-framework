@@ -37,7 +37,7 @@ try {
   }
   const tarball = join(temporary, filename)
   const name = 'dsh-bridge-plugin-isolated-install-fixture'
-  const dependencies = { '@qq-agent-framework/dsh-bridge-plugin': `file:${tarball}` }
+  const dependencies = { '@qq-bridge-framework/dsh-bridge-plugin': `file:${tarball}` }
   manifest.name = name
   manifest.dependencies = dependencies
   lock.name = name
@@ -56,7 +56,7 @@ try {
     for (const key of ['version', 'resolved', 'integrity']) assert.equal(actual[key], expected[key], `Locked dependency changed: ${path}`)
   }
   execFileSync('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org'], options)
-  for (const dependency of ['@qq-agent-framework/dsh-bridge-plugin', '@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-api-gateway']) {
+  for (const dependency of ['@qq-bridge-framework/dsh-bridge-plugin', '@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-api-gateway']) {
     const info = await lstat(join(fixture, 'node_modules', dependency))
     assert(info.isDirectory() && !info.isSymbolicLink(), 'Packed verification must use installed packages, not linked old SDKs')
   }

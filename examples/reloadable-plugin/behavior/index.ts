@@ -1,4 +1,4 @@
-import { defineServiceContract } from '@qq-agent-framework/sdk/host'
+import { defineServiceContract } from '@qq-bridge-framework/sdk/host'
 import type { ExampleBehavior } from '../contract.ts'
 
 // Module evaluation only declares behavior. Registrations and recurring work belong to the stable package.

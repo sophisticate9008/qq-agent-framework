@@ -4,8 +4,8 @@ import {
   PLUGIN_RUNTIME_PACKAGE_ID, PLUGIN_SCHEDULER_SERVICE_CONTRACT, PLUGIN_TOOLS_SERVICE_CONTRACT,
   PLUGIN_EXTENSIONS_SERVICE_CONTRACT, publishService, serviceDeclaration, useService,
   type NativePackageDefinition, type PluginDirectoryTool, type PluginScheduledOccurrence,
-} from '@qq-agent-framework/sdk/host'
-import type { JsonObject } from '@qq-agent-framework/sdk/contracts'
+} from '@qq-bridge-framework/sdk/host'
+import type { JsonObject } from '@qq-bridge-framework/sdk/contracts'
 import { EXAMPLE_BEHAVIOR_CONTRACT } from './contract.ts'
 
 const owner = 'reloadable-example'

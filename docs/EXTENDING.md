@@ -35,10 +35,10 @@ const metadata = {
 
 注册来源、DSH 注册范围、传输方式分别建模。`registrationSource` 包含 `origin`（`framework-builtin`、`dsh-builtin` 或 `extension`）、`ownerId`、`ownerName` 和 `transport`（`native` 或 `mcp`）。框架随版本提供的工具或 MCP 登记为框架内置；DSH 自带工具单列为 DSH 内置；后续安装的包、Agent 编写的插件或动态扩展登记为扩展。DSH 全局注册、会话注册以及 `mcp__` 前缀都不能单独证明工具属于哪一类。
 
-框架投影工具在 `FrameworkToolDefinition.registrationSource` 中声明。直接在 DSH 注册工具时，使用桥接插件的 `@qq-agent-framework/dsh-bridge-plugin/registration` 导出：
+框架投影工具在 `FrameworkToolDefinition.registrationSource` 中声明。直接在 DSH 注册工具时，使用桥接插件的 `@qq-bridge-framework/dsh-bridge-plugin/registration` 导出：
 
 ```ts
-import { withToolRegistration, declareMcpToolRegistration } from '@qq-agent-framework/dsh-bridge-plugin/registration';
+import { withToolRegistration, declareMcpToolRegistration } from '@qq-bridge-framework/dsh-bridge-plugin/registration';
 
 ctx.tools.register(withToolRegistration(toolDefinition, {
   origin: 'extension', ownerId: 'image-generation', ownerName: '通用图片生成', transport: 'native',
@@ -89,16 +89,18 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 ## SDK 与示例运行方式
 
-当前 SDK 包为 `@qq-agent-framework/sdk`，要求 Node.js 24.12.0 或更新版本。以下子路径有公开 `exports` 和声明文件：
+当前 SDK 包为 `@qq-bridge-framework/sdk`，要求 Node.js 24.12.0 或更新版本。以下子路径有公开 `exports` 和声明文件：
+
+已有扩展可安装同版本旧包名兼容包，继续使用原导入路径，见 [名称与兼容升级](RENAMING.md)。
 
 | 导入路径 | 用途 |
 | --- | --- |
-| `@qq-agent-framework/sdk` | 核心类型、上下文、policy、engine 与 `defineNativeBootstrap`。 |
-| `@qq-agent-framework/sdk/core` | 核心运行接口。 |
-| `@qq-agent-framework/sdk/host` | bridge、bootstrap、包、配置、任务、日历、事件、服务与账号 registry。 |
-| `@qq-agent-framework/sdk/contracts` | 纯 DTO、ports、account scope、事件与包状态契约。 |
-| `@qq-agent-framework/sdk/storage` | SQLite、只读 SQLite、持久 policy/state 和账号 store 绑定。 |
-| `@qq-agent-framework/sdk/adapters` | 可复用的外部协议适配器，当前提供 OneBot 空间发布与删除。 |
+| `@qq-bridge-framework/sdk` | 核心类型、上下文、policy、engine 与 `defineNativeBootstrap`。 |
+| `@qq-bridge-framework/sdk/core` | 核心运行接口。 |
+| `@qq-bridge-framework/sdk/host` | bridge、bootstrap、包、配置、任务、日历、事件、服务与账号 registry。 |
+| `@qq-bridge-framework/sdk/contracts` | 纯 DTO、ports、account scope、事件与包状态契约。 |
+| `@qq-bridge-framework/sdk/storage` | SQLite、只读 SQLite、持久 policy/state 和账号 store 绑定。 |
+| `@qq-bridge-framework/sdk/adapters` | 可复用的外部协议适配器，当前提供 OneBot 空间发布与删除。 |
 
 源码中的其他路径不构成 SDK 承诺。SDK 包不包含管理服务器和网页。仓库可以本地生成 tarball；以下示例不依赖 npm 上已有公开发布：
 
@@ -113,7 +115,7 @@ npm pack ./packages/framework-sdk --pack-destination /tmp
 # 在一个新的外部目录中
 npm init -y
 npm pkg set type=module
-npm install --ignore-scripts /tmp/qq-agent-framework-sdk-1.3.1.tgz
+npm install --ignore-scripts /tmp/qq-bridge-framework-sdk-1.4.0.tgz
 npm install --save-dev typescript@5.9.3
 ```
 
@@ -142,10 +144,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createContextStore, defineNativeBootstrap,
-  type FeatureDefinition } from '@qq-agent-framework/sdk';
+  type FeatureDefinition } from '@qq-bridge-framework/sdk';
 import { createBridgeHost, createNativeBootstrapMount,
-  type LoadedNativeBootstrap } from '@qq-agent-framework/sdk/host';
-import { createSqliteStore } from '@qq-agent-framework/sdk/storage';
+  type LoadedNativeBootstrap } from '@qq-bridge-framework/sdk/host';
+import { createSqliteStore } from '@qq-bridge-framework/sdk/storage';
 
 const directory = await mkdtemp(join(tmpdir(), 'sdk-feature-'));
 const store = createSqliteStore({ filename: join(directory, 'state.sqlite') });
@@ -229,7 +231,7 @@ bootstrap 的 `create()` 可返回 `packages`。每个包声明 `manifest`：`sc
 
 ```ts
 import { defineServiceContract, publishService, serviceDeclaration, useService }
-  from '@qq-agent-framework/sdk/host';
+  from '@qq-bridge-framework/sdk/host';
 
 interface ExampleService { format(text: string): string }
 const EXAMPLE = defineServiceContract<ExampleService>({
@@ -248,7 +250,7 @@ const EXAMPLE = defineServiceContract<ExampleService>({
 默认 `native-services` 包提供五个版本 1 的服务：`native-agent`、`native-interactions`、`native-executions`、`native-tools`、`native-work`。使用后台工作时，包声明 `dependencies: ['native-services']` 与 `requires: [serviceDeclaration(NATIVE_WORK_SERVICE_CONTRACT)]`：
 
 ```ts
-import { NATIVE_WORK_SERVICE_CONTRACT, useService } from '@qq-agent-framework/sdk/host';
+import { NATIVE_WORK_SERVICE_CONTRACT, useService } from '@qq-bridge-framework/sdk/host';
 // packageContext 来自本包 start；execution 来自本包功能回调。
 const work = useService(packageContext, NATIVE_WORK_SERVICE_CONTRACT);
 const status = work.status();
@@ -274,7 +276,7 @@ const hook = { id: 'example-send-guard', checkpoint: 'send.before' as const,
 常规插件优先使用上文的 `plugin-scheduler` 服务。下层 SDK 日历服务提供 daily/weekly、IANA 时区、DST 与 misfire 策略；由宿主调用 tick，不在注册时暗中启动计时循环。下面是使用已有私有 `store` 和受控 `dispatchOccurrence` 的局部片段：
 
 ```ts
-import { createCalendarTriggerService } from '@qq-agent-framework/sdk/host';
+import { createCalendarTriggerService } from '@qq-bridge-framework/sdk/host';
 const calendar = createCalendarTriggerService({ store,
   callback: occurrence => dispatchOccurrence(occurrence) });
 calendar.register({ id: 'daily-report', scope: 'private:123', timeZone: 'UTC',
@@ -299,9 +301,9 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createNativePackageState } from '@qq-agent-framework/sdk/host';
-import type { NativePackageStateIdentity } from '@qq-agent-framework/sdk/contracts';
-import { createSqliteStore } from '@qq-agent-framework/sdk/storage';
+import { createNativePackageState } from '@qq-bridge-framework/sdk/host';
+import type { NativePackageStateIdentity } from '@qq-bridge-framework/sdk/contracts';
+import { createSqliteStore } from '@qq-bridge-framework/sdk/storage';
 
 const directory = await mkdtemp(join(tmpdir(), 'sdk-state-'));
 const filename = join(directory, 'state.sqlite');
@@ -369,7 +371,7 @@ try {
   "schema": 1,
   "entry": "extension.ts",
   "dependencies": [
-    { "specifier": "@qq-agent-framework/sdk/host", "lockFile": "package-lock.json" }
+    { "specifier": "@qq-bridge-framework/sdk/host", "lockFile": "package-lock.json" }
   ]
 }
 ```
@@ -388,11 +390,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createContextStore, type FeatureDefinition } from '@qq-agent-framework/sdk';
+import { createContextStore, type FeatureDefinition } from '@qq-bridge-framework/sdk';
 import { createBridgeHost, createNativeAccounts,
-  type NativeAccountProtocol } from '@qq-agent-framework/sdk/host';
-import type { AccountScope } from '@qq-agent-framework/sdk/contracts';
-import { createSqliteStore, assertAccountStore } from '@qq-agent-framework/sdk/storage';
+  type NativeAccountProtocol } from '@qq-bridge-framework/sdk/host';
+import type { AccountScope } from '@qq-bridge-framework/sdk/contracts';
+import { createSqliteStore, assertAccountStore } from '@qq-bridge-framework/sdk/storage';
 
 const directory = await mkdtemp(join(tmpdir(), 'sdk-accounts-'));
 const signal = new AbortController().signal;
@@ -500,8 +502,8 @@ try {
 
 ```ts
 import { PLUGIN_MODELS_SERVICE_CONTRACT, PLUGIN_PROTOCOL_SERVICE_CONTRACT,
-  serviceDeclaration, useService } from '@qq-agent-framework/sdk/host';
-import type { NativePackageDefinition } from '@qq-agent-framework/sdk/host';
+  serviceDeclaration, useService } from '@qq-bridge-framework/sdk/host';
+import type { NativePackageDefinition } from '@qq-bridge-framework/sdk/host';
 
 export const writingPackage: NativePackageDefinition = {
   manifest: { schema: 1, id: 'example-writing', version: '1.0.0',
@@ -564,7 +566,7 @@ if (sendSupport.capabilities.some(item => item.id === 'send_private_msg')) {
 
 ```ts
 import { PLUGIN_USAGE_SERVICE_CONTRACT, PLUGIN_EVENTS_SERVICE_CONTRACT, useService }
-  from '@qq-agent-framework/sdk/host';
+  from '@qq-bridge-framework/sdk/host';
 // context 来自本包生命周期回调，manifest.requires 已声明两个契约。
 const usage = useService(context, PLUGIN_USAGE_SERVICE_CONTRACT);
 const page = usage.list({ limit: 20 });

@@ -37,8 +37,8 @@
   "schema": 1,
   "activeProtocol": "napcat",
   "dshHome": "/srv/dsh/home",
-  "logDirectory": "/srv/qq-agent-framework/runtime/logs",
-  "lockFile": "/srv/qq-agent-framework/runtime/live/service-control.lock",
+  "logDirectory": "/srv/qq-bridge-framework/runtime/logs",
+  "lockFile": "/srv/qq-bridge-framework/runtime/live/service-control.lock",
   "order": ["dsh"],
   "services": {
     "dsh": {
@@ -71,7 +71,7 @@
 ```json
 {
   "schema": 1,
-  "nativeDirectory": "/srv/qq-agent-framework/runtime/admin/runtime",
+  "nativeDirectory": "/srv/qq-bridge-framework/runtime/admin/runtime",
   "accountId": "需要核验的机器人账号",
   "imageWorker": {
     "url": "http://127.0.0.1:17865/health",
@@ -108,8 +108,8 @@ node scripts/install-service-manager.ts --boot /绝对路径/service-boot.sh --a
 
 | 内容 | 位置示例 |
 | --- | --- |
-| 框架代码、公开插件 | `/srv/qq-agent-framework/`、其中的 `plugins/` |
-| 本机插件及私有配置 | `/srv/qq-agent-framework/runtime/live/extensions/` |
+| 框架代码、公开插件 | `/srv/qq-bridge-framework/`、其中的 `plugins/` |
+| 本机插件及私有配置 | `/srv/qq-bridge-framework/runtime/live/extensions/` |
 | 插件生成文件、工作目录、运行日志 | 框架的 `runtime/` 下，分别存放 |
 | DSH 程序、配置、会话与附件 | `/srv/qq-services/dsh/runtime/`、`/srv/qq-services/dsh/home/` |
 | 协议端及其登录数据 | 独立安装目录；各协议端分别登记，可保留备用安装 |

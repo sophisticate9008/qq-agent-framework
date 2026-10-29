@@ -27,8 +27,8 @@ git --version
 ## 2. 克隆、安装并构建
 
 ```sh
-git clone https://github.com/sophisticate9008/qq-agent-framework.git
-cd qq-agent-framework
+git clone https://github.com/sophisticate9008/qq-bridge-framework.git
+cd qq-bridge-framework
 npm ci
 npm run build
 ```

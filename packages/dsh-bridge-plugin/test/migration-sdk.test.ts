@@ -96,7 +96,7 @@ test('real SDK owner fork preserves completed text, target model selection, work
         ] },
       ] })
     }
-    await ctx.loader.create({ name: import.meta.resolve('@qq-agent-framework/dsh-bridge-plugin') })
+    await ctx.loader.create({ name: import.meta.resolve('@qq-bridge-framework/dsh-bridge-plugin') })
     await ctx.loader.await()
     const workspace = await ctx.workspaceRegistry.create(directory)
     const sourceHandle = await ctx.agents.create({ sessionId: SessionId('text-source'), meta: { cwd: directory, agentPreset: 'old' },

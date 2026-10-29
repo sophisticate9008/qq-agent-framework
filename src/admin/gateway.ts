@@ -49,7 +49,7 @@ import { FrameworkError } from '../core/values.ts';
 import { createNativePackageConfigurationRegistry } from '../host/native-package-configuration.ts';
 import { readNativeRuntimeProjection } from '../host/native-runtime-projection.ts';
 
-const FRAMEWORK_VERSION = '1.0.0';
+const FRAMEWORK_VERSION = '1.4.0';
 const PROBE_TIMEOUT_MS = 2_500;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 
@@ -413,7 +413,7 @@ function liveSnapshot(
     revision,
     integrations: { nativeRuntimeResources: true, nativeChatRuntime: false },
     overview: {
-      name: 'QQ Agent Framework Gateway Admin',
+      name: 'QQ Bridge Framework Gateway Admin',
       mode: 'gateway-live',
       version: FRAMEWORK_VERSION,
       status: runtimeStatus,

@@ -4,11 +4,11 @@
 
 ## 声明、发布与取得
 
-公共契约使用 `defineServiceContract<T>({ id, version, description, methods })` 定义。`serviceDeclaration(contract)` 生成 manifest 中的服务声明，提供方用 `publishService(context, contract, value)` 发布，消费者用 `useService(context, contract)` 取得类型化接口。这些 helper 从 `@qq-agent-framework/sdk/host` 导出；纯契约类型也从 `contracts` 导出。
+公共契约使用 `defineServiceContract<T>({ id, version, description, methods })` 定义。`serviceDeclaration(contract)` 生成 manifest 中的服务声明，提供方用 `publishService(context, contract, value)` 发布，消费者用 `useService(context, contract)` 取得类型化接口。这些 helper 从 `@qq-bridge-framework/sdk/host` 导出；纯契约类型也从 `contracts` 导出。
 
 ```ts
 import { defineServiceContract, publishService, serviceDeclaration, useService }
-  from '@qq-agent-framework/sdk/host';
+  from '@qq-bridge-framework/sdk/host';
 
 interface TextService { summarize(text: string, signal: AbortSignal): Promise<string> }
 const TEXT = defineServiceContract<TextService>({ id: 'example-text', version: 1,

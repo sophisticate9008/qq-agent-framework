@@ -1,4 +1,4 @@
-# QQ Agent Framework
+# QQ Bridge Framework
 
 面向 QQ 群聊与私聊的可扩展智能体框架，提供中文控制台、连续聊天、按需媒体读取、后台助手及持久执行记录。OneBot 接入 QQ，DSH 管理模型会话，框架负责上下文、访问权限、工具调用和结果回传。
 
@@ -15,8 +15,8 @@ AI许愿生成的，目前自用
 需要 **Node.js 24.12.0 或更新版本**、npm、已登录 QQ 的 OneBot v11 协议端，以及与桥接插件兼容的独立 DSH 实例。Linux 支持本机 DSH 自动发现；Windows/macOS 需要按高级接入方式配置，当前未提供同等运行验收保证。
 
 ```sh
-git clone https://github.com/sophisticate9008/qq-agent-framework.git
-cd qq-agent-framework
+git clone https://github.com/sophisticate9008/qq-bridge-framework.git
+cd qq-bridge-framework
 npm ci
 npm run build
 npm run cli -- init
@@ -45,7 +45,7 @@ npm start
 
 安装、注册、就绪与授权分别显示。实际能力以所选模型、协议端、DSH 插件和已加载扩展为准。使用示例和限制见 [使用教程](docs/USAGE.md)。
 
-当前版本为 **v1.3.1**（框架、SDK 与 DSH 桥接插件统一为 `1.3.1`），安装包、兼容范围与限制见 [发布说明](docs/RELEASE_NOTES.md)。
+当前版本为 **v1.4.0**（框架、SDK 与 DSH 桥接插件统一为 `1.4.0`），安装包、兼容范围与限制见 [发布说明](docs/RELEASE_NOTES.md)。
 
 ## 文档
 
@@ -68,6 +68,7 @@ npm start
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |
 | 处理未决执行、会话和恢复 | [恢复手册](docs/RECOVERY.md) |
 | 判断版本与发布 | [版本规则](docs/VERSIONING.md) · [发布记录](docs/RELEASE_NOTES.md) |
+| 从旧项目名或包名升级 | [名称与兼容升级](docs/RENAMING.md) |
 | 参与开发与报告问题 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 | 了解验证范围与阶段记录 | [验收记录](docs/VALIDATION.md) · [2026-10-26 交付快照](docs/IMPROVEMENT_CHECKLIST_2026-10-25.md) |
 

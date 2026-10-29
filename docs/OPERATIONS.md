@@ -99,6 +99,8 @@ npm run test:sdk
 
 ## 升级与备份
 
+v1.4.0 起使用 QQ Bridge Framework 名称和 `qq-bridge-framework` 仓库；已有安装路径、运维命令和数据继续使用。远程地址更新及旧包名兼容安装见 [名称与兼容升级](RENAMING.md)。
+
 升级前核对本地修改，并按部署方式停止框架管理进程；使用 `qqagent` 的部署执行 `qqagent stop framework-admin`，前台 CLI 等待 Ctrl+C 完成。停止结果未知时先核对排空，不继续覆盖运行文件。
 
 备份私有配置、账号目录、SQLite 与其有效 WAL、关联资源和外部 DSH 配置，保留文件权限。不要只复制单个数据库文件；运行中备份使用支持一致快照的工具。

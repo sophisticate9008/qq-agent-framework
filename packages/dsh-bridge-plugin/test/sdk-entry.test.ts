@@ -54,7 +54,7 @@ test('actual SDK loads entry, authenticates owner calls, observes real inbox cla
   ctx.plugin(Presets, { default: 'chosen' })
   ctx.plugin(AgentLoop)
   await loaderFiber.inertia
-  const entryPath = import.meta.resolve('@qq-agent-framework/dsh-bridge-plugin')
+  const entryPath = import.meta.resolve('@qq-bridge-framework/dsh-bridge-plugin')
   const entryId = await ctx.loader.create({ name: entryPath })
   await ctx.loader.await()
   await new Promise<void>(resolve => setImmediate(resolve))
@@ -67,7 +67,7 @@ test('actual SDK loads entry, authenticates owner calls, observes real inbox cla
       await ctx.typertGateway.invoke({ namespace: 'bridgePlugin', method, args, peer: currentPeer }) as PluginReplies[Method]
     const described = await invoke('describe')
     assert.equal(described.protocol, 'qq-agent-framework.dsh-bridge/1')
-    assert.equal(described.pluginVersion, '1.3.1')
+    assert.equal(described.pluginVersion, '1.4.0')
     const nonOwner = new Peer(ctx, { principal: { kind: 'test-untrusted' }, interactions: 'none' })
     await assert.rejects(invoke('describe', {}, nonOwner))
     ctx.remoteAccess.registerPolicy('test-untrusted', { bindings: () => [{

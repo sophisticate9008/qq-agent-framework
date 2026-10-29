@@ -48,7 +48,7 @@ test('actual SDK repair stays inside the original turn and user claim until its 
   fibers.push(ctx.plugin(Presets, { default: 'fixture' }), ctx.plugin(AgentLoop))
   await Promise.all(fibers.map(fiber => fiber.inertia))
   await loader.inertia
-  await ctx.loader.create({ name: import.meta.resolve('@qq-agent-framework/dsh-bridge-plugin') })
+  await ctx.loader.create({ name: import.meta.resolve('@qq-bridge-framework/dsh-bridge-plugin') })
   await ctx.loader.await()
   await new Promise<void>(resolve => setImmediate(resolve))
   const adapter = new ReplyAdapter()

@@ -30,10 +30,10 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { createContextStore, defineNativeBootstrap, type FeatureDefinition } from '@qq-agent-framework/sdk';
-import { createBridgeHost, createNativeBootstrapMount, createNativeEventObserver, createNativePackageState, createNativeAccounts, type NativeAccountProtocol, type NativeAccountRuntime, type LoadedNativeBootstrap } from '@qq-agent-framework/sdk/host';
-import { createSqliteStore, assertAccountStore } from '@qq-agent-framework/sdk/storage';
-import { isNativeEventPage, parseAccountScope, parseNativeAccountsSnapshot, type JsonValue, type DurableStore, type AccountScope } from '@qq-agent-framework/sdk/contracts';
+import { createContextStore, defineNativeBootstrap, type FeatureDefinition } from '@qq-bridge-framework/sdk';
+import { createBridgeHost, createNativeBootstrapMount, createNativeEventObserver, createNativePackageState, createNativeAccounts, type NativeAccountProtocol, type NativeAccountRuntime, type LoadedNativeBootstrap } from '@qq-bridge-framework/sdk/host';
+import { createSqliteStore, assertAccountStore } from '@qq-bridge-framework/sdk/storage';
+import { isNativeEventPage, parseAccountScope, parseNativeAccountsSnapshot, type JsonValue, type DurableStore, type AccountScope } from '@qq-bridge-framework/sdk/contracts';
 const feature: FeatureDefinition = { id: 'external-feature', version: '1.0.0', apiVersion: 1,
   capabilities: ['messaging.send'], subscriptions: ['trigger.fired'], setup(context) {
     context.on('trigger.fired', async execution => { await execution.send([{ type: 'text', text: 'external-package-ok' }]); });
@@ -123,12 +123,12 @@ assert.throws(() => accountHosts.get('one')!.policy.reserve({ featureId: 'extern
 assert.equal(accountHosts.get('two')!.policy.describe().grants[0]?.used['messaging.send'], 0);
 await accounts.close();
 const require = createRequire(import.meta.url);
-assert.throws(() => require.resolve('@qq-agent-framework/sdk/dist/core/engine.js'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
+assert.throws(() => require.resolve('@qq-bridge-framework/sdk/dist/core/engine.js'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
 console.log('External SDK feature/bootstrap, filtered cancellable events, owned-state CAS and isolated accounts compiled and executed.');
 `);
   execFileSync(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), 'index.ts', '--strict', '--module', 'NodeNext',
     '--moduleResolution', 'NodeNext', '--target', 'ES2023', '--outDir', 'out', '--skipLibCheck', 'false'], { cwd: directory, stdio: 'inherit' });
   execFileSync(process.execPath, ['out/index.js'], { cwd: directory, stdio: 'inherit' });
-  const installed = JSON.parse(await readFile(join(directory, 'node_modules/@qq-agent-framework/sdk/package.json'), 'utf8')) as { name: string };
-  assert.equal(installed.name, '@qq-agent-framework/sdk');
+  const installed = JSON.parse(await readFile(join(directory, 'node_modules/@qq-bridge-framework/sdk/package.json'), 'utf8')) as { name: string };
+  assert.equal(installed.name, '@qq-bridge-framework/sdk');
 } finally { await rm(directory, { recursive: true, force: true }); }

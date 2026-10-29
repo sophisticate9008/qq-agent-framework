@@ -1,6 +1,6 @@
 # 持久触发器
 
-`createCalendarTriggerService` 是宿主可复用的持久调度组件，通过 `@qq-agent-framework/sdk/host` 导出。它保存规则和发生记录，调用宿主提供的回调；调用方负责启动周期性 `tick`、停止服务以及执行时的当前权限检查。注册规则本身不会启动计时循环或授予任何外部操作权限。
+`createCalendarTriggerService` 是宿主可复用的持久调度组件，通过 `@qq-bridge-framework/sdk/host` 导出。它保存规则和发生记录，调用宿主提供的回调；调用方负责启动周期性 `tick`、停止服务以及执行时的当前权限检查。注册规则本身不会启动计时循环或授予任何外部操作权限。
 
 ## 时间与规则
 

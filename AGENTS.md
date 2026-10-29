@@ -1,4 +1,4 @@
-# QQ Agent Framework 开发约定
+# QQ Bridge Framework 开发约定
 
 - 开始修改前阅读 `docs/GOALS.md` 与 `docs/CONTRACTS.md`，通过 `README.md` 查找专题文档，以当前源码和测试为实现事实来源。
 - 旧说明、教程、架构文档及审计报告已删除，不从 Git 历史恢复为现行要求。当前文档依据实现重写；`docs/IMPROVEMENT_CHECKLIST_2026-10-25.md` 是本轮交付记录，后续需求以用户最新指令为准。

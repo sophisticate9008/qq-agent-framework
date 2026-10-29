@@ -1,7 +1,7 @@
 {
-  "name": "@qq-agent-framework/sdk",
-  "version": "1.3.1",
-  "description": "QQ Agent Framework 扩展的类型化功能、宿主、生命周期与存储契约。",
+  "name": "@qq-bridge-framework/sdk",
+  "version": "1.4.0",
+  "description": "QQ Bridge Framework 扩展的类型化功能、宿主、生命周期与存储契约。",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -43,11 +43,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sophisticate9008/qq-agent-framework.git",
+    "url": "git+https://github.com/sophisticate9008/qq-bridge-framework.git",
     "directory": "packages/framework-sdk"
   },
-  "homepage": "https://github.com/sophisticate9008/qq-agent-framework#readme",
+  "homepage": "https://github.com/sophisticate9008/qq-bridge-framework#readme",
   "bugs": {
-    "url": "https://github.com/sophisticate9008/qq-agent-framework/issues"
+    "url": "https://github.com/sophisticate9008/qq-bridge-framework/issues"
   }
 }

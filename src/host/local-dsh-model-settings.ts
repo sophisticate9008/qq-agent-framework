@@ -4,7 +4,7 @@ import { isUtf8 } from 'node:buffer'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { composeStaticDshLayers, readStaticDshProfile, staticDshProfileValues } from '../adapters/dsh-static-profile.ts'
+import { composeStaticDshLayers, readStaticDshProfileValues } from '../adapters/dsh-static-profile.ts'
 import { parseDshInputModalities, validateDshModelSettings, type DshDeploymentModelSettings } from '../contracts/dsh-model-settings.ts'
 import { FrameworkError, isRecord, snapshot } from '../core/values.ts'
 import type { NativeChatConfiguration } from './native-chat-configuration.ts'
@@ -73,9 +73,9 @@ async function readProfile(filename: string, signal?: AbortSignal): Promise<unkn
       || current.size !== before.size || current.mtimeMs !== before.mtimeMs || current.ctimeMs !== before.ctimeMs) missing()
     const content = bytes.subarray(0, length)
     if (!isUtf8(content)) missing()
-    const document = readStaticDshProfile(content.toString('utf8') || '[]\n')
+    const value = readStaticDshProfileValues(content.toString('utf8') || '[]\n')
     signal?.throwIfAborted()
-    return staticDshProfileValues(document)
+    return value
   } finally { await handle.close() }
 }
 

@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { composeStaticDshLayers, readStaticDshProfile, staticDshProfileValues } from '../src/adapters/dsh-static-profile.ts'
+import { composeStaticDshLayers, readStaticDshProfile, readStaticDshProfileValues, staticDshProfileValues } from '../src/adapters/dsh-static-profile.ts'
 import { createNativeDshDeploymentRuntime } from '../src/adapters/dsh-profile-deployment.ts'
 import { resolveLocalDshModelSettings, readLocalDshModelCapabilities } from '../src/host/local-dsh-model-settings.ts'
 import { NativeConfigurationRepository } from '../src/admin/native-configuration-repository.ts'
@@ -13,6 +13,21 @@ import { discoverLocalDshDeployment } from '../src/host/local-dsh-deployment.ts'
 import type { NativeChatConfiguration } from '../src/host/native-chat-configuration.ts'
 
 function value(text: string) { return staticDshProfileValues(readStaticDshProfile(text)) }
+
+test('cached static values follow complete content and cannot be changed through editable documents', () => {
+  const source = 'cache-fixture: { enabled: true }\n'
+  const cached = readStaticDshProfileValues(source)
+  assert.equal(readStaticDshProfileValues(source), cached)
+  const document = readStaticDshProfile(source)
+  document.setIn(['cache-fixture', 'enabled'], false)
+  assert.deepEqual(staticDshProfileValues(document), { 'cache-fixture': { enabled: false } })
+  assert.deepEqual(readStaticDshProfileValues(source), { 'cache-fixture': { enabled: true } })
+  assert.deepEqual(readStaticDshProfileValues(source.replace('true', 'null')), { 'cache-fixture': { enabled: null } })
+  assert(Object.isFrozen(cached))
+  assert(cached !== null && typeof cached === 'object' && !Array.isArray(cached))
+  assert(Object.isFrozen(cached['cache-fixture']))
+  assert.throws(() => readStaticDshProfileValues('cache-fixture: [*missing]\n'))
+})
 
 test('static profile composition preserves AST, clones layers and represents expressions without evaluating them', () => {
   const source = '# retained comment\n- insert:\n  - id: group\n    name: group\n    group: true\n    config:\n      - id: nested\n        name: plugin\n        disabled: !!js (() => { throw new Error("must-not-run") })()\n        config: { original: true }\n'

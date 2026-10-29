@@ -43,6 +43,37 @@ export function staticDshProfileValues(document: StaticDshYamlDocument): JsonVal
   catch { return fail('dsh_yaml_invalid') }
 }
 
+const profileValuesCache = new Map<string, { readonly value: JsonValue; readonly bytes: number; readonly expiresAt: number }>()
+let profileValuesCacheBytes = 0
+
+/** Cache immutable values by complete source text; editable YAML documents never enter this cache. */
+export function readStaticDshProfileValues(text: string): JsonValue {
+  const now = Date.now()
+  for (const [source, entry] of profileValuesCache) {
+    if (entry.expiresAt <= now) {
+      profileValuesCache.delete(source)
+      profileValuesCacheBytes -= entry.bytes
+    }
+  }
+  const cached = profileValuesCache.get(text)
+  if (cached) {
+    profileValuesCache.delete(text)
+    profileValuesCache.set(text, cached)
+    return cached.value
+  }
+  const value = staticDshProfileValues(readStaticDshProfile(text))
+  const bytes = Buffer.byteLength(text)
+  profileValuesCache.set(text, { value, bytes, expiresAt: now + 60_000 })
+  profileValuesCacheBytes += bytes
+  while (profileValuesCache.size > 32 || profileValuesCacheBytes > 8_388_608) {
+    const oldest = profileValuesCache.entries().next().value
+    if (!oldest) break
+    profileValuesCache.delete(oldest[0])
+    profileValuesCacheBytes -= oldest[1].bytes
+  }
+  return value
+}
+
 /** Compose insertions and explicit patches over cloned data, returning parents and nested rows in insertion order. */
 export function composeStaticDshLayers(layers: readonly unknown[]): JsonObject[] {
   const indexed = new Map<string, JsonObject>()

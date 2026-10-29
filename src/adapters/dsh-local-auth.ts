@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, type BigIntStats } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import { isAbsolute, normalize } from 'node:path'
@@ -45,7 +45,18 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-async function signingKey(filename: string, signal: AbortSignal): Promise<Buffer> {
+interface ValidatedCookie {
+  readonly revision: string
+  readonly cookie: string
+  readonly refreshAt: number
+}
+
+function fileRevision(stat: BigIntStats): string {
+  return [stat.dev, stat.ino, stat.mode, stat.uid, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
+}
+
+async function authenticatedCookie(filename: string, authority: string, cached: ValidatedCookie | undefined,
+  signal: AbortSignal): Promise<ValidatedCookie> {
   checkSignal(signal)
   if (process.platform !== 'linux' || typeof process.getuid !== 'function' || typeof filename !== 'string'
     || !isAbsolute(filename) || filename.length > 4_096 || normalize(filename) !== filename
@@ -65,21 +76,25 @@ async function signingKey(filename: string, signal: AbortSignal): Promise<Buffer
     }
     checkSignal(signal)
     file = await open(`/proc/self/fd/${directory.fd}/${basename}`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    const before = await file.stat()
-    const mode = before.mode & 0o7777
-    if (!before.isFile() || before.uid !== process.getuid() || before.nlink !== 1 || mode !== 0o600 && mode !== 0o400
-      || before.size < 1 || before.size > 1_048_576) fail('DSH_LOCAL_AUTH_UNSAFE_FILE')
-    bytes = Buffer.alloc(before.size + 1)
-    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
-    const after = await file.stat()
-    const current = await lstat(filename)
-    if (bytesRead !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
-      || after.mode !== before.mode || after.uid !== before.uid || after.nlink !== 1 || current.isSymbolicLink()
-      || current.dev !== before.dev || current.ino !== before.ino || current.mode !== before.mode || current.uid !== before.uid
-      || current.nlink !== 1 || current.size !== before.size || current.mtimeMs !== before.mtimeMs
-      || current.ctimeMs !== before.ctimeMs || await realpath(filename) !== filename) fail('DSH_LOCAL_AUTH_FILE_CHANGED')
+    const before = await file.stat({ bigint: true })
+    const mode = Number(before.mode & 0o7777n)
+    if (!before.isFile() || before.uid !== BigInt(process.getuid()) || before.nlink !== 1n || mode !== 0o600 && mode !== 0o400
+      || before.size < 1n || before.size > 1_048_576n) fail('DSH_LOCAL_AUTH_UNSAFE_FILE')
+    const revision = fileRevision(before)
+    const reusable = cached?.revision === revision && cached.refreshAt > Date.now() ? cached : undefined
+    let bytesRead = 0
+    if (!reusable) {
+      bytes = Buffer.alloc(Number(before.size) + 1)
+      bytesRead = (await file.read(bytes, 0, bytes.length, 0)).bytesRead
+      if (BigInt(bytesRead) !== before.size) fail('DSH_LOCAL_AUTH_FILE_CHANGED')
+    }
+    const after = await file.stat({ bigint: true })
+    const current = await lstat(filename, { bigint: true })
+    if (fileRevision(after) !== revision || current.isSymbolicLink() || fileRevision(current) !== revision
+      || await realpath(filename) !== filename) fail('DSH_LOCAL_AUTH_FILE_CHANGED')
     checkSignal(signal)
-    const body = bytes.subarray(0, bytesRead)
+    if (reusable) return reusable
+    const body = bytes!.subarray(0, bytesRead)
     if (!isUtf8(body)) fail('DSH_LOCAL_AUTH_INVALID_CREDENTIALS')
     const document = parseDocument(body.toString('utf8'), { strict: true, uniqueKeys: true })
     if (document.errors.length || document.warnings.length) fail('DSH_LOCAL_AUTH_INVALID_CREDENTIALS')
@@ -96,7 +111,13 @@ async function signingKey(filename: string, signal: AbortSignal): Promise<Buffer
       secret.fill(0)
       fail('DSH_LOCAL_AUTH_INVALID_CREDENTIALS')
     }
-    return secret
+    try {
+      const issuedAt = Date.now()
+      const body = Buffer.from(JSON.stringify({ version: 1, authority, issuedAt, expiresAt: issuedAt + 300_000 }), 'utf8').toString('base64url')
+      const signature = createHmac('sha256', secret).update(body).digest('base64url')
+      const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
+      return { revision, cookie: `${name}=v1.${body}.${signature}`, refreshAt: issuedAt + 240_000 }
+    } finally { secret.fill(0) }
   } catch {
     checkSignal(signal)
     return fail()
@@ -110,21 +131,35 @@ async function signingKey(filename: string, signal: AbortSignal): Promise<Buffer
 export function createLocalDshAuthenticationProvider(options: DshLocalAuthenticationOptions): DshLocalAuthenticationProvider {
   const endpoint = endpointUrl(options.endpoint)
   const credentialsPath = options.credentialsPath
+  const authority = endpoint.protocol === 'https:' ? endpoint.origin : endpoint.host
+  let cached: ValidatedCookie | undefined
+  let pending: Promise<ValidatedCookie> | undefined
   return async (mode, signal) => {
     checkSignal(signal)
     if (mode !== 'none' && mode !== 'answer') fail('DSH_LOCAL_AUTH_INVALID_MODE')
-    const secret = await signingKey(credentialsPath, signal)
-    try {
-      checkSignal(signal)
-      const issuedAt = Date.now()
-      const authority = endpoint.protocol === 'https:' ? endpoint.origin : endpoint.host
-      const body = Buffer.from(JSON.stringify({ version: 1, authority, issuedAt, expiresAt: issuedAt + 300_000 }), 'utf8').toString('base64url')
-      const signature = createHmac('sha256', secret).update(body).digest('base64url')
-      const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
-      return `${name}=v1.${body}.${signature}`
-    } finally {
-      secret.fill(0)
+    if (!pending) {
+      // Each request checks the current secure file revision. Only concurrent checks share work;
+      // one caller's cancellation cannot cancel another caller's authentication.
+      const operation = authenticatedCookie(credentialsPath, authority, cached, AbortSignal.timeout(10_000))
+      pending = operation
+      void operation.then(value => {
+        cached = value
+        if (pending === operation) pending = undefined
+      }, () => {
+        cached = undefined
+        if (pending === operation) pending = undefined
+      })
     }
+    const operation = pending
+    return new Promise<string>((resolve, reject) => {
+      const abort = (): void => reject(new FrameworkError('DSH_LOCAL_AUTH_ABORTED', 'Local DSH authentication did not complete safely.'))
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+      void operation.then(value => {
+        checkSignal(signal)
+        resolve(value.cookie)
+      }).catch(reject).finally(() => signal.removeEventListener('abort', abort))
+    })
   }
 }
 

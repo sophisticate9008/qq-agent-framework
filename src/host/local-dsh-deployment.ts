@@ -5,7 +5,7 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { isIP } from 'node:net'
-import { composeStaticDshLayers, readStaticDshProfile, staticDshProfileValues } from '../adapters/dsh-static-profile.ts'
+import { composeStaticDshLayers, readStaticDshProfileValues } from '../adapters/dsh-static-profile.ts'
 import { FrameworkError, snapshot } from '../core/values.ts'
 
 export interface LocalDshDeploymentTarget {
@@ -48,7 +48,7 @@ async function text(filename: string, signal: AbortSignal, maximum = 1_048_576):
   try {
     const before = await handle.stat()
     if (!before.isFile() || before.size > maximum) fail('LOCAL_DSH_DEPLOYMENT_METADATA_UNSAFE')
-    const buffer = Buffer.alloc(maximum + 1)
+    const buffer = Buffer.alloc(before.size > 0 ? before.size + 1 : maximum + 1)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
     const after = await handle.stat()
     if (bytesRead > maximum || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
@@ -74,7 +74,7 @@ async function patch(filename: string, signal: AbortSignal, optional = false): P
   if (!information.isFile() || information.isSymbolicLink() || information.nlink !== 1 || (information.mode & 0o022) !== 0) fail('LOCAL_DSH_DEPLOYMENT_PATCH_UNSAFE')
   let value: unknown
   const content = await text(path, signal)
-  try { value = staticDshProfileValues(readStaticDshProfile(content)) }
+  try { value = readStaticDshProfileValues(content) }
   catch { return fail('LOCAL_DSH_DEPLOYMENT_PATCH_INVALID') }
   if (value !== null && !Array.isArray(value)) fail('LOCAL_DSH_DEPLOYMENT_PATCH_INVALID')
   return { path, length: Array.isArray(value) ? value.length : 0 }
@@ -252,7 +252,7 @@ export async function discoverLocalDshDeployment(request: LocalDshDeploymentRequ
       let content: string
       try { content = await text(path, signal) }
       catch (error) { if (path === profilePath && missing(error)) continue; throw error }
-      try { values.push(staticDshProfileValues(readStaticDshProfile(content || '[]\n'))) }
+      try { values.push(readStaticDshProfileValues(content || '[]\n')) }
       catch { fail('LOCAL_DSH_DEPLOYMENT_PATCH_INVALID') }
     }
     try { composeStaticDshLayers(values) }

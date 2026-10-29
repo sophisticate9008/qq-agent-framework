@@ -83,6 +83,7 @@ test('public diary package starts under the real package manager with declared s
   assert.deepEqual(started.map(entry => [entry.id, entry.state]), [[PLUGIN_RUNTIME_PACKAGE_ID, 'running'], ['fixture-images', 'running'], ['qzone-diary', 'running']]);
   const diary = started.find(entry => entry.id === 'qzone-diary')!;
   assert.deepEqual(diary.resources.map(entry => [entry.kind, entry.id, entry.state]), [
+    ['subscription', 'schedule-details-plan', 'active'], ['subscription', 'schedule-details-publish', 'active'],
     ['task', 'workflow', 'active'], ['subscription', 'workflow-reload', 'active'], ['subscription', 'workflow-handlers', 'active'],
     ['subscription', 'status', 'active'], ['subscription', 'plan', 'active'], ['subscription', 'set-enabled', 'active'],
   ]);
@@ -143,8 +144,10 @@ test('a workflow startup failure rolls back already registered owned tools and s
   const manager = f.manager();
   const diary = (await manager.start()).find(entry => entry.id === 'qzone-diary')!;
   assert.equal(diary.state, 'failed'); assert.equal(diary.reason, 'DIARY_CONFIGURATION_INVALID');
-  assert.equal(diary.resources.length, 2);
-  assert(diary.resources.every(resource => resource.state === 'disposed'));
+  assert.deepEqual(diary.resources.map(entry => [entry.kind, entry.id, entry.state]), [
+    ['subscription', 'schedule-details-plan', 'disposed'], ['subscription', 'schedule-details-publish', 'disposed'],
+    ['task', 'workflow', 'disposed'], ['subscription', 'workflow-reload', 'disposed'],
+  ]);
   assert.equal(f.tools.entries().length, 0); assert.equal(f.scheduler.status().handlers, 0);
   assert.equal(f.calls.models + f.calls.images + f.calls.protocol, 0);
 });

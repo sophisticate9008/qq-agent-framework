@@ -61,7 +61,10 @@ try {
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-    assert(await page.locator('[data-execution-journal-scroll]').evaluate(element => element.scrollHeight > element.clientHeight));
+    await page.waitForFunction(() => {
+      const element = document.querySelector('[data-execution-journal-scroll]');
+      return element !== null && element.scrollHeight > element.clientHeight;
+    });
     if (evidenceDirectory) {
       await mkdir(evidenceDirectory, { recursive: true });
       await page.screenshot({ path: join(evidenceDirectory, `execution-journal-${width}.png`), fullPage: true });

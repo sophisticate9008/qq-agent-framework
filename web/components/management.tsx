@@ -40,6 +40,6 @@ export function SaveBar({ dirty, saving, message, onSave, onReset, label = '保�
   return <>{(!compact || dirty || saving || disabled) && <span className={cn('min-w-0 text-xs text-muted-foreground', !compact && 'mr-auto flex-1 basis-40')} role="status">{compact && dirty && !disabled ? '未保存' : message ?? (dirty ? '未保存' : '未修改')}</span>}{children}{onReset && (!compact || dirty) && <Button variant="ghost" disabled={!dirty || saving} onClick={onReset}>撤销更改</Button>}<Button disabled={!dirty || saving || disabled} onClick={onSave}>{saving && <LoaderCircle className="size-4 animate-spin" />}{saving ? '正在保存' : label}</Button></>;
 }
 
-export function StatusPill({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'success' | 'warning' | 'neutral' }) {
-  return <span className={cn('inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium whitespace-nowrap', tone === 'success' ? 'status-success' : tone === 'warning' ? 'status-warning' : 'bg-muted text-muted-foreground')}><span className="size-1 rounded-full bg-current" />{children}</span>;
+export function StatusPill({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'success' | 'warning' | 'neutral' | 'info' }) {
+  return <span className={cn('inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium whitespace-nowrap', tone === 'success' ? 'status-success' : tone === 'warning' ? 'status-warning' : tone === 'info' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-muted text-muted-foreground')}><span className="size-1 rounded-full bg-current" />{children}</span>;
 }

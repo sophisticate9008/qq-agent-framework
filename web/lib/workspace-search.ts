@@ -164,6 +164,8 @@ export function buildWorkspaceSearchTargets(sources: WorkspaceSearchSources): re
     { page: 'security', title: '运行设置', sectionTitle: '运行设置', sectionId: 'security-settings', kind: 'section' },
     { page: 'overview', title: '最近活动（100 条）', sectionTitle: '最近活动（100 条）', sectionId: 'recent-activity', kind: 'section' },
     { page: 'sessions', title: '待处理提问与工具审批', sectionTitle: '待处理提问与工具审批', sectionId: 'chat-interactions', kind: 'section' },
+    { page: 'schedules', title: '待执行', sectionTitle: '待执行', sectionId: 'schedule-upcoming', kind: 'section' },
+    { page: 'schedules', title: '执行记录', sectionTitle: '执行记录', sectionId: 'schedule-history', kind: 'section' },
     { page: 'features', title: '框架注入 DSH', sectionTitle: '框架注入 DSH', sectionId: 'chat-tools', kind: 'section' },
     { page: 'features', title: '扩展注入 DSH', sectionTitle: '扩展注入 DSH', sectionId: 'extension-dsh-tools', kind: 'section' },
     { page: 'features', title: 'DSH 自带工具', sectionTitle: 'DSH 自带工具', sectionId: 'dsh-builtin-tools', kind: 'section' },

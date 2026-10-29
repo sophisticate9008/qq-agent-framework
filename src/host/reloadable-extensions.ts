@@ -114,10 +114,13 @@ export async function createReloadableExtension<Value>(options: {
   readonly id: string
   readonly displayName: string
   readonly load: (signal: AbortSignal) => Promise<ReloadableExtensionCandidate<Value>>
+  /** Runs before activation; a rejected candidate follows the ordinary tracked disposal path. */
+  readonly validate?: (value: Value) => void | Promise<void>
   readonly signal?: AbortSignal
 }): Promise<ReloadableExtension<Value>> {
   metadata(options.id, options.displayName)
-  assert(typeof options.load === 'function', 'EXTENSION_LOADER_INVALID', 'Expected an extension loader.')
+  assert(typeof options.load === 'function' && (options.validate === undefined || typeof options.validate === 'function'),
+    'EXTENSION_LOADER_INVALID', 'Expected an extension loader and optional candidate validator.')
   const controller = new AbortController()
   const lifetime = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
   lifetime.throwIfAborted()
@@ -163,6 +166,12 @@ export async function createReloadableExtension<Value>(options: {
       // Preserve a valid cleanup callback even when the revision is malformed.
       if (typeof candidate.dispose === 'function') await discard(item)
       fail('EXTENSION_CANDIDATE_INVALID')
+    }
+    try {
+      await options.validate?.(candidate.value)
+    } catch (error) {
+      await discard(item)
+      throw error
     }
     return item
   }

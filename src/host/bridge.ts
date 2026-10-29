@@ -69,6 +69,8 @@ export interface BridgeHostOptions {
   /** Optional local diagnostics; faults never affect delivery. Content has confirmed receipts only. */
   onAgentMessageDelivery?(event: FrameworkEvent, result: AgentMessageDelivery, confirmedContent: readonly MessageContent[]): void;
   shouldSendAgentMessage?(event: FrameworkEvent): boolean | Promise<boolean>;
+  /** Called after freshness and output validation, once before splitting is sent. */
+  onAgentSpeakDecision?(event: FrameworkEvent): void;
 }
 export interface AgentMessageDelivery {
   readonly status: 'sent' | 'rejected' | 'unknown';
@@ -104,7 +106,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
   taskTickMs = 250, maxConcurrentSends = 1, eventTimeoutMs = 30000, timeouts: timeoutInput,
   replyTimeoutMs = 30000, replyTimeoutNotice = '请求已提交，但尚未收到回复。结果尚未确认，未自动重复提交。',
   selectAgentMessage, splitAgentMessage, onFault = () => {}, model, observer, eventValidators = {}, effectAdapters = {}, routeIncoming,
-  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, onAgentMessageDelivery, shouldSendAgentMessage, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
+  agentInputPreparation, agentMessagePreparation, followPool, onAgentDelivery, onAgentMessageDelivery, shouldSendAgentMessage, onAgentSpeakDecision, accountScope: accountInput, replyRecovery = 'notify' }: BridgeHostOptions) {
   const accountScope = accountInput === undefined ? undefined : normalizeAccountScope(accountInput);
   bindAccountStore(store, accountScope);
   assert(typeof authorizeIncoming === 'function' && Number.isSafeInteger(taskTickMs) && taskTickMs >= 10 && taskTickMs <= 60000,
@@ -206,6 +208,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         'INVALID_AGENT_MESSAGE_SPLIT', 'Agent message splitting requires one to four bounded messages.');
       messages = selected.map(message => normalizeContent(message));
       if (await shouldSendAgentMessage?.(snapshot(event)) === false) return record({ status: 'rejected', receipts, errorCode: 'AGENT_MESSAGE_SUPPRESSED' });
+      onAgentSpeakDecision?.(snapshot(event));
     } catch (error) { return record({ status: 'rejected', receipts, errorCode: errorCode(error, 'AGENT_MESSAGE_PREPARATION_FAILED') }); }
     try {
       for (const [index, message] of messages.entries()) {

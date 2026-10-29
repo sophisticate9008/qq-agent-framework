@@ -10,6 +10,7 @@ export type ChatInputConfiguration = {
   readonly wakeOnMention: boolean
   readonly wakeOnReply: boolean
   readonly continuationMs: number
+  readonly replyExtensionMs?: number
   readonly scopes: {
     readonly group: boolean
     readonly private: boolean
@@ -19,7 +20,7 @@ export type ChatInputConfiguration = {
 }
 
 export const DEFAULT_CHAT_INPUT_CONFIGURATION: ChatInputConfiguration = Object.freeze({ schema: 1,
-  enabled: true, nicknames: Object.freeze([]), wakeOnMention: true, wakeOnReply: true, continuationMs: 90_000,
+  enabled: true, nicknames: Object.freeze([]), wakeOnMention: true, wakeOnReply: true, continuationMs: 90_000, replyExtensionMs: 500,
   scopes: Object.freeze({ group: true, private: true, include: Object.freeze([]), exclude: Object.freeze([]) }) })
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -32,10 +33,11 @@ function keys(value: Record<string, unknown>, required: readonly string[]): bool
 
 export function validateChatInputConfiguration(input: unknown): ChatInputConfiguration {
   const invalid = (): never => { throw new TypeError('Invalid chat input configuration') }
-  if (!record(input) || !keys(input, ['schema', 'enabled', 'nicknames', 'wakeOnMention', 'wakeOnReply', 'continuationMs', 'scopes'])
+  if (!record(input) || !keys(input, ['schema', 'enabled', 'nicknames', 'wakeOnMention', 'wakeOnReply', 'continuationMs', 'scopes', ...(Object.hasOwn(input, 'replyExtensionMs') ? ['replyExtensionMs'] : [])])
     || input.schema !== 1 || typeof input.enabled !== 'boolean' || typeof input.wakeOnMention !== 'boolean'
     || typeof input.wakeOnReply !== 'boolean' || typeof input.continuationMs !== 'number'
     || !Number.isSafeInteger(input.continuationMs) || input.continuationMs < 0 || input.continuationMs > 300_000
+    || input.replyExtensionMs !== undefined && (!Number.isSafeInteger(input.replyExtensionMs) || Number(input.replyExtensionMs) < 0 || Number(input.replyExtensionMs) > 60000)
     || !Array.isArray(input.nicknames) || input.nicknames.length > 16
     || !input.nicknames.every(name => typeof name === 'string' && name.trim() === name && name.length > 0
       && name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(name))
@@ -47,7 +49,7 @@ export function validateChatInputConfiguration(input: unknown): ChatInputConfigu
     && new Set(value).size === value.length && value.every(scope => isNativeAccessScope(scope))
   if (!list(scopes.include) || !list(scopes.exclude)) return invalid()
   return Object.freeze({ schema: 1, enabled: input.enabled, nicknames: Object.freeze([...input.nicknames] as string[]),
-    wakeOnMention: input.wakeOnMention, wakeOnReply: input.wakeOnReply, continuationMs: input.continuationMs,
+    wakeOnMention: input.wakeOnMention, wakeOnReply: input.wakeOnReply, continuationMs: input.continuationMs, replyExtensionMs: Number(input.replyExtensionMs ?? 500),
     scopes: Object.freeze({ group: scopes.group, private: scopes.private,
       include: Object.freeze([...scopes.include]), exclude: Object.freeze([...scopes.exclude]) }) })
 }
@@ -59,6 +61,7 @@ export interface EffectiveChatInputConfiguration {
   readonly wakeOnMention: boolean
   readonly wakeOnReply: boolean
   readonly continuationMs: number
+  readonly replyExtensionMs?: number
 }
 
 /** Legacy switches and secondary scope lists are ignored; access is enforced by the whitelist. */
@@ -70,5 +73,5 @@ export function resolveChatInputConfiguration(configuration: ChatInputConfigurat
   const names = candidates.filter((name, index) => candidates.findIndex(candidate => candidate.toLocaleLowerCase() === name.toLocaleLowerCase()) === index)
     .filter(name => name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(name)).slice(0, 16)
   return Object.freeze({ enabled: true, reason: 'active', names: Object.freeze(names), wakeOnMention: true,
-    wakeOnReply: current.wakeOnReply, continuationMs: current.continuationMs })
+    wakeOnReply: current.wakeOnReply, continuationMs: current.continuationMs, replyExtensionMs: current.replyExtensionMs ?? 500 })
 }

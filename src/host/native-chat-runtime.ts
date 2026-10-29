@@ -1,3 +1,6 @@
+import { createConversationTaskRuntime, readConversationTasks, readConversationTaskHistory, type ConversationTaskExecutor } from './conversation-tasks.ts'
+import { createConversationTaskAgent } from './conversation-task-agent.ts'
+import { CONVERSATION_TASK_TOOLS, createConversationTaskEffects } from './conversation-task-tools.ts'
 import { createPluginUsageService } from './plugin-usage.ts'
 import { createPluginEventsService } from './plugin-events.ts'
 import { useService } from './service-contract.ts'
@@ -145,6 +148,7 @@ export interface NativeChatDeploymentResolution {
 }
 
 export interface NativeChatRuntimeOptions {
+  readonly taskExecutors?: Readonly<Record<string, ConversationTaskExecutor>>
   readonly qzoneSupportedActions?: (signal: AbortSignal) => Promise<readonly string[]>
 
   readonly accountScope?: AccountScope
@@ -324,6 +328,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let stickers: ReturnType<typeof createNativeStickerService> | undefined
   let workMissingReasons: readonly string[] = ['native_work_backend_unavailable']
   let workAssets: ReturnType<typeof createNativeWorkAssets> | undefined
+  let conversationTasks: ReturnType<typeof createConversationTaskRuntime> | undefined
+  let taskAgent: ReturnType<typeof createConversationTaskAgent> | undefined
+  let taskEventsTimer: ReturnType<typeof setInterval> | undefined
   let frameworkTools: ReturnType<typeof createNativeFrameworkTools> | undefined
   let quotedContext: ReturnType<typeof createNativeQuotedContext> | undefined
   let inbox: ReturnType<typeof createNativeInbox> | undefined
@@ -484,6 +491,13 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     get interactionMessages() { return interactionMessages }, get quotedContext() { return quotedContext },
     get inputPackage() { return inputPackage }, feedbackBusy: conversationId => workFeedback?.busy(conversationId) ?? false
   }, accountScope, expectedSelfId, activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode,
+    onMessage(message) {
+      const binding = host?.sessions.get(message.conversationId)
+      if (!binding || !conversationTasks?.list(message.conversationId, undefined, 200).items.some(task => ['waiting', 'running', 'paused'].includes(task.state))) return
+      try { conversationTasks.emit({ binding, actorId: message.userId, sourceMessageId: message.id }, 'conversation.message', message.userId,
+        json({ messageId: message.id, userId: message.userId, content: message.content }), message.id) }
+      catch (error) { activity.record('error', message.conversationId, undefined, {}, safeCode(error)) }
+    },
     onDispatched: (requestId, accepted) => replyFreshness?.settled(requestId, accepted) })
   const connection = createOneBotConnectionManager({ ...inbound.handlers, ...(accountScope ? { accountId: accountScope.accountId } : {}) })
   let lastObservedConnection = ''
@@ -752,12 +766,14 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   async function cleanup() {
     frozenRecoveryConversations.clear()
     const resources = { lifetime, host, dsh, work, workFeedback, claims, executions, bootstrap: bootstrapMount,
-      tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, scheduler: pluginScheduler,
+      tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, scheduler: pluginScheduler, conversationTasks,
       releaseInteractions, closeInteractions: stopInteractions, claimTimer,
       clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
     releaseInteractions = undefined
     stopInteractions = undefined
     interactionMessages = undefined
+    clearInterval(taskEventsTimer); taskEventsTimer = undefined
+    await conversationTasks?.stop(); conversationTasks = undefined; taskAgent = undefined
     messageSources = undefined
     workFeedback = undefined
     replyFreshness?.clear()
@@ -970,7 +986,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         sessionTurns = createSessionTurnQueue({ signal: controller.signal, store })
         const agent = sessionTurns.wrapChat(createNativeAgentCoordinator({ sourceAgent, dsh, store, controller, definition, configuration, identity,
           onReplyAttempted: requestId => Boolean(host?.deliveryForRequest(requestId)),
-          presetBindings: selected.deployment.presetBindings, activity, bindingForSession, admittedAt: inbound.admittedAt, checkpoint, guard,
+          presetBindings: selected.deployment.presetBindings, activity, bindingForSession, admittedAt: requestId => inbound.admittedAt(requestId) ?? taskAgent?.admittedAt(requestId), checkpoint, guard,
           onReplySuppressed: requestId => workFeedback?.suppressed(requestId),
           onReplyFailed: (requestId, known) => workFeedback?.delivered(requestId, { status: known ? 'rejected' : 'unknown' }),
           resources: { get lifetime() { return lifetime }, get configuration() { return active }, get host() { return host },
@@ -1085,6 +1101,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         const qzoneEffects = createNativeQzoneEffects({ port: qzonePort, store, selfId, resolveAsset: resolveOutputAsset,
           sources: () => messageSources?.reader, authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         const reminderService = reminders.service()
+        const taskEffects = createConversationTaskEffects({ runtime: () => conversationTasks, sources: () => messageSources?.reader, host: () => host })
         const workEffects = createNativeWorkEffects({ executor: () => work, sources: () => messageSources?.reader })
         const conversationEffects = createNativeConversationService({
           port: createOneBotConversationPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
@@ -1115,7 +1132,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           loadedInSession: false, registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework',
             ownerName: '框架能力目录', transport: 'native' } }))
         const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
-        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', 'native.stickers.manage', ...Object.keys(conversationEffects), ...Object.keys(capabilityDirectory.effects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
+        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', 'native.stickers.manage', ...Object.keys(conversationEffects), ...Object.keys(capabilityDirectory.effects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(taskEffects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
           failure('NATIVE_CHAT_RESERVED_CAPABILITY')
         }
         if ([...ONEBOT_PROTOCOL_EVENT_TYPES, NATIVE_TOOL_EVENT, ...Object.keys(reminderService.eventValidators)].some(type => bootstrapMount?.bridgeOptions.eventValidators?.[type])) {
@@ -1130,9 +1147,13 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           ...bootstrapMount?.bridgeOptions,
           onAgentDelivery: (requestId, receipt) => workFeedback?.delivered(requestId, receipt),
           onAgentMessageDelivery: (event, result, confirmedContent) => recordNativeExecutionDelivery(store!, event, result, confirmedContent),
+          onAgentSpeakDecision(event) {
+            const data = event.data.agentData
+            if (isRecord(data) && typeof data.nativeRequestId === 'string') inbound.speakDecision(event.conversationId, data.nativeRequestId)
+          },
           shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
-          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...memoryEffects, ...workEffects, ...conversationEffects, ...capabilityDirectory.effects, ...qzoneEffects, ...replyEffects,
+          effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...taskEffects, ...memoryEffects, ...workEffects, ...conversationEffects, ...capabilityDirectory.effects, ...qzoneEffects, ...replyEffects,
             'native.stickers.manage': { execute(request) { if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE'); return stickers.manage.execute(request) } },
             'native.stickers.list': { execute(request) {
               if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE')
@@ -1381,7 +1402,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         if (plugin.frameworkToolProtocol !== 'qq-bridge-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
         if (plugin.frameworkToolProtocol === 'qq-bridge-framework.tools/1' && dsh.frameworkTools) {
           frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
-            tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
+            tools: [...NATIVE_REPLY_TOOLS, ...CONVERSATION_TASK_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
             async toolDescriptions(signal): Promise<Readonly<Record<string, string>>> {
               const identity = await options.readWorkIdentity?.(signal)
               signal.throwIfAborted()
@@ -1426,6 +1447,18 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           host.engine.install(frameworkTools.feature)
           await toolPolicy.sync(controller.signal)
         }
+        conversationTasks = createConversationTaskRuntime({ store,
+          async authorize(origin, signal) {
+            await guard(origin.binding.conversationId, signal, true, 'resource')
+            if (!host?.sessions.get(origin.binding.conversationId)) failure('TASK_BINDING_CHANGED')
+          },
+          ready(task) { const id = task.origin.binding.conversationId; return state === 'running'
+            && !executions?.forConversation(id) && !inbound.isProcessing(id) && !inbox?.hasPending(id) && !workFeedback?.busy(id) },
+          onFault: code => activity.record('error', null, undefined, {}, code) })
+        taskAgent = createConversationTaskAgent({ store, host: () => host, sources: () => messageSources,
+          executions: () => executions, timeoutMs: () => active?.execution.turnTimeoutMs ?? 120000 })
+        conversationTasks.register('conversation', taskAgent.executor)
+        for (const [name, executor] of Object.entries(options.taskExecutors ?? {})) conversationTasks.register(name, executor)
         await host.start()
         await frameworkTools?.recoverPending(controller.signal)
         const interactionAssembly = createNativeInteractionAssembly({ interactions, port: dsh, signal: controller.signal,
@@ -1531,12 +1564,27 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             && host?.replies.get(conversationId)?.status !== 'waiting',
           onFault: code => { lastError = code; activity.record('error', null, undefined, {}, code) } })
         const runningResources: NativeRunningRunResources = { lifetime: controller, host, dsh, work, claims, executions,
-          workFeedback, bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, scheduler: pluginScheduler, releaseInteractions,
+          workFeedback, bootstrap: bootstrapMount, tools: frameworkTools, packages, inbox, quotedContext, reminders, memory, scheduler: pluginScheduler, conversationTasks, releaseInteractions,
           closeInteractions: stopInteractions, claimTimer, clearIngress: inbound.clear, drainConfiguration: configurationGuard.drain, drainPolicy: toolPolicy.drain }
         runningResources.lifetime.signal.throwIfAborted()
         state = 'running'
         pluginScheduler.start()
         await reminderService.start()
+        conversationTasks?.start()
+        taskEventsTimer = setInterval(() => {
+          if (!conversationTasks || !store || state !== 'running' || controller.signal.aborted) return
+          try {
+            for (const row of store.list('native-work.executions', { limit: 1000 })) {
+              if (!isRecord(row.value) || !['completed', 'failed'].includes(String(row.value.status))) continue
+              const value = row.value, binding = host?.sessions.get(String(value.conversationId))
+              if (!binding || typeof value.ownerId !== 'string' || !conversationTasks.list(binding.conversationId, undefined, 200).items.some(task => !['completed', 'failed', 'cancelled', 'expired'].includes(task.state))) continue
+              conversationTasks.emit({ binding, actorId: value.ownerId, sourceMessageId: row.key }, 'work.completed', row.key,
+                json({ workId: row.key, status: value.status, resultId: value.resultId ?? null }), row.key)
+            }
+            conversationTasks.maintain()
+          } catch (error) { activity.record('error', null, undefined, {}, safeCode(error)) }
+        }, 5000)
+        taskEventsTimer.unref()
         await checkpoint('runtime.ready', { state: 'running', planId: definition.planId }, controller.signal)
         activity.record('running')
         const reportedTimeouts = new Set<string>()
@@ -1984,6 +2032,23 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         assertAccountStore(writer, accountScope)
         return await createPluginSchedulerService({ store: writer }).manage(request, signal)
       } finally { if (writer !== store) writer.close() }
+    },
+    taskService() { return conversationTasks },
+    readConversationTasks(conversationId?: string, after?: string) {
+      verifyPersistedAccount()
+      if (store) return readConversationTasks(store, conversationId, after)
+      let existing: ReturnType<typeof openReadonlySqliteStore>
+      try { existing = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite')) }
+      catch (error) { if (safeCode(error) === 'STORE_NOT_FOUND') return { items: [], next: null }; throw error }
+      try { return existing.withSnapshot(() => readConversationTasks(existing, conversationId, after)) } finally { existing.close() }
+    },
+    readConversationTaskHistory(id: string) {
+      verifyPersistedAccount()
+      if (store) return readConversationTaskHistory(store, id)
+      let existing: ReturnType<typeof openReadonlySqliteStore>
+      try { existing = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite')) }
+      catch (error) { if (safeCode(error) === 'STORE_NOT_FOUND') return []; throw error }
+      try { return existing.withSnapshot(() => readConversationTaskHistory(existing, id)) } finally { existing.close() }
     },
     readReminders(readOptions: NativeReminderReadOptions = {}) { return reminders.read(readOptions) },
     readReminderHistory(readOptions: NativeReminderReadOptions & { readonly ruleId?: string } = {}) { return reminders.history(readOptions) },

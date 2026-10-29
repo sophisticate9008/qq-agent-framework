@@ -59,6 +59,7 @@ export function createNativeInboundController(options: {
   readonly checkpoint: (point: LifecycleCheckpoint, data: JsonObject, signal: AbortSignal) => Promise<void>
   readonly guard: (conversationId: string, signal: AbortSignal, recheck: boolean, phase: 'protocol' | 'admission') => Promise<void>
   readonly safeCode: (error: unknown) => string
+  readonly onMessage?: (message: InboundMessage) => void
   readonly onDispatched?: (requestId: string, accepted: boolean) => void
 }) {
   const runtime = options.resources
@@ -70,6 +71,9 @@ export function createNativeInboundController(options: {
   const admissionTimes = new Map<string, number>()
   const activeConversations = new Map<string, number>()
   const activationTimes = new Map<string, number>()
+  const extendedUntil = new Map<string, number>()
+  const speakDecisions = new Set<string>()
+  const wakeSettings = new Map<string, { continuationMs: number; replyExtensionMs?: number }>()
   let received = 0
   let rejected = 0
   let unknown = 0
@@ -161,29 +165,35 @@ export function createNativeInboundController(options: {
       }
       received++
       activity.record('received', message.conversationId, activityContent)
+      options.onMessage?.({ ...message, content })
       const inputSettings = await readInputConfiguration(message.conversationId, persona?.name)
+      if (wakeSettings.size >= 1024 && !wakeSettings.has(message.conversationId)) wakeSettings.delete(wakeSettings.keys().next().value!)
+      wakeSettings.set(message.conversationId, inputSettings.effective)
       const initialParticipation = nativeParticipation({ ...message, content }, history.messages,
-        { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId) }, admittedAt)
+        { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId), extendedUntil: extendedUntil.get(message.conversationId) }, admittedAt)
       const quotedMessages = inputSettings.effective.wakeOnReply && !['direct', 'nickname', 'reply'].includes(initialParticipation)
         ? await runtime.quotedContext?.read(message, history.messages, context.signal) : undefined
       if (current !== runtime.host || runtime.lifetime !== generation || context.signal.aborted) return
       const participation = nativeParticipation({ ...message, content }, history.messages,
-        { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId), quotedMessages }, admittedAt)
+        { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId), extendedUntil: extendedUntil.get(message.conversationId), quotedMessages }, admittedAt)
       if (['direct', 'nickname', 'reply'].includes(participation)
         && !history.messages.some(entry => entry.id === message.id)
         && !runtime.inbox?.contains(message.conversationId, message.id)) {
         // Activate on the call itself, before model submission or reply delivery.
         // This account owns the map; the conversation key never crosses accounts.
         for (const [conversationId, activatedAt] of activationTimes) {
-          if (admittedAt - activatedAt > 300_000 || !allowed(configuration, conversationId)) activationTimes.delete(conversationId)
+          if (admittedAt > Math.max(activatedAt + 300_000, extendedUntil.get(conversationId) ?? 0) || !allowed(configuration, conversationId)) {
+            activationTimes.delete(conversationId); extendedUntil.delete(conversationId); wakeSettings.delete(conversationId)
+          }
         }
         const activatedAt = Math.max(activationTimes.get(message.conversationId) ?? admittedAt, admittedAt)
         activationTimes.delete(message.conversationId)
         if (activationTimes.size >= 1_024) {
           const oldest = activationTimes.keys().next().value
-          if (oldest !== undefined) activationTimes.delete(oldest)
+          if (oldest !== undefined) { activationTimes.delete(oldest); extendedUntil.delete(oldest); wakeSettings.delete(oldest) }
         }
         activationTimes.set(message.conversationId, activatedAt)
+        extendedUntil.delete(message.conversationId)
       }
       // A busy model is not another group wake. Outside the actual call window,
       // ordinary chatter stays in history without chaining new model requests.
@@ -304,7 +314,18 @@ export function createNativeInboundController(options: {
     participation: (requestId: string) => participationReasons.get(requestId),
     observationActive(conversationId: string, continuationMs: number, at = Date.now()) {
       const activatedAt = activationTimes.get(conversationId)
-      return activatedAt !== undefined && continuationMs > 0 && at >= activatedAt && at - activatedAt <= continuationMs
+      return activatedAt !== undefined && continuationMs > 0 && at >= activatedAt && at <= Math.max(activatedAt + continuationMs, extendedUntil.get(conversationId) ?? 0)
+    },
+    speakDecision(conversationId: string, requestId: string, at = Date.now()) {
+      const activated = activationTimes.get(conversationId), settings = wakeSettings.get(conversationId)
+      if (!conversationId.startsWith('group:') || activated === undefined || !settings || settings.continuationMs === 0
+        || speakDecisions.has(requestId)) return
+      if (speakDecisions.size >= 4096) speakDecisions.delete(speakDecisions.values().next().value!)
+      speakDecisions.add(requestId)
+      const increment = settings.replyExtensionMs ?? 500
+      if (increment <= 0) return
+      const expires = Math.max(activated + settings.continuationMs, extendedUntil.get(conversationId) ?? 0, at)
+      extendedUntil.set(conversationId, Math.min(at + 300_000, expires + increment))
     },
     setParticipation(requestId: string, reason: NativeParticipationReason) { participationReasons.set(requestId, reason) },
     groupWake: (requestId: string) => groupWakes.get(requestId),
@@ -312,6 +333,6 @@ export function createNativeInboundController(options: {
       if (groupWakes.size >= 256 && !groupWakes.has(requestId)) groupWakes.delete(groupWakes.keys().next().value!)
       groupWakes.set(requestId, wake.slice(-16))
     },
-    clear() { participationReasons.clear(); groupWakes.clear(); inputSequences.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear() }
+    clear() { participationReasons.clear(); groupWakes.clear(); inputSequences.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear(); extendedUntil.clear(); speakDecisions.clear(); wakeSettings.clear() }
   })
 }

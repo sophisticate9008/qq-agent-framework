@@ -1010,6 +1010,21 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))
   if (chatRuntime !== undefined) {
+    routes.push({ method: 'GET', pathname: '/api/chat/tasks/history', maxResponseBytes: 8388608,
+      handle({ query }) {
+        const id = query.get('id')
+        if (!id || !/^[a-f0-9]{64}$/.test(id) || [...query.keys()].some(key => key !== 'id') || query.getAll('id').length !== 1)
+          throw new AdminRequestError(400, 'invalid_task_query')
+        return { items: chatRuntime.readConversationTaskHistory(id) }
+      } })
+    routes.push({ method: 'GET', pathname: '/api/chat/tasks', maxResponseBytes: 4194304,
+      handle({ query }) {
+        if ([...query.keys()].some(key => !['conversationId', 'after'].includes(key) || query.getAll(key).length !== 1)) throw new AdminRequestError(400, 'invalid_task_query')
+        const conversationId = query.get('conversationId'), after = query.get('after')
+        if (conversationId !== null && !/^(group|private):[1-9][0-9]{0,31}$/.test(conversationId)
+          || after !== null && !/^[a-f0-9]{64}$/.test(after)) throw new AdminRequestError(400, 'invalid_task_query')
+        return chatRuntime.readConversationTasks(conversationId ?? undefined, after ?? undefined)
+      } })
     routes.push(...createPluginScheduleRoutes({ runtime: chatRuntime }))
     routes.push(...nativeChatControlRoutes(directory, chatRuntime, options.deploymentRuntime === undefined ? undefined : checkedNativeDeploymentRuntime(options.deploymentRuntime)))
     routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state,

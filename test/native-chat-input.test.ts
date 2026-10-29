@@ -170,3 +170,10 @@ test('participant mapping bounds names and account count while keeping the curre
   assert.equal(result.envelope.participantsLimited, true);
   assert.equal(new Set(result.envelope.participants.map(item => item.userId)).size, 32);
 });
+
+test('a dynamic continuation deadline decays and never activates an uncalled or disabled conversation', () => {
+  assert.equal(nativeParticipation(message, history, { ...options, extendedUntil: 200 }, 180), 'continuation')
+  assert.equal(nativeParticipation(message, history, { ...options, extendedUntil: 200 }, 201), 'ambient')
+  assert.equal(nativeParticipation(message, history, { ...options, activatedAt: undefined, extendedUntil: 200 }, 180), 'ambient')
+  assert.equal(nativeParticipation(message, history, { ...options, continuationMs: 0, extendedUntil: 200 }, 180), 'ambient')
+})

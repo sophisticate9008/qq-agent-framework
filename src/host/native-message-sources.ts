@@ -14,7 +14,8 @@ export interface NativeMessageSource {
   readonly receivedAt: number
   readonly expiresAt: number
   readonly isOwner: boolean
-  readonly assurance: 'normalized-onebot-source-only'
+  readonly assurance: 'normalized-onebot-source-only' | 'task-delegation'
+  readonly task?: { readonly id: string; readonly runId: string; readonly originalMessageId: string }
   readonly workIntentVerified: false
   readonly capabilityAuthorizationVerified: false
   readonly externalToolAuthorizationVerified: false
@@ -105,6 +106,24 @@ export function createNativeMessageSources(options: {
     } })
 
   return Object.freeze({ reader,
+    captureTask(input: { readonly conversationId: string; readonly id: string; readonly actorId: string;
+      readonly taskId: string; readonly runId: string; readonly originalMessageId: string;
+      readonly receivedAt: number; readonly expiresAt: number; readonly signal: AbortSignal }) {
+      options.signal.throwIfAborted(); input.signal.throwIfAborted(); prune()
+      assert(reference(input.id) && reference(input.actorId) && reference(input.taskId) && reference(input.runId)
+        && reference(input.originalMessageId) && input.expiresAt > Date.now() && input.receivedAt <= Date.now(),
+      'NATIVE_TASK_SOURCE_INVALID', 'A live host-authorized task activation is required.')
+      const sourceKey = key(input.conversationId, input.id)
+      assert(!entries.has(sourceKey) && entries.size < 256, 'NATIVE_MESSAGE_SOURCE_CONFLICT', 'The task activation already exists or capacity is full.')
+      const entry: Entry = { execution: null, signal: input.signal, source: Object.freeze({
+        ...(accountScope ? { accountScope } : {}), conversationId: input.conversationId, sourceMessageId: input.id,
+        userId: input.actorId, receivedAt: input.receivedAt, expiresAt: input.expiresAt,
+        isOwner: input.actorId === options.owner, assurance: 'task-delegation',
+        task: { id: input.taskId, runId: input.runId, originalMessageId: input.originalMessageId },
+        workIntentVerified: false, capabilityAuthorizationVerified: false, externalToolAuthorizationVerified: false }) }
+      entries.set(sourceKey, entry)
+      return () => { for (const [id, candidate] of entries) if (candidate === entry) entries.delete(id) }
+    },
     async alias(scope: Readonly<EffectScope>, eventId: string, signal: AbortSignal): Promise<void> {
       assert(reference(eventId), 'NATIVE_MESSAGE_SOURCE_INVALID', 'A bounded trusted event identity is required.')
       await lookup(scope, signal)

@@ -26,7 +26,7 @@ function receiptResult(result: FrameworkToolResult): FrameworkToolResult {
   return { ...result, value }
 }
 
-async function fixture(context: TestContext, options: { receipts?: readonly DeliveryReceipt[]; suppress?: boolean } = {}) {
+async function fixture(context: TestContext, options: { receipts?: readonly DeliveryReceipt[]; suppress?: boolean; onDecision?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'qbf-reply-'))
   const store = createSqliteStore({ filename: ':memory:' })
   const lifetime = new AbortController()
@@ -51,7 +51,7 @@ async function fixture(context: TestContext, options: { receipts?: readonly Deli
     effectAdapters: { ...createNativeReplyEffects({ sources: () => sources.reader, authorize: async () => {} }),
       'native.media.inspect': { execute: () => null }, 'native.media.read': { execute: () => null } },
     agentMessagePreparation: { capabilities: [], prepare: (execution, event) => output.prepare(event.data.content, event, execution.signal) },
-    splitAgentMessage: output.split, shouldSendAgentMessage: () => options.suppress !== true })
+    onAgentSpeakDecision: options.onDecision, splitAgentMessage: output.split, shouldSendAgentMessage: () => options.suppress !== true })
   const binding = await host.sessions.resolve('group:123', signal)
   const requestId = digest([binding.conversationId, 'source-message', 'prompt'])
   sources.capture({ id: 'source-message', conversationId: binding.conversationId, userId: '1234' },
@@ -182,4 +182,16 @@ test('plain and enveloped structured content share one normalized delivery ident
   assert(repeated.status === 'confirmed' && isRecord(repeated.value))
   assert.equal(repeated.value.cached, true)
   assert.equal(runtime.sent.length, 1)
+})
+
+test('speech decisions occur once before bubble delivery and never for superseded output', async context => {
+  let decisions = 0
+  const live = await fixture(context, { onDecision: () => { decisions++ } })
+  await live.invoke({ content: '第一句\n\n第二句' })
+  assert.equal(live.sent.length, 2)
+  assert.equal(decisions, 1)
+  const suppressed = await fixture(context, { suppress: true, onDecision: () => { decisions++ } })
+  await suppressed.invoke({ content: '已被覆盖的回复' })
+  assert.equal(suppressed.sent.length, 0)
+  assert.equal(decisions, 1)
 })

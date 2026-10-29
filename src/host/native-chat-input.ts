@@ -12,6 +12,7 @@ export interface NativeParticipationOptions {
   readonly names: readonly string[];
   readonly continuationMs: number;
   readonly activatedAt?: number;
+  readonly extendedUntil?: number;
   readonly wakeOnMention?: boolean;
   readonly wakeOnReply?: boolean;
   readonly quotedMessages?: readonly HistoryMessage[];
@@ -32,10 +33,10 @@ export function nativeParticipation(message: InboundMessage, history: readonly H
     .some(entry => entry.id === part.messageId && entry.actor === 'assistant'))) return 'reply';
   const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').toLocaleLowerCase();
   if (options.names.some(name => text.includes(name.toLocaleLowerCase()))) return 'nickname';
-  // Only a real call activates the group. Our own replies cannot keep the entire
-  // group awake indefinitely while people have moved on to another conversation.
+  // A real call starts the window. Accepted speak decisions can add a bounded
+  // increment; ordinary input, silent or superseded executions do not.
   const activatedAt = options.activatedAt ?? -Infinity;
-  if (options.continuationMs > 0 && now >= activatedAt && now - activatedAt <= options.continuationMs) return 'continuation';
+  if (Number.isFinite(activatedAt) && options.continuationMs > 0 && now >= activatedAt && now <= Math.max(activatedAt + options.continuationMs, options.extendedUntil ?? -Infinity)) return 'continuation';
   return 'ambient';
 }
 

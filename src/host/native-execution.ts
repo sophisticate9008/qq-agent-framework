@@ -448,6 +448,29 @@ export function createNativeExecutionController(options: NativeExecutionOptions)
       return snapshot(rows.map(row => ({ ...row, summary: summaries.get(row.id)! })))
     },
     active() { return snapshot(activeRecords()) },
+    async cancel(id: string) {
+      assertRunning()
+      const current = get(id)
+      assert(current, 'EXECUTION_NOT_FOUND', 'The execution does not exist.')
+      if (terminalExternal.has(current.externalStatus) || current.cancelStatus !== 'not-requested') return current
+      signals.get(id)?.abort()
+      update(id, value => ({ ...value, status: 'unknown', isolated: true,
+        cancelStatus: options.cancel ? 'requesting' : 'unavailable', lastError: 'EXECUTION_CANCEL_REQUESTED' }))
+      if (!options.cancel) return get(id)!
+      const accept = (status: 'accepted' | 'rejected' | 'unknown') => {
+        if (stopped) return
+        const next = update(id, value => value.cancelStatus === 'confirmed' ? value : settleIsolation({ ...value,
+          cancelStatus: status === 'accepted' && value.externalStatus === 'cancelled' ? 'confirmed' : status }))
+        release(next)
+      }
+      try {
+        const result = await withDeadline({ signal: lifetime.signal, timeoutMs: current.policy.cancelTimeoutMs,
+          code: 'EXECUTION_CANCEL_UNKNOWN', run: signal => limited(() => options.cancel!({ execution: current,
+            idempotencyKey: `execution:${id}:cancel`, signal })), onLate: result => accept(result.status) })
+        accept(result.status)
+      } catch { accept('unknown') }
+      return get(id)!
+    },
     forConversation(conversationId: string) {
       const claim = store.read(conversations, digest(conversationId))
       return claim ? get(String(object(claim.value).executionId)) : null

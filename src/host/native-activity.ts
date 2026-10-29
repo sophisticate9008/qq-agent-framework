@@ -3,8 +3,21 @@ import { snapshot } from '../core/values.ts'
 import { isNativeEventInput, type NativeEventCorrelation, type NativeEventInput } from '../contracts/native-events.ts'
 import { createNativeEventObserver } from './native-events.ts'
 import type { MessageContent } from '../contracts/messages.ts'
+import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts'
 
-export function nativeActivityContent(content: readonly MessageContent[]): string {
+export function nativeActivityContent(content: readonly MessageContent[], context: {
+  readonly selfId?: string; readonly selfName?: string;
+  readonly members?: readonly { readonly actor: string; readonly displayName?: string }[];
+} = {}): string {
+  const names = new Map<string, string>()
+  if (content.some(part => part.type === 'mention')) {
+    for (const member of context.members ?? []) {
+      const name = normalizeSenderDisplayName(member.displayName)
+      if (name) names.set(member.actor, name)
+    }
+    const selfName = normalizeSenderDisplayName(context.selfName)
+    if (context.selfId && selfName) names.set(context.selfId, selfName)
+  }
   return content.map(part => {
     switch (part.type) {
       case 'text': return part.text
@@ -13,7 +26,7 @@ export function nativeActivityContent(content: readonly MessageContent[]): strin
       case 'file': return `[${/\.(?:mp4|m4v|mov|mkv|webm|avi|mpeg|mpg)$/i.test(part.name) ? '视频' : '文件'}：${part.name}]`
       case 'face': return '[QQ表情]'
       case 'reply': return '[引用消息]'
-      case 'mention': return '[提及成员]'
+      case 'mention': return `@${names.get(part.userId) ?? part.userId}`
       case 'forward': return `[合并转发：${part.nodes.length}条]`
       case 'forward-reference': return '[合并转发]'
     }

@@ -141,7 +141,13 @@ export function createNativeInboundController(options: {
       const wakeKind = nativeChatWakeKind(message.id, message.content, context.selfId)
       // Preserve a pure mention as a contact signal, including when QQ supplies no trailing space.
       const content = wakeKind ? message.content : message.content.filter(part => part.type !== 'mention' || part.userId !== context.selfId)
-      const activityContent = nativeActivityContent(content)
+      const history = current.history.snapshot(message.conversationId, { afterSequence: 0, limit: 100 })
+      const configuration = runtime.configuration
+      const personaId = configuredDefinition(configuration)?.personaId
+      const persona = configuration.personas.find(value => value.id === personaId)
+      const activityContent = nativeActivityContent(message.content, { selfId: context.selfId,
+        ...(persona ? { selfName: persona.name } : {}), members: [...history.messages,
+          { actor: message.userId, ...(message.displayName ? { displayName: message.displayName } : {}) }] })
       if (!wakeKind && await runtime.interactionMessages?.receive({ ...message, content }, context.signal)) {
         received++
         activity.record('received', message.conversationId, activityContent)
@@ -155,10 +161,6 @@ export function createNativeInboundController(options: {
       }
       received++
       activity.record('received', message.conversationId, activityContent)
-      const history = current.history.snapshot(message.conversationId, { afterSequence: 0, limit: 100 })
-      const configuration = runtime.configuration
-      const personaId = configuredDefinition(configuration)?.personaId
-      const persona = configuration.personas.find(value => value.id === personaId)
       const inputSettings = await readInputConfiguration(message.conversationId, persona?.name)
       const initialParticipation = nativeParticipation({ ...message, content }, history.messages,
         { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId) }, admittedAt)

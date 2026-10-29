@@ -1189,7 +1189,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           splitAgentMessage: output.split,
           followPool: { maxSessions: 16, isIdle: binding => executions?.forConversation(binding.conversationId) === null },
           transport: { capabilities: () => sourceTransport.capabilities!(), async send(request) {
-            const activityContent = nativeActivityContent(request.content)
+            const activityContent = nativeActivityContent(request.content, {
+              members: request.content.some(part => part.type === 'mention')
+                ? host?.history.snapshot(request.conversationId, { afterSequence: 0, limit: 100 }).messages ?? [] : [] })
             try {
               await checkpoint('send.before', { conversationId: request.conversationId, idempotencyKey: request.idempotencyKey,
                 content: json(request.content) }, request.signal)

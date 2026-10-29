@@ -52,6 +52,7 @@ function content(input: unknown): string | null {
   for (const part of input.slice(0, 8)) {
     if (!isRecord(part)) continue
     if (part.type === 'text' && typeof part.text === 'string') pieces.push(part.text.slice(0, 8192))
+    else if (part.type === 'mention' && typeof part.userId === 'string' && /^[1-9]\d{0,31}$/.test(part.userId)) pieces.push(`@${part.userId}`)
     else if (['image', 'audio', 'file', 'face', 'reply', 'mention', 'forward', 'forward-reference'].includes(String(part.type))) {
       pieces.push(({ image: '[图片]', audio: '[语音]', file: '[文件]', face: '[QQ表情]', reply: '[引用消息]',
         mention: '[提及成员]', forward: '[合并转发]', 'forward-reference': '[合并转发]' } as Record<string, string>)[String(part.type)])

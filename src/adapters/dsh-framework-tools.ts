@@ -12,7 +12,7 @@ export interface DshFrameworkToolPort {
   install(request: { issuerEpoch: string; sessionId: string; generation: number; tools: readonly FrameworkToolDefinition[] }, signal: AbortSignal):
     Promise<{ leaseId: string; sessionId: string; generation: number; names: readonly string[] }>
   withdraw(request: { issuerEpoch: string; sessionId: string; leaseId: string }, signal: AbortSignal): Promise<boolean>
-  poll(request: { issuerEpoch: string }, signal: AbortSignal): Promise<readonly FrameworkToolPendingCall[]>
+  poll(request: { issuerEpoch: string; waitMs?: number }, signal: AbortSignal): Promise<readonly FrameworkToolPendingCall[]>
   complete(request: { issuerEpoch: string; ticket: string; result: FrameworkToolResult }, signal: AbortSignal): Promise<boolean>
 }
 

@@ -110,13 +110,18 @@ export function createDshUnaryTransport(options: { readonly base: URL; readonly 
     pendingRpc += 1
     try {
       return await limited(async combined => {
+        const startedAt = performance.now()
         const credential = await authenticate(combined, method === '$events/result' ? 'answer' : 'none')
         combined.throwIfAborted()
+        // Leave response/transport headroom for deployments with short RPC deadlines.
+        const requestInput = method === 'bridgePlugin/pollFrameworkTools' && input && typeof input.waitMs === 'number'
+          ? { ...input, waitMs: Math.min(input.waitMs, Math.max(0, Math.floor((timeoutMs - (performance.now() - startedAt)) / 2))) }
+          : input
         const rpcId = randomUUID()
         const response = await fetch(new URL(`api/${method}`, base), {
           method: 'POST', redirect: 'error', signal: combined,
           headers: { 'content-type': 'application/json', cookie: credential },
-          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: input === undefined ? {} : direct ? input : { request: input } } }),
+          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: requestInput === undefined ? {} : direct ? requestInput : { request: requestInput } } }),
         })
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined)

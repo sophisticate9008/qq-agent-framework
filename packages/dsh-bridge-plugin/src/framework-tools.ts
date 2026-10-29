@@ -81,9 +81,14 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
   const leases = new Map<string, Lease>()
   const claims = new WeakMap<Agent, Claim>()
   const pending = new Map<string, Pending>()
+  const waiters = new Set<() => void>()
   let closed = false
   function epoch(value: string): void {
     if (closed || value !== options.issuerEpoch) throw new TypeError('Framework tool channel epoch changed')
+  }
+  function wake(): void { for (const notify of [...waiters]) notify() }
+  function page() {
+    return { schema: 1 as const, issuerEpoch: options.issuerEpoch, calls: [...pending.values()].map(entry => json(entry.wire)) }
   }
   function withdraw(lease: Lease): void {
     if (leases.get(lease.agent.id) === lease) leases.delete(lease.agent.id)
@@ -188,6 +193,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
                 timer = setTimeout(() => finish({ status: 'unknown', code: 'TOOL_HOST_TIMEOUT' }), spec.timeoutMs)
                 exec.signal.addEventListener('abort', abort, { once: true })
                 if (exec.signal.aborted) abort()
+                else wake()
               })
             } }
           lease.disposers.push(agent.ctx.tools.register(spec.registrationSource ? withToolRegistration(definition, spec.registrationSource) : definition))
@@ -215,7 +221,33 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
     },
     poll(request: { issuerEpoch: string }) {
       epoch(request.issuerEpoch)
-      return { schema: 1 as const, issuerEpoch: options.issuerEpoch, calls: [...pending.values()].map(entry => json(entry.wire)) }
+      return page()
+    },
+    async waitForCalls(request: { issuerEpoch: string; waitMs?: number }, signal: AbortSignal) {
+      epoch(request.issuerEpoch)
+      const waitMs = request.waitMs ?? 0
+      if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 10000) throw new TypeError('Invalid framework tool wait')
+      signal.throwIfAborted()
+      if (pending.size === 0 && waitMs > 0) {
+        if (waiters.size >= 32) throw new TypeError('Framework tool waiter capacity reached')
+        await new Promise<void>((resolve, reject) => {
+          const finish = () => {
+            clearTimeout(timer)
+            waiters.delete(finish)
+            signal.removeEventListener('abort', abort)
+            if (signal.aborted) reject(signal.reason)
+            else resolve()
+          }
+          const abort = () => finish()
+          const timer = setTimeout(finish, waitMs)
+          waiters.add(finish)
+          signal.addEventListener('abort', abort, { once: true })
+          if (signal.aborted) finish()
+        })
+      }
+      signal.throwIfAborted()
+      epoch(request.issuerEpoch)
+      return page()
     },
     async complete(request: FrameworkToolCompletion, signal: AbortSignal = new AbortController().signal) {
       epoch(request.issuerEpoch)
@@ -255,6 +287,6 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
       } else entry?.finish(value)
       return { schema: 1 as const, accepted: entry !== undefined }
     },
-    close(): void { closed = true; for (const lease of leases.values()) withdraw(lease) }
+    close(): void { closed = true; wake(); for (const lease of leases.values()) withdraw(lease) }
   })
 }

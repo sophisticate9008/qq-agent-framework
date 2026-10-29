@@ -270,9 +270,9 @@ export default class BridgePlugin extends TypertRemoteService {
   }
 
   @Remote('pollFrameworkTools')
-  pollFrameworkTools(request: { issuerEpoch: string }) {
-    this.assertOperator()
-    return this.frameworkTools.poll(request)
+  pollFrameworkTools(request: { issuerEpoch: string; waitMs?: number }) {
+    const invocation = this.assertOperator()
+    return this.frameworkTools.waitForCalls(request, invocation.signal)
   }
 
   @Remote('inspectFrameworkTools')

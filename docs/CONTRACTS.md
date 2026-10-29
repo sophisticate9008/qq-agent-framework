@@ -297,3 +297,9 @@ GIF 仍登记为当前会话的图片，不受视频观察开关影响。`qaf_me
 `GET /api/chat/plugin-sessions` 只读本地绑定及已创建会话登记；`GET /api/chat/plugin-sessions/models` 显式读取已配置模型。`POST /api/chat/plugin-sessions` 的 `create/bind/unbind/reconcile` 校验当前 `revision`，并保留历史；`reconcile` 不重新执行模型请求。`POST /api/chat/sessions/bind` 要求 QQ 完整绑定版本与目标实际会话 ID，核验目标存在、原绑定和执行状态后原子换绑。插件可以共享 QQ 会话，两个 QQ 地址不能绑定同一实际会话。
 
 模型从当前 QQ 会话请求自身换绑或解绑时，登记待执行操作，待当前聊天、发送和入站排空后再次核验主人和绑定版本再执行；未知结果不重放。待执行队列最多 64 项，已结束操作七天回收，未知操作保留。详见[插件能力与统一会话服务](PLUGIN_CAPABILITIES_AND_SESSIONS.md)与[插件模型](PLUGIN_MODELS.md)。
+
+## 空闲读取与工具等待
+
+`DurableStore.changeToken(namespace)` 是可选优化：令牌只在同一打开实例内比较相等，涵盖本连接该命名空间的提交及其他连接的数据库变更。它不表示 TTL 是否到期，不代替实际读取、权限或 CAS 校验。原生入站队列在令牌未变时只检查已知非空队列；不支持令牌的存储继续完整扫描。
+
+DSH 桥接插件的 `pollFrameworkTools` 接受可选 `waitMs`（0–10000 毫秒，默认 0）。空队列等待期间，新工具入队立即唤醒；取消和关闭清理等待器，每个通道最多 32 个等待器。宿主空闲时请求等待 1000 毫秒，并按实际 RPC 剩余期限进一步压缩等待；有执行中工具时沿用短轮询观察撤销与过期。旧插件忽略附加字段并保持原有轮询，调用票据、租约、来源校验和完成回执不变。

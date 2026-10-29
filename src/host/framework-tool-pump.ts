@@ -31,7 +31,11 @@ export function createFrameworkToolPump(options: {
   }
   async function tick(): Promise<void> {
     try {
-      const pending = await options.port.poll({ issuerEpoch: options.issuerEpoch }, lifetime.signal)
+      // Empty channels wait on the DSH side and wake as soon as a tool arrives.
+      // While executing, retain the short observation interval for withdrawal/expiry.
+      // Older bridge plugins ignore waitMs and retain their original polling behavior.
+      const pending = await options.port.poll({ issuerEpoch: options.issuerEpoch,
+        waitMs: active.size === 0 ? 1000 : 0 }, lifetime.signal)
       if (lifetime.signal.aborted) return
       const tickets = new Set(pending.map(entry => entry.ticket))
       for (const [ticket, entry] of active) if (!tickets.has(ticket)) entry.controller.abort()

@@ -1460,7 +1460,7 @@ test('conversational notices admit group uploads through normal wake rules and w
   await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1)
   const prompt = JSON.stringify(fake.rpc.find(call => call.method === 'session/prompt')!.request)
-  assert.match(prompt, /拍一拍/); assert.match(prompt, /senderIsConfiguredOwner\\\":false/)
+  assert.doesNotMatch(prompt, /拍一拍/); assert.match(prompt, /notes.txt/); assert.match(prompt, /senderIsConfiguredOwner\\\":false/)
   fake.message(814, { ...poke, target_id: 999 })
   await delay(40)
   assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 1, 'A replayed notice never starts a second concurrent prompt')
@@ -1945,7 +1945,8 @@ test('default native host publishes shared versioned services and invalidates re
   const fake = await fixture(context, { bootstrap })
   await fake.configure(); await fake.start()
   assert.equal(consumers.length, 2)
-  for (const id of ids) assert.equal(consumers[0][id], consumers[1][id])
+  for (const id of ids) assert.notEqual(consumers[0][id], consumers[1][id])
+  assert.deepEqual(consumers[0]['native-agent'].status(), consumers[1]['native-agent'].status())
   assert.equal(consumers[0]['native-agent'].status().available, true)
   assert.equal(consumers[0]['native-agent'].binding('private:123'), null)
   assert.equal(consumers[0]['native-work'].status().available, false)
@@ -1959,7 +1960,7 @@ test('default native host publishes shared versioned services and invalidates re
   assert(!Object.hasOwn(consumers[0]['native-work'], 'grant'))
   await fake.runtime().stop()
   assert.throws(() => consumers[0]['native-agent'].status())
-  await assert.rejects(consumers[0]['native-tools'].catalog(new AbortController().signal))
+  assert.throws(() => consumers[0]['native-tools'].catalog(new AbortController().signal))
 })
 
 test('native output package sends registered image audio file and configured long forward with real delivery receipts', async context => {

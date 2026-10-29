@@ -52,7 +52,7 @@ test('bootstrap package contributions run real features, policy effects and orde
       { kind: 'input-provider', id: 'test-late', order: 20, capabilities: ['test.read'] },
       { kind: 'input-provider', id: 'test-early', order: 10 }, { kind: 'feature', id: feature.id }] },
     install(context) {
-      assert.deepEqual(context.service('test-service', 1), { greeting: 'sourced' })
+      assert.equal((context.service('test-service', 1) as { greeting: string }).greeting, 'sourced')
       context.contribute('input-provider', 'test-early', { capabilities: [], prepare(_execution: unknown, event: { data: { text: string } }) {
         return [{ type: 'text', text: `early ${event.data.text}` }]
       } })

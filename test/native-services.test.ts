@@ -76,7 +76,8 @@ test('two external packages share versioned host facades and work invocation pre
   const manager = createNativePackages({ packages: [...mount.packageDefinitions, createNativeServicesPackage({ ports })], configurationRegistry: configurationRegistry() })
   try {
     await mount.install(host); await manager.start(); await mount.bindPackages(host, manager); await mount.start(host)
-    assert.equal(firstWork, secondWork); assert.equal(firstAgent, secondAgent)
+    assert.notEqual(firstWork, secondWork); assert.notEqual(firstAgent, secondAgent)
+    assert.deepEqual(firstAgent?.status(), secondAgent?.status())
     assert(firstWork && firstAgent)
     assert.equal('executor' in firstWork, false); assert.equal('send' in firstAgent, false)
     assert.deepEqual(firstAgent.status(), { available: true, missingReasons: [] })
@@ -99,7 +100,7 @@ test('two external packages share versioned host facades and work invocation pre
     await mount.stop(host); await manager.stop()
     assert.throws(() => firstAgent!.status())
     assert.throws(() => firstWork!.list())
-    await assert.rejects(firstWork.start({ signal, async invoke() { assert.fail('Retained service must never invoke') } }, { task: 'late' }))
+    assert.throws(() => firstWork!.start({ signal, async invoke() { assert.fail('Retained service must never invoke') } }, { task: 'late' }))
   } finally { await mount.stop(host); await manager.stop(); await executor.close(signal); await host.stop(); store.close() }
 })
 

@@ -397,7 +397,7 @@ async function run(): Promise<void> {
         assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
         {
           await visibleNavigator(page).getByRole('button').first().click();
-          assert.equal(await page.locator('[aria-label="本页目录"]:visible').count(), 0);
+          await page.locator('[aria-label="本页目录"]:visible').waitFor({ state: 'hidden' });
         }
       }
     }

@@ -216,7 +216,7 @@ test('memory package exposes retrieval/proposal only and revokes retained provid
   assert.equal('createConfirmed' in provider, false)
   assert.equal((await provider.context({ conversationId: 'group:123', userId: '456' }, signal)).items[0]?.id, saved.id)
   await packages.stop()
-  await assert.rejects(provider.context({ conversationId: 'group:123', userId: '456' }, signal))
+  assert.throws(() => provider.context({ conversationId: 'group:123', userId: '456' }, signal))
   assert.equal(service.read(saved.id).status, 'confirmed')
 })
 

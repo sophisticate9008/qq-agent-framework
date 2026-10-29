@@ -56,7 +56,8 @@ npm start
 | 排版、视频、动图与空间 | [图片排版](docs/MARKDOWN.md) · [视频](docs/VIDEO.md) · [GIF](docs/GIF.md) · [空间](docs/QZONE.md) |
 | QQ 协议基础能力与尚未接入项目 | [QQ 能力清单](docs/QQ_CAPABILITIES.md) |
 | 插件能力分层与会话服务设计 | [设计文档](docs/PLUGIN_CAPABILITIES_AND_SESSIONS.md) |
-| 全框架服务盘点与统一规范设计 | [服务规范](docs/SERVICE_CONVENTIONS.md) |
+| 框架服务契约、依赖与生命周期 | [服务规范](docs/SERVICE_CONVENTIONS.md) |
+| 插件热重载与完整示例 | [热重载服务](docs/RELOADABLE_SERVICES.md) · [示例](examples/reloadable-plugin/README.md) |
 | 编写扩展及使用 SDK | [扩展开发](docs/EXTENDING.md) · [SDK](packages/framework-sdk/README.md) |
 | 插件调度与空间日记实例 | [持久定时任务](docs/TRIGGERS.md) · [空间生活日记](plugins/qzone-diary/README.md) |
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |

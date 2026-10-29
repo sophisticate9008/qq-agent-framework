@@ -1,3 +1,7 @@
+import { createPluginUsageService } from './plugin-usage.ts'
+import { createPluginEventsService } from './plugin-events.ts'
+import { useService } from './service-contract.ts'
+import { CHAT_INPUT_SERVICE_CONTRACT, MEDIA_SERVICE_CONTRACT, MEMORY_SERVICE_CONTRACT, QZONE_SERVICE_CONTRACT } from './framework-service-contracts.ts'
 import { createOneBotCapabilitiesPort } from '../adapters/onebot-capabilities.ts'
 import { createPluginCapabilityService, type PluginCapabilityService } from './plugin-capability-service.ts'
 import { createPluginModelService, type PluginModelService } from './plugin-model-service.ts'
@@ -256,7 +260,26 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     const check = () => { signal.throwIfAborted(); assertActive(); if (closed) failure('PLUGIN_RUNTIME_UNAVAILABLE') }
     const capabilities = () => { check(); if (!pluginCapabilities) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginCapabilities.forPlugin(owner, signal, check) }
     const models = () => { check(); if (!pluginModels) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginModels.forPlugin(owner, signal) }
+    let usageClient: ReturnType<ReturnType<typeof createPluginUsageService>['forPlugin']> | undefined
+    let eventsClient: ReturnType<ReturnType<typeof createPluginEventsService>['forPlugin']> | undefined
+    const usage = () => { check(); if (!store) failure('PLUGIN_RUNTIME_UNAVAILABLE')
+      return usageClient ??= createPluginUsageService({ store }).forPlugin(owner, signal, check) }
+    const events = () => { check(); if (!store) failure('PLUGIN_RUNTIME_UNAVAILABLE')
+      return eventsClient ??= createPluginEventsService({ store, observer: { read: activity.events, subscribe: activity.subscribeEvents } }).forPlugin(owner, signal, check) }
     return Object.freeze({
+      usage: { list: query => usage().list(query), summary: query => usage().summary(query) },
+      events: { read: query => events().read(query), subscribe: query => events().subscribe(query) },
+      extensions: {
+        register(manager) {
+          check()
+          if (manager.id !== owner) failure('PLUGIN_EXTENSION_OWNER_MISMATCH')
+          const unregister = extensions.register(manager)
+          const dispose = () => { signal.removeEventListener('abort', dispose); unregister() }
+          signal.addEventListener('abort', dispose, { once: true })
+          return dispose
+        },
+        list() { check(); return extensions.list().filter(item => item.id === owner) }
+      },
       scheduler: { registerHandler: (kind, handler) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).registerHandler(kind, handler) },
         schedule: (input, options) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).schedule(input, options) },
         list: options => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).list(options) },
@@ -553,7 +576,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       && (options.readWorkEnabled ? await options.readWorkEnabled(controlLifetime.signal) : workMissingReasons.length === 0)
     return snapshot({ state, chatReady, runtimeConnected: chatReady, protocolConnected,
       configurationIssues, configurationCompatibility, configurationImpact, guard: configurationGuard.describe(),
-      packages: packages?.describe() ?? [], frameworkTools: frameworkTools?.describe() ?? null,
+      packages: packages?.describe() ?? [], services: packages?.services() ?? [], frameworkTools: frameworkTools?.describe() ?? null,
       reminders: reminders.status(),
       memory: memory.status(),
       sessionMigration: { eligible: !closed && state === 'stopped' && !adapterOperation && !starting && !stopping
@@ -1042,7 +1065,11 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             model: definition.model.name }),
           withSessionLease: (sessionId, signal, operation) => sessionTurns!.withSession(sessionId, signal, operation),
           isSessionBusy: sessionId => sessionTurns?.isBusy(sessionId) ?? false,
-          onUsage: event => recordUsage({ id: event.requestId, sessionId: event.sessionId, type: event.status, data: event.data }, event.owner) })
+          onUsage: event => {
+            recordUsage({ id: event.requestId, sessionId: event.sessionId, type: event.status, data: event.data }, event.owner)
+            activity.observe({ source: 'host', kind: 'execution', status: event.status === 'completed' ? 'completed' : 'failed',
+              correlation: { sessionId: event.sessionId, requestId: event.requestId } })
+          } })
         sessionIntents = createNativeSessionIntents({ store, signal: controller.signal,
           currentOwner: () => active?.access.owner ?? null,
           isReady: key => state === 'running' && !inbound.isProcessing(key) && !inbox?.hasPending(key)
@@ -1252,9 +1279,9 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         packageUnknown = packageStates.some(item => item.state === 'unknown')
         if (packageStates.some(item => item.state !== 'running')) failure('NATIVE_CHAT_PACKAGE_START_FAILED')
         await bootstrapMount?.bindPackages(host, packages)
-        inputPackage = packages.service('chat-input', 1) as NativeChatInputPackageService
-        media = packages.service('media', 1) as NativeMediaPackageService
-        memoryPackage = packages.service('memory', 1) as NativeMemoryPackageService
+        inputPackage = useService(packages, CHAT_INPUT_SERVICE_CONTRACT)
+        media = useService(packages, MEDIA_SERVICE_CONTRACT)
+        memoryPackage = useService(packages, MEMORY_SERVICE_CONTRACT)
         host.engine.install(reminderService.feature)
         quotedContext = createNativeQuotedContext({ protocol: { getMessage: request => readScopedProtocolMessage({
           ...request, port: readProtocol, store: store!, selfId, ...(accountScope ? { accountScope } : {}) }) }, selfId, register: media.register,
@@ -1819,7 +1846,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
       }
     },
     qzone(): QzoneToolPort | null {
-      return state === 'running' && packages ? packages.service('qzone', 1) as QzoneToolPort : null
+      return state === 'running' && packages ? useService(packages, QZONE_SERVICE_CONTRACT) : null
     },
     async verifyProtocolIdentity(expected: string, signal: AbortSignal) {
       if (closed || state !== 'stopped' || starting || stopping || adapterOperation || migrationOperation) failure('NATIVE_CHAT_BUSY')

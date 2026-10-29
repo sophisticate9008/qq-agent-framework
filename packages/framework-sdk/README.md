@@ -29,4 +29,10 @@ printf '安装包目录：%s\n' "$artifact_dir"
 
 完整示例、内容指纹、状态迁移、权限和多账号接入见 [扩展开发](https://github.com/sophisticate9008/qq-agent-framework/blob/main/docs/EXTENDING.md)。功能声明与安装不授予权限，可信本机扩展在宿主进程中执行；外部副作用仍经宿主与 policy。
 
+## 服务与热重载
+
+`host` 导出 `defineServiceContract`、`serviceDeclaration`、`publishService`、`publishScopedService` 和 `useService`，以及内置 `*_SERVICE_CONTRACT` 常量。包声明提供方依赖及需要的服务后，取得按生命周期检查的类型化接口。模型、协议、会话、日程、工具、媒体、用量、观察事件和重载登记均可通过 `plugin-runtime` 提供的契约接入。
+
+`createReloadableService` 为异步方法维护稳定入口，`createReloadableHandler` 将工具及定时回调绑定到当前实现；旧调用结束后再释放旧版本。工具 schema、依赖或注册结构变化需要完整应用。参见[服务规范](https://github.com/sophisticate9008/qq-agent-framework/blob/main/docs/SERVICE_CONVENTIONS.md)及[可运行的插件示例](https://github.com/sophisticate9008/qq-agent-framework/tree/main/examples/reloadable-plugin)。
+
 源码许可见随包 `LICENSE`，来源与第三方许可见随包 `NOTICE.md`。

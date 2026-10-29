@@ -52,3 +52,17 @@ export type { NativeImageReferenceReader } from '../contracts/native-media.ts';
 export type { FrameworkImageMediaType } from '../contracts/framework-media.ts';
 export { createPluginCapabilityService } from '../host/plugin-capability-service.ts';
 export type { PluginCapabilityService, PluginCapabilityClient, PluginCapabilityCatalogQuery, PluginCapabilityCall } from '../host/plugin-capability-service.ts';
+
+export { defineServiceContract, validateServiceContractImplementation } from '../contracts/service-contract.ts';
+export type { ServiceContract, ServiceMetadata, ServiceSnapshot } from '../contracts/service-contract.ts';
+export { serviceDeclaration, useService, publishService, publishScopedService } from '../host/service-contract.ts';
+export * from '../host/framework-service-contracts.ts';
+export * from '../host/plugin-service-contracts.ts';
+export type { NativeServiceConsumer } from '../host/native-packages.ts';
+export { createPluginRuntimePackage } from '../host/plugin-runtime-package.ts';
+export { createReloadableService, createReloadableHandler } from '../host/reloadable-service.ts';
+export type * from '../host/reloadable-service.ts';
+export { createPluginUsageService } from '../host/plugin-usage.ts';
+export type * from '../host/plugin-usage.ts';
+export { createPluginEventsService } from '../host/plugin-events.ts';
+export type * from '../host/plugin-events.ts';

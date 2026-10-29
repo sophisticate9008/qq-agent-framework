@@ -1,3 +1,7 @@
+import type { ServiceMetadata, ServiceSnapshot } from '../contracts/service-contract.ts'
+import { guardService } from './service-contract.ts'
+import { createPluginRuntimePackage } from './plugin-runtime-package.ts'
+import { PLUGIN_SERVICE_CONTRACTS } from './plugin-service-contracts.ts'
 import type { PluginRuntimeServices } from './plugin-runtime.ts'
 import { extensionMetadata, validExtensionMetadata } from '../contracts/extension-metadata.ts'
 import { FrameworkError, assert, errorCode, identifier, snapshot } from '../core/values.ts'
@@ -12,6 +16,21 @@ import { withDeadline } from './deadlines.ts'
 import { validatePackageConfigurationContribution, type PackageConfigurationContribution,
   type PackageConfigurationRegistry } from './package-configuration.ts'
 
+export interface NativeServiceConsumer {
+  readonly owner: string
+  readonly signal: AbortSignal
+  assertActive(): void
+}
+
+interface RegisteredService {
+  readonly owner: string
+  readonly version: number
+  readonly value?: unknown
+  readonly factory?: (consumer: NativeServiceConsumer) => unknown
+  readonly metadata?: ServiceMetadata
+  readonly clients: Map<string, unknown>
+}
+
 export interface NativePackageContext {
   readonly runtime?: PluginRuntimeServices
   readonly owner: string
@@ -25,7 +44,8 @@ export interface NativePackageContext {
   namespace(name: string): string
   store(store: DurableStore): DurableStore
   service(id: string, version: number): unknown
-  publish(id: string, version: number, value: unknown): void
+  publish(id: string, version: number, value: unknown, metadata?: ServiceMetadata): void
+  publishScoped(id: string, version: number, factory: (consumer: NativeServiceConsumer) => unknown, metadata?: ServiceMetadata): void
   contribute(kind: NativePackageManifest['contributions'][number]['kind'], id: string, value: unknown): void
   own(kind: NativePackageResourceKind, id: string, dispose: (signal: AbortSignal) => void | Promise<void>): void
 }
@@ -76,10 +96,11 @@ export function createNativePackages(options: {
   readonly signal?: AbortSignal
   readonly timeoutMs?: number
 }) {
-  const definitions: readonly NativePackageDefinition[] = options.packages
+  const definitions: readonly NativePackageDefinition[] = options.runtimeServices
+    ? [createPluginRuntimePackage(options.runtimeServices), ...options.packages] : options.packages
   const timeoutMs = options.timeoutMs ?? 10_000
   assert(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000, 'INVALID_TIMEOUT', 'A finite package timeout is required.')
-  assert(Array.isArray(options.packages) && options.packages.length <= 128, 'NATIVE_PACKAGE_MANIFEST_INVALID', 'Package declarations are bounded.')
+  assert(Array.isArray(options.packages) && definitions.length <= 128, 'NATIVE_PACKAGE_MANIFEST_INVALID', 'Package declarations are bounded.')
   const entries = new Map<string, Entry>()
   const serviceOwners = new Map<string, { owner: string; version: number }>()
   const contributionOwners = new Map<string, string>()
@@ -180,7 +201,7 @@ export function createNativePackages(options: {
     for (const item of registered) options.configurationRegistry.unregister(item.id, item.owner)
     throw error
   }
-  const services = new Map<string, { owner: string; version: number; value: unknown }>()
+  const services = new Map<string, RegisteredService>()
   const contributions = new Map<string, { owner: string; kind: NativePackageManifest['contributions'][number]['kind']; id: string; value: unknown }>()
   let startTask: Promise<readonly NativePackageSnapshot[]> | undefined
   let stopTask: Promise<readonly NativePackageSnapshot[]> | undefined
@@ -189,6 +210,37 @@ export function createNativePackages(options: {
     return snapshot(order.map(entry => ({ schema: 1 as const, id: entry.definition.manifest.id,
       version: entry.definition.manifest.version, ...extensionMetadata(entry.definition.manifest), dependencies: entry.definition.manifest.dependencies, state: entry.state, phase: entry.phase, reason: entry.reason,
       resources: entry.resources.map(({ id, kind, state }) => ({ id, kind, state })) })))
+  }
+  function resolveService(id: string, requestedVersion: number, consumer?: Entry): unknown {
+    const registered = services.get(id)
+    function active() {
+      consumer?.lifetime.signal.throwIfAborted()
+      if (stopping || !registered || services.get(id) !== registered || registered.version !== requestedVersion
+        || entries.get(registered.owner)?.state !== 'running'
+        || consumer && !['starting', 'running'].includes(consumer.state)) failure('NATIVE_PACKAGE_SERVICE_UNAVAILABLE')
+    }
+    active()
+    if (!registered) failure('NATIVE_PACKAGE_SERVICE_UNAVAILABLE')
+    if (registered.factory && !consumer) failure('NATIVE_PACKAGE_SERVICE_SCOPE_REQUIRED')
+    const owner = consumer?.definition.manifest.id ?? '@host'
+    if (registered.clients.has(owner)) return registered.clients.get(owner)
+    const value = registered.factory && consumer ? registered.factory({ owner, signal: consumer.lifetime.signal, assertActive: active }) : registered.value
+    const guarded = guardService(value, active)
+    registered.clients.set(owner, guarded)
+    return guarded
+  }
+  function describeServices(): readonly ServiceSnapshot[] {
+    return snapshot([...serviceOwners].map(([id, declaration]) => {
+      const entry = entries.get(declaration.owner)!
+      const registered = services.get(id)
+      return { id, version: declaration.version, owner: declaration.owner,
+        origin: options.bootstrapContent?.packageIds.includes(declaration.owner) ? 'extension' as const
+          : entry.definition.content?.identity.coverage === 'builtin-host-files' ? 'framework-builtin' as const : 'extension' as const,
+        state: entry.state === 'running' && registered ? 'ready' as const : registered ? 'registered' as const
+          : entry.state === 'registered' ? 'declared' as const : 'unavailable' as const,
+        scoped: Boolean(registered?.factory), description: registered?.metadata?.description ?? entry.definition.manifest.description ?? '',
+        methods: registered?.metadata?.methods ?? [] }
+    }))
   }
   function context(entry: Entry, phaseSignal?: AbortSignal, phaseName?: NativePackagePhase, migrationSignal?: AbortSignal): NativePackageContext {
     const manifest = entry.definition.manifest
@@ -220,8 +272,29 @@ export function createNativePackages(options: {
       },
       async reconcile(revision: number, operationId: string, current: AbortSignal) { migrating(); return owned.reconcile(revision, operationId, stateSignal(current)) }
     }) : undefined
+    function service(id: string, requestedVersion: number): unknown {
+      active()
+      if (!manifest.requires.some(item => item.id === id && item.version === requestedVersion)) failure('NATIVE_PACKAGE_SERVICE_UNDECLARED')
+      return resolveService(id, requestedVersion, entry)
+    }
+    function publish(id: string, publishedVersion: number, value: unknown, metadata?: ServiceMetadata,
+      factory?: (consumer: NativeServiceConsumer) => unknown): void {
+      active()
+      if (!manifest.provides.some(item => item.id === id && item.version === publishedVersion)) failure('NATIVE_PACKAGE_SERVICE_UNDECLARED')
+      if (services.has(id) || entry.resources.some(resource => resource.id === `service.${id}`)) failure('NATIVE_PACKAGE_SERVICE_DUPLICATE')
+      if (metadata && (typeof metadata.description !== 'string' || metadata.description.length > 500
+        || !Array.isArray(metadata.methods) || metadata.methods.length > 128
+        || !metadata.methods.every(method => typeof method === 'string' && /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(method)))) failure('SERVICE_METADATA_INVALID')
+      services.set(id, { owner: manifest.id, version: publishedVersion, value, factory,
+        ...(metadata ? { metadata: snapshot(metadata) } : {}), clients: new Map() })
+      entry.resources.push({ id: `service.${id}`, kind: 'service', state: 'active', dispose() { services.delete(id) } })
+    }
+    // The compatibility accessor resolves exactly the same declared, owner-bound services.
+    const runtime = options.runtimeServices ? Object.freeze(Object.defineProperties({}, Object.fromEntries(
+      Object.entries(PLUGIN_SERVICE_CONTRACTS).map(([name, contract]) => [name, { enumerable: true,
+        get: () => service(contract.id, contract.version) }])))) as PluginRuntimeServices : undefined
     return Object.freeze({ owner: manifest.id, signal, namespace, state,
-      ...(options.runtimeServices ? { runtime: options.runtimeServices(manifest.id, entry.lifetime.signal, active) } : {}),
+      ...(runtime ? { runtime } : {}),
       configuration: Object.freeze({
         async read(id: string) {
           active()
@@ -261,19 +334,10 @@ export function createNativePackages(options: {
           close() { /* Shared store lifetime belongs to the host. */ }
         } satisfies DurableStore)
       },
-      service(id, requestedVersion) {
-        active()
-        if (!manifest.requires.some(item => item.id === id && item.version === requestedVersion)) failure('NATIVE_PACKAGE_SERVICE_UNDECLARED')
-        const service = services.get(id)
-        if (!service || service.version !== requestedVersion || entries.get(service.owner)?.state !== 'running') failure('NATIVE_PACKAGE_SERVICE_UNAVAILABLE')
-        return service.value
-      },
-      publish(id, publishedVersion, value) {
-        active()
-        if (!manifest.provides.some(item => item.id === id && item.version === publishedVersion)) failure('NATIVE_PACKAGE_SERVICE_UNDECLARED')
-        if (services.has(id) || entry.resources.some(resource => resource.id === `service.${id}`)) failure('NATIVE_PACKAGE_SERVICE_DUPLICATE')
-        services.set(id, { owner: manifest.id, version: publishedVersion, value })
-        entry.resources.push({ id: `service.${id}`, kind: 'service', state: 'active', dispose() { services.delete(id) } })
+      service, publish,
+      publishScoped(id, publishedVersion, factory, metadata) {
+        if (typeof factory !== 'function') failure('SERVICE_IMPLEMENTATION_INVALID')
+        publish(id, publishedVersion, undefined, metadata, factory)
       },
       contribute(kind, id, value) {
         active()
@@ -391,7 +455,7 @@ export function createNativePackages(options: {
   }
   options.signal?.addEventListener('abort', () => { void stop() }, { once: true })
   if (options.signal?.aborted) void stop()
-  return Object.freeze({ start, stop, describe,
+  return Object.freeze({ start, stop, describe, services: describeServices,
     lifecycleEvidence(owner: string) {
       const entry = entries.get(owner)
       if (!entry) failure('NATIVE_PACKAGE_NOT_FOUND')
@@ -404,11 +468,7 @@ export function createNativePackages(options: {
         run: current => entry.lifecycle!.reconcile(revision, verify, current) })
       return entry.lifecycle.evidence()
     },
-    service(id: string, requestedVersion: number): unknown {
-      const service = services.get(id)
-      if (stopping || !service || service.version !== requestedVersion || entries.get(service.owner)?.state !== 'running') failure('NATIVE_PACKAGE_SERVICE_UNAVAILABLE')
-      return service.value
-    },
+    service(id: string, requestedVersion: number): unknown { return resolveService(id, requestedVersion) },
     contributions() { return Object.freeze([...contributions.values()].filter(item => entries.get(item.owner)?.state === 'running').map(item => Object.freeze({ ...item }))) }
   })
 }

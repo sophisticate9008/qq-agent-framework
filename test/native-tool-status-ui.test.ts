@@ -6,7 +6,7 @@ test('runtime installation parser keeps registered tools separate from projected
   assert.equal(parseNativeToolRuntimeStatus({ features: [{ id: 'media', status: 'available' }], capabilities: ['native.media.read'] }), null);
   const value = { packages: [{ schema: 1, id: 'media', version: '1.0.0', state: 'running', phase: null, reason: null,
     resources: [{ id: 'media-read', kind: 'contribution', state: 'active' }] }], frameworkTools: { schema: 1, available: true, reason: null,
-    channel: { state: 'idle', pending: 0, lastError: null }, tools: [{ name: 'qaf_media_read', capability: 'native.media.read' }], projections: 0 } };
+    channel: { state: 'idle', pending: 0, lastError: null }, tools: [{ name: 'qbf_media_read', capability: 'native.media.read' }], projections: 0 } };
   const result = parseNativeToolRuntimeStatus(value); assert(result);
   assert.equal(result.packages[0]?.state, 'running'); assert.equal(result.frameworkTools?.tools.length, 1);
   assert.equal(result.frameworkTools?.projections, 0); assert.equal(result.frameworkTools?.channel.state, 'idle');

@@ -100,7 +100,7 @@ function fixture(testContext: TestContext, options: {
   replyTimeoutNotice?: string | null;
   onFault?(code: string): void;
 }) {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-reply-deadline-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-reply-deadline-'));
   const store = createSqliteStore({ filename: join(directory, 'host.sqlite') });
   const agent = new ReplyAgent();
   const transport = new ReplyTransport();
@@ -207,7 +207,7 @@ test('additional accepted prompts do not extend the original reply deadline', as
 });
 
 test('restart restores a waiting watchdog and does not repeat a persisted timeout', async testContext => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-reply-restart-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-reply-restart-'));
   const filename = join(directory, 'host.sqlite');
   const notice = 'Restored reply deadline reached.';
   const firstStore = createSqliteStore({ filename });

@@ -27,7 +27,7 @@ function deferred<Value>(): Deferred<Value> {
 }
 
 function temporaryDatabase(): { directory: string; filename: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-sessions-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-sessions-'));
   return { directory, filename: join(directory, 'sessions.sqlite') };
 }
 

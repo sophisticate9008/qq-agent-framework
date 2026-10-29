@@ -31,7 +31,7 @@ function observeUsage(usage: Readonly<Record<string, unknown>>, parsed: ReturnTy
     ...Object.fromEntries(observedDetails.filter(key => Object.hasOwn(usage, key))
       .map(key => [key, numericFields(record(usage[key]), ['cached_tokens', 'cache_write_tokens', 'reasoning_tokens'])])) }
   pendingObservation = { filename, contents: JSON.stringify({ schema: 1, observedAt: new Date().toISOString(), rawUsage,
-    cacheReadReported: parsed.qafCacheReadReported, cacheWriteReported: parsed.qafCacheWriteReported }) + '\n' }
+    cacheReadReported: parsed.qbfCacheReadReported, cacheWriteReported: parsed.qbfCacheWriteReported }) + '\n' }
   if (observationWrite) return
   observationWrite = (async () => {
     while (pendingObservation) {
@@ -70,7 +70,7 @@ function usageCounts(usage: Readonly<Record<string, unknown>>) {
   const totalTokens = count(usage.total_tokens) ?? derivedTotal
     ?? (cached === undefined ? undefined : sum(cached, output)) ?? 0
   return { input, output, cacheRead, cacheWrite,
-    qafCacheReadReported: explicitHit !== undefined, qafCacheWriteReported: explicitWrite !== undefined,
+    qbfCacheReadReported: explicitHit !== undefined, qbfCacheWriteReported: explicitWrite !== undefined,
     reasoning: count(outputDetails.reasoning_tokens, completionDetails.reasoning_tokens) ?? 0,
     totalTokens }
 }
@@ -85,5 +85,5 @@ export function readResponsesUsage(value: unknown, observationFile?: URL) {
 /** Preserve Chat Completions' existing numeric mapping and attach only report presence. */
 export function readCacheUsagePresence(value: unknown, observationFile?: URL) {
   const parsed = readResponsesUsage(value, observationFile)
-  return { qafCacheReadReported: parsed.qafCacheReadReported, qafCacheWriteReported: parsed.qafCacheWriteReported }
+  return { qbfCacheReadReported: parsed.qbfCacheReadReported, qbfCacheWriteReported: parsed.qbfCacheWriteReported }
 }

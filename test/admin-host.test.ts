@@ -93,7 +93,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 async function startFixture(testContext: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-admin-host-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-admin-host-'));
   const store = createSqliteStore({ filename: join(directory, 'host.sqlite') });
   const context = createContextStore();
   const persona = context.registerPersona({

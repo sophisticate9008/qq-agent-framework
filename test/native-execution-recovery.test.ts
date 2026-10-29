@@ -38,9 +38,9 @@ async function fixture(context: TestContext, options: { lostFork?: boolean; reti
   const evidencePort:DshBridgePluginPort={async describe(){throw Error('unused')},async claimReceipts(){throw Error('unused')},async inspectScope(){throw Error('unused')},async inspectExecution(){return evidence}}
   let receipt:DshSessionMigrationReceipt|undefined
   const migrationPort:DshSessionMigrationPort={
-    async forkPreview(request){return {...request,migrationProtocol:'qaf-session-migration/1',issuerEpoch:'fresh-epoch',state:'available',sourceCursor:7,
+    async forkPreview(request){return {...request,migrationProtocol:'qbf-session-migration/1',issuerEpoch:'fresh-epoch',state:'available',sourceCursor:7,
       sourceDigest:'c'.repeat(64),targetRevision:'d'.repeat(64),missingReasons:[]}},
-    async forkWithPreset(request){forked++;receipt={...request,migrationProtocol:'qaf-session-migration/1',state:'completed',childSessionId:'new-session',idempotency:'created',missingReasons:[]}
+    async forkWithPreset(request){forked++;receipt={...request,migrationProtocol:'qbf-session-migration/1',state:'completed',childSessionId:'new-session',idempotency:'created',missingReasons:[]}
       if(options.lostFork)throw Error('lost receipt');return receipt},
     async inspectMigration(){inspected++;assert(receipt);return {...receipt,idempotency:'replayed'}}}
   function service(){return createNativeExecutionRecovery({store,evidencePort,migrationPort,issuerEpoch:'fresh-epoch',executions:controller,

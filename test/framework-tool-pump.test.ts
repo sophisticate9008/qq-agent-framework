@@ -7,7 +7,7 @@ import { awaitCondition } from './fixtures/await-condition.ts'
 
 const item: FrameworkToolPendingCall = { ticket: 'ticket-1', leaseId: 'projection-1', call: {
   id: 'call-1', sessionId: 'session-1', generation: 1, requestId: 'request-1', userMessageId: 'message-1',
-  turn: 0, name: 'qaf_media_inspect', input: { assetId: 'opaque' }, expiresAt: Date.now() + 1000 } }
+  turn: 0, name: 'qbf_media_inspect', input: { assetId: 'opaque' }, expiresAt: Date.now() + 1000 } }
 const signal = new AbortController().signal
 function port(poll: DshFrameworkToolPort['poll'], complete: DshFrameworkToolPort['complete']): DshFrameworkToolPort {
   return { poll, complete, async inspect() { throw new Error('unused') }, async install() { throw new Error('unused') }, async withdraw() { throw new Error('unused') } }

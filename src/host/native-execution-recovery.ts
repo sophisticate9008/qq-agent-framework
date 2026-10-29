@@ -171,7 +171,7 @@ export function createNativeExecutionRecovery(options: {
           let receipt: DshSessionMigrationReceipt
           try {
             receipt = first ? await options.migrationPort.forkWithPreset(plan.request,combined) : await options.migrationPort.inspectMigration(plan.request,combined)
-            assert(receipt.migrationProtocol === 'qaf-session-migration/1' && Object.entries(plan.request).every(([key,value]) => receipt[key as keyof typeof receipt] === value)
+            assert(receipt.migrationProtocol === 'qbf-session-migration/1' && Object.entries(plan.request).every(([key,value]) => receipt[key as keyof typeof receipt] === value)
               && receipt.state === 'completed' && reference(receipt.childSessionId) && receipt.childSessionId !== plan.binding.sessionId
               && ['created','replayed'].includes(receipt.idempotency) && receipt.missingReasons.length === 0,
             'EXECUTION_RECOVERY_RECEIPT_INVALID', 'Only a verified completed fork can become the successor binding.')

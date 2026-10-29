@@ -87,7 +87,7 @@ export async function prepareSimulationDsh(options: {
   browser.payload.secret = randomBytes(32).toString('base64url')
   const credentialsPath = join(home, '.credentials.yaml')
   await writeFile(credentialsPath, stringify(credentials), { mode: 0o600, flag: 'wx' })
-  await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'qaf-private-simulation', private: true,
+  await writeFile(join(profile, 'package.json'), JSON.stringify({ name: 'qbf-private-simulation', private: true,
     dsh: { profile: { bundles: packages.slice(0, 2) } } }, null, 2), { mode: 0o600, flag: 'wx' })
   await writeFile(join(profile, 'cordis.yml'), '[]\n', { mode: 0o600, flag: 'wx' })
   const profilePath = join(profile, 'cordis.patch.yml')
@@ -95,7 +95,7 @@ export async function prepareSimulationDsh(options: {
     { id: 'llm-pi-ai', config: provider.config },
     { id: 'session-title-llm', disabled: true },
     { id: 'tool-plugin-manager', disabled: true },
-    { insert: [{ id: 'qaf-bridge-evidence', name: '@qq-bridge-framework/dsh-bridge-plugin' }] }
+    { insert: [{ id: 'qbf-bridge-evidence', name: '@qq-bridge-framework/dsh-bridge-plugin' }] }
   ]), { mode: 0o600, flag: 'wx' })
   const port = await unusedPort()
   const endpoint = `http://127.0.0.1:${port}`

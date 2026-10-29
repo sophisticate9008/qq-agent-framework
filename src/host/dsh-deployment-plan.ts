@@ -157,7 +157,7 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
       || Object.keys(plugin).some(key => !['id', 'name', 'config', 'disabled'].includes(key))
       || plugin.disabled !== undefined && typeof plugin.disabled !== 'boolean')
       || new Set(presetPlugins.map(plugin => plugin.id)).size !== presetPlugins.length) missingReasons.push('invalid_preset_plugins')
-    const namespace = input.namespace ?? 'qqaf'
+    const namespace = input.namespace ?? 'qqbf'
     const conversationKinds = input.conversationKinds ?? ['group', 'private'] as const
     const preservedPresetBindings = input.preservedPresetBindings ?? []
     if (!Array.isArray(conversationKinds) || conversationKinds.length < 1 || conversationKinds.length > 2
@@ -207,7 +207,7 @@ export function prepareDshDeployment(input: DshDeploymentInput): DshDeploymentPr
       ...(input.protocolInstructions === '' ? [] : [input.protocolInstructions ?? NATIVE_CHAT_PROTOCOL_INSTRUCTIONS])].join('\n\n')
     if (/\{\{[\s\S]*?\}\}/.test(prompt)) missingReasons.push('literal_prompt_template_unsupported')
     if (missingReasons.length === 0 && target && provider && settings && definition.contextLimits) {
-      const credentialVersion = createHmac('sha256', provider.apiKey).update(`qqaf-dsh:${provider.id}`).digest('hex')
+      const credentialVersion = createHmac('sha256', provider.apiKey).update(`qqbf-dsh:${provider.id}`).digest('hex')
       const digest = createHash('sha256').update(JSON.stringify({ capacityPolicy: 'model-headroom/1', definition, settings, type: provider.type, api: provider.api, baseUrl: provider.baseUrl, namespace, credentialVersion })).digest('hex').slice(0, 24)
       const providerConfig = snapshot(target.providerConfig)
       const existingProviders = object(providerConfig.providers)

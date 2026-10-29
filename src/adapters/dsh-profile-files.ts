@@ -153,7 +153,7 @@ async function exclusiveWrite(filename: string, text: string): Promise<void> {
 }
 
 async function replace(filename: string, text: string): Promise<void> {
-  const temporary = `${filename}.qqaf-${randomUUID()}.tmp`
+  const temporary = `${filename}.qqbf-${randomUUID()}.tmp`
   try {
     await exclusiveWrite(temporary, text)
     await rename(temporary, filename)
@@ -202,7 +202,7 @@ async function writeProposal(target: DeploymentTarget, proposal: DshDeploymentPr
     const credentialText = String(current.credentials)
     parse(credentialText)
     const backupId = randomUUID()
-    for (const file of current.files.slice(-2)) await exclusiveWrite(`${file.path}.qqaf-backup-${backupId}${file.exists ? '' : '.absent'}`, file.text)
+    for (const file of current.files.slice(-2)) await exclusiveWrite(`${file.path}.qqbf-backup-${backupId}${file.exists ? '' : '.absent'}`, file.text)
     backedUp(backupId)
     signal.throwIfAborted()
     const recheck = await readProfile(target)

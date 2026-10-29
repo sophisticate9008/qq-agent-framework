@@ -9,7 +9,7 @@ import { createNativeUsage, NATIVE_USAGE_TURNS_NAMESPACE } from '../src/host/nat
 import { createNativeUsageMaintenance } from '../src/host/native-usage-maintenance.ts'
 
 test('simulated real usage preserves original price/time, isolates conversations and stays cleared', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'qaf-usage-'))
+  const root = await mkdtemp(join(tmpdir(), 'qbf-usage-'))
   const sourceDirectory = join(root, 'source')
   const simulationDirectory = join(root, 'qq-ABC123')
   await mkdir(sourceDirectory, { mode: 0o700 })

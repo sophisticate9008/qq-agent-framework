@@ -158,7 +158,7 @@ test('explicit long callback deadlines stay bounded and stop aborts immediately 
 });
 
 test('persistent once and daily rules resume after storage reopens without replaying completed work', async context => {
-  const directory = mkdtempSync(join(tmpdir(), 'qaf-plugin-schedule-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qbf-plugin-schedule-'));
   context.after(() => rmSync(directory, { force: true, recursive: true }));
   const filename = join(directory, 'scheduler.sqlite');
   let now = initial;

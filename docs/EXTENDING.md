@@ -67,7 +67,7 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 同样声明 `PLUGIN_TOOLS_SERVICE_CONTRACT`，使用 `useService(context, PLUGIN_TOOLS_SERVICE_CONTRACT).register({ id, description, parameters, permission, readOnly, execute })` 将工具加入二级目录，返回撤销函数，应交给 `context.own` 管理。`context.runtime.scheduler/tools` 是同一客户端的便利 getter，也要求对应 `requires`。宿主固定插件身份，完整名称为 `extension.<插件标识>.<id>`。`permission` 在工具说明之外声明：`owner` 核验当前 QQ 主人，`autonomous` 仍经过当前会话准入；定时任务直接使用插件宿主服务，不伪造 QQ 发言者。写调用按事件身份持久去重，未确认结果保留且不自动重放。
 
-模型通过 `qaf_capability_catalog` 查分类或搜索摘要，指定单个 `id` 才读取其参数，再用 `qaf_capability_call` 执行。二级目录条目不会额外投影到每轮顶层工具 schema；控制台仍显示其真实扩展来源。模型是否使用目录，需要结合实际会话及模型请求日志观察。
+模型通过 `qbf_capability_catalog` 查分类或搜索摘要，指定单个 `id` 才读取其参数，再用 `qbf_capability_call` 执行。二级目录条目不会额外投影到每轮顶层工具 schema；控制台仍显示其真实扩展来源。模型是否使用目录，需要结合实际会话及模型请求日志观察。
 
 可选的 `image-generation` v1 服务使用 `ImageGenerationService` 契约：接受提示词、稳定幂等键、主体选择和取消信号，返回原始图片字节、类型与 SHA-256，不隐式发送。服务实现由生图扩展提供，自己的形象参考可在服务内部组合；依赖它的业务插件无需复制 QQ 发送或会话鉴权链路。组合服务示例见 [空间生活日记](../examples/qzone-diary/README.md)，需安装者另行提供生图实现、素材与模型配置，不随框架自动启用。
 
@@ -83,7 +83,7 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 运行时最多允许一代旧实例排空；旧代尚有任务、清理尚未结束或清理失败时，后续重载明确拒绝。内容指纹相同返回 `changed: false` 并释放新准备的候选实例。清理失败会保留错误码和排空状态，`close()` 也会报告失败；关闭立即禁止新调用与版本切换，并等待进行中的准备、任务及清理。
 
-`qqagent extensions` 查询已登记实例，`qqagent extensions reload <插件标识>` 读取当前指纹后提交 CAS 重载。状态仅包含标识、显示名、当前指纹、活动调用、排空、重载和关闭状态及错误码。返回的 `currentRevision`、`changed`、`draining` 区分版本切换和旧任务排空；网络中断后先查状态，不自动重放写操作。
+`qqbridge-framework extensions` 查询已登记实例，`qqbridge-framework extensions reload <插件标识>` 读取当前指纹后提交 CAS 重载。状态仅包含标识、显示名、当前指纹、活动调用、排空、重载和关闭状态及错误码。返回的 `currentRevision`、`changed`、`draining` 区分版本切换和旧任务排空；网络中断后先查状态，不自动重放写操作。
 
 配置有各自的即时应用约定。当前生图配置 `generationAccess` 接受 `owner` 或 `whitelist`，执行时热读，保存后对后续权限检查生效；当前配置缺省为 `whitelist`。代码重载用于保持同一工具协议的实现更新。工具名称、输入输出 schema、依赖或注册结构变化需要完整应用插件装配，不能仅替换实例后声称工具目录已同步。
 
@@ -91,7 +91,6 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 当前 SDK 包为 `@qq-bridge-framework/sdk`，要求 Node.js 24.12.0 或更新版本。以下子路径有公开 `exports` 和声明文件：
 
-已有扩展可安装同版本旧包名兼容包，继续使用原导入路径，见 [名称与兼容升级](RENAMING.md)。
 
 | 导入路径 | 用途 |
 | --- | --- |
@@ -115,7 +114,7 @@ npm pack ./packages/framework-sdk --pack-destination /tmp
 # 在一个新的外部目录中
 npm init -y
 npm pkg set type=module
-npm install --ignore-scripts /tmp/qq-bridge-framework-sdk-1.4.0.tgz
+npm install --ignore-scripts /tmp/qq-bridge-framework-sdk-1.4.1.tgz
 npm install --save-dev typescript@5.9.3
 ```
 
@@ -529,7 +528,7 @@ export const writingPackage: NativePackageDefinition = {
 
 协议客户端的 `catalog({ id })` 读取具体参数；`call({ id, input, idempotencyKey })` 调用协议动作。写操作必须给稳定幂等键，重启后相同动作仍使用原键，不能为绕过未知结果换键重发。当前适配器按实际协议版本与能力清单开放；插件获得 `confirmed`、`rejected` 或 `unknown` 回执。插件可用协议原生本机文件参数处理自己生成的素材，不必伪造 QQ 发言或会话媒体资源。
 
-发送和收藏表情沿用这一客户端：`send_group_msg/send_private_msg` 及实际支持的转发动作；`fetch_custom_face/fetch_custom_face_detail/add_custom_face/delete_custom_face/set_custom_face_desc`。先读取实际参数，再提交稳定幂等键。直接协议发送不自动执行聊天排版、聊天 outbox 或历史追加；`chat-output` 只准备内容和分组。需要聊天发送语义的功能回调使用 `FeatureExecution.send`，模型使用 `qaf_reply`，这些入口继续走聊天 policy 与真实发送回执。
+发送和收藏表情沿用这一客户端：`send_group_msg/send_private_msg` 及实际支持的转发动作；`fetch_custom_face/fetch_custom_face_detail/add_custom_face/delete_custom_face/set_custom_face_desc`。先读取实际参数，再提交稳定幂等键。直接协议发送不自动执行聊天排版、聊天 outbox 或历史追加；`chat-output` 只准备内容和分组。需要聊天发送语义的功能回调使用 `FeatureExecution.send`，模型使用 `qbf_reply`，这些入口继续走聊天 policy 与真实发送回执。
 
 以下是已声明协议服务的任务回调片段；目标与业务操作标识来自插件自己的可信配置和持久业务记录：
 

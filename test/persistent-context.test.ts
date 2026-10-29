@@ -14,7 +14,7 @@ import { createSqliteStore } from '../src/storage/sqlite.ts';
 type ContextStore = ReturnType<typeof createContextStore>;
 
 function temporaryDatabase(): { directory: string; filename: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-context-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-context-'));
   return { directory, filename: join(directory, 'context.sqlite') };
 }
 

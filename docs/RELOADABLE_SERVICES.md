@@ -1,6 +1,6 @@
 # 稳定服务与可替换行为
 
-`createReloadableService` 复用现有扩展管理器，保持服务代理身份不变，在源码候选通过校验后切换实现。插件依旧使用 `createExtensionModuleLoader` 加载可信本机模块，使用宿主扩展登记服务接入现有 `qqagent extensions` 运维入口。
+`createReloadableService` 复用现有扩展管理器，保持服务代理身份不变，在源码候选通过校验后切换实现。插件依旧使用 `createExtensionModuleLoader` 加载可信本机模块，使用宿主扩展登记服务接入现有 `qqbridge-framework extensions` 运维入口。
 
 ```ts
 const { service, manager } = await createReloadableService({

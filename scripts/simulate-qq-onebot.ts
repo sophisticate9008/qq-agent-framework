@@ -124,7 +124,7 @@ export async function startSimulatedOneBot(options: {
     options.record({ type: 'protocol-action', action: name, params, source: 'simulation-fixture' })
     if (name === 'get_login_info') return { status: 'ok', retcode: 0, data: { user_id: Number(options.selfId), nickname: '模拟机器人' } }
     if (name === 'get_status') return { status: 'ok', retcode: 0, data: { online: true, good: true } }
-    if (name === 'get_version_info') return { status: 'ok', retcode: 0, data: { app_name: 'qaf-simulation', protocol_version: 'v11' } }
+    if (name === 'get_version_info') return { status: 'ok', retcode: 0, data: { app_name: 'qbf-simulation', protocol_version: 'v11' } }
     if (name === 'get_msg') {
       const message = messages.get(Number(params.message_id))
       return message ? { status: 'ok', retcode: 0, data: message } : { status: 'failed', retcode: 1404, data: null, message: 'simulation_message_not_found' }

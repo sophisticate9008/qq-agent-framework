@@ -163,7 +163,7 @@ async function fixture(name: string, settings: { turnTimeoutMs?: number; createD
   async function answer(sessionId: string, turn = 1, send = true) {
     const completedBefore = runtime.executions()?.list().filter(row => row.binding.sessionId === sessionId && row.status === 'completed').length ?? 0
     if (send) {
-    const ticket = plugin.queue(sessionId, 'qaf_reply', { content: 'offline final' })
+    const ticket = plugin.queue(sessionId, 'qbf_reply', { content: 'offline final' })
     await until(() => plugin.result(ticket) !== undefined)
     assert.equal(plugin.result(ticket)?.status, 'confirmed')
     }

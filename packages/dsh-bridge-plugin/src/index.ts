@@ -40,7 +40,7 @@ export default class BridgePlugin extends TypertRemoteService {
     const replyRepair = createReplyDecisionRepair({ current: agent => ctx.agents.get(SessionId(agent.id)) === agent,
       hasReplyLease: agent => {
         const current = ctx.agents.get(SessionId(agent.id))
-        return current === agent && this.frameworkTools.projectedNames(current).includes('qaf_reply')
+        return current === agent && this.frameworkTools.projectedNames(current).includes('qbf_reply')
       } })
     this.frameworkTools = createFrameworkToolChannel({ issuerEpoch: this.journal.issuerEpoch,
       getAgent: id => ctx.agents.get(SessionId(id)), onReplyAttempt: (agent, claim) => replyRepair.attempted(agent, claim) })
@@ -89,7 +89,7 @@ export default class BridgePlugin extends TypertRemoteService {
           throw new TypeError('Stored work GIF metadata changed')
       }
       return data
-    }, journal: createWorkJournal(join(resolveDshHome(), 'storages', 'qaf-work')), issuerEpoch: this.journal.issuerEpoch, getAgent: id => ctx.agents.get(SessionId(id)),
+    }, journal: createWorkJournal(join(resolveDshHome(), 'storages', 'qbf-work')), issuerEpoch: this.journal.issuerEpoch, getAgent: id => ctx.agents.get(SessionId(id)),
       runtime: () => ctx.get('subagents'), hasPreset: async id => (await ctx.agentPresets.list()).some(preset => preset.id === id),
       continuationAvailable: () => ctx.get('sessionPersistence') !== undefined && ctx.get('sessionQuery') !== undefined })
     const attachmentTools = new Map<string, () => void>()
@@ -127,7 +127,7 @@ export default class BridgePlugin extends TypertRemoteService {
       if (event.type === 'turn/end') { this.frameworkTools.endTurn(agent, event.data.turn); replyRepair.clear(agent) }
     })
     ctx.on('agent/turn-stopping', ({ agent, turn, signal }) => replyRepair.stopping(agent, turn, signal))
-    this.migrations = createMigrationJournal({ directory: join(resolveDshHome(), 'storages', 'qaf-session-migrations'),
+    this.migrations = createMigrationJournal({ directory: join(resolveDshHome(), 'storages', 'qbf-session-migrations'),
       issuerEpoch: this.journal.issuerEpoch, prepare: (request, signal) => prepareSdkMigration(ctx, request, signal) })
     this.scopeReader = createDshToolScopeReader({ sessionId: SessionId, agents: ctx.agents,
       agentPresets: ctx.agentPresets, tools: { schemas: agent => {
@@ -157,11 +157,11 @@ export default class BridgePlugin extends TypertRemoteService {
   @Remote('describe')
   describe() {
     this.assertOperator()
-    return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.0', sdkVersion: '0.2.1-rc.2',
+    return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1', sdkVersion: '0.2.1-rc.2',
       issuerEpoch: this.journal.issuerEpoch, authentication: 'dsh-owner-peer', retention: RECEIPT_LIMITS,
       migrationProtocol: MIGRATION_PROTOCOL, migrationApiVersion: 2,
-      frameworkToolProtocol: 'qq-agent-framework.tools/1',
-      workProtocol: 'qq-agent-framework.work/1', executionEvidenceProtocol: DSH_EXECUTION_EVIDENCE_PROTOCOL,
+      frameworkToolProtocol: 'qq-bridge-framework.tools/1',
+      workProtocol: 'qq-bridge-framework.work/1', executionEvidenceProtocol: DSH_EXECUTION_EVIDENCE_PROTOCOL,
       methods: ['bridgePlugin/inspectToolInventory', 'bridgePlugin/describe', 'bridgePlugin/inspectScope', 'bridgePlugin/claimReceipts',
         'bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration',
         'bridgePlugin/installFrameworkTools', 'bridgePlugin/withdrawFrameworkTools',

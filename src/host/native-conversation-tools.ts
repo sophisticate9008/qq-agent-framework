@@ -61,15 +61,15 @@ function cardInput(input: JsonValue): { card: string } {
   'INVALID_CONVERSATION_INPUT', 'Group card requires a single-line name of 1 to 30 characters.');
   return { card: input.card };
 }
-const source = { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' } as const;
+const source = { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' } as const;
 export const NATIVE_CONVERSATION_TOOLS: readonly NativeToolContribution[] = Object.freeze<readonly NativeToolContribution[]>([
-  { definition: { name: 'qaf_group_card', capability: 'native.conversation.card', featureId: 'framework-tools', timeoutMs: 35000,
+  { definition: { name: 'qbf_group_card', capability: 'native.conversation.card', featureId: 'framework-tools', timeoutMs: 35000,
     registrationSource: source,
     description: '修改机器人自己在当前群的群名片。card为1至30字的新名片；当前群和机器人账号由宿主确定，无需填写。可按人设自主选择，或执行真实主人的改名要求；普通群友的建议不等于必须执行的指令。只影响当前群，不改QQ昵称或其他成员名片。返回confirmed才表示已读回确认；unknown时不重复提交同一次修改。',
     parameters: { type: 'object', additionalProperties: false, required: ['card'], properties: {
       card: { type: 'string', minLength: 1, maxLength: 30 },
     } } }, validate: input => json(cardInput(input)) },
-  { definition: { name: 'qaf_conversation_query', capability: 'native.conversation.query', featureId: 'framework-tools', timeoutMs: 15000,
+  { definition: { name: 'qbf_conversation_query', capability: 'native.conversation.query', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source,
     description: '查询当前QQ会话：info为会话信息，members为当前群成员（可按昵称/群名片/QQ号搜索并分页），history为当前群或私聊最近最多10条消息，message按messageId读取当前会话单条消息，avatar获取QQ头像图片（userId省略取当前发言者，也可指定当前群成员或机器人自己），directories读取账号好友或群目录。头像和消息媒体返回可复用的会话assetId；获取图片不调用视觉或生图，不代表已经看懂，不自动发送。目录支持query/offset/limit，不要整份目录灌入回复。',
     parameters: { type: 'object', additionalProperties: false, required: ['kind'], properties: {
@@ -78,17 +78,17 @@ export const NATIVE_CONVERSATION_TOOLS: readonly NativeToolContribution[] = Obje
       offset: { type: 'integer', minimum: 0, maximum: 10000 }, limit: { type: 'integer', minimum: 1, maximum: 50 },
       messageId: { type: 'string', pattern: '^-?[1-9][0-9]{0,31}$' }, directory: { enum: ['friends', 'groups'] },
     } } }, validate: input => json(queryInput(input)) },
-  { definition: { name: 'qaf_poke', capability: 'native.conversation.poke', featureId: 'framework-tools', timeoutMs: 15000,
+  { definition: { name: 'qbf_poke', capability: 'native.conversation.poke', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source, description: '在当前QQ会话戳一戳。userId省略时戳当前真实发言者；私聊固定当前对端，群聊目标必须是当前群成员。根据真实协议回执报告成功或失败；结果unknown时不能重复提交同一次动作。',
     parameters: { type: 'object', additionalProperties: false, properties: { userId: { type: 'string', pattern: '^[1-9][0-9]{0,31}$' } } } },
     validate: input => json(pokeInput(input)) },
-  { definition: { name: 'qaf_reaction', capability: 'native.conversation.reaction', featureId: 'framework-tools', timeoutMs: 15000,
+  { definition: { name: 'qbf_reaction', capability: 'native.conversation.reaction', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source, description: '给当前QQ会话的真实消息贴QQ表情回应，或取消机器人自己的回应。action为add或remove，messageId来自当前会话消息，emojiId为QQ表情编号。宿主核验消息归属；remove只取消自己贴的同一表情。unknown时不重复提交同一次动作。',
     parameters: { type: 'object', additionalProperties: false, required: ['action', 'messageId', 'emojiId'], properties: {
       action: { enum: ['add', 'remove'] }, messageId: { type: 'string', pattern: '^-?[1-9][0-9]{0,31}$' },
       emojiId: { type: 'string', pattern: '^(0|[1-9][0-9]{0,31})$' },
     } } }, validate: input => json(reactionInput(input)) },
-  { definition: { name: 'qaf_recall', capability: 'native.conversation.recall', featureId: 'framework-tools', timeoutMs: 15000,
+  { definition: { name: 'qbf_recall', capability: 'native.conversation.recall', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source, description: '撤回当前QQ会话中机器人自己发送的一条消息。messageId须来自真实消息记录；先核对消息归属再执行，不能撤回其他发言者消息。结果unknown时不能重复提交同一次动作。',
     parameters: { type: 'object', additionalProperties: false, required: ['messageId'], properties: {
       messageId: { type: 'string', pattern: '^-?[1-9][0-9]{0,31}$' },

@@ -14,9 +14,8 @@ DSH 启动时会加载已启用的 MCP 服务；stdio 服务由 DSH 启动独立
 
 ## 版本与安装
 
-当前桥接插件是 `@qq-bridge-framework/dsh-bridge-plugin` **1.4.0**，适配官方 DSH SDK **0.2.1-rc.2** 和 Cordis **4.0.5**。框架要求 Node.js **24.12.0 及以上**。插件清单中的 SDK peer dependencies 使用精确版本；升级 SDK 后需重新验证协议和运行行为。
+当前桥接插件是 `@qq-bridge-framework/dsh-bridge-plugin` **1.4.1**，适配官方 DSH SDK **0.2.1-rc.2** 和 Cordis **4.0.5**。框架要求 Node.js **24.12.0 及以上**。插件清单中的 SDK peer dependencies 使用精确版本；升级 SDK 后需重新验证协议和运行行为。
 
-已有 DSH 使用旧加载名时，可安装同版本 `qq-agent-framework-dsh-bridge-plugin-1.4.0.tgz` 兼容包并沿用原 Loader 配置；新名与旧名插件只加载一份。详细步骤见 [名称与兼容升级](RENAMING.md)。
 
 ### 安全依赖覆盖
 
@@ -35,11 +34,11 @@ DSH 启动时会加载已启用的 MCP 服务；stdio 服务由 DSH 启动独立
 此示例是 npm 的根项目配置；其他包管理器使用自身的覆盖机制。如果宿主直接依赖 Zod，需同时核对直接版本与覆盖约束。更新后检查 `npm ls zod` 与 `npm audit`，并核对 DSH 的会话、工具和桥接加载。安装桥接 tarball 不会替宿主修改这些设置，框架也不会自动改写已运行实例的依赖。SDK 与 Cordis 的精确兼容版本保持不变。
 
 
-使用 pi-ai **1.4.0** 和 `@deepseek-ai/dsh-llm-pi-ai` **0.2.1-rc.2** 时，可在仓库根目录执行 `node scripts/patch-dsh-responses-usage.ts /absolute/path/to/dsh-node-project`，安装 Responses 与 Chat Completions 用量兼容解析器。脚本核对两个包的版本和解析块，为修改的三个文件保留 `.qaf-usage-original` 备份，编译 TypeScript helper 后逐文件原子替换；支持更新旧 Responses 补丁及重复执行。安装后按维护流程重启 DSH。
+使用 pi-ai **1.4.0** 和 `@deepseek-ai/dsh-llm-pi-ai` **0.2.1-rc.2** 时，可在仓库根目录执行 `node scripts/patch-dsh-responses-usage.ts /absolute/path/to/dsh-node-project`，安装 Responses 与 Chat Completions 用量兼容解析器。脚本核对两个包的版本和解析块，为修改的三个文件保留 `.qbf-usage-original` 备份，编译 TypeScript helper 后逐文件原子替换；支持更新旧 Responses 补丁及重复执行。安装后按维护流程重启 DSH。
 
 解析器保留上游是否明确报告缓存计数，明确的零也通过 DSH 标准可选字段传递；未报告的缓存读取保持未知。Responses 兼容标准及网关缓存、输入输出别名，Chat Completions 保留原有数值映射。请求协议由当前模型配置选择，安装补丁本身不切换协议。缓存分项未知时仍保留可确认的总输入和输出，历史账本与已有金额不重写。网关实际未报告的缓存量无法恢复，升级或重装依赖后需重新核对；版本或源码不符会拒绝安装。
 
-下一次实际模型调用后，pi-ai 的 `dist/api/qaf-provider-usage-observed.json` 保留最近一次上游用量诊断：只包含白名单数值计数、缓存报告标记及时间，不记录请求、正文或凭据。文件以 `0600` 权限原子覆盖，不累积历史；诊断写入失败不影响聊天。它用于区分网关缺少缓存字段与下游映射丢失。
+下一次实际模型调用后，pi-ai 的 `dist/api/qbf-provider-usage-observed.json` 保留最近一次上游用量诊断：只包含白名单数值计数、缓存报告标记及时间，不记录请求、正文或凭据。文件以 `0600` 权限原子覆盖，不累积历史；诊断写入失败不影响聊天。它用于区分网关缺少缓存字段与下游映射丢失。
 
 插件当前通过本仓库构建的 tarball 安装，未提供公开 npm 发布安装承诺。在框架仓库根目录执行以下命令可生成安装包：
 
@@ -54,7 +53,7 @@ printf '安装包目录：%s\n' "$artifact_dir"
 记下输出的 `.tgz` 绝对路径。在你管理的独立 DSH Node 项目目录中明确安装它，例如：
 
 ```sh
-npm install --ignore-scripts /absolute/path/qq-bridge-framework-dsh-bridge-plugin-1.4.0.tgz
+npm install --ignore-scripts /absolute/path/qq-bridge-framework-dsh-bridge-plugin-1.4.1.tgz
 ```
 
 安装前核对该实例的 SDK 版本与锁文件。安装包只包含公开清单及编译后的插件文件，不包含框架配置、凭据或会话数据。隔离打包验收会在临时项目中安装真实 tarball，核对既有依赖的版本和完整性，并运行官方 SDK 的加载及 owner 认证测试。
@@ -89,7 +88,7 @@ export async function loadFrameworkBridge(ctx: Context): Promise<void> {
 
 上例是经过测试的程序加载 API。现有 DSH 实例如何持久保存这段启动装配，应由该实例自己的启动管理方式决定。本框架没有提供已验证的通用永久 Cordis YAML 插入方案，不会在控制台连接或应用方案时自动安装 npm 包或首次加载插件。已受管实例在应用现有会话提示词或助手配置时，可能通过本机维护服务重启 DSH，见下文。
 
-插件通过 owner 认证后的 `bridgePlugin/describe` 声明 `qq-agent-framework.dsh-bridge/1`、插件和 SDK 版本、当前 `issuerEpoch` 及证据保留能力。普通模型工具调用者不能借用这个管理身份。
+插件通过 owner 认证后的 `bridgePlugin/describe` 声明 `qq-bridge-framework.dsh-bridge/1`、插件和 SDK 版本、当前 `issuerEpoch` 及证据保留能力。普通模型工具调用者不能借用这个管理身份。
 
 图片工具结果通过 Agent 上下文的 `get('attachments')` 获取可选附件服务，再保存为 SDK 图片附件。Agent 上下文未注入该服务，不能直接访问 `agent.ctx.attachments`。附件处理失败会结束当前工具调用并返回 SDK 错误码或 `TOOL_MEDIA_PROCESSING_FAILED`，不会将单次图片失败升级为整个工具通道故障；来源变化返回 `TOOL_MEDIA_SOURCE_CHANGED`，取消返回 `TOOL_CALL_CANCELLED`。
 
@@ -127,7 +126,7 @@ export async function loadFrameworkBridge(ctx: Context): Promise<void> {
 
 普通只读生效检查不重启 DSH。明确应用聊天方案或人设时，已有会话需要加载新提示词会调用受控本机重载；保存并启用助手时也可能触发加载。需要单独维护时，宿主可提供 `/api/chat/dsh/restart`：GET 只读返回可用性及原操作；POST 携带新的 `operationId` 和当前八份 `revisions`，建立持久维护操作。服务先停止并排空聊天，再重启已确认归属的本机 DSH，核验连接与配置，最后按原运行意图恢复聊天；已有待加载应用则核对并继续原应用，不重复 apply。没有待续行应用时，原来停止的聊天保持停止；已有等待加载的应用按原更新意图继续。维护完成提示不根据 `wasRunning` 推测聊天最终状态，会话历史保留。
 
-当前实际进程适配器通过服务端配置的本框架 `ops/qqagent` 管理入口，读取其 `describe --json` 实例标识，并核验文件权限、归属及 DSH 凭据目录与自动发现目标一致；原管理器保持兼容识别。浏览器不能指定命令或参数。本机实例必须能被识别并核验进程归属；进程缺失、完全宕机无法识别目标时，页面说明需先恢复服务，不承诺用重启入口盲目启动。远程 DSH、未配置管理器、目标不匹配、其他账号仍在使用同一实例或存在未排空工作时，入口不可用或拒绝维护。
+当前实际进程适配器通过服务端配置的本框架 `ops/qqbridge-framework` 管理入口，读取其 `describe --json` 实例标识，并核验文件权限、归属及 DSH 凭据目录与自动发现目标一致；原管理器保持兼容识别。浏览器不能指定命令或参数。本机实例必须能被识别并核验进程归属；进程缺失、完全宕机无法识别目标时，页面说明需先恢复服务，不承诺用重启入口盲目启动。远程 DSH、未配置管理器、目标不匹配、其他账号仍在使用同一实例或存在未排空工作时，入口不可用或拒绝维护。
 
 重启响应丢失或进程中断时，保留原操作；查询原 ID 或明确 POST `/api/chat/dsh/restart/reconcile`，body 为 `{ "operationId": "<原 UUID>" }`。核对不会再次执行 restart；证据允许时只继续验证与恢复，证据不足时保持未知。`restartExecutionVerified` 只记录重启命令是否已确认执行，不代表模型调用成功。 普通空查询不会解除未知状态；明确核对证实未受理并原子封存旧 ID 后，才允许新的明确重启，迟到旧请求保持拒绝。
 
@@ -137,7 +136,7 @@ export async function loadFrameworkBridge(ctx: Context): Promise<void> {
 
 框架会话的工具租约同时精简重复的旧桥工具：收件轮询、最近消息、提示词读取、普通回复、消息图片读取、唤醒配置与旧连接状态由现有宿主链路负责。这些工具仍保留全局注册，只在当前框架会话中隐藏；撤销租约时恢复，不改动其他预设、插件安装或授权。搜索、绘图以及其他独立扩展工具继续按原注册方式提供。精简减少后续模型请求中的工具定义，已有会话历史不因此删除，实际 token 用量以模型回报为准。
 
-`qaf_work_start` 是调用已配置助手模型的入口，工具说明附带已保存的助手称呼与模型。助手设置变化时，下一次提交更新工具定义；描述未变化时复用原租约，不在每轮聊天正文重复注入工作说明。聊天侧的文件访问限制不代表助手拥有相同限制，执行仍以助手实际工具和宿主授权为准。助手的文字结果自动回到原 QQ 会话；文件路径文字本身不是附件，只有实际 SDK 附件经过登记后才能按附件回传。
+`qbf_work_start` 是调用已配置助手模型的入口，工具说明附带已保存的助手称呼与模型。助手设置变化时，下一次提交更新工具定义；描述未变化时复用原租约，不在每轮聊天正文重复注入工作说明。聊天侧的文件访问限制不代表助手拥有相同限制，执行仍以助手实际工具和宿主授权为准。助手的文字结果自动回到原 QQ 会话；文件路径文字本身不是附件，只有实际 SDK 附件经过登记后才能按附件回传。
 
 DSH 原有工具清单单独核验。检查时只排除当前框架 lease 实际安装的工具名，不按任意名称前缀豁免其他工具。观察到外部工具清单不表示本框架核验了该工具的具体外部动作权限。
 

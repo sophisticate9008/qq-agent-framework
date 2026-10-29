@@ -1,6 +1,6 @@
 import type { JsonValue } from './data.ts'
 
-export const FRAMEWORK_MEDIA_PROTOCOL = 'qq-agent-framework.media-read/1' as const
+export const FRAMEWORK_MEDIA_PROTOCOL = 'qq-bridge-framework.media-read/1' as const
 export const FRAMEWORK_MEDIA_WIRE_BYTES = 512 * 1024
 export const FRAMEWORK_MEDIA_IMAGE_BYTES = 384 * 1024 - 1024
 export const FRAMEWORK_MEDIA_VIDEO_BYTES = 360 * 1024

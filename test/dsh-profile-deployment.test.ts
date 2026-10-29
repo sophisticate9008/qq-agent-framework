@@ -99,7 +99,7 @@ async function fixture(context: TestContext) {
     providers: [{ id: 'native-provider', name: 'Models', type: 'openai', baseUrl: 'https://models.example.test/v1', enabled: true,
       apiKey: 'private-model-fixture-key', models: [{ id: 'model-1', name: 'Model' }] }],
     deployment: { target: { profilePath, credentialsPath, layerPaths: [basePath], schemaVersion: '0.2.1-rc.2' },
-      modelSettings: { contextWindow: 512_000, maxTokens: 4096, reasoningEfforts: false }, namespace: 'qqaf' },
+      modelSettings: { contextWindow: 512_000, maxTokens: 4096, reasoningEfforts: false }, namespace: 'qqbf' },
     adapters: {
       dshAgent: { enabled: true, endpoint: `http://127.0.0.1:${address.port}`, auth: 'cookie:operator=fixture' },
       onebotHttp: { enabled: false, endpoint: '', secret: '' }, onebotWs: { enabled: false, endpoint: '', secret: '' },
@@ -146,7 +146,7 @@ test('real profile callback previews, applies CAS backups and independently veri
   assert.equal(object(credentials.refs).UNRELATED_KEY, 'private-unrelated-key')
   assert.equal(credentials.foreign, 'keep-me')
   const files = await readdir(data.directory)
-  const backups = files.filter(file => file.includes('.qqaf-backup-'))
+  const backups = files.filter(file => file.includes('.qqbf-backup-'))
   assert.equal(backups.length, 2)
   for (const file of backups) assert.equal((await stat(join(data.directory, file))).mode & 0o777, 0o600)
   assert(!files.some(file => file.endsWith('.lock')))
@@ -181,7 +181,7 @@ test('profile CAS includes both files and explicit layers and refuses stale prev
     await writeFile(path, `${before}\n# independent edit\n`, { mode: 0o600 })
     assert.equal(object(await deployment.apply(data.configuration, new AbortController().signal, String(prepared.targetRevision))).state, 'conflict')
     assert((await readFile(path, 'utf8')).endsWith('# independent edit\n'))
-    assert(!(await readdir(data.directory)).some(file => file.includes('.qqaf-backup-')))
+    assert(!(await readdir(data.directory)).some(file => file.includes('.qqbf-backup-')))
   }
 })
 
@@ -248,7 +248,7 @@ test('file application requires the exact approved target revision even when ano
   assert.notEqual(first.targetRevision, second.targetRevision)
   const result = object(await deployment.apply(data.configuration, new AbortController().signal, String(first.targetRevision)))
   assert.equal(result.state, 'conflict')
-  assert(!(await readdir(data.directory)).some(file => file.includes('.qqaf-backup-')))
+  assert(!(await readdir(data.directory)).some(file => file.includes('.qqbf-backup-')))
   await deployment.prepare(data.configuration)
   assert.equal(object(await deployment.apply(data.configuration, new AbortController().signal)).state, 'conflict')
 })
@@ -343,7 +343,7 @@ test('capability approved composition survives actual profile CAS, backups and l
   assert.notEqual(again.targetRevision, data.prepared.targetRevision)
   assert.deepEqual(object(again.preview).presets, presets)
   const files = await readdir(data.directory)
-  assert.equal(files.filter(filename => filename.includes('.qqaf-backup-')).length, 2)
+  assert.equal(files.filter(filename => filename.includes('.qqbf-backup-')).length, 2)
   assert.equal(data.requests.length, 0)
   assert(data.calls.every(method => ['settings/describe', 'agentPresets/list', 'agentPresets/read', 'credentials/describe'].includes(method)))
   assert(!JSON.stringify(result).includes('private-model-fixture-key'))
@@ -369,7 +369,7 @@ test('capability source drift or unreadable metadata between preview and apply n
     const result = object(await data.deployment.apply(data.configuration, new AbortController().signal, String(data.prepared.targetRevision)))
     assert.equal(result.state, 'blocked')
     assert.equal(await readFile(data.profilePath, 'utf8'), before)
-    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqaf-backup-')))
+    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqbf-backup-')))
     const reconciled = await data.deployment.reconcile(data.configuration)
     assert.equal(reconciled.presetBindings.length, 0)
   }
@@ -387,7 +387,7 @@ test('capability unknown write verification is not replayed and later reconcilia
   data.loaded(true)
   assert.deepEqual((await data.deployment.reconcile(data.configuration)).missingReasons, [])
   assert.equal(await readFile(data.profilePath, 'utf8'), written)
-  assert.equal((await readdir(data.directory)).filter(filename => filename.includes('.qqaf-backup-')).length, 2)
+  assert.equal((await readdir(data.directory)).filter(filename => filename.includes('.qqbf-backup-')).length, 2)
 })
 
 
@@ -419,8 +419,8 @@ test('whitelist configured selection applies and reconciles real profile without
     assert.equal(resolverCalls, 0)
     assert.equal(data.requests.length, 0)
     const files = await readdir(data.directory)
-    assert.deepEqual(files.filter(filename => !filename.includes('.qqaf-backup-')).sort(), originalFiles)
-    assert.equal(files.filter(filename => filename.includes('.qqaf-backup-')).length, 2)
+    assert.deepEqual(files.filter(filename => !filename.includes('.qqbf-backup-')).sort(), originalFiles)
+    assert.equal(files.filter(filename => filename.includes('.qqbf-backup-')).length, 2)
     const profile = await readFile(data.profilePath, 'utf8')
     assert(profile.includes('@operator/mature-work'))
     for (const key of ['authority:', 'approvalId:', 'capabilityApproval:']) assert(!profile.includes(key))
@@ -454,7 +454,7 @@ test('whitelist configured selection still rejects source drift or unreadable so
     assert.deepEqual(result.missingReasons, ['capability_source_unverified'])
     assert.equal(await readFile(data.profilePath, 'utf8'), profile)
     assert.equal(await readFile(data.credentialsPath, 'utf8'), credentials)
-    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqaf-backup-')))
+    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqbf-backup-')))
     assert.equal((await deployment.reconcile(configuration)).presetBindings.length, 0)
   }
 })
@@ -480,7 +480,7 @@ test('whitelist configured selection preserves exact target CAS and native confi
       : changed === 'revision' ? 'deployment_preview_revision_conflict' : 'deployment_revision_conflict'])
     assert.equal(await readFile(data.profilePath, 'utf8'), profile)
     assert.equal(await readFile(data.credentialsPath, 'utf8'), credentials)
-    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqaf-backup-')))
+    assert(!(await readdir(data.directory)).some(filename => filename.includes('.qqbf-backup-')))
   }
 })
 
@@ -501,5 +501,5 @@ test('whitelist configured selection keeps pending live verification non-replaye
   data.capabilityDocuments.set('operator-work', '[]')
   assert.equal((await deployment.reconcile(configuration)).presetBindings.length, 0)
   assert.equal(await readFile(data.profilePath, 'utf8'), written)
-  assert.equal((await readdir(data.directory)).filter(filename => filename.includes('.qqaf-backup-')).length, 2)
+  assert.equal((await readdir(data.directory)).filter(filename => filename.includes('.qqbf-backup-')).length, 2)
 })

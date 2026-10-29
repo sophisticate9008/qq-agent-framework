@@ -4,7 +4,7 @@ import { createFrameworkToolRegistry } from '../src/host/framework-tools.ts'
 import type { FrameworkToolCall, FrameworkToolDefinition } from '../src/contracts/framework-tools.ts'
 import { FrameworkError } from '../src/core/values.ts'
 
-const definition: FrameworkToolDefinition = { name: 'qaf_media_inspect', description: 'Read registered media facts in the current QQ conversation.',
+const definition: FrameworkToolDefinition = { name: 'qbf_media_inspect', description: 'Read registered media facts in the current QQ conversation.',
   parameters: { type: 'object', properties: { assetId: { type: 'string' } }, required: ['assetId'], additionalProperties: false },
   featureId: 'media-tools', capability: 'media.inspect', timeoutMs: 1000 }
 const call = (changes: Partial<FrameworkToolCall> = {}): FrameworkToolCall => ({ id: 'call-1', name: definition.name,

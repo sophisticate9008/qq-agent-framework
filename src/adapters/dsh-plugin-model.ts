@@ -57,7 +57,7 @@ export function createDshPluginModelBackend(options: {
       let pendingStart: DshSessionEvent | undefined
       const pending: Record<string, boolean[]> = { 'next-turn': [], 'next-step': [] }
       const matchesSource = (message: unknown) => isRecord(message) && isRecord(message.source)
-        && message.source.kind === 'qaf-plugin' && message.source.owner === request.owner && message.source.requestId === request.requestId
+        && message.source.kind === 'qbf-plugin' && message.source.owner === request.owner && message.source.requestId === request.requestId
       const adapter = createDshAdapter({
         createSession: input => options.client.createSession(input), prompt: input => options.client.prompt(input),
         cancel: input => options.client.cancel(input),

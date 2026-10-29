@@ -17,7 +17,7 @@ const server = await createServer({
   server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
 });
 let browser: Browser | undefined;
-const evidenceDirectory = process.env.QQ_AGENT_UI_EVIDENCE_DIR;
+const evidenceDirectory = process.env.QQ_BRIDGE_FRAMEWORK_UI_EVIDENCE_DIR;
 if (evidenceDirectory && !isAbsolute(evidenceDirectory)) throw new Error('execution_evidence_directory_must_be_absolute');
 try {
   await server.listen();

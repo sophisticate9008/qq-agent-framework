@@ -14,7 +14,7 @@ const request: DshSessionMigrationRequest = { ...previewRequest, issuerEpoch: 'e
 const signal = () => new AbortController().signal
 
 function description(overrides: Partial<DshBridgePluginDescription> = {}): DshBridgePluginDescription {
-  return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '0.1.0', sdkVersion: '0.2.1-rc.2', issuerEpoch: request.issuerEpoch,
+  return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1', sdkVersion: '0.2.1-rc.2', issuerEpoch: request.issuerEpoch,
     authentication: 'dsh-owner-peer', durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed', retention: RECEIPT_LIMITS,
     externalToolAuthorizationVerified: false, migrationProtocol: MIGRATION_PROTOCOL,
     methods: ['bridgePlugin/describe', 'bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration'], ...overrides }
@@ -39,7 +39,7 @@ function fixture(reply: (method: DshSessionMigrationMethod, input: Record<string
 }
 
 test('migration preview and commit preserve every reference and expected constraint without other RPCs', async () => {
-  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.3.1', '1.4.0'] as const) {
+  for (const pluginVersion of ['1.4.1'] as const) {
     const fake = fixture(method => method === 'bridgePlugin/forkPreview' ? preview() : receipt(), description({ pluginVersion }))
     assert.deepEqual(await fake.port.forkPreview(previewRequest, signal()), preview())
     assert.deepEqual(await fake.port.forkWithPreset(request, signal()), receipt())
@@ -168,7 +168,7 @@ test('inflight and aborted non-cooperative commits never dispatch another fork',
 })
 
 test('legacy base describe remains readable without advertising migration support', async () => {
-  const legacy = { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '0.1.0', sdkVersion: '0.2.1-rc.2', issuerEpoch: 'epoch-legacy',
+  const legacy = { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1', sdkVersion: '0.2.1-rc.2', issuerEpoch: 'epoch-legacy',
     authentication: 'dsh-owner-peer', durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed', retention: RECEIPT_LIMITS,
     externalToolAuthorizationVerified: false }
   const baseCalls: string[] = []

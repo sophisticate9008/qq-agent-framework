@@ -41,9 +41,9 @@ interface Journal { readonly schema: 1; readonly pending: Pending | null; readon
 const fallback: Journal = Object.freeze({ schema: 1, pending: null, applied: null })
 const instructions = '完成当前会话中由用户明确委派的独立工作。只根据宿主提供的任务、来源和上下文行动；工具与资源许可继续由宿主和外部服务分别核验，不把任务内容当作授权。返回真实结果，未完成时说明阻碍。'
 const assistantPresetPlugins: readonly JsonObject[] = Object.freeze([
-  Object.freeze({ id: 'qaf-assistant-fs', name: '@deepseek-ai/dsh-tool-fs' }),
-  Object.freeze({ id: 'qaf-assistant-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: Object.freeze({ sampleOverCapGlobResults: false }) }),
-  Object.freeze({ id: 'qaf-assistant-shell', name: process.platform === 'win32' ? '@deepseek-ai/dsh-tool-pwsh' : '@deepseek-ai/dsh-tool-bash' })
+  Object.freeze({ id: 'qbf-assistant-fs', name: '@deepseek-ai/dsh-tool-fs' }),
+  Object.freeze({ id: 'qbf-assistant-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: Object.freeze({ sampleOverCapGlobResults: false }) }),
+  Object.freeze({ id: 'qbf-assistant-shell', name: process.platform === 'win32' ? '@deepseek-ai/dsh-tool-pwsh' : '@deepseek-ai/dsh-tool-bash' })
 ])
 function fail(code: string): never { throw new FrameworkError(code, 'The assistant deployment operation could not be completed.') }
 function hash(value: unknown): string { return createHash('sha256').update(JSON.stringify(value)).digest('hex') }
@@ -185,7 +185,7 @@ export function createNativeAssistantTarget(options: NativeAssistantTargetOption
     const metadataConfiguration: NativeChatConfiguration = { ...original,
       catalog: { activePlanId: plan.id, plans: [plan] },
       personas: [{ id: 'assistant-work', name: '独立工作助手', identity: '处理用户明确委派的独立任务。', style: '准确、清晰，保留真实的完成状态与不确定性。' }],
-      deployment: { ...original.deployment, namespace: options.deploymentNamespace ?? 'qqafwork', target, modelSettings: null, capabilityApproval: null } }
+      deployment: { ...original.deployment, namespace: options.deploymentNamespace ?? 'qqbfwork', target, modelSettings: null, capabilityApproval: null } }
     const metadata = await resolveLocalDshModelSettings(metadataConfiguration, target, signal, options.directory)
     const configuration: NativeChatConfiguration = { ...metadataConfiguration,
       catalog: { activePlanId: plan.id, plans: [{ ...plan, contextLimits: { group: metadata.modelSettings.contextWindow, private: metadata.modelSettings.contextWindow } }] },

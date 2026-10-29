@@ -8,7 +8,7 @@ import type { JsonValue } from '../src/core/types.ts';
 import { createSqliteStore } from '../src/storage/sqlite.ts';
 
 function temporaryDatabase(): { directory: string; filename: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-store-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-store-'));
   return { directory, filename: join(directory, 'store.sqlite') };
 }
 

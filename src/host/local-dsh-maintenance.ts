@@ -19,7 +19,7 @@ export function createLocalDshMaintenance(serviceManager?: string) {
     const manager = await realpath(serviceManager)
     const metadata = await lstat(manager)
     assert(metadata.isFile() && metadata.nlink === 1 && (metadata.mode & 0o022) === 0 && (metadata.mode & 0o111) !== 0
-      && metadata.uid === process.getuid?.() && ['qqagent', 'qqbridge'].includes(basename(manager)) && basename(dirname(manager)) === 'ops',
+      && metadata.uid === process.getuid?.() && basename(manager) === 'qqbridge-framework' && basename(dirname(manager)) === 'ops',
     'LOCAL_DSH_MANAGER_UNSUPPORTED', 'The configured manager is not a supported local DSH manager.')
     const root = dirname(dirname(manager))
     for (const directory of [root, dirname(manager)]) {
@@ -27,19 +27,16 @@ export function createLocalDshMaintenance(serviceManager?: string) {
       assert(info.isDirectory() && (info.mode & 0o022) === 0 && info.uid === process.getuid?.(),
         'LOCAL_DSH_MANAGER_UNSAFE', 'The trusted manager directory is not private to its owner.')
     }
-    let dshHome = join(root, 'dsh', 'home')
-    if (basename(manager) === 'qqagent') {
-      const description = await execute(manager, ['describe', '--json'], { cwd: root, signal, timeout: 10_000, maxBuffer: 16 * 1024 })
-      const value: unknown = JSON.parse(description.stdout)
-      assert(value !== null && typeof value === 'object' && 'schema' in value && value.schema === 1
-        && 'kind' in value && value.kind === 'qq-agent-framework' && 'dshHome' in value
-        && typeof value.dshHome === 'string' && isAbsolute(value.dshHome) && !value.dshHome.includes('\0'),
-      'LOCAL_DSH_MANAGER_UNSUPPORTED', 'The configured manager did not identify its DSH instance.')
-      dshHome = await realpath(value.dshHome)
-      const homeMetadata = await lstat(dshHome)
-      assert(homeMetadata.isDirectory() && (homeMetadata.mode & 0o022) === 0 && homeMetadata.uid === process.getuid?.(),
-        'LOCAL_DSH_MANAGER_UNSAFE', 'The DSH directory is not owner-controlled.')
-    }
+    const description = await execute(manager, ['describe', '--json'], { cwd: root, signal, timeout: 10_000, maxBuffer: 16 * 1024 })
+    const value: unknown = JSON.parse(description.stdout)
+    assert(value !== null && typeof value === 'object' && 'schema' in value && value.schema === 1
+      && 'kind' in value && value.kind === 'qq-bridge-framework' && 'dshHome' in value
+      && typeof value.dshHome === 'string' && isAbsolute(value.dshHome) && !value.dshHome.includes('\0'),
+    'LOCAL_DSH_MANAGER_UNSUPPORTED', 'The configured manager did not identify its DSH instance.')
+    const dshHome = await realpath(value.dshHome)
+    const homeMetadata = await lstat(dshHome)
+    assert(homeMetadata.isDirectory() && (homeMetadata.mode & 0o022) === 0 && homeMetadata.uid === process.getuid?.(),
+      'LOCAL_DSH_MANAGER_UNSAFE', 'The DSH directory is not owner-controlled.')
     const adapter = configuration.adapters.dshAgent
     assert(adapter.enabled && adapter.localCredentialsPath, 'LOCAL_DSH_RESTART_UNAVAILABLE', 'Local DSH discovery is required.')
     const target = await discoverLocalDshDeployment({ endpoint: adapter.endpoint, localCredentialsPath: adapter.localCredentialsPath, signal })

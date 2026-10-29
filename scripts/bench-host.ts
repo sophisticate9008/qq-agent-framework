@@ -143,7 +143,7 @@ async function exercise(
 async function main(): Promise<void> {
   const iterations = iterationsFromEnvironment();
   const warmup = Math.min(50, Math.max(20, Math.floor(iterations / 10)));
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-bench-host-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-bench-host-'));
   const filename = join(directory, 'host.sqlite');
   const store = createSqliteStore({ filename });
   const agent = new FakeAgent();

@@ -103,7 +103,7 @@ function requestFor(binding: NativeSessionMigrationBinding): DshSessionMigration
 
 function verifyReceipt(receipt: DshSessionMigrationReceipt, binding: NativeSessionMigrationBinding): void {
   const expected = requestFor(binding)
-  if (receipt.migrationProtocol !== 'qaf-session-migration/1'
+  if (receipt.migrationProtocol !== 'qbf-session-migration/1'
     || Object.entries(expected).some(([key, value]) => digest(receipt[key as keyof DshSessionMigrationRequest] ?? null) !== digest(value))
     || receipt.state === 'completed' && (!reference(receipt.childSessionId) || receipt.childSessionId === binding.sourceSessionId)) {
     migrationFailure('NATIVE_SESSION_MIGRATION_RECEIPT_INVALID')
@@ -220,7 +220,7 @@ async function preparePlan(options: NativeSessionMigrationOptions,
     const preview = await options.port.forkPreview(request, options.signal).catch(() => null)
     if (!preview) return blocked(options, ['migration_plugin_unavailable'])
     if (preview.state !== 'available') return blocked(options, ['migration_source_or_target_unavailable', ...preview.missingReasons].slice(0, 32))
-    if (preview.migrationProtocol !== 'qaf-session-migration/1' || preview.sourceCursor === null || preview.sourceDigest === null
+    if (preview.migrationProtocol !== 'qbf-session-migration/1' || preview.sourceCursor === null || preview.sourceDigest === null
       || preview.targetRevision === null || Object.entries(request).some(([key, entry]) => digest(preview[key as keyof typeof request] ?? null) !== digest(entry))) {
       migrationFailure('NATIVE_SESSION_MIGRATION_PREVIEW_INVALID')
     }

@@ -1,4 +1,4 @@
-export const MIGRATION_PROTOCOL = 'qaf-session-migration/1' as const
+export const MIGRATION_PROTOCOL = 'qbf-session-migration/1' as const
 
 export interface MigrationTargetSelection {
   readonly provider: string

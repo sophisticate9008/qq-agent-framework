@@ -103,7 +103,7 @@ class FakeTransport implements TransportAdapter {
 }
 
 function temporaryDatabase(): { directory: string; filename: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-host-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-host-'));
   return { directory, filename: join(directory, 'host.sqlite') };
 }
 

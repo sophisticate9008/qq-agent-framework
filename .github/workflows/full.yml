@@ -76,7 +76,7 @@ jobs:
         id: browser
         run: npm run cli -- test --browser --with-deps
         env:
-          QQ_AGENT_UI_EVIDENCE_DIR: ${{ github.workspace }}/runtime/execution-journal-smoke
+          QQ_BRIDGE_FRAMEWORK_UI_EVIDENCE_DIR: ${{ github.workspace }}/runtime/execution-journal-smoke
       - name: 整理浏览器失败诊断
         id: diagnostics
         if: ${{ failure() && steps.browser.outcome == 'failure' }}

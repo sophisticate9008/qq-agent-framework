@@ -23,7 +23,7 @@ test('one short same-turn repair preserves the original source and waits for a g
   assert.equal(steering.length, 1)
   assert.equal(terminalEvents, 0, 'the SDK checks steering before committing turn/end')
   const reminder = steering[0]!
-  assert.equal(reminder.source.kind, 'qaf-reply-decision-repair')
+  assert.equal(reminder.source.kind, 'qbf-reply-decision-repair')
   assert('requestId' in reminder.source)
   assert.equal(reminder.source.requestId, 'real-request')
   assert(!('rpcId' in reminder.source), 'repair input cannot mint a user RPC claim')
@@ -53,8 +53,8 @@ test('ordinary observations, work feedback, explicit silence, attempted sends an
     if (mode === 'work-feedback') repair.claimed(agent, createUserMessage({ source: { kind: 'user', rpcId: 'work-feedback' },
       content: [{ type: 'text', text: 'Host work feedback is not a QQ message' }] }), 7)
     repair.assistant(agent, 7, [{ type: 'text', text: mode === 'silent'
-      ? '{"schema":"qaf.reply/1","action":"silent","reason":"not-addressed"}' : mode === 'empty' ? '  ' : 'Bare answer' },
-      ...(mode === 'tool-call' ? [{ type: 'tool-call', name: 'qaf_reply' }] : [])])
+      ? '{"schema":"qbf.reply/1","action":"silent","reason":"not-addressed"}' : mode === 'empty' ? '  ' : 'Bare answer' },
+      ...(mode === 'tool-call' ? [{ type: 'tool-call', name: 'qbf_reply' }] : [])])
     if (mode === 'attempted') repair.attempted(agent, { requestId: 'real-request', userMessageId: source.id, turn: 7 })
     if (mode === 'revoked') revoke()
     const controller = new AbortController()

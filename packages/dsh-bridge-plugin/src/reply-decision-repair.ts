@@ -2,7 +2,7 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    'qaf-reply-decision-repair': { readonly kind: 'qaf-reply-decision-repair'; readonly requestId: string;
+    'qbf-reply-decision-repair': { readonly kind: 'qbf-reply-decision-repair'; readonly requestId: string;
       readonly turn: number; readonly form: 'notice'; readonly summary: string }
   }
 }
@@ -22,7 +22,7 @@ interface Decision {
   final: string
 }
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
-const repairText = '本轮正文还没有发送到QQ。现在只做一次明确决定：需要答复就调用 qaf_reply 发送；无需发言就输出 {"schema":"qaf.reply/1","action":"silent","reason":"no-useful-addition"}。沿用本轮原始用户来源和权限，不重复已执行的工具，不新增工作或调用其他工具。'
+const repairText = '本轮正文还没有发送到QQ。现在只做一次明确决定：需要答复就调用 qbf_reply 发送；无需发言就输出 {"schema":"qbf.reply/1","action":"silent","reason":"no-useful-addition"}。沿用本轮原始用户来源和权限，不重复已执行的工具，不新增工作或调用其他工具。'
 
 function addressed(content: UserMessage['content']): boolean {
   const text = content.filter(block => block.type === 'text').map(block => block.text).join('')
@@ -42,7 +42,7 @@ function silent(text: string): boolean {
   if (text.length > 2048) return false
   try {
     const value: unknown = JSON.parse(text)
-    return object(value) && Object.keys(value).length === 3 && value.schema === 'qaf.reply/1' && value.action === 'silent'
+    return object(value) && Object.keys(value).length === 3 && value.schema === 'qbf.reply/1' && value.action === 'silent'
       && ['not-addressed', 'already-answered', 'no-useful-addition', 'user-requested'].includes(String(value.reason))
   } catch { return false }
 }
@@ -65,7 +65,7 @@ export function createReplyDecisionRepair(options: {
     assistant(agent: ReplyDecisionAgent, turn: number, content: unknown): void {
       const decision = decisions.get(agent)
       if (!decision || decision.turn !== turn || !Array.isArray(content)) return
-      if (content.some(block => object(block) && block.type === 'tool-call' && block.name === 'qaf_reply')) decision.attempted = true
+      if (content.some(block => object(block) && block.type === 'tool-call' && block.name === 'qbf_reply')) decision.attempted = true
       decision.final = content.filter(block => object(block) && block.type === 'text' && typeof block.text === 'string')
         .map(block => object(block) ? String(block.text) : '').join('').trim()
     },
@@ -81,7 +81,7 @@ export function createReplyDecisionRepair(options: {
       // Set before steering: the SDK re-enters this boundary only after the next step.
       decision.repaired = true
       agent.steer(createUserMessage({ content: [{ type: 'text', text: repairText }], source: {
-        kind: 'qaf-reply-decision-repair', requestId: decision.requestId, turn, form: 'notice', summary: '确认本轮QQ发送或静默决定'
+        kind: 'qbf-reply-decision-repair', requestId: decision.requestId, turn, form: 'notice', summary: '确认本轮QQ发送或静默决定'
       } }))
     },
     clear(agent: ReplyDecisionAgent): void { decisions.delete(agent) }

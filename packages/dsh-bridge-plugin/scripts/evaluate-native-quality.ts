@@ -90,7 +90,7 @@ export async function evaluateNativeQuality(options:{frameworkRoot:string;bridge
   evaluationSampleId?:string;evaluationDeadline?:number;maximumObservedTokens?:number;evaluationOutputTokens?:512}) {
   assert(isAbsolute(options.frameworkRoot)&&(!options.execute||options.bridgeRoot&&isAbsolute(options.bridgeRoot)),'QUALITY_OPTIONS_INVALID')
   const {data,score}=await dataset(options.frameworkRoot)
-  const directory=await mkdtemp(join(tmpdir(),'qqaf-quality-'));await chmod(directory,0o700)
+  const directory=await mkdtemp(join(tmpdir(),'qqbf-quality-'));await chmod(directory,0o700)
   const previousHome=process.env.DSH_HOME;process.env.DSH_HOME=directory
   const ctx=new Context();ctx.baseUrl=import.meta.url;ctx.logger.exporter({export(){}})
   const extended=options.evaluationSampleId!==undefined

@@ -1,4 +1,4 @@
-export const BRIDGE_PLUGIN_PROTOCOL = 'qq-agent-framework.dsh-bridge/1' as const
+export const BRIDGE_PLUGIN_PROTOCOL = 'qq-bridge-framework.dsh-bridge/1' as const
 export const RECEIPT_LIMITS = Object.freeze({ maxReceipts: 4096, maxAgeMs: 300_000, maxPage: 128 })
 
 export interface ClaimReceipt {

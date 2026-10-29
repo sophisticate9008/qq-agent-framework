@@ -180,7 +180,7 @@ DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树
 
 真实模拟的聊天与独立助手用量都先进入本轮 `native/native-chat.sqlite` 的 `native-usage.turns`。入口每两秒将真实观测记录发布到来源账号账本，退出前再等待最终发布完成；发布使用 `simulation:<runId>:<conversation>` 独立会话标记，保留原 token/cache、时间和价格快照，重复读取不会重复记账，已清理记录不复活。发布失败记录 `usage-publish-failed`，不改变模型实际执行结果。
 
-`--batch presentation` 在完整 work 专项之后，追加私聊 Markdown 综合排版转 PNG、群聊及私聊长纯文本转发，最后保留活动与真实 chat/work 用量。渲染请求通过 `qaf_reply` 的 content 提交，格式为 `{"schema":"qaf.output/1","format":"markdown-image","body":"Markdown 正文","title":"可选标题"}`，正文最多 32000 字符及 64 KiB，标题最多 120 字符；它请求框架本机渲染图片，不是原生协议 Markdown 卡片或 Markdown 文件发送。
+`--batch presentation` 在完整 work 专项之后，追加私聊 Markdown 综合排版转 PNG、群聊及私聊长纯文本转发，最后保留活动与真实 chat/work 用量。渲染请求通过 `qbf_reply` 的 content 提交，格式为 `{"schema":"qbf.output/1","format":"markdown-image","body":"Markdown 正文","title":"可选标题"}`，正文最多 32000 字符及 64 KiB，标题最多 120 字符；它请求框架本机渲染图片，不是原生协议 Markdown 卡片或 Markdown 文件发送。
 
 ## 查看与解除模拟绑定
 

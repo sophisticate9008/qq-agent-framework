@@ -66,7 +66,7 @@ async function drainTasks(host: ReturnType<typeof createBridgeHost>): Promise<vo
 }
 
 test('relay selection drops internal output and rewrites public output without consuming unrelated send budget', async context => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-relay-selection-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-relay-selection-'));
   const store = createSqliteStore({ filename: join(directory, 'host.sqlite') });
   const agent = new RelayAgent();
   const transport = new RelayTransport();

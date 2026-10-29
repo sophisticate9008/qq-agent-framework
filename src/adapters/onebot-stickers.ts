@@ -153,7 +153,7 @@ export function createOneBotStickerPort(options: {
         const extension = imageExtension(bytes);
         if (!extension) return { status: 'rejected', code: 'ONEBOT_STICKER_INVALID_IMAGE' };
         request.signal.throwIfAborted();
-        directory = await mkdtemp(join(tmpdir(), 'qaf-sticker-'));
+        directory = await mkdtemp(join(tmpdir(), 'qbf-sticker-'));
         const file = join(directory, `image.${extension}`);
         await writeFile(file, bytes, { mode: 0o600, signal: request.signal });
         return await invoke('add_custom_face', { file, is_origin: true }, request.signal, acknowledged);

@@ -5,7 +5,7 @@
 在本目录安装当前框架构建的 SDK 包，再将 `index.ts` 作为可信 bootstrap 显式装配。宿主需要提供 `plugin-runtime` 包；本示例声明依赖其中的工具、日程和扩展登记服务。SDK 的准备方式见 [SDK 说明](../../packages/framework-sdk/README.md)。
 
 ```sh
-npm install /本机路径/qq-bridge-framework-sdk-1.4.0.tgz
+npm install /本机路径/qq-bridge-framework-sdk-1.4.1.tgz
 ```
 
 启动后通过二级能力目录查找 `extension.reloadable-example.status` 或 `extension.reloadable-example.run`，读取具体参数后调用。每日 UTC 09:00 的固定日程也会调用同一行为。两种入口都在本地保存结果，不发送 QQ 消息。
@@ -13,8 +13,8 @@ npm install /本机路径/qq-bridge-framework-sdk-1.4.0.tgz
 修改 `behavior/index.ts` 中的文案或业务处理，保留契约标识、版本和方法集合，再通过已有运维入口应用：
 
 ```sh
-qqagent extensions
-qqagent extensions reload reloadable-example
+qqbridge-framework extensions
+qqbridge-framework extensions reload reloadable-example
 ```
 
 新调用进入新行为；已经开始的工具或日程调用保留旧代直到完整 Promise 结束。导入、契约或方法校验失败时旧实现继续使用，重载状态记录错误。清理失败仍通过原扩展管理器保留排空状态，不能据此盲目重试写操作。

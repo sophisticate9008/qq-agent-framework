@@ -1,41 +1,39 @@
-# 项目名称与兼容升级
+# 命名统一与升级
 
-从 v1.4.0 起，项目名称为 **QQ Bridge Framework**，仓库为 [sophisticate9008/qq-bridge-framework](https://github.com/sophisticate9008/qq-bridge-framework)。此前名称为 QQ Agent Framework。
+从 v1.4.1 起，框架、SDK、DSH 桥接插件及本机接入统一使用 **QQ Bridge Framework** 名称。仓库为 [sophisticate9008/qq-bridge-framework](https://github.com/sophisticate9008/qq-bridge-framework)。
 
-## 仓库与安装目录
+## 当前命名
 
-已有工作副本可以更新远程地址：
+| 范围 | 当前名称 |
+| --- | --- |
+| 仓库、安装目录 | `qq-bridge-framework` |
+| SDK | `@qq-bridge-framework/sdk` |
+| DSH 桥接插件 | `@qq-bridge-framework/dsh-bridge-plugin` |
+| 应用 CLI | `qq-bridge-framework`，或 `npm run cli -- ...` |
+| 服务运维 | `qqbridge-framework`，仓库入口 `ops/qqbridge-framework` |
+| 环境变量 | `QQ_BRIDGE_FRAMEWORK_*` |
+| 框架工具 | `qbf_*`，例如 `qbf_reply` |
+| 通信及媒体协议 | `qq-bridge-framework.*`、`qbf.*` |
+| 默认 DSH 配置命名空间 | `qqbf`、`qqbfwork` |
 
-```sh
-git remote set-url origin git@github.com:sophisticate9008/qq-bridge-framework.git
-```
+本版只提供新名称的 SDK、DSH 桥接插件两个安装包和 `SHA256SUMS`。运行时仅识别 1.4.1 桥接插件及新协议；工具、命令、环境变量与包名均采用上表名称。
 
-安装目录由部署者选择，已有目录可以继续使用。运行数据、服务清单、会话工作目录及系统日志轮转配置继续使用实际登记的路径；改项目名不要求搬迁目录。新安装默认克隆到 `qq-bridge-framework/`。
+## 已有部署升级
 
-## SDK 与 DSH 桥接插件
+这次是完整命名迁移，框架、DSH 桥接插件及调用方需要一起更新。维护者明确指定本次版本为 `1.4.1`，并不代表可以把新旧协议混用。
 
-Release 同时提供四个安装包，所有包均为 `1.4.0`：
+1. 核对当前任务已结束，停止聊天及框架服务、DSH 和依赖安装目录的辅助进程。保存配置、数据库、DSH profile、凭据及会话目录的私有备份。
+2. 更新 SDK 导入、桥接插件依赖与 Loader 名称，以及插件对框架工具名、来源标识和协议字段的引用。卸载旧名称的包和命令链接，安装本版两个新包。
+3. 同步本机安装目录、服务清单、启动脚本、工作目录、扩展依赖链接、日志轮转及浏览器工具链配置。`boot` 调用 `qqbridge-framework`。
+4. 将托管 DSH 配置中的框架命名空间、预设引用、工具名及系统提示词同步为当前名称；同步凭据引用而不替换凭据值。已有会话的配置元数据、工作目录和框架绑定必须与新配置对应，保留会话 ID 与历史正文。
+5. 对已有配置基线与部署记录重新核对摘要。采用正常配置应用流程核验 DSH 实际加载状态；不能仅替换字符串后跳过配置身份、绑定和内容指纹检查。
+6. 启动 DSH 与辅助服务，再启动框架；用 `qqbridge-framework doctor` 核对服务、QQ 登录、插件协议和聊天状态。检查会话绑定、后台工作、插件日程和模型用量仍可读取。
 
-| 用途 | 包名 | 安装包 |
-| --- | --- | --- |
-| SDK | `@qq-bridge-framework/sdk` | `qq-bridge-framework-sdk-1.4.0.tgz` |
-| DSH 桥接插件 | `@qq-bridge-framework/dsh-bridge-plugin` | `qq-bridge-framework-dsh-bridge-plugin-1.4.0.tgz` |
-| SDK 旧导入兼容 | `@qq-agent-framework/sdk` | `qq-agent-framework-sdk-1.4.0.tgz` |
-| DSH 旧加载名兼容 | `@qq-agent-framework/dsh-bridge-plugin` | `qq-agent-framework-dsh-bridge-plugin-1.4.0.tgz` |
-
-新项目使用新包名。已有扩展或 DSH 装配可以安装旧包名兼容包，保留原 import、依赖键与 Loader 配置；兼容包与对应新名包包含相同编译代码和公开导出。请先更新框架，再加载 1.4.0 桥接插件。
-
-选择迁移包名时，SDK 的所有导入路径和依赖键一起更新；DSH 的安装依赖与 Loader 名称一起更新，同一实例只加载一份桥接插件。包名迁移可单独安排，不要求修改已有会话和数据。
-
-## 稳定接口
-
-`qaf_*` 工具名、`qaf.*` 与 `qq-agent-framework.*` 线协议和持久标识、内置工具的来源 ownerId、服务管理器的 `kind`、环境变量、浏览器偏好键继续使用已有值。它们用于协议协作、来源和数据身份，不随产品名称改写。
-
-`npm run cli -- ...`、`qq-agent` 与运维命令 `qqagent` 继续可用；包清单另提供 `qq-bridge-framework` CLI 入口，指向同一命令行程序。现有 `boot` 与服务管理配置继续使用 `qqagent`。
+旧协议的未结执行必须先核对并处理，不能通过更名重发。历史发布记录、回退备份、会话 ID 和历史正文作为已有数据留存，不注册旧名称的运行入口。
 
 ## 生成发布包
 
-准备根项目和桥接插件依赖后，在仓库根目录执行：
+准备根项目与桥接插件依赖后，在仓库根目录执行：
 
 ```sh
 npm run build
@@ -44,4 +42,4 @@ npm --prefix packages/dsh-bridge-plugin run build
 npm run release:pack
 ```
 
-打包器核对组件版本和插件报告版本，从包文件白名单生成新名与兼容安装包，并在 `runtime/releases/v<版本>/` 写入 `SHA256SUMS`。旧版本附件留存在对应 GitHub Release，历史发布记录中的文件名仍指向原安装包。
+两个组件的安装包与 `SHA256SUMS` 输出到 `runtime/releases/v<版本>/`，打包时核对文件白名单和版本。已发布历史版本仍由对应 GitHub Release 留存。

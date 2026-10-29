@@ -13,8 +13,8 @@ const categories = [
   { id: 'other', label: '其他能力', description: '通过能力目录按需查询和调用' },
 ];
 const sessionLabels: Readonly<Record<string, string>> = {
-  qaf_session_resolve: '查询会话绑定', qaf_session_list: '列出会话绑定', qaf_session_bind: '切换会话绑定',
-  qaf_session_create: '创建插件会话', qaf_session_unbind: '解除会话绑定',
+  qbf_session_resolve: '查询会话绑定', qbf_session_list: '列出会话绑定', qbf_session_bind: '切换会话绑定',
+  qbf_session_create: '创建插件会话', qbf_session_unbind: '解除会话绑定',
 };
 export function directoryToolLabel(tool: PresentedInventoryTool): string | undefined {
   if (!toolPackage(tool)) return undefined;
@@ -23,8 +23,8 @@ export function directoryToolLabel(tool: PresentedInventoryTool): string | undef
 /** Ownership comes from registration metadata; known IDs only select a display category. */
 export function toolPackage(tool: PresentedInventoryTool): string | null {
   if (tool.category.kind !== 'framework' || tool.registrationSource?.ownerName !== '框架能力目录') return null;
-  return capabilities.get(tool.name)?.category ?? (tool.name.startsWith('qaf_session_') ? 'sessions'
-    : tool.name.startsWith('qaf_qzone_') ? 'qzone' : 'other');
+  return capabilities.get(tool.name)?.category ?? (tool.name.startsWith('qbf_session_') ? 'sessions'
+    : tool.name.startsWith('qbf_qzone_') ? 'qzone' : 'other');
 }
 export function toolPackageSearchText(tool: PresentedInventoryTool): string {
   const category = categories.find(item => item.id === toolPackage(tool));

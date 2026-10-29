@@ -279,7 +279,7 @@ async function prepareFixtures(workspace: string, withVideo = false): Promise<{ 
     '```typescript', 'const greeting: string = "你好，世界";', 'console.log(greeting);', '```', '',
     '行内公式 $a^2+b^2=c^2$。', '', '$$\\int_0^1 x^2\\,dx=\\frac{1}{3}$$'].join('\n')
   const plain = '这是一段用于验证长纯文本合并转发的说明，句子保持原样，不包含标题、表格或代码。'.repeat(35)
-  const literalOutput = JSON.stringify({ schema: 'qaf.output/1', content: [{ type: 'text', text: plain }] })
+  const literalOutput = JSON.stringify({ schema: 'qbf.output/1', content: [{ type: 'text', text: plain }] })
   const presentationMessages = [...workMessages.slice(0, -1),
     { actor: 'owner', kind: 'private', text: `请把下面 Markdown 原文完整渲染为图片回给我。使用框架内置 markdown-image 格式，body保留原文，title用“本机渲染验收”；不调用助手、不输出纯文本或文件：\n\n${markdown}` },
     { settings: { longTextAsForward: true, longTextThreshold: 500 } },

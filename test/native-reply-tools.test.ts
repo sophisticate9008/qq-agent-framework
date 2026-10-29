@@ -27,7 +27,7 @@ function receiptResult(result: FrameworkToolResult): FrameworkToolResult {
 }
 
 async function fixture(context: TestContext, options: { receipts?: readonly DeliveryReceipt[]; suppress?: boolean } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'qaf-reply-'))
+  const directory = await mkdtemp(join(tmpdir(), 'qbf-reply-'))
   const store = createSqliteStore({ filename: ':memory:' })
   const lifetime = new AbortController()
   const signal = lifetime.signal
@@ -83,7 +83,7 @@ async function fixture(context: TestContext, options: { receipts?: readonly Deli
   await tools.project(binding, signal)
   let tickets = 0
   async function invoke(input: JsonValue, id = `call-${tickets}`): Promise<FrameworkToolResult> {
-    const call = calls.get(id) ?? { id, name: 'qaf_reply', input, requestId, sessionId: binding.sessionId,
+    const call = calls.get(id) ?? { id, name: 'qbf_reply', input, requestId, sessionId: binding.sessionId,
       generation: binding.generation, userMessageId: 'user-message', turn: 0, expiresAt: Date.now() + 10000 }
     calls.set(id, call)
     const ticket = `ticket-${tickets++}`
@@ -124,7 +124,7 @@ for (const status of ['unknown', 'rejected'] as const) test(`reply tool preserve
 
 test('reply tool reuses Markdown images, long forward planning and text plus file deliveries', async context => {
   const runtime = await fixture(context)
-  await runtime.invoke({ content: { schema: 'qaf.output/1', format: 'markdown-image', body: '# Report\n\nBody' } })
+  await runtime.invoke({ content: { schema: 'qbf.output/1', format: 'markdown-image', body: '# Report\n\nBody' } })
   assert.deepEqual(runtime.rendered, ['# Report\n\nBody'])
   assert.deepEqual(runtime.sent[0]?.content, [{ type: 'image', assetId: 'markdown-scoped-asset' }])
   await runtime.invoke({ content: 'plain text '.repeat(1000) })
@@ -178,7 +178,7 @@ test('a superseded reply rejects rewritten followup content until a new request 
 test('plain and enveloped structured content share one normalized delivery identity', async context => {
   const runtime = await fixture(context)
   await runtime.invoke({ content: [{ type: 'face', id: '14' }] }, 'plain-structure')
-  const repeated = await runtime.invoke({ content: { schema: 'qaf.output/1', content: [{ id: '14', type: 'face' }] } }, 'wrapped-structure')
+  const repeated = await runtime.invoke({ content: { schema: 'qbf.output/1', content: [{ id: '14', type: 'face' }] } }, 'wrapped-structure')
   assert(repeated.status === 'confirmed' && isRecord(repeated.value))
   assert.equal(repeated.value.cached, true)
   assert.equal(runtime.sent.length, 1)

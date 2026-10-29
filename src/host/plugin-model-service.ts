@@ -161,7 +161,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     if (rows(SESSIONS).length >= MAX_BINDINGS) failure('PLUGIN_MODEL_SESSION_LIMIT')
     const at = Date.now()
     const prepared: PluginModelBinding = { revision: 0, busy: false, owner, name: current.name, conversationId: current.conversationId,
-      sessionId: `qaf-plugin-${randomUUID()}`, source: 'created', model, state: 'creating', createdAt: at, updatedAt: at, lastUsedAt: null,
+      sessionId: `qbf-plugin-${randomUUID()}`, source: 'created', model, state: 'creating', createdAt: at, updatedAt: at, lastUsedAt: null,
       ...(contextRestartedFrom === undefined ? {} : { contextRestartedFrom }) }
     const saved = options.store.write(BINDINGS, current.id, json(prepared), { expectedRevision: current.row?.revision ?? null })
     options.store.write(SESSIONS, prepared.sessionId, json({ schema: 1, ...prepared, mode: 'persistent' }), { expectedRevision: null })
@@ -352,7 +352,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
             if (rows(SESSIONS).length >= MAX_BINDINGS) failure('PLUGIN_MODEL_SESSION_LIMIT')
             const at = Date.now()
             const target: PluginModelBinding = { revision: 0, busy: false, owner, name: request.name ?? 'default', conversationId: request.conversationId ?? null,
-              sessionId: `qaf-plugin-${randomUUID()}`, source: 'created', model, state: 'ready', createdAt: at, updatedAt: at, lastUsedAt: null }
+              sessionId: `qbf-plugin-${randomUUID()}`, source: 'created', model, state: 'ready', createdAt: at, updatedAt: at, lastUsedAt: null }
             keyOf(owner, request)
             options.store.write(SESSIONS, target.sessionId, json({ schema: 1, ...target, mode: 'stateless' }), { expectedRevision: null })
             await options.backend.create({ sessionId: target.sessionId, owner, model, signal })

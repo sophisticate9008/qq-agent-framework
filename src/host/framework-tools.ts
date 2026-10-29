@@ -27,7 +27,7 @@ export function createFrameworkToolRegistry(options: FrameworkToolRegistryOption
   return Object.freeze({
     register(value: FrameworkToolDefinition, validate: (input: JsonValue) => JsonValue): () => void {
       const definition = snapshot(value)
-      assert(!closed && /^qaf_[a-z][a-z0-9_]{0,79}$/.test(definition.name)
+      assert(!closed && /^qbf_[a-z][a-z0-9_]{0,79}$/.test(definition.name)
         && identifier(definition.featureId) && identifier(definition.capability)
         && definition.description.length > 0 && definition.description.length <= 4000
         && definition.parameters.type === 'object' && definition.parameters.additionalProperties === false

@@ -16,7 +16,7 @@ function fixture(context: TestContext) {
   let calls = 0
   const port = createDshBridgePluginPort(async (method, input) => {
     calls++
-    if (method === 'bridgePlugin/describe') return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '0.1.0', sdkVersion: '0.2.1-rc.2',
+    if (method === 'bridgePlugin/describe') return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1', sdkVersion: '0.2.1-rc.2',
       issuerEpoch: journal.issuerEpoch, authentication: 'dsh-owner-peer', durableReceipts: false,
       claimMeaning: 'inbox-claimed-not-completed', externalToolAuthorizationVerified: false, retention: RECEIPT_LIMITS }
     assert.equal(method, 'bridgePlugin/claimReceipts')

@@ -139,7 +139,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
       const agent = options.getAgent(request.sessionId)
       if (!agent || agent.session.id !== request.sessionId) throw new TypeError('Framework tool agent is unavailable')
       const specs = request.tools.map(spec => {
-        if (!spec || !/^qaf_[a-z][a-z0-9_]{0,79}$/.test(spec.name) || typeof spec.description !== 'string'
+        if (!spec || !/^qbf_[a-z][a-z0-9_]{0,79}$/.test(spec.name) || typeof spec.description !== 'string'
           || spec.description.length < 1 || spec.description.length > 4000 || !Number.isSafeInteger(spec.timeoutMs)
           || spec.timeoutMs < 10 || spec.timeoutMs > 300000) throw new TypeError('Invalid framework tool definition')
         if (spec.registrationSource !== undefined && !readToolRegistrationSource(spec.registrationSource)) throw new TypeError('Invalid tool registration source')
@@ -175,7 +175,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
               const input = json(args)
               if (Buffer.byteLength(JSON.stringify(input)) > 65536) return { status: 'rejected', code: 'TOOL_INPUT_TOO_LARGE' }
               lease.seen.add(exec.callId)
-              if (spec.name === 'qaf_reply') options.onReplyAttempt?.(agent, claim)
+              if (spec.name === 'qbf_reply') options.onReplyAttempt?.(agent, claim)
               return new Promise<unknown>(resolve => {
                 const ticket = randomUUID()
                 let timer: ReturnType<typeof setTimeout>
@@ -184,7 +184,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
                   if (!pending.delete(ticket)) return
                   clearTimeout(timer)
                   exec.signal.removeEventListener('abort', abort)
-                  if (spec.name === 'qaf_reply' && !exec.signal.aborted && replyConcludesTurn(result)) exec.concludeTurn()
+                  if (spec.name === 'qbf_reply' && !exec.signal.aborted && replyConcludesTurn(result)) exec.concludeTurn()
                   resolve(result)
                 }
                 const wire = { ticket, leaseId: lease.id, call: { id: exec.callId, sessionId: agent.id, generation: lease.generation,

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const directory = await mkdtemp(join(tmpdir(), 'qqaf-sdk-consumer-'));
+const directory = await mkdtemp(join(tmpdir(), 'qqbf-sdk-consumer-'));
 try {
   execFileSync(process.execPath, ['scripts/build-sdk.ts'], { cwd: root, stdio: 'inherit' });
   const result: unknown = JSON.parse(execFileSync('npm', ['pack', './packages/framework-sdk', '--ignore-scripts', '--json',

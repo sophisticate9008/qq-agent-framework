@@ -6,7 +6,7 @@ import test from 'node:test';
 import { runTestFiles } from '../scripts/test-runner.ts';
 
 test('bounded test runner aggregates successes and reports assertion failures without dumping successful output', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qaf-test-runner-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qbf-test-runner-'));
   try {
     const passing = join(directory, 'passing.test.mjs');
     const failing = join(directory, 'failing.test.mjs');
@@ -25,7 +25,7 @@ test('bounded test runner aggregates successes and reports assertion failures wi
 });
 
 test('an unresolved test with a leaked handle cannot outlive its hard process deadline', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qaf-test-hang-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qbf-test-hang-'));
   try {
     const filename = join(directory, 'leaked.test.mjs');
     writeFileSync(filename, "import test from 'node:test'; test('never settles', () => new Promise(() => { setInterval(() => {}, 1000); }));\n");

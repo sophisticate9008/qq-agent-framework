@@ -20,7 +20,7 @@ export function installWorkAttachmentTool(agent: Agent, options: {
   readonly commit: (asset: WorkMediaReference) => void;
 }): () => void {
   return agent.ctx.tools.register(defineTool({
-    name: 'qaf_work_attach',
+    name: 'qbf_work_attach',
     description: '将本次工作的现有图片或文件登记为结果附件，工作完成后由宿主回传原QQ会话。path按当前工作目录解析；kind=image发送图片，kind=file发送文件，省略时根据真实文件字节识别图片。每项最多8MiB，本次工作最多3个不同附件。调用成功只表示已登记，不代表QQ已送达。最终回复描述结果，不要把本机路径当作已经发送。',
     parameters: {
       path: { type: 'string', required: true, description: '当前工作生成或选定的现有普通文件路径。' },

@@ -11,8 +11,8 @@ import type { NativeMessageSourceReader } from './native-message-sources.ts';
 /** Convert the tool wire value into the existing output planner's bounded message format. */
 function replyContent(value: unknown): readonly MessageContent[] {
   if (Array.isArray(value)) return normalizeContent(value);
-  assert(typeof value === 'string' || isRecord(value) && value.schema === 'qaf.output/1',
-    'INVALID_REPLY_INPUT', 'Reply content must be text, message content, or a qaf.output/1 envelope.');
+  assert(typeof value === 'string' || isRecord(value) && value.schema === 'qbf.output/1',
+    'INVALID_REPLY_INPUT', 'Reply content must be text, message content, or a qbf.output/1 envelope.');
   const text = typeof value === 'string' ? value : JSON.stringify(value);
   const chunks = boundedTextChunks(text, 8000, 8);
   assert(chunks, 'INVALID_REPLY_INPUT', 'Reply text exceeds its bounded size.');
@@ -26,11 +26,11 @@ function replyInput(input: JsonValue): JsonValue {
 const tool = nativeToolCapabilityDefinition('native.reply');
 export const NATIVE_REPLY_TOOLS: readonly NativeToolContribution[] = Object.freeze<readonly NativeToolContribution[]>([
   { definition: { name: tool.tool, capability: tool.capability, description: tool.description, featureId: 'framework-tools', timeoutMs: 120000,
-    registrationSource: { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' },
+    registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' },
     parameters: { type: 'object', additionalProperties: false, required: ['content'], properties: {
-      content: { description: '发送的文字、结构化消息数组，或包含schema:qaf.output/1的对象。资源仅使用当前会话已登记assetId。',
+      content: { description: '发送的文字、结构化消息数组，或包含schema:qbf.output/1的对象。资源仅使用当前会话已登记assetId。',
         oneOf: [ { type: 'string', minLength: 1, maxLength: 64000 }, { type: 'array', minItems: 1, maxItems: 8, items: { type: 'object' } },
-          { type: 'object', required: ['schema'], properties: { schema: { const: 'qaf.output/1' } } } ] }
+          { type: 'object', required: ['schema'], properties: { schema: { const: 'qbf.output/1' } } } ] }
     } } }, validate: replyInput, deliveryCapabilities: ['messaging.send', 'messaging.forward'],
     async afterInvoke(value, execution, event, host) {
       assert(isRecord(value) && typeof value.nativeRequestId === 'string', 'INVALID_REPLY_INPUT', 'A trusted reply source is required.');

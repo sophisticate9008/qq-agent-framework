@@ -12,7 +12,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   if (args.includes('--help')) {
-    console.log('安装 qqagent：node scripts/install-service-manager.ts [--bin-dir /usr/local/bin] [--admin-config /绝对路径/config.json] [--boot /绝对路径/service-boot.sh]\n先配置 runtime/live/services.json；--boot 仅更新现有 qqbridge 的启动、停止、状态和日志分发。');
+    console.log('安装 qqbridge-framework：node scripts/install-service-manager.ts [--bin-dir /usr/local/bin] [--admin-config /绝对路径/config.json] [--boot /绝对路径/service-boot.sh]\n先配置 runtime/live/services.json；--boot 核对 qqbridge-framework 的启动、停止、状态和日志分发。');
     return;
   }
   const options = new Map<string, string>();
@@ -24,8 +24,8 @@ async function main(): Promise<void> {
   const binDirectory = options.get('--bin-dir') ?? '/usr/local/bin';
   const adminPath = options.get('--admin-config') ?? join(root, 'runtime/live/framework-admin.json');
   const bootPath = options.get('--boot');
-  const target = join(root, 'ops/qqagent');
-  const cli = join(binDirectory, 'qqagent');
+  const target = join(root, 'ops/qqbridge-framework');
+  const cli = join(binDirectory, 'qqbridge-framework');
   if (!/^\/[A-Za-z0-9_./-]+$/.test(cli)) throw new InstallError('命令安装路径不支持空格或特殊字符。');
   const adminSource = await readFile(adminPath, 'utf8');
   const admin: unknown = JSON.parse(adminSource);
@@ -36,24 +36,13 @@ async function main(): Promise<void> {
     if (isRecord(error) && error.code === 'ENOENT') return null;
     throw error;
   });
-  if (originalLink && (!originalLink.isSymbolicLink() || resolve(binDirectory, await readlink(cli)) !== resolve(target))) throw new InstallError('qqagent 已被其他程序占用。');
+  if (originalLink && (!originalLink.isSymbolicLink() || resolve(binDirectory, await readlink(cli)) !== resolve(target))) throw new InstallError('qqbridge-framework 已被其他程序占用。');
 
   let bootSource: string | undefined;
   let bootNext: string | undefined;
   if (bootPath) {
     bootSource = await readFile(bootPath, 'utf8');
     bootNext = bootSource;
-    const previous = '/usr/local/bin/qqbridge';
-    if (bootSource.includes(previous)) {
-      for (const action of ['start', 'stop', 'status', 'logs']) {
-        if (!bootSource.includes(`${previous} ${action}`)) throw new InstallError('boot 分发格式发生变化，未修改。');
-      }
-      bootNext = bootNext.replaceAll(previous, cli)
-        .replaceAll('failed_services+=("qqbridge")', 'failed_services+=("qqagent")')
-        .replaceAll('qqbridge|framework-admin|framework-gateway|bridge|', 'qqagent|qqbridge|framework-admin|framework-gateway|')
-        .replace('if [[ "$service" == qqbridge ]]; then service=framework-admin; fi',
-          'if [[ "$service" == qqagent || "$service" == qqbridge ]]; then service=framework-admin; fi');
-    }
     for (const action of ['start', 'stop', 'status', 'logs']) {
       if (!bootNext.includes(`${cli} ${action}`)) throw new InstallError('boot 不包含已支持的运维分发入口，未修改。');
     }
@@ -70,7 +59,7 @@ async function main(): Promise<void> {
   const replace = async (filename: string, before: string, after: string, mode: number): Promise<void> => {
     if (before === after) return;
     if (await readFile(filename, 'utf8') !== before) throw new InstallError('配置在安装期间被修改，停止覆盖。');
-    const temporary = join(dirname(filename), `.qqagent-${randomUUID()}.tmp`);
+    const temporary = join(dirname(filename), `.qqbridge-framework-${randomUUID()}.tmp`);
     try {
       await writeFile(temporary, after, { mode, flag: 'wx' });
       await rename(temporary, filename);
@@ -84,7 +73,7 @@ async function main(): Promise<void> {
     const mode = (await lstat(bootPath)).mode & 0o777;
     await replace(bootPath, bootSource, bootNext, mode);
   }
-  console.log('已安装 qqagent 并更新管理配置。' + (bootPath ? ' boot 已切换到本框架运维入口。' : ''));
+  console.log('已安装 qqbridge-framework 并更新管理配置。' + (bootPath ? ' boot 已切换到本框架运维入口。' : ''));
   console.log('已有进程保持运行；管理服务下次启动时读取新的维护入口。备份位于 runtime/ops-backups。');
 }
 

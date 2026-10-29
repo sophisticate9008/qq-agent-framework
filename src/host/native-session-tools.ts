@@ -17,7 +17,7 @@ interface ListInput { readonly kind: 'all' | 'qq' | 'plugin'; readonly pluginOwn
 type MutationInput = { readonly kind: 'qq'; readonly target: NativeSessionResetTarget; readonly targetSessionId?: string }
   | { readonly kind: 'plugin'; readonly request: PluginSessionManagementRequest };
 const conversation = (value: unknown): value is string => typeof value === 'string' && /^(group|private):[1-9]\d{0,19}$/.test(value);
-const source = { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' } as const;
+const source = { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' } as const;
 const identifierSchema: JsonObject = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$', maxLength: 256 };
 const conversationSchema: JsonObject = { type: 'string', pattern: '^(group|private):[1-9][0-9]{0,19}$' };
 const revisionSchema: JsonObject = { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }], description: '读取列表得到的当前revision；新绑定传null。' };
@@ -117,12 +117,12 @@ export function createNativeSessionDirectoryTools(options: {
   }
   function make<Input>(name: string, description: string, parameters: JsonObject, parse: (value: JsonValue) => Input,
     run: (input: Input, request: EffectRequest) => unknown | Promise<unknown>): DirectoryTool {
-    return { category: 'sessions', permission: 'owner', tool: { definition: { name, capability: `native.sessions.${name.slice('qaf_session_'.length)}`,
+    return { category: 'sessions', permission: 'owner', tool: { definition: { name, capability: `native.sessions.${name.slice('qbf_session_'.length)}`,
       featureId: 'framework-tools', timeoutMs: 120000, registrationSource: source, description, parameters }, validate: value => { parse(value); return json(value); } },
     effect: { async execute(request) { const input = parse(request.input); await guard(request); return json(await run(input, request)); } } };
   }
   const tools: DirectoryTool[] = [
-    make('qaf_session_resolve', '按QQ地址key或目标插件具名会话查询当前真实模型会话ID与绑定版本。QQ绑定返回target，可直接用于换绑或解绑；插件返回revision，用作expectedRevision。此查询不会创建会话。',
+    make('qbf_session_resolve', '按QQ地址key或目标插件具名会话查询当前真实模型会话ID与绑定版本。QQ绑定返回target，可直接用于换绑或解绑；插件返回revision，用作expectedRevision。此查询不会创建会话。',
       { anyOf: [ { type: 'object', additionalProperties: false, required: ['kind', 'key'], properties: { kind: { const: 'qq' }, key: conversationSchema } },
         { type: 'object', additionalProperties: false, required: ['kind', 'pluginOwner'], properties: pluginProperties } ] }, resolveInput,
       input => {
@@ -138,7 +138,7 @@ export function createNativeSessionDirectoryTools(options: {
           bindingRevision: nativeSessionBindingRevision(metadata) } : null;
         return { status: 'confirmed', kind: 'qq', binding, target };
       }),
-    make('qaf_session_list', '列出QQ和插件的会话绑定，最多100项。kind可为all、qq、plugin；按pluginOwner筛选时kind须为plugin。QQ条目含完整target版本；插件条目含revision、busy与共享的实际sessionId。',
+    make('qbf_session_list', '列出QQ和插件的会话绑定，最多100项。kind可为all、qq、plugin；按pluginOwner筛选时kind须为plugin。QQ条目含完整target版本；插件条目含revision、busy与共享的实际sessionId。',
       { type: 'object', additionalProperties: false, properties: { kind: { enum: ['all', 'qq', 'plugin'], default: 'all' },
         pluginOwner: identifierSchema, limit: { type: 'integer', minimum: 1, maximum: 100, default: 100 } } }, listInput,
       input => {
@@ -152,7 +152,7 @@ export function createNativeSessionDirectoryTools(options: {
         return { status: 'confirmed', bindings: all.slice(0, input.limit), limited: all.length > input.limit,
           pluginManagementAvailable: service !== undefined };
       }),
-    make('qaf_session_bind', '将空闲QQ或插件绑定切换到明确的targetSessionId。QQ传resolve/list得到的完整target，保持历史并推进generation；两个QQ不能占用同一实际会话。插件传pluginOwner、expectedRevision及可选具名键，可共享QQ或其他插件会话。管理当前QQ会话时先返回pending与operationId，待本轮处理和发送结束后应用。',
+    make('qbf_session_bind', '将空闲QQ或插件绑定切换到明确的targetSessionId。QQ传resolve/list得到的完整target，保持历史并推进generation；两个QQ不能占用同一实际会话。插件传pluginOwner、expectedRevision及可选具名键，可共享QQ或其他插件会话。管理当前QQ会话时先返回pending与operationId，待本轮处理和发送结束后应用。',
       mutationSchema('bind'), value => mutationInput(value, 'bind'), async (input, request) => {
         if (input.kind === 'qq') {
           assert(input.targetSessionId, 'INVALID_SESSION_TOOL_INPUT', 'A concrete targetSessionId is required.');
@@ -165,7 +165,7 @@ export function createNativeSessionDirectoryTools(options: {
           expectedRevision: target.revision, sessionId: target.sessionId }, request.signal);
         return { status: 'confirmed', kind: 'plugin', binding };
       }),
-    make('qaf_session_create', '为目标插件创建一个新的持久模型会话并绑定；默认kind为plugin。先查询插件绑定，将当前revision作为expectedRevision，尚无绑定时传null。model可指定已配置provider/model，省略使用宿主默认模型。创建后返回真实sessionId。',
+    make('qbf_session_create', '为目标插件创建一个新的持久模型会话并绑定；默认kind为plugin。先查询插件绑定，将当前revision作为expectedRevision，尚无绑定时传null。model可指定已配置provider/model，省略使用宿主默认模型。创建后返回真实sessionId。',
       mutationSchema('create'), value => mutationInput(value, 'create'), async (input, request) => {
         assert(input.kind === 'plugin' && input.request.action === 'create', 'INVALID_SESSION_TOOL_INPUT', 'Creation requires a concrete plugin target.');
         const target = input.request;
@@ -173,7 +173,7 @@ export function createNativeSessionDirectoryTools(options: {
           expectedRevision: target.revision, ...(target.model === undefined ? {} : { model: target.model }) }, request.signal);
         return { status: 'confirmed', kind: 'plugin', binding };
       }),
-    make('qaf_session_unbind', '解除QQ或插件的当前会话绑定并保留实际模型会话历史。QQ使用完整target版本；插件使用pluginOwner、expectedRevision及具名键。管理当前QQ会话时先返回pending与operationId，在本轮结束后应用；其余目标即时核验空闲与执行状态。解绑后下次调用可建立新绑定。',
+    make('qbf_session_unbind', '解除QQ或插件的当前会话绑定并保留实际模型会话历史。QQ使用完整target版本；插件使用pluginOwner、expectedRevision及具名键。管理当前QQ会话时先返回pending与operationId，在本轮结束后应用；其余目标即时核验空闲与执行状态。解绑后下次调用可建立新绑定。',
       mutationSchema('unbind'), value => mutationInput(value, 'unbind'), async (input, request) => {
         if (input.kind === 'qq') {
           if (input.target.key === request.scope.conversationId && options.deferQQ) return options.deferQQ(request, input.target);

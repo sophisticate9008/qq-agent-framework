@@ -35,7 +35,7 @@ interface FixtureOptions {
 }
 
 async function fixture(context: TestContext, options: FixtureOptions = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'qaf-diary-'));
+  const directory = await mkdtemp(join(tmpdir(), 'qbf-diary-'));
   const filename = join(directory, 'diary.sqlite');
   let now = initial;
   let configuration: DiaryConfiguration = { enabled: true, publish: options.publish ?? true, timeZone: 'Asia/Shanghai',

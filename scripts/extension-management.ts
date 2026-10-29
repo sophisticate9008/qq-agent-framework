@@ -69,7 +69,7 @@ export async function manageExtensions(root: string, argumentsList: readonly str
   output: (value: string) => void = console.log): Promise<void> {
   const listing = argumentsList.length === 0 || argumentsList.length === 1 && argumentsList[0] === 'list'
   const reloading = argumentsList.length === 2 && argumentsList[0] === 'reload' && identifier(argumentsList[1])
-  if (!listing && !reloading) fail('用法：qqagent extensions [list] 或 qqagent extensions reload <插件标识>。')
+  if (!listing && !reloading) fail('用法：qqbridge-framework extensions [list] 或 qqbridge-framework extensions reload <插件标识>。')
   let configuration: ReturnType<typeof loadGatewayAdminConfiguration>
   let token: string
   try {
@@ -89,7 +89,7 @@ export async function manageExtensions(root: string, argumentsList: readonly str
         ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'error',
         signal: AbortSignal.timeout(body ? 60_000 : 5_000) })
     } catch {
-      fail(body ? '插件重载结果尚未确认；请运行 qqagent extensions 查询状态，勿自动重试。' : '无法连接本机管理服务。')
+      fail(body ? '插件重载结果尚未确认；请运行 qqbridge-framework extensions 查询状态，勿自动重试。' : '无法连接本机管理服务。')
     }
     if (!response.ok) {
       let failureCode: string | undefined
@@ -107,7 +107,7 @@ export async function manageExtensions(root: string, argumentsList: readonly str
       if (failureCode === 'extension_dispose_failed') fail('插件清理失败；请查询错误与排空状态，勿继续重载堆积实例。')
       if (failureCode === 'extension_reload_timeout' || failureCode === 'extension_reload_aborted'
         || failureCode === 'operation_unknown' || failureCode === 'handler_timeout' || failureCode === 'request_aborted') {
-        fail('插件重载结果尚未确认；请运行 qqagent extensions 查询状态，勿自动重试。')
+        fail('插件重载结果尚未确认；请运行 qqbridge-framework extensions 查询状态，勿自动重试。')
       }
       if (failureCode === 'origin_forbidden') fail('管理端同源校验失败；请核对本机管理配置中的 publicOrigin。')
       fail(response.status === 401 || response.status === 403 ? '管理端鉴权失败。'
@@ -125,7 +125,7 @@ export async function manageExtensions(root: string, argumentsList: readonly str
   if (listing) { output(JSON.stringify({ schema: 1, items }, null, 2)); return }
   const id = argumentsList[1]!
   const selected = items.find(item => item.id === id)
-  if (!selected) fail('指定插件未登记；请先运行 qqagent extensions。')
+  if (!selected) fail('指定插件未登记；请先运行 qqbridge-framework extensions。')
   const result = await request({ id, expectedRevision: selected.currentRevision })
   if (!isRecord(result) || result.schema !== 1 || result.id !== id
     || result.previousRevision !== selected.currentRevision || !validRevision(result.currentRevision)

@@ -85,7 +85,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   readonly unread?: { readonly ids: readonly string[]; readonly readThrough: number; readonly through: number; readonly partial: boolean };
   readonly memory?: NativeMemoryContext;
   readonly tools?: { readonly available: boolean; readonly tools: readonly { readonly name: string; readonly description: string }[]; readonly reason: string | null };
-  readonly output?: { readonly protocol: 'qaf.output/1'; readonly forwardAuthorized?: boolean; readonly bubbles: boolean; readonly longTextAsForward: boolean; readonly longTextThreshold: number; readonly maxDeliveries: number };
+  readonly output?: { readonly protocol: 'qbf.output/1'; readonly forwardAuthorized?: boolean; readonly bubbles: boolean; readonly longTextAsForward: boolean; readonly longTextThreshold: number; readonly maxDeliveries: number };
 }): readonly MessageContent[] {
   const budget = options.maxHistoryCharacters ?? 5_000;
   assert(Number.isSafeInteger(budget) && budget >= 0 && budget <= 6_000,
@@ -181,7 +181,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
       count: options.unread.ids.length, included: recent.filter(item => item.unread).length
         + (options.unread.ids.includes(event.id) && wake?.mode !== 'read-unread' ? 1 : 0),
       partial: options.unread.partial || historyTruncated } : null,
-    recent, quoted, memory: options.memory ?? null, tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ? { ...options.output, sendMode: 'explicit-tool', sendTool: 'qaf_reply' } : null, historyTruncated, currentTruncated });
+    recent, quoted, memory: options.memory ?? null, tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ? { ...options.output, sendMode: 'explicit-tool', sendTool: 'qbf_reply' } : null, historyTruncated, currentTruncated });
 
   function build(length: number): readonly MessageContent[] {
     const parts: MessageContent[] = [];

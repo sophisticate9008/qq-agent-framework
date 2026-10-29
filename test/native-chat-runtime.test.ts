@@ -195,7 +195,7 @@ async function fixture(context: TestContext, options: {
       routableProviders: ['external-provider'], groups: [{ id: 'external-provider', name: 'Local fixture provider',
         models: [{ id: 'model', name: 'Model', reasoning: { efforts: [{ id: 'off', name: 'Off' }], defaultEffort: 'off' } }, ...(options.migrationChannel ? [{ id: 'next-model', name: 'Next', reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }] : [])] }], failures: [] }
     else if ((options.frameworkToolChannel || options.executionCheckpoint || options.migrationChannel) && envelope.method === 'bridgePlugin/describe') value = {
-      ...plugin.invoke(envelope.method, input) as Record<string, unknown>, ...(options.executionCheckpoint ? { executionEvidenceProtocol: 'qq-agent-framework.execution-evidence/1' } : {}), ...(options.migrationChannel ? { migrationProtocol: 'qaf-session-migration/1', migrationApiVersion: 2 } : {}), methods: [...(options.executionCheckpoint ? ['bridgePlugin/inspectExecution'] : []), ...(options.migrationChannel ? ['bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration'] : [])], ...(options.frameworkToolChannel ? { frameworkToolProtocol: 'qq-agent-framework.tools/1' } : {}), ...(options.workChannel ? { workProtocol: 'qq-agent-framework.work/1' } : {}) }
+      ...plugin.invoke(envelope.method, input) as Record<string, unknown>, ...(options.executionCheckpoint ? { executionEvidenceProtocol: 'qq-bridge-framework.execution-evidence/1' } : {}), ...(options.migrationChannel ? { migrationProtocol: 'qbf-session-migration/1', migrationApiVersion: 2 } : {}), methods: [...(options.executionCheckpoint ? ['bridgePlugin/inspectExecution'] : []), ...(options.migrationChannel ? ['bridgePlugin/forkPreview', 'bridgePlugin/forkWithPreset', 'bridgePlugin/inspectMigration'] : [])], ...(options.frameworkToolChannel ? { frameworkToolProtocol: 'qq-bridge-framework.tools/1' } : {}), ...(options.workChannel ? { workProtocol: 'qq-bridge-framework.work/1' } : {}) }
     else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/inspectFrameworkTools') value = {
       schema: 1, issuerEpoch: input.issuerEpoch, projection: toolLeases.get(String(input.sessionId)) ?? null }
     else if (options.frameworkToolChannel && envelope.method === 'bridgePlugin/installFrameworkTools') {
@@ -226,7 +226,7 @@ async function fixture(context: TestContext, options: {
     } else if (options.workChannel && envelope.method === 'bridgePlugin/interruptWork') {
       const prior = works.get(String(input.id))!; works.set(prior.id, { ...prior, state: 'completed', result: { stopReason: 'interrupted', output: [{ type: 'text', text: '工作已停止。' }] } }); value = { accepted: true }
     } else if (options.executionCheckpoint && envelope.method === 'bridgePlugin/inspectExecution') value = {
-      ...input, schema: 1, protocol: 'qq-agent-framework.execution-evidence/1',
+      ...input, schema: 1, protocol: 'qq-bridge-framework.execution-evidence/1',
       issuerEpoch: (plugin.invoke('bridgePlugin/describe', {}) as Record<string, unknown>).issuerEpoch,
       state: checkpointSettled ? 'settled' : 'not-observed',
       matchedUserMessageId: checkpointSettled ? input.userMessageId ?? `user-${input.requestId}` : null,
@@ -240,11 +240,11 @@ async function fixture(context: TestContext, options: {
     else if (options.migrationChannel && envelope.method === 'agentPresets/read') value = { agentPreset: input.agentPreset,
       content: `- name: "@deepseek-ai/dsh-compaction-basic"\n  config: { auto: true, headroomTokens: 0, maxTokens: 16000, summarizationProvider: external-provider, summarizationModel: next-model }\n` }
     else if (options.migrationChannel && envelope.method === 'credentials/describe') value = { credentials: [] }
-    else if (options.migrationChannel && envelope.method === 'bridgePlugin/forkPreview') value = { ...input, migrationProtocol: 'qaf-session-migration/1',
+    else if (options.migrationChannel && envelope.method === 'bridgePlugin/forkPreview') value = { ...input, migrationProtocol: 'qbf-session-migration/1',
       issuerEpoch: (plugin.invoke('bridgePlugin/describe', {}) as Record<string, unknown>).issuerEpoch, state: 'available',
       sourceCursor: 7, sourceDigest: 'c'.repeat(64), targetRevision: 'd'.repeat(64), missingReasons: [] }
     else if (options.migrationChannel && envelope.method === 'bridgePlugin/forkWithPreset') {
-      value = { ...input, migrationProtocol: 'qaf-session-migration/1', state: 'completed', childSessionId: `migration-child-${migrations.size+1}`, idempotency: 'created', missingReasons: [] }
+      value = { ...input, migrationProtocol: 'qbf-session-migration/1', state: 'completed', childSessionId: `migration-child-${migrations.size+1}`, idempotency: 'created', missingReasons: [] }
       migrations.set(String(input.migrationId), value as Record<string, unknown>)
       if (options.unknownFork) { response.destroy(); return }
     } else if (options.migrationChannel && envelope.method === 'bridgePlugin/inspectMigration') value = { ...migrations.get(String(input.migrationId)), idempotency: 'replayed' }
@@ -368,7 +368,7 @@ async function fixture(context: TestContext, options: {
     const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
     const id = `reply-${sessionId}-${turn}-${toolCalls.length}`
     const lease = toolLeases.get(sessionId)!
-    toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name: 'qaf_reply',
+    toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name: 'qbf_reply',
       input: { content: json(content) }, sessionId, requestId, generation: lease.generation,
       userMessageId: `user-${requestId}`, turn, expiresAt: Date.now() + 10000 } })
     await until(() => toolResults.has(id))
@@ -1574,9 +1574,9 @@ test('native default framework tools project only explicit grants and execute me
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
   const lease = fake.toolLeases.get(sessionId)!
-  assert(lease.names.includes('qaf_media_inspect') && lease.names.includes('qaf_media_read'))
+  assert(lease.names.includes('qbf_media_inspect') && lease.names.includes('qbf_media_read'))
   const call = { id: 'tool-call-1', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
-    name: 'qaf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
+    name: 'qbf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
   fake.toolCalls.push({ ticket: 'ticket-forged', leaseId: lease.leaseId, call: { ...call, id: 'forged', userMessageId: 'unmatched-source' } })
   await until(() => fake.toolResults.has('ticket-forged'))
   assert.equal(fake.toolResults.get('ticket-forged')?.status, 'rejected')
@@ -1604,7 +1604,7 @@ test('native consumes a structured non-participation decision without sending co
   fake.message(960)
   await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   fake.agentEvent('assistant/message', { turn: 1, message: { id: 'silent-final', role: 'assistant', content: [{ type: 'text',
-    text: JSON.stringify({ schema: 'qaf.reply/1', action: 'silent', reason: 'user-requested' }) }] } })
+    text: JSON.stringify({ schema: 'qbf.reply/1', action: 'silent', reason: 'user-requested' }) }] } })
   fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
   await until(() => fake.runtime().host()!.replies.get('private:123')?.status === 'suppressed')
   assert.equal(fake.sends.length, 0)
@@ -1613,7 +1613,7 @@ test('native consumes a structured non-participation decision without sending co
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
   await fake.answer(2)
   await until(() => fake.sends.length === 1)
-  assert(!JSON.stringify(fake.sends).includes('qaf.reply/1'))
+  assert(!JSON.stringify(fake.sends).includes('qbf.reply/1'))
   assert.equal(fake.creates(), 1)
 })
 
@@ -1650,9 +1650,9 @@ test('whitelist projects tools without a grant document and removing access reje
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const assetId = JSON.stringify(prompt.content).match(/media-[a-f0-9]{64}/)![0]
   const lease = fake.toolLeases.get(sessionId)!
-  assert(lease.names.includes('qaf_media_read'))
+  assert(lease.names.includes('qbf_media_read'))
   const call = { id: 'whitelist-read', sessionId, generation: 1, requestId, userMessageId: `user-${requestId}`, turn: 1,
-    name: 'qaf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
+    name: 'qbf_media_read', input: { assetId }, expiresAt: Date.now() + 10_000 }
   fake.toolCalls.push({ ticket: 'whitelist-read', leaseId: lease.leaseId, call })
   await until(() => fake.toolResults.has('whitelist-read'))
   assert.equal(fake.toolResults.get('whitelist-read')?.status, 'confirmed')
@@ -1687,8 +1687,8 @@ test('default tool projection exposes framework tools while memory and reminder 
   await fake.configure(); await fake.start(); fake.message(990)
   await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
   const names = fake.toolLeases.get('session-1')!.names
-  assert(names.includes('qaf_reply'))
-  assert(!names.some(name => name.startsWith('qaf_memory_') || name.startsWith('qaf_reminder_')))
+  assert(names.includes('qbf_reply'))
+  assert(!names.some(name => name.startsWith('qbf_memory_') || name.startsWith('qbf_reminder_')))
   assert.equal((await fake.reply('同账号的显式回复')).status, 'confirmed')
   fake.rawFinal()
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
@@ -1717,7 +1717,7 @@ test('native work tools run independently, persist results, send with delegation
       generation: 1, userMessageId: `user-${requestId}`, turn: requests.length, expiresAt: Date.now() + 10000 } })
     await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
   }
-  const started = await call('start-independent', 'qaf_work_start', { task: '执行明确委派的测试任务', context: '' })
+  const started = await call('start-independent', 'qbf_work_start', { task: '执行明确委派的测试任务', context: '' })
   assert.equal(started.status, 'confirmed', JSON.stringify(started))
   assert.equal(fake.works.size, 1)
   const [id, work] = [...fake.works][0]
@@ -1725,7 +1725,7 @@ test('native work tools run independently, persist results, send with delegation
   const start = fake.rpc.find(call => call.method === 'bridgePlugin/startWork')!.request
   assert.equal(start.modelProvider, 'external-work'); assert.equal(start.agentPreset, 'test-work')
   assert.equal(start.parentSessionId, sessionId)
-  const status = await call('status-independent', 'qaf_work_status', { id })
+  const status = await call('status-independent', 'qbf_work_status', { id })
   assert.equal(status.status, 'confirmed')
   fake.rawFinal(1)
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
@@ -1741,11 +1741,11 @@ test('native work tools run independently, persist results, send with delegation
   assert.equal(fake.runtime().host()!.sessions.get('private:123')?.sessionId, sessionId)
   fake.message(1201)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
-  const followup = await call('follow-independent', 'qaf_work_followup', { id, text: '补充明确要求', delivery: 'queue' })
+  const followup = await call('follow-independent', 'qbf_work_followup', { id, text: '补充明确要求', delivery: 'queue' })
   assert.equal(followup.status, 'confirmed', JSON.stringify(followup))
   assert.equal(fake.works.get(id)?.childId, work.childId)
   await until(() => fake.runtime().readWork(id)?.status === 'running')
-  const stopped = await call('stop-independent', 'qaf_work_interrupt', { id })
+  const stopped = await call('stop-independent', 'qbf_work_interrupt', { id })
   assert.equal(stopped.status, 'confirmed', JSON.stringify(stopped))
   fake.rawFinal(3)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 4)
@@ -1771,7 +1771,7 @@ test('native child questions use QQ owner replies while the main conversation co
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const lease = fake.toolLeases.get(sessionId)!
-  fake.toolCalls.push({ ticket: 'child-start', leaseId: lease.leaseId, call: { id: 'child-start', name: 'qaf_work_start',
+  fake.toolCalls.push({ ticket: 'child-start', leaseId: lease.leaseId, call: { id: 'child-start', name: 'qbf_work_start',
     input: { task: '执行需要确认的独立工作', context: '' }, sessionId, requestId, generation: 1,
     userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
   await until(() => fake.toolResults.has('child-start'))
@@ -1809,7 +1809,7 @@ test('native work file result is registered from SDK bytes and records a real up
   await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
-  fake.toolCalls.push({ ticket: 'file-start', leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id: 'file-start', name: 'qaf_work_start',
+  fake.toolCalls.push({ ticket: 'file-start', leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id: 'file-start', name: 'qbf_work_start',
     input: { task: '生成报告文件', context: '' }, sessionId, requestId, generation: 1,
     userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
   await until(() => fake.toolResults.has('file-start'))
@@ -1907,7 +1907,7 @@ test('native media tools read protocol image and text-file bytes without sending
   async function call(index: number) {
     const part = contents[index]; assert('assetId' in part)
     const id = `media-read-${index}`
-    fake.toolCalls.push({ ticket: id, leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id, name: 'qaf_media_read',
+    fake.toolCalls.push({ ticket: id, leaseId: fake.toolLeases.get(sessionId)!.leaseId, call: { id, name: 'qbf_media_read',
       input: { assetId: part.assetId }, sessionId, requestId, generation: 1,
       userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
     await until(() => fake.toolResults.has(id)); return fake.toolResults.get(id)!
@@ -1974,9 +1974,9 @@ test('native output package sends registered image audio file and configured lon
   const source = fake.runtime().host()!.history.snapshot('private:123', { afterSequence: 0 }).messages[0]
   const assets = source.content.filter(part => part.type === 'image' || part.type === 'audio' || part.type === 'file')
   assert.equal(assets.length, 3)
-  await fake.reply({ schema: 'qaf.output/1', content: [{ type: 'text', text: '这些是原资源。' }, ...assets] })
+  await fake.reply({ schema: 'qbf.output/1', content: [{ type: 'text', text: '这些是原资源。' }, ...assets] })
   fake.agentEvent('assistant/message', { turn: 1, message: { id: 'output-media', role: 'assistant',
-    content: [{ type: 'text', text: JSON.stringify({ schema: 'qaf.output/1', content: [{ type: 'text', text: '这些是原资源。' }, ...assets] }) }] } })
+    content: [{ type: 'text', text: JSON.stringify({ schema: 'qbf.output/1', content: [{ type: 'text', text: '这些是原资源。' }, ...assets] }) }] } })
   fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
   await until(() => fake.sends.length === 2)
   assert.match(JSON.stringify(fake.sends[0]), /"type":"image"/)
@@ -2206,8 +2206,8 @@ test('legacy tool permissions do not restrict whitelist tools and absent work ba
   await until(() => fake.rpc.some(call => call.method === 'session/prompt')).catch(async error => { throw new Error(JSON.stringify((await fake.runtime().status()).ingress), { cause: error }) })
   const first = promptHostFacts(fake.rpc.find(call => call.method === 'session/prompt')!.request)
   assert(isRecord(first.tools) && Array.isArray(first.tools.tools))
-  assert(first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qaf_media_inspect'))
-  assert(!first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qaf_work_start'))
+  assert(first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qbf_media_inspect'))
+  assert(!first.tools.tools.some(tool => isRecord(tool) && tool.name === 'qbf_work_start'))
   assert(isRecord(first.output)); assert.equal(first.output.forwardAuthorized, true)
   await fake.answer(1); await until(() => fake.sends.length === 1)
   await invoke(fake.routes(), 'POST', path, { revision: granted.revision, action: 'revoke', id })
@@ -2237,7 +2237,7 @@ test('native conversation doctor and versioned event routes expose blockers with
   const detail = await invoke(fake.routes(), 'GET', '/api/chat/executions', null, new URLSearchParams({ id: rows[0].id }))
   assert(isRecord(detail.item)); assert.equal(detail.item.id, rows[0].id); assert(!Object.hasOwn(detail.item, 'policy'))
   const events = await invoke(fake.routes(), 'GET', '/api/chat/events', null, new URLSearchParams({ conversationId: 'private:123' }))
-  assert.equal(events.protocol, 'qaf.events/1'); assert(Array.isArray(events.events) && events.events.length > 0)
+  assert.equal(events.protocol, 'qbf.events/1'); assert(Array.isArray(events.events) && events.events.length > 0)
   assert(!JSON.stringify(events).includes('User message 2400'))
   const counts = fake.rpc.length
   const abort = new AbortController()
@@ -2385,7 +2385,7 @@ for (const finalKind of ['none', 'text', 'invalid-silent']) test(`explicit reply
   if (finalKind === 'none') fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
   else if (finalKind === 'invalid-silent') {
     fake.agentEvent('assistant/message', { turn: 1, message: { id: 'legacy-silent', role: 'assistant', content: [{ type: 'text',
-      text: JSON.stringify({ schema: 'qaf.reply/1', action: 'silent', reason: '用户要求不用回复' }) }] } })
+      text: JSON.stringify({ schema: 'qbf.reply/1', action: 'silent', reason: '用户要求不用回复' }) }] } })
     fake.agentEvent('turn/end', { turn: 1, reason: { kind: 'completed' } })
   }
   else fake.rawFinal(1)
@@ -2405,7 +2405,7 @@ for (const finalKind of ['none', 'text', 'invalid-silent']) test(`explicit reply
   assert.equal(fake.sends.length, 0)
 })
 
-for (const conversation of ['private', 'group'] as const) test(`explicit reply contract: ${conversation} qaf_reply sends once and terminal final neither repeats nor times out`, async context => {
+for (const conversation of ['private', 'group'] as const) test(`explicit reply contract: ${conversation} qbf_reply sends once and terminal final neither repeats nor times out`, async context => {
   const fake = await fixture(context)
   await fake.configure()
   await fake.save('execution', { policy: { ...DEFAULT_NATIVE_EXECUTION_POLICY, turnTimeoutMs: 4000, cancelOnTimeout: false } })
@@ -2417,7 +2417,7 @@ for (const conversation of ['private', 'group'] as const) test(`explicit reply c
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   fake.toolCalls.push({ ticket: 'explicit-send', leaseId: fake.toolLeases.get(sessionId)!.leaseId,
-    call: { id: 'explicit-send', name: 'qaf_reply', input: { content: '主动发出的唯一答复' }, sessionId, requestId,
+    call: { id: 'explicit-send', name: 'qbf_reply', input: { content: '主动发出的唯一答复' }, sessionId, requestId,
       generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
   await until(() => fake.toolResults.has('explicit-send'))
   const result = fake.toolResults.get('explicit-send')!
@@ -2455,7 +2455,7 @@ test('explicit reply contract: host work feedback uses final narration while too
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   const leaseId = fake.toolLeases.get(sessionId)!.leaseId
-  fake.toolCalls.push({ ticket: 'feedback-start', leaseId, call: { id: 'feedback-start', name: 'qaf_work_start',
+  fake.toolCalls.push({ ticket: 'feedback-start', leaseId, call: { id: 'feedback-start', name: 'qbf_work_start',
     input: { task: '整理报告', context: '' }, sessionId, requestId, generation: 1,
     userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
   await until(() => fake.toolResults.has('feedback-start'))
@@ -2465,16 +2465,16 @@ test('explicit reply contract: host work feedback uses final narration while too
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   assert.equal(fake.sends.length, 0)
   fake.works.set(id, { ...work, state: 'completed', result: { stopReason: 'completed', output: [
-    { type: 'text', text: 'workspace.write succeeded; qaf_work_start internal log: 报告有三项结果。' } ] } })
+    { type: 'text', text: 'workspace.write succeeded; qbf_work_start internal log: 报告有三项结果。' } ] } })
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
   const feedback = fake.rpc.filter(call => call.method === 'session/prompt')[1]!.request
   const feedbackRequestId = String(feedback.requestId)
   const feedbackInput = JSON.stringify(feedback.content)
-  assert.match(feedbackInput, /qaf.work-feedback\/1/)
+  assert.match(feedbackInput, /qbf.work-feedback\/1/)
   assert.match(feedbackInput, /宿主专用转述/)
   assert.match(feedbackInput, /不照搬助手的格式、工具名/)
   assert.equal(fake.sends.length, 0, 'raw child result is input to the narrator, never directly sent')
-  fake.toolCalls.push({ ticket: 'feedback-forbidden-tool', leaseId, call: { id: 'feedback-forbidden-tool', name: 'qaf_reply',
+  fake.toolCalls.push({ ticket: 'feedback-forbidden-tool', leaseId, call: { id: 'feedback-forbidden-tool', name: 'qbf_reply',
     input: { content: 'must not send' }, sessionId, requestId: feedbackRequestId, generation: 1,
     userMessageId: `user-${feedbackRequestId}`, turn: 2, expiresAt: Date.now() + 10000 } })
   await until(() => fake.toolResults.has('feedback-forbidden-tool'))
@@ -2490,7 +2490,7 @@ test('explicit reply contract: host work feedback uses final narration while too
   await until(() => fake.runtime().readWork(id)?.delivery === 'confirmed')
   assert.equal(fake.sends.length, 1)
   assert.match(JSON.stringify(fake.sends), /报告整理好了/)
-  assert.doesNotMatch(JSON.stringify(fake.sends), /workspace.write|qaf_work_start|private-tool|internal progress|must not send/)
+  assert.doesNotMatch(JSON.stringify(fake.sends), /workspace.write|qbf_work_start|private-tool|internal progress|must not send/)
   assert.equal(fake.runtime().host()!.replies.get('private:123')?.status, 'responded')
 })
 
@@ -2551,7 +2551,7 @@ for (const stopReason of ['completed', 'failed', 'running'] as const) test(stopR
   const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
   const sessionId = String(prompt.sessionId); const requestId = String(prompt.requestId)
   fake.toolCalls.push({ ticket: 'stale-progress-work', leaseId: fake.toolLeases.get(sessionId)!.leaseId,
-    call: { id: 'stale-progress-work', name: 'qaf_work_start', input: { task: '整理一份报告', context: '' },
+    call: { id: 'stale-progress-work', name: 'qbf_work_start', input: { task: '整理一份报告', context: '' },
       sessionId, requestId, generation: 1, userMessageId: `user-${requestId}`, turn: 1, expiresAt: Date.now() + 10000 } })
   await until(() => fake.toolResults.has('stale-progress-work'))
   assert.equal(fake.toolResults.get('stale-progress-work')?.status, 'confirmed')

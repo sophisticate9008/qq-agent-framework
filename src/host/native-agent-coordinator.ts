@@ -208,7 +208,7 @@ export function createNativeAgentCoordinator(options: {
                 observedMessages.add(execution.requestId)
                 const pending = matchingReply(binding, execution.requestId)
                 // Only host-authored work feedback uses final text as a presentation result.
-                // QQ turns speak through qaf_reply; final text is never a fallback send.
+                // QQ turns speak through qbf_reply; final text is never a fallback send.
                 const feedback = pending?.requestId.startsWith('work-feedback:')
                   ? store.read('native-work.feedback', pending.requestId) : null
                 const value = feedback ? object(feedback.value) : null

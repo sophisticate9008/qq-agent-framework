@@ -147,7 +147,7 @@ export function createMigrationJournal(options: {
       busy = true
       let lock: Awaited<ReturnType<typeof open>> | undefined
       let intent = false
-      const childSessionId = `session-qaf-${migrationDigest(request.migrationId)}`
+      const childSessionId = `session-qbf-${migrationDigest(request.migrationId)}`
       const fingerprint = migrationDigest(constraints(request))
       try {
         signal.throwIfAborted()

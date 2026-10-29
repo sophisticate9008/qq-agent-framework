@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 
 export type Theme = 'light' | 'dark' | 'system';
-const storageKey = 'qq-agent-theme';
+const storageKey = 'qq-bridge-framework-theme';
 const ThemeContext = createContext<{ theme: Theme; setTheme(theme: Theme): void }>({ theme: 'system', setTheme() {} });
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

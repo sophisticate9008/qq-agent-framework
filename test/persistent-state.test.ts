@@ -12,7 +12,7 @@ import { createPersistentFeatureState } from '../src/storage/state.ts';
 type FeatureState = ReturnType<typeof createFeatureState>;
 
 function temporaryDatabase(): { directory: string; filename: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-state-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-state-'));
   return { directory, filename: join(directory, 'state.sqlite') };
 }
 

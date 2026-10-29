@@ -7,7 +7,7 @@ import { createMigrationJournal, migrationDigest } from '../dist/migration-journ
 import type { ForkWithPresetRequest } from '../dist/migration-protocol.js'
 
 test('durable migration retains original complete request across restart and never retries unknown', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'qaf-migration-journal-'))
+  const root = await mkdtemp(join(tmpdir(), 'qbf-migration-journal-'))
   const directory = join(root, 'journal')
   let creates = 0
   let uncertain = false

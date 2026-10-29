@@ -26,16 +26,16 @@ class ReplyAdapter extends LlmAdapter {
     if (response === 'tool' || response === 'invalid' || response === 'siblings') {
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(this.requests <= 3 ? 'reply-call' : `reply-call-${this.requests}`),
-        name: 'qaf_reply', arguments: response === 'invalid' ? '{"unexpected":true}' : '{"content":"Sent by an explicit tool"}' } }
+        name: 'qbf_reply', arguments: response === 'invalid' ? '{"unexpected":true}' : '{"content":"Sent by an explicit tool"}' } }
       if (response === 'siblings') {
         yield { type: 'block-start', index: 1, blockType: 'tool-call' }
-        yield { type: 'block-end', index: 1, block: { type: 'tool-call', id: ToolCallId('sibling-call'), name: 'qaf_sibling', arguments: '{}' } }
+        yield { type: 'block-end', index: 1, block: { type: 'tool-call', id: ToolCallId('sibling-call'), name: 'qbf_sibling', arguments: '{}' } }
       }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
     } else {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: response === 'bare' ? 'Bare answer that must stay private'
-        : '{"schema":"qaf.reply/1","action":"silent","reason":"already-answered"}' } }
+        : '{"schema":"qbf.reply/1","action":"silent","reason":"already-answered"}' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
   }
@@ -62,9 +62,9 @@ test('actual SDK repair stays inside the original turn and user claim until its 
   assert(object(described) && typeof described.issuerEpoch === 'string')
   const issuerEpoch = described.issuerEpoch
   await invoke('installFrameworkTools', { request: { issuerEpoch, sessionId: agent.id, generation: 1,
-    tools: [{ name: 'qaf_reply', description: 'Explicit local capture reply', timeoutMs: 5000,
+    tools: [{ name: 'qbf_reply', description: 'Explicit local capture reply', timeoutMs: 5000,
       parameters: { type: 'object', additionalProperties: false, properties: { content: { type: 'string' } }, required: ['content'] } },
-    { name: 'qaf_sibling', description: 'A second submitted local tool', timeoutMs: 5000,
+    { name: 'qbf_sibling', description: 'A second submitted local tool', timeoutMs: 5000,
       parameters: { type: 'object', properties: {}, additionalProperties: false } }] } })
   const terminal: number[] = []
   const observedSources: string[] = []
@@ -95,7 +95,7 @@ test('actual SDK repair stays inside the original turn and user claim until its 
   assert.equal(calls.length, 1)
   assert.equal(adapter.requests, 2, 'the reminder is added only after an omitted decision')
   assert.deepEqual(terminal, [], 'the first bare final does not close the turn')
-  assert(observedSources.includes('qaf-reply-decision-repair'))
+  assert(observedSources.includes('qbf-reply-decision-repair'))
   const pending = calls[0]
   assert(object(pending) && object(pending.call) && typeof pending.ticket === 'string')
   assert.equal(pending.call.requestId, 'authentic-qq-request')
@@ -113,7 +113,7 @@ test('actual SDK repair stays inside the original turn and user claim until its 
   const probe = agent.ctx.on('agent/request', async (payload, next) => {
     if (payload.turn === 2 && !probed) {
       probed = true
-      oldProbe = await agent.ctx.tools.execute({ callId: ToolCallId('reply-call'), agent, name: 'qaf_reply',
+      oldProbe = await agent.ctx.tools.execute({ callId: ToolCallId('reply-call'), agent, name: 'qbf_reply',
         arguments: { content: 'An old call must not borrow the new user source' }, signal: payload.signal })
     }
     return next()
@@ -149,7 +149,7 @@ test('actual SDK repair stays inside the original turn and user claim until its 
     { name: 'rejected-delivery', result: { status: 'confirmed', value: { status: 'rejected', receipts: [], errorCode: 'INVALID_REPLY_INPUT' } }, terminal: false },
     { name: 'rejected-tool', result: { status: 'rejected', code: 'INVALID_TOOL_INPUT' }, terminal: false }
   ]
-  async function queuedCall(name = 'qaf_reply') {
+  async function queuedCall(name = 'qbf_reply') {
     for (let attempt = 0; attempt < 300; attempt++) {
       const result = await invoke('pollFrameworkTools', { request: { issuerEpoch } })
       assert(object(result) && Array.isArray(result.calls))
@@ -183,7 +183,7 @@ test('actual SDK repair stays inside the original turn and user claim until its 
   const reply = await queuedCall()
   await invoke('completeFrameworkTool', { request: { issuerEpoch, ticket: reply.ticket,
     result: { status: 'confirmed', value: { status: 'sent', receipts: [{ status: 'confirmed' }] } } } })
-  const sibling = await queuedCall('qaf_sibling')
+  const sibling = await queuedCall('qbf_sibling')
   assert.equal(terminal.length, turnsBefore, 'a concluded reply does not abort the other submitted tool')
   await invoke('completeFrameworkTool', { request: { issuerEpoch, ticket: sibling.ticket, result: { status: 'confirmed', value: 'drained' } } })
   await agent.whenIdle()

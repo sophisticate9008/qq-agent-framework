@@ -15,7 +15,7 @@ import { createSqliteStore } from '../src/storage/sqlite.ts';
 type Policy = ReturnType<typeof createPolicy>;
 
 function temporaryDatabase(): { directory: string; filename: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-policy-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-policy-'));
   return { directory, filename: join(directory, 'policy.sqlite') };
 }
 

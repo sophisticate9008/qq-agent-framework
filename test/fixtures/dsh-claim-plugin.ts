@@ -36,10 +36,10 @@ export function createDshClaimPluginFixture(readJournal?: () => ReturnType<typeo
     result(ticket: string) { return results.get(ticket) },
     invoke(method: string, request: Record<string, unknown>): unknown {
       const currentJournal = readJournal?.() ?? journal
-      if (method === 'bridgePlugin/describe') return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.0.0',
+      if (method === 'bridgePlugin/describe') return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1',
         sdkVersion: '0.2.1-rc.2', issuerEpoch: currentJournal.issuerEpoch, authentication: 'dsh-owner-peer',
         durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed', externalToolAuthorizationVerified: false,
-        frameworkToolProtocol: 'qq-agent-framework.tools/1', retention: RECEIPT_LIMITS }
+        frameworkToolProtocol: 'qq-bridge-framework.tools/1', retention: RECEIPT_LIMITS }
       if (method === 'bridgePlugin/claimReceipts') return currentJournal.read({ sessionId: String(request.sessionId),
         ...(request.issuerEpoch === undefined ? {} : { issuerEpoch: String(request.issuerEpoch) }),
         ...(request.after === undefined ? {} : { after: Number(request.after) }),

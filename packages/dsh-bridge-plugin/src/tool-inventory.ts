@@ -90,7 +90,7 @@ export function inspectRegisteredToolInventory(ctx: Context) {
       if (items.length >= LIMIT) { limited = true; break }
       const rawDescription = own(definition, 'description')
       const description = typeof rawDescription === 'string' ? rawDescription.slice(0, 2000) : null
-      const registrationSource = readToolRegistrationSource(own(definition, 'qafRegistration'))
+      const registrationSource = readToolRegistrationSource(own(definition, 'qbfRegistration'))
         ?? declaredMcpToolSource(source.id, key) ?? legacySource(key)
       items.push({ ...(registrationSource ? { registrationSource } : {}), id: `${source.id}:${key}`, name: key, description, sourceId: source.id, registration: 'registered', loadedInSession: null })
     }

@@ -1112,7 +1112,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
                 return sessionIntents.schedule({ target, ...(targetSessionId ? { targetSessionId } : {}), ownerId: source.userId })
               } })] })
         directoryInventory = capabilityDirectory.inventory().map(item => ({ name: item.id, description: item.description,
-          loadedInSession: false, registrationSource: { origin: 'framework-builtin', ownerId: 'qq-agent-framework',
+          loadedInSession: false, registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework',
             ownerName: '框架能力目录', transport: 'native' } }))
         const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
         if (['native.media.inspect', 'native.media.read', 'native.stickers.list', 'native.stickers.manage', ...Object.keys(conversationEffects), ...Object.keys(capabilityDirectory.effects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
@@ -1306,7 +1306,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         const workTarget = options.resolveWorkTarget ? await options.resolveWorkTarget(controller.signal) : null
         workMissingReasons = workTarget?.missingReasons ?? ['native_work_target_unavailable']
         // Register the host once; availability and the selected model are resolved for each task.
-        if (plugin.workProtocol === 'qq-agent-framework.work/1' && dsh.work && options.resolveWorkTarget) {
+        if (plugin.workProtocol === 'qq-bridge-framework.work/1' && dsh.work && options.resolveWorkTarget) {
           const workHost = host
           const resolveTarget = options.resolveWorkTarget
           const workPort = dsh.work
@@ -1378,15 +1378,15 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
               guard: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') }),
             onFault(code) { lastError = code; activity.record('error') } })
         }
-        if (plugin.frameworkToolProtocol !== 'qq-agent-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
-        if (plugin.frameworkToolProtocol === 'qq-agent-framework.tools/1' && dsh.frameworkTools) {
+        if (plugin.frameworkToolProtocol !== 'qq-bridge-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
+        if (plugin.frameworkToolProtocol === 'qq-bridge-framework.tools/1' && dsh.frameworkTools) {
           frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
             tools: [...NATIVE_REPLY_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
             async toolDescriptions(signal): Promise<Readonly<Record<string, string>>> {
               const identity = await options.readWorkIdentity?.(signal)
               signal.throwIfAborted()
-              const start = NATIVE_WORK_TOOLS.find(tool => tool.definition.name === 'qaf_work_start')!
-              return identity ? { qaf_work_start: `${start.definition.description}\n当前配置的助手：${JSON.stringify(identity)}。此配置说明覆盖历史回复中对助手身份或可调用性的猜测。` } : {}
+              const start = NATIVE_WORK_TOOLS.find(tool => tool.definition.name === 'qbf_work_start')!
+              return identity ? { qbf_work_start: `${start.definition.description}\n当前配置的助手：${JSON.stringify(identity)}。此配置说明覆盖历史回复中对助手身份或可调用性的猜测。` } : {}
             },
             async unavailableCapabilities(signal) {
               if (!work || !options.resolveWorkTarget) return NATIVE_WORK_TOOLS.map(tool => tool.definition.capability)

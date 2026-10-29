@@ -14,7 +14,7 @@ import { parse, stringify } from 'yaml'
 
 type Value = Record<string, unknown>
 const adminToken = 'local-admin-token-no-production-0123456789'
-export const useRealCli = process.env.QQ_AGENT_FIXTURE_CLI === '1'
+export const useRealCli = process.env.QQ_BRIDGE_FRAMEWORK_FIXTURE_CLI === '1'
 
 export function nativeGatewayFixtureObject(value: unknown): Value {
   assert(value !== null && typeof value === 'object' && !Array.isArray(value))
@@ -295,8 +295,8 @@ export async function createNativeChatGatewayFixture(context: TestContext, optio
   async function reply(content: string, index = streams.length - 1) {
     const stream = streams[index]!
     const requestId = String(calls.findLast(call => call.method === 'session/prompt' && call.input.sessionId === stream.sessionId)!.input.requestId)
-    await until(() => plugin.ready(stream.sessionId, 'qaf_reply', requestId))
-    const ticket = plugin.queue(stream.sessionId, 'qaf_reply', { content })
+    await until(() => plugin.ready(stream.sessionId, 'qbf_reply', requestId))
+    const ticket = plugin.queue(stream.sessionId, 'qbf_reply', { content })
     await awaitCondition(() => plugin.result(ticket) !== undefined, { message: 'Explicit reply tool did not settle', timeoutMs: 10_000 })
     return plugin.result(ticket)!
   }

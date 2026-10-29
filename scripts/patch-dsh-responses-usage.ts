@@ -12,7 +12,7 @@ for (const [name, version] of [['@earendil-works/pi-ai', '1.4.0'], ['@deepseek-a
     || !('version' in manifest) || manifest.version !== version) throw new Error(`Unsupported package; expected ${name} ${version}`)
 }
 const apiDirectory = join(modules, '@earendil-works/pi-ai/dist/api')
-const helper = join(apiDirectory, 'qaf-responses-usage.js')
+const helper = join(apiDirectory, 'qbf-responses-usage.js')
 const responsesOriginal = `            const inputDetails = response.usage.input_tokens_details;
             const cachedTokens = inputDetails?.cached_tokens || 0;
             const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
@@ -26,16 +26,16 @@ const responsesOriginal = `            const inputDetails = response.usage.input
                 totalTokens: response.usage.total_tokens || 0,
 `
 const responsesPrevious = `            output.usage = {
-                ...qafReadResponsesUsage(response.usage),
+                ...qbfReadResponsesUsage(response.usage),
 `
 const responsesReplacement = `            output.usage = {
-                ...qafReadResponsesUsage(response.usage, new URL("./qaf-provider-usage-observed.json", import.meta.url)),
+                ...qbfReadResponsesUsage(response.usage, new URL("./qbf-provider-usage-observed.json", import.meta.url)),
 `
 const completionsOriginal = `        totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 `
 const completionsReplacement = `        totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
-        ...qafReadCacheUsagePresence(rawUsage, new URL("./qaf-provider-usage-observed.json", import.meta.url)),
+        ...qbfReadCacheUsagePresence(rawUsage, new URL("./qbf-provider-usage-observed.json", import.meta.url)),
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 `
 const adapterOriginal = `function mapUsage(usage) {
@@ -47,22 +47,22 @@ const adapterOriginal = `function mapUsage(usage) {
 \t\t...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {}
 \t};
 }`
-const adapterReplacement = `// qaf-cache-report-presence/1: explicit provider zeros survive the standard optional fields.
+const adapterReplacement = `// qbf-cache-report-presence/1: explicit provider zeros survive the standard optional fields.
 function mapUsage(usage) {
 \treturn {
 \t\tinputTokens: usage.input,
 \t\toutputTokens: usage.output,
 \t\ttotalTokens: usage.totalTokens,
-\t\t...usage.qafCacheReadReported === true || usage.qafCacheReadReported === undefined && usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
-\t\t...usage.qafCacheWriteReported === true || usage.qafCacheWriteReported === undefined && usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {}
+\t\t...usage.qbfCacheReadReported === true || usage.qbfCacheReadReported === undefined && usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
+\t\t...usage.qbfCacheWriteReported === true || usage.qbfCacheWriteReported === undefined && usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {}
 \t};
 }`
 const definitions = [
   { target: join(apiDirectory, 'openai-responses-shared.js'),
-    marker: 'import { readResponsesUsage as qafReadResponsesUsage } from "./qaf-responses-usage.js";\n',
+    marker: 'import { readResponsesUsage as qbfReadResponsesUsage } from "./qbf-responses-usage.js";\n',
     original: responsesOriginal, replacement: responsesReplacement, previous: responsesPrevious },
   { target: join(apiDirectory, 'openai-completions.js'),
-    marker: 'import { readCacheUsagePresence as qafReadCacheUsagePresence } from "./qaf-responses-usage.js";\n',
+    marker: 'import { readCacheUsagePresence as qbfReadCacheUsagePresence } from "./qbf-responses-usage.js";\n',
     original: completionsOriginal, replacement: completionsReplacement, previous: undefined },
   { target: join(modules, '@deepseek-ai/dsh-llm-pi-ai/lib/index.js'), marker: '',
     original: adapterOriginal, replacement: adapterReplacement, previous: undefined },
@@ -90,7 +90,7 @@ const compiled = ts.transpileModule(helperSource, { fileName: 'responses-usage.t
 if (compiled.diagnostics?.some(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error)) throw new Error('Unable to compile usage helper')
 const generated = '// Generated from QQ Bridge Framework src/adapters/responses-usage.ts.\n' + compiled.outputText
 for (const update of updates) {
-  const backup = update.target + '.qaf-usage-original'
+  const backup = update.target + '.qbf-usage-original'
   try { await writeFile(backup, update.original, { flag: 'wx', mode: update.mode }) }
   catch (error) {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error

@@ -34,7 +34,7 @@ function fixture() {
   return { calls, ports, setStatus(next: Partial<NativeApplicationRuntimeStatus>) { current = { ...current, ...next }; } };
 }
 async function directory(t: { after(fn: () => Promise<void>): void }) {
-  const directory = await mkdtemp(join(tmpdir(), 'qaf-application-'));
+  const directory = await mkdtemp(join(tmpdir(), 'qbf-application-'));
   t.after(() => rm(directory, { recursive: true, force: true })); return directory;
 }
 

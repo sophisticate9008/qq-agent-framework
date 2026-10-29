@@ -21,7 +21,7 @@ test('a final DSH text longer than 8000 reaches the long-forward planner without
   const current = await registry.read('chat-output')
   await registry.compareAndSet('chat-output', current.revision, { ...DEFAULT_NATIVE_OUTPUT, longTextAsForward: true, longTextThreshold: 3500 }, signal)
   const output = createNativeOutputService(registry)
-  for (const text of [markdown, JSON.stringify({ schema: 'qaf.output/1', content: [{ type: 'text', text: markdown }] })]) {
+  for (const text of [markdown, JSON.stringify({ schema: 'qbf.output/1', content: [{ type: 'text', text: markdown }] })]) {
     const bounded = normalizeDshOutputText([{ type: 'text', text }])
     assert(bounded.length > 1)
     const result = await output.prepare(bounded, event, signal)

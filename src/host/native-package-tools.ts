@@ -36,29 +36,29 @@ function reminder(value: JsonValue): JsonValue {
   return input;
 }
 export const NATIVE_REMINDER_TOOLS: readonly NativeToolContribution[] = Object.freeze([
-  contribution('qaf_reminder_list', 'reminders.list', object({}), value => exact(value, [])),
-  contribution('qaf_reminder_create', 'reminders.create',
+  contribution('qbf_reminder_list', 'reminders.list', object({}), value => exact(value, [])),
+  contribution('qbf_reminder_create', 'reminders.create',
     object(reminderProperties), reminder),
-  contribution('qaf_reminder_update', 'reminders.update',
+  contribution('qbf_reminder_update', 'reminders.update',
     object({ id, revision, configuration: object(reminderProperties) }), value => {
       const input = exact(value, ['id', 'revision', 'configuration']); identified(input); reminder(input.configuration); return input;
     }),
-  contribution('qaf_reminder_set_enabled', 'reminders.set-enabled',
+  contribution('qbf_reminder_set_enabled', 'reminders.set-enabled',
     object({ id, revision, enabled: { type: 'boolean' } }), value => {
       const input = exact(value, ['id', 'revision', 'enabled']); identified(input);
       assert(typeof input.enabled === 'boolean', 'INVALID_TOOL_INPUT', 'Enabled must be explicit.'); return input;
     }),
-  contribution('qaf_reminder_cancel', 'reminders.cancel', object({ id, revision }), value => {
+  contribution('qbf_reminder_cancel', 'reminders.cancel', object({ id, revision }), value => {
     const input = exact(value, ['id', 'revision']); identified(input); return input;
   })
 ]);
 export const NATIVE_MEMORY_TOOLS: readonly NativeToolContribution[] = Object.freeze([
-  contribution('qaf_memory_query', 'memory.query',
+  contribution('qbf_memory_query', 'memory.query',
     object({ query: { type: 'string', maxLength: 256 } }), value => {
       const input = exact(value, ['query']); assert(typeof input.query === 'string' && input.query.length <= 256,
         'INVALID_TOOL_INPUT', 'Memory query must be bounded.'); return input;
     }),
-  contribution('qaf_memory_propose', 'memory.propose',
+  contribution('qbf_memory_propose', 'memory.propose',
     object({ kind: { enum: ['memory', 'preference'] }, content: { type: 'string', minLength: 1, maxLength: 4000 },
       tags: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 64 }, maxItems: 16, uniqueItems: true },
       expiresAt: { type: ['integer', 'null'], minimum: 0 } }), value => {

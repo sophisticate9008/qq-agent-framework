@@ -92,7 +92,7 @@ function privateFile(filename: string, value: string): void {
 }
 
 function fixture(port = 3131): { readonly directory: string; readonly gatewayConfiguration: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-cli-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-cli-'));
   privateFile(join(directory, 'gateway.token'), `${GATEWAY_SECRET}\n`);
   const gatewayConfiguration = join(directory, 'gateway.json');
   privateFile(gatewayConfiguration, JSON.stringify({
@@ -145,7 +145,7 @@ test('CLI parses only supported command options and presents standalone init fir
   });
   assert.equal(parseCliArguments(['start', '--admin-only']).adminOnly, true);
   assert.equal(parseCliArguments(['init']).command, 'init');
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-cli-empty-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-cli-empty-'));
   try {
     const help = capturedIo(directory);
     assert.equal(await runCli(['init', '--help'], help.io), 0);
@@ -257,7 +257,7 @@ test('optional SDK CI installs, tests and verifies the package tarball in its ow
 });
 
 test('browser resolver handles static imports from the isolated package, not the project package', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain space-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-toolchain space-'));
   const isolated = browserToolchainPaths(directory).directory;
   const fixture = join(directory, 'smoke.ts');
   const hooks = registerBrowserToolchainResolver(isolated);
@@ -282,7 +282,7 @@ test('browser resolver handles static imports from the isolated package, not the
 });
 
 test('browser resolver refuses to fall back to an unrelated project dependency', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-fallback-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-toolchain-fallback-'));
   const dependency = join(directory, 'node_modules/playwright');
   mkdirSync(dependency, { recursive: true });
   writeFileSync(join(dependency, 'package.json'), JSON.stringify({ name: 'playwright', exports: './package.json' }));
@@ -299,7 +299,7 @@ test('browser resolver refuses to fall back to an unrelated project dependency',
 });
 
 test('uninstall removes only the isolated toolchain and preserves configurations and evidence', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-remove-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-toolchain-remove-'));
   try {
     const paths = browserToolchainPaths(directory);
     assert.equal(paths.manifest, join(directory, 'runtime/testing/package.json'));
@@ -313,7 +313,7 @@ test('uninstall removes only the isolated toolchain and preserves configurations
       mkdirSync(dirname(join(directory, filename)), { recursive: true });
       writeFileSync(join(directory, filename), 'keep');
     }
-    writeFileSync(paths.manifest, JSON.stringify({ name: 'qq-agent-browser-testing', private: true, type: 'module' }));
+    writeFileSync(paths.manifest, JSON.stringify({ name: 'qq-bridge-framework-browser-testing', private: true, type: 'module' }));
     uninstallBrowserToolchain(directory);
     assert.equal(existsSync(paths.directory), false);
     for (const filename of preserved) assert.equal(readFileSync(join(directory, filename), 'utf8'), 'keep');
@@ -330,12 +330,12 @@ test('uninstall refuses missing, foreign, invalid and symlinked markers without 
   const markers: readonly (string | undefined)[] = [
     undefined,
     JSON.stringify({ name: 'foreign-browser-testing', private: true, type: 'module' }),
-    JSON.stringify({ name: 'qq-agent-browser-testing', private: false, type: 'module' }),
-    JSON.stringify({ name: 'qq-agent-browser-testing', private: true, type: 'commonjs' }),
+    JSON.stringify({ name: 'qq-bridge-framework-browser-testing', private: false, type: 'module' }),
+    JSON.stringify({ name: 'qq-bridge-framework-browser-testing', private: true, type: 'commonjs' }),
     '{not-json', ' '.repeat(4097)
   ];
   for (const marker of markers) {
-    const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-unowned-'));
+    const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-toolchain-unowned-'));
     try {
       const paths = browserToolchainPaths(directory);
       mkdirSync(paths.directory, { recursive: true });
@@ -350,12 +350,12 @@ test('uninstall refuses missing, foreign, invalid and symlinked markers without 
       rmSync(directory, { recursive: true, force: true });
     }
   }
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-toolchain-linked-marker-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-toolchain-linked-marker-'));
   try {
     const paths = browserToolchainPaths(directory);
     mkdirSync(paths.directory, { recursive: true });
     const externalMarker = join(directory, 'external-package.json');
-    const content = JSON.stringify({ name: 'qq-agent-browser-testing', private: true, type: 'module' });
+    const content = JSON.stringify({ name: 'qq-bridge-framework-browser-testing', private: true, type: 'module' });
     writeFileSync(externalMarker, content);
     symlinkSync(externalMarker, paths.manifest);
     const retained = join(paths.directory, 'unrelated-data');
@@ -428,16 +428,16 @@ test('gateway preparation rejects an occupied mismatched port without stopping i
 
 test('configuration selection prefers explicit argument, then environment, then runtime default', () => {
   const directory = join(tmpdir(), 'cli-precedence');
-  assert.equal(resolveConfigurationFilename('explicit.json', { QQ_AGENT_CONFIG: 'environment.json' }, directory),
+  assert.equal(resolveConfigurationFilename('explicit.json', { QQ_BRIDGE_FRAMEWORK_CONFIG: 'environment.json' }, directory),
     join(directory, 'explicit.json'));
-  assert.equal(resolveConfigurationFilename(undefined, { QQ_AGENT_CONFIG: 'environment.json' }, directory),
+  assert.equal(resolveConfigurationFilename(undefined, { QQ_BRIDGE_FRAMEWORK_CONFIG: 'environment.json' }, directory),
     join(directory, 'environment.json'));
   assert.equal(resolveConfigurationFilename(undefined, {}, directory), join(directory, 'runtime/admin/config.json'));
 });
 
 test('standalone init creates private safe defaults, defers the admin token and never partially overwrites', async context => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-cli-standalone-'));
-  const conflictDirectory = mkdtempSync(join(tmpdir(), 'qq-agent-cli-conflict-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-cli-standalone-'));
+  const conflictDirectory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-cli-conflict-'));
   let service: Awaited<ReturnType<typeof startGatewayAdmin>> | undefined;
   context.after(async () => {
     await service?.close();
@@ -632,7 +632,7 @@ test('status performs read-only health requests and does not print administrator
   const { createHash } = await import('node:crypto');
   expectedRevision = createHash('sha256').update(JSON.stringify(configuration)).digest('hex');
 
-  const output = capturedIo(values.directory, { QQ_AGENT_CONFIG: join(values.directory, 'missing.json') });
+  const output = capturedIo(values.directory, { QQ_BRIDGE_FRAMEWORK_CONFIG: join(values.directory, 'missing.json') });
   assert.equal(await runCli(['status', '--config', adminConfiguration], output.io), 0);
   assert.deepEqual(requests.map(request => [request.method, request.url]), [
     ['GET', '/health'],

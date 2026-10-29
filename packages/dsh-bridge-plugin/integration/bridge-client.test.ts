@@ -134,7 +134,7 @@ class LocalFailureAdapter extends LlmAdapter {
       if (!tool) {
         this.mediaToolRequests++
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`media-tool-${this.mediaToolRequests}`), name: 'qaf_media_read', arguments: JSON.stringify({assetId:'opaque-image'}) } }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(`media-tool-${this.mediaToolRequests}`), name: 'qbf_media_read', arguments: JSON.stringify({assetId:'opaque-image'}) } }
         yield { type: 'finish', reason: {kind:'tool-calls'} }
       } else {
         this.mediaSeen = tool.content
@@ -493,16 +493,16 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
       const originalScope = await port.inspectScope({ sessionId: agent.id, expectedPreset: 'chosen-group', expectedNames: [] }, description.issuerEpoch, signal)
       assert(originalScope.state === 'verified-scope')
       const installed = await client.frameworkTools.install({ issuerEpoch: description.issuerEpoch, sessionId: agent.id, generation: 9,
-        tools: [{ name: 'qaf_media_inspect', description: 'Inspect the current QQ scoped opaque media handle.', timeoutMs: 2000,
+        tools: [{ name: 'qbf_media_inspect', description: 'Inspect the current QQ scoped opaque media handle.', timeoutMs: 2000,
           parameters: { type: 'object', properties: { assetId: { type: 'string' } }, required: ['assetId'], additionalProperties: false } }] }, signal)
-      assert.deepEqual(installed.names, ['qaf_media_inspect'])
+      assert.deepEqual(installed.names, ['qbf_media_inspect'])
       const inspected = await client.frameworkTools.inspect({ issuerEpoch: description.issuerEpoch, sessionId: agent.id }, signal)
       assert.deepEqual(inspected, { sessionId: agent.id, generation: 9, leaseId: installed.leaseId, names: installed.names })
       await assert.rejects(client.frameworkTools.install({ issuerEpoch: description.issuerEpoch, sessionId: agent.id, generation: 9,
-        tools: [{ name: 'qaf_media_inspect', description: 'Duplicate install must not silently replace an uncertain lease.', timeoutMs: 2000,
+        tools: [{ name: 'qbf_media_inspect', description: 'Duplicate install must not silently replace an uncertain lease.', timeoutMs: 2000,
           parameters: { type: 'object', properties: {}, additionalProperties: false } }] }, signal))
       assert.equal((await client.frameworkTools.inspect({ issuerEpoch: description.issuerEpoch, sessionId: agent.id }, signal))?.leaseId, installed.leaseId)
-      assert.equal(ctx.tools.schemas(agent).some(schema => schema.name === 'qaf_media_inspect'), true)
+      assert.equal(ctx.tools.schemas(agent).some(schema => schema.name === 'qbf_media_inspect'), true)
       const projectedScope = await port.inspectScope({ sessionId: agent.id, expectedPreset: 'chosen-group', expectedNames: [],
         expectedSchemaFingerprint: originalScope.schemaFingerprint }, description.issuerEpoch, signal)
       assert(projectedScope.state === 'verified-scope')
@@ -523,10 +523,10 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
           // that the model loop publishes before dispatching its tool pipeline.
           agent.session.append('assistant/message', { turn: payload.turn, step: payload.step, stream: [], message: createAssistantMessage({
             source: { provider: 'local-fixture', model: 'safe-model' }, content: [{ type: 'tool-call', id: ToolCallId(sdkCallId),
-              name: 'qaf_media_inspect', arguments: '{"assetId":"opaque-asset"}' }]
+              name: 'qbf_media_inspect', arguments: '{"assetId":"opaque-asset"}' }]
           }) }, { surfaceOp: 'append' })
           await new Promise<void>(resolve => setImmediate(resolve))
-          outcome = await agent.ctx.tools.execute({ callId: ToolCallId(sdkCallId), agent, name: 'qaf_media_inspect',
+          outcome = await agent.ctx.tools.execute({ callId: ToolCallId(sdkCallId), agent, name: 'qbf_media_inspect',
             arguments: { assetId: 'opaque-asset' }, signal: AbortSignal.any([payload.signal, toolSignal]) })
         }
         return next()
@@ -574,15 +574,15 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
         assert.deepEqual(await client.frameworkTools.poll({ issuerEpoch: description.issuerEpoch }, signal), [])
         assert.equal(await client.frameworkTools.complete({ issuerEpoch: description.issuerEpoch, ticket: cancelledTicket,
           result: { status: 'confirmed', value: { late: true } } }, signal), false)
-        const noSource = await agent.ctx.tools.execute({ callId: ToolCallId('late-old-turn'), agent, name: 'qaf_media_inspect', arguments: { assetId: 'opaque-asset' }, signal })
+        const noSource = await agent.ctx.tools.execute({ callId: ToolCallId('late-old-turn'), agent, name: 'qbf_media_inspect', arguments: { assetId: 'opaque-asset' }, signal })
         assert.equal(noSource.isError, false)
         assert.deepEqual(noSource.value, { status: 'rejected', code: 'TOOL_SOURCE_UNAVAILABLE' })
-        const malformed = await agent.ctx.tools.execute({ callId: ToolCallId('forged-input'), agent, name: 'qaf_media_inspect', arguments: { assetId: 'opaque-asset', owner: true }, signal })
+        const malformed = await agent.ctx.tools.execute({ callId: ToolCallId('forged-input'), agent, name: 'qbf_media_inspect', arguments: { assetId: 'opaque-asset', owner: true }, signal })
         assert.equal(malformed.isError, false)
         assert.deepEqual(malformed.value, { status: 'rejected', code: 'INVALID_TOOL_INPUT' })
         const revoke = agent.ctx.tools.guard(() => 'Original DSH tool policy denies this invocation')
         try {
-          const denied = await agent.ctx.tools.execute({ callId: ToolCallId('dsh-policy-denied'), agent, name: 'qaf_media_inspect', arguments: { assetId: 'opaque-asset' }, signal })
+          const denied = await agent.ctx.tools.execute({ callId: ToolCallId('dsh-policy-denied'), agent, name: 'qbf_media_inspect', arguments: { assetId: 'opaque-asset' }, signal })
           assert.equal(denied.isError, true)
         } finally { revoke() }
         assert.deepEqual(await client.frameworkTools.poll({ issuerEpoch: description.issuerEpoch }, signal), [])
@@ -590,7 +590,7 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
         hook(); errors()
         await client.frameworkTools.withdraw({ issuerEpoch: description.issuerEpoch, sessionId: agent.id, leaseId: installed.leaseId }, signal)
       }
-      assert.equal(ctx.tools.schemas(agent).some(schema => schema.name === 'qaf_media_inspect'), false)
+      assert.equal(ctx.tools.schemas(agent).some(schema => schema.name === 'qbf_media_inspect'), false)
       assert.equal(await client.frameworkTools.inspect({ issuerEpoch: description.issuerEpoch, sessionId: agent.id }, signal), null)
     })
     await context.test('structured media tool content reaches the next real SDK model request without Base64 text and unsupported models stay explicit', async () => {
@@ -607,14 +607,14 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
           const agent = ctx.agents.get(SessionId(created.value.sessionId)); assert(agent)
           const description = await port.describe(signal)
           await client.frameworkTools.install({issuerEpoch:description.issuerEpoch,sessionId:agent.id,generation:1,tools:[{
-            name:'qaf_media_read',description:'Read explicitly authorized scoped image or text bytes.',timeoutMs:3000,
+            name:'qbf_media_read',description:'Read explicitly authorized scoped image or text bytes.',timeoutMs:3000,
             parameters:{type:'object',properties:{assetId:{type:'string'}},required:['assetId'],additionalProperties:false}}]},signal)
           assert((await client.prompt({sessionId:agent.id,requestId:`media-prompt-${mode}`,mode:'queue',content:[{type:'text',text:'READ_SCOPED_MEDIA'}],signal})).ok)
           let pending: Awaited<ReturnType<FrameworkClient['frameworkTools']['poll']>> = []
           for(let attempt=0;attempt<200&&!pending.length;attempt++) { pending=await client.frameworkTools.poll({issuerEpoch:description.issuerEpoch},signal); if(!pending.length)await new Promise<void>(resolve=>setTimeout(resolve,5)) }
           assert.equal(pending.length,1)
           const content = mode==='text' ? [{type:'text' as const,text:'VERIFIED_UTF8_FILE_BODY'}] : [{type:'image' as const,mediaType:'image/png' as const,data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHd8AAAAASUVORK5CYII='}]
-          assert.equal(await client.frameworkTools.complete({issuerEpoch:description.issuerEpoch,ticket:pending[0]!.ticket,result:{status:'confirmed',value:{schema:'qq-agent-framework.media-read/1',kind:mode==='text'?'text':'image',contentRead:true},content}},signal),true)
+          assert.equal(await client.frameworkTools.complete({issuerEpoch:description.issuerEpoch,ticket:pending[0]!.ticket,result:{status:'confirmed',value:{schema:'qq-bridge-framework.media-read/1',kind:mode==='text'?'text':'image',contentRead:true},content}},signal),true)
           await agent.whenIdle()
           assert(adapter.mediaSeen.length>0)
           assert.equal(adapter.mediaSeen.some(part=>object(part).type==='image'),mode==='image')
@@ -687,7 +687,7 @@ test('official plugin entry and actual framework HTTP client isolate claims, per
           await assert.rejects(channel.inspect({...address,generation:request.generation+1}));
           await channel.close();
           process.stdout.write(JSON.stringify(snapshot));
-        `, JSON.stringify(request), join(directory, 'storages', 'qaf-work')], { cwd: new URL('..', import.meta.url), timeout: 10000 })
+        `, JSON.stringify(request), join(directory, 'storages', 'qbf-work')], { cwd: new URL('..', import.meta.url), timeout: 10000 })
         assert.equal(object(JSON.parse(stdout)).issuerEpoch, 'fresh-owner-epoch')
         const parent = ctx.agents.get(SessionId(address.parentSessionId))
         assert(parent)

@@ -97,7 +97,7 @@ const GENERAL_HELP = `QQ Bridge Framework 命令行
   npm run cli -- uninstall --browser
   npm run cli -- build
 
-配置优先级：--config > QQ_AGENT_CONFIG > runtime/admin/config.json
+配置优先级：--config > QQ_BRIDGE_FRAMEWORK_CONFIG > runtime/admin/config.json
 init 默认创建独立的本机 OneBot HTTP 网关配置；--gateway-config 可复用已严格校验的高级网关配置。
 默认上游为 http://127.0.0.1:3000，网关监听 127.0.0.1:3131，管理端监听 127.0.0.1:3210。
 新配置不允许任何会话发送；请首次访问管理网页生成管理令牌，再显式配置外部 OneBot 和发送范围。
@@ -219,8 +219,8 @@ export function resolveConfigurationFilename(
   environment: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd()
 ): string {
-  const selected = explicit ?? environment.QQ_AGENT_CONFIG ?? 'runtime/admin/config.json';
-  if (selected.length === 0) usage('QQ_AGENT_CONFIG 不能为空。');
+  const selected = explicit ?? environment.QQ_BRIDGE_FRAMEWORK_CONFIG ?? 'runtime/admin/config.json';
+  if (selected.length === 0) usage('QQ_BRIDGE_FRAMEWORK_CONFIG 不能为空。');
   return resolve(cwd, selected);
 }
 
@@ -421,7 +421,7 @@ function requireBrowserToolchainMarker(filename: string): void {
       throw new Error('invalid_marker');
     }
     const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, count)));
-    if (!isRecord(value) || value.name !== 'qq-agent-browser-testing' || value.private !== true || value.type !== 'module') {
+    if (!isRecord(value) || value.name !== 'qq-bridge-framework-browser-testing' || value.private !== true || value.type !== 'module') {
       throw new Error('invalid_marker');
     }
   } catch {
@@ -436,7 +436,7 @@ async function prepareBrowser(withDeps: boolean, downloadBrowser: boolean, io: C
   privateDirectory(dirname(paths.directory));
   privateDirectory(paths.directory);
   const manifest = JSON.stringify({
-    name: 'qq-agent-browser-testing',
+    name: 'qq-bridge-framework-browser-testing',
     private: true,
     type: 'module',
     dependencies: { playwright: PLAYWRIGHT_VERSION, typescript: BROWSER_TYPESCRIPT_VERSION }
@@ -532,7 +532,7 @@ async function runTests(parsed: ParsedCliArguments, io: CliIo): Promise<void> {
   for (const smoke of browserSmokeFiles(target)) {
     io.stdout(`执行浏览器测试：${smoke}`);
     await runProcess(process.execPath, ['--import', pathToFileURL(paths.resolver).href, resolve(PROJECT_ROOT, smoke)], {
-      env: { ...io.env, QQ_AGENT_BROWSER_TOOLCHAIN_ROOT: paths.directory, PLAYWRIGHT_BROWSERS_PATH: paths.browsers }
+      env: { ...io.env, QQ_BRIDGE_FRAMEWORK_BROWSER_TOOLCHAIN_ROOT: paths.directory, PLAYWRIGHT_BROWSERS_PATH: paths.browsers }
     });
   }
 }

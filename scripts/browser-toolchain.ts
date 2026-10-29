@@ -19,6 +19,6 @@ export function registerBrowserToolchainResolver(directory: string): ReturnType<
   });
 }
 
-if (process.env.QQ_AGENT_BROWSER_TOOLCHAIN_ROOT !== undefined) {
-  registerBrowserToolchainResolver(process.env.QQ_AGENT_BROWSER_TOOLCHAIN_ROOT);
+if (process.env.QQ_BRIDGE_FRAMEWORK_BROWSER_TOOLCHAIN_ROOT !== undefined) {
+  registerBrowserToolchainResolver(process.env.QQ_BRIDGE_FRAMEWORK_BROWSER_TOOLCHAIN_ROOT);
 }

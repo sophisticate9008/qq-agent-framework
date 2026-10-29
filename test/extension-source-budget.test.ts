@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createExtensionModuleLoader } from '../src/host/extension-module-loader.ts';
 
 test('source budgets share unchanged modules and retain the running version on overflow', async context => {
-  const root = await mkdtemp(join(tmpdir(), 'qaf-source-budget-'));
+  const root = await mkdtemp(join(tmpdir(), 'qbf-source-budget-'));
   context.after(() => rm(root, { recursive: true, force: true }));
   const entry = join(root, 'index.ts');
   const padding = 'x'.repeat(5000);

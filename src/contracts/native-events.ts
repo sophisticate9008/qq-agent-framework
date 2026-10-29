@@ -1,4 +1,4 @@
-export const NATIVE_EVENT_PROTOCOL = 'qaf.events/1' as const
+export const NATIVE_EVENT_PROTOCOL = 'qbf.events/1' as const
 export const NATIVE_EVENT_STATUSES = {
   runtime: ['starting','running','stopping','stopped','error'],
   connection: ['connecting','connected','disconnected','error','unknown'],

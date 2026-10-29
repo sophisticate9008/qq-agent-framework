@@ -38,7 +38,7 @@
 
 ## 工作流热重载
 
-包启动后登记 `qzone-diary` 热重载项。更新工作流实现后先执行 `qqagent extensions` 查看当前登记，再执行 `qqagent extensions reload qzone-diary`。候选模块按源码指纹加载，固定 v1 行为契约不兼容或加载失败时保留旧代；同一源码版本不切换。固定入口 `index.ts`、行为契约 `workflow-contract.ts`、输入类型 `types.ts`、管理贡献 `management.ts`、媒体适配器 `media-store.ts` 和时间换算 `time.ts` 的指纹在加载前后核对，修改这些文件会拒绝热重载，要求完整重新应用装配。工作流和其本地依赖采用有界 ESM 代际缓存，最多 64 个源码版本，达到上限后需重新应用宿主版本。
+包启动后登记 `qzone-diary` 热重载项。更新工作流实现后先执行 `qqbridge-framework extensions` 查看当前登记，再执行 `qqbridge-framework extensions reload qzone-diary`。候选模块按源码指纹加载，固定 v1 行为契约不兼容或加载失败时保留旧代；同一源码版本不切换。固定入口 `index.ts`、行为契约 `workflow-contract.ts`、输入类型 `types.ts`、管理贡献 `management.ts`、媒体适配器 `media-store.ts` 和时间换算 `time.ts` 的指纹在加载前后核对，修改这些文件会拒绝热重载，要求完整重新应用装配。工作流和其本地依赖采用有界 ESM 代际缓存，最多 64 个源码版本，达到上限后需重新应用宿主版本。
 
 工具和定时任务 handler 只在包首次启动时注册，各次完整执行持有对应工作流代的租约。新调用使用新代，已开始的规划、生成、检查或发布沿原代排空；旧代排空前不接受下一次重载。候选构造不调用 `start()`，不会重复登记 handler、更新每日规则、执行中断恢复或将仍在运行的日程改成 unknown。所有代继续使用同一持久日程和模型绑定，不因重载重排当天计划或重放发布。
 

@@ -1,4 +1,4 @@
-export const DSH_EXECUTION_EVIDENCE_PROTOCOL = 'qq-agent-framework.execution-evidence/1' as const
+export const DSH_EXECUTION_EVIDENCE_PROTOCOL = 'qq-bridge-framework.execution-evidence/1' as const
 export interface DshExecutionEvidenceRequest {
   readonly sessionId: string
   readonly requestId: string

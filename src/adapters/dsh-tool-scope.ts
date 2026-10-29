@@ -11,7 +11,7 @@ export type { ClaimReceipt, ClaimReceiptPage, ClaimReceiptQuery }
 
 export interface DshBridgePluginDescription {
   readonly protocol: typeof BRIDGE_PLUGIN_PROTOCOL
-  readonly pluginVersion: '0.1.0' | '0.2.0' | '1.0.0' | '1.1.0' | '1.2.0' | '1.3.0' | '1.3.1' | '1.4.0'
+  readonly pluginVersion: '1.4.1'
   readonly sdkVersion: '0.2.1-rc.2'
   readonly issuerEpoch: string
   readonly authentication: 'dsh-owner-peer'
@@ -21,9 +21,9 @@ export interface DshBridgePluginDescription {
   readonly externalToolAuthorizationVerified: false
   readonly migrationApiVersion?: 1 | 2
   readonly migrationProtocol?: string
-  readonly frameworkToolProtocol?: 'qq-agent-framework.tools/1'
+  readonly frameworkToolProtocol?: 'qq-bridge-framework.tools/1'
   readonly executionEvidenceProtocol?: typeof DSH_EXECUTION_EVIDENCE_PROTOCOL
-  readonly workProtocol?: 'qq-agent-framework.work/1'
+  readonly workProtocol?: 'qq-bridge-framework.work/1'
   readonly methods?: readonly string[]
 }
 
@@ -75,7 +75,7 @@ export function createDshBridgePluginPort(invoke: (method: PluginMethod, request
   const port: DshBridgePluginPort = Object.freeze<DshBridgePluginPort>({
     async describe(signal) {
       const value = object(await invoke('bridgePlugin/describe', undefined, signal))
-      requireProof(value.protocol === BRIDGE_PLUGIN_PROTOCOL && (value.pluginVersion === '0.1.0' || value.pluginVersion === '0.2.0' || value.pluginVersion === '1.0.0' || value.pluginVersion === '1.1.0' || value.pluginVersion === '1.2.0' || value.pluginVersion === '1.3.0' || value.pluginVersion === '1.3.1' || value.pluginVersion === '1.4.0') && value.sdkVersion === '0.2.1-rc.2'
+      requireProof(value.protocol === BRIDGE_PLUGIN_PROTOCOL && value.pluginVersion === '1.4.1' && value.sdkVersion === '0.2.1-rc.2'
         && validIdentifier(value.issuerEpoch) && value.authentication === 'dsh-owner-peer' && value.durableReceipts === false
         && value.claimMeaning === 'inbox-claimed-not-completed' && value.externalToolAuthorizationVerified === false)
       const retention = object(value.retention)
@@ -83,8 +83,8 @@ export function createDshBridgePluginPort(invoke: (method: PluginMethod, request
       if (value.executionEvidenceProtocol !== undefined) requireProof(value.executionEvidenceProtocol === DSH_EXECUTION_EVIDENCE_PROTOCOL)
       if (value.migrationApiVersion !== undefined) requireProof(value.migrationApiVersion === 1 || value.migrationApiVersion === 2)
       if (value.migrationProtocol !== undefined) requireProof(validIdentifier(value.migrationProtocol))
-      if (value.frameworkToolProtocol !== undefined) requireProof(value.frameworkToolProtocol === 'qq-agent-framework.tools/1')
-      if (value.workProtocol !== undefined) requireProof(value.workProtocol === 'qq-agent-framework.work/1')
+      if (value.frameworkToolProtocol !== undefined) requireProof(value.frameworkToolProtocol === 'qq-bridge-framework.tools/1')
+      if (value.workProtocol !== undefined) requireProof(value.workProtocol === 'qq-bridge-framework.work/1')
       if (value.methods !== undefined) requireProof(Array.isArray(value.methods) && value.methods.length <= 32
         && value.methods.every(validIdentifier) && new Set(value.methods).size === value.methods.length)
       return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: value.pluginVersion, sdkVersion: '0.2.1-rc.2', issuerEpoch: value.issuerEpoch,
@@ -93,8 +93,8 @@ export function createDshBridgePluginPort(invoke: (method: PluginMethod, request
         ...(value.executionEvidenceProtocol === undefined ? {} : { executionEvidenceProtocol: DSH_EXECUTION_EVIDENCE_PROTOCOL }),
         ...(value.migrationApiVersion === undefined ? {} : { migrationApiVersion: value.migrationApiVersion as 1 | 2 }),
         ...(value.migrationProtocol === undefined ? {} : { migrationProtocol: value.migrationProtocol as string }),
-        ...(value.frameworkToolProtocol === undefined ? {} : { frameworkToolProtocol: 'qq-agent-framework.tools/1' as const }),
-        ...(value.workProtocol === undefined ? {} : { workProtocol: 'qq-agent-framework.work/1' as const }),
+        ...(value.frameworkToolProtocol === undefined ? {} : { frameworkToolProtocol: 'qq-bridge-framework.tools/1' as const }),
+        ...(value.workProtocol === undefined ? {} : { workProtocol: 'qq-bridge-framework.work/1' as const }),
         ...(value.methods === undefined ? {} : { methods: [...value.methods as string[]] }) }
     },
     async inspectToolInventory(issuerEpoch, signal) {

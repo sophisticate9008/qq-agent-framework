@@ -99,10 +99,10 @@ test('actual model discovery and deployment use identical layered static data wi
   const prepared = await deployment.prepare({ ...configuration, deployment: { ...configuration.deployment, modelSettings: settings.modelSettings } })
   assert.equal(prepared.state, 'prepared', JSON.stringify(prepared))
   assert.equal(await readFile(profilePath, 'utf8'), profile)
-  const generated = 'qqaf-' + 'a'.repeat(24) + '-group'
+  const generated = 'qqbf-' + 'a'.repeat(24) + '-group'
   await writeFile(profilePath, profile + '- id: provider\n  config: ' + JSON.stringify({ providers: { observed: route,
     [generated]: { ...route, models: [{ ...route.models[0], contextWindow: 64000 }] } } }) + '\n- insert: ' + JSON.stringify([
-      { id: 'qqaf-preset-' + 'a'.repeat(24) + '-group', name: '@deepseek-ai/dsh-agent-preset', config: { id: generated, name: 'Native chat (group)', plugins: [] } }
+      { id: 'qqbf-preset-' + 'a'.repeat(24) + '-group', name: '@deepseek-ai/dsh-agent-preset', config: { id: generated, name: 'Native chat (group)', plugins: [] } }
     ]) + '\n', { mode: 0o600 })
   assert.equal((await readLocalDshModelCapabilities(provider, 'model', target)).capacity?.contextWindow, 128000,
     'Generated per-conversation limits are not observations of the model capacity')
@@ -128,11 +128,11 @@ test('model capabilities and deployment share API preference, fallback and confl
     deployment: { ...defaults.deployment, target, modelSettings: null } }
   const model = { id: 'model', contextWindow: 128_000, maxTokens: 4096, reasoningEfforts: { off: 'off', high: 'high' } }
   const route = { api: 'openai-completions', baseURL: 'https://models.example.test/v1', models: [model] }
-  const generated = 'qqaf-' + 'a'.repeat(24) + '-group'
+  const generated = 'qqbf-' + 'a'.repeat(24) + '-group'
   async function profile(routes: Record<string, unknown>, managed = false) {
     await writeFile(profilePath, '- insert: ' + JSON.stringify([
       { id: 'provider', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: routes } },
-      ...(managed ? [{ id: 'qqaf-preset-' + 'a'.repeat(24) + '-group', name: '@deepseek-ai/dsh-agent-preset',
+      ...(managed ? [{ id: 'qqbf-preset-' + 'a'.repeat(24) + '-group', name: '@deepseek-ai/dsh-agent-preset',
         config: { id: generated, name: 'Native chat (group)', plugins: [] } }] : [])
     ]) + '\n', { mode: 0o600 })
     return readLocalDshModelCapabilities(provider, 'model', target)

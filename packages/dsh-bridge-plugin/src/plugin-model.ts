@@ -12,12 +12,12 @@ import type {} from '@deepseek-ai/dsh-settings'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    'qaf-plugin': { readonly kind: 'qaf-plugin'; readonly owner: string; readonly requestId: string }
+    'qbf-plugin': { readonly kind: 'qbf-plugin'; readonly owner: string; readonly requestId: string }
   }
 }
 declare module '@deepseek-ai/dsh-session/types' {
   interface PluginRecordMap {
-    'plugin:qaf/model-session': { readonly owner: string }
+    'plugin:qbf/model-session': { readonly owner: string }
   }
 }
 interface Selection { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
@@ -41,7 +41,7 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 const MAX_OWNED_HANDLES = 64
 const MAX_RUNS = 256
 const MAX_ACTIVE = 32
-const isOwnedSession = (events: readonly SessionEvent[]) => events.some(event => pluginRecordOf(event)?.type === 'plugin:qaf/model-session')
+const isOwnedSession = (events: readonly SessionEvent[]) => events.some(event => pluginRecordOf(event)?.type === 'plugin:qbf/model-session')
 function images(value: unknown): readonly Image[] {
   if (!Array.isArray(value) || value.length > 4) throw new TypeError('Invalid plugin model images')
   let total = 0
@@ -103,9 +103,9 @@ export function createPluginModelChannel(ctx: Context) {
     if (live) return live
     // Plugin-owned sessions have no chat preset. Resume their
     // recorded composition directly; the ordinary controller requires a cwd.
-    if (sessionId.startsWith('qaf-plugin-')) {
-      const query = ctx.get('sessionQuery')
-      if (!query) throw new TypeError('Session query is unavailable')
+    // Ownership comes from the stored plugin record; session IDs are opaque.
+    const query = ctx.get('sessionQuery')
+    if (query) {
       const observed = await query.observeSession(SessionId(sessionId), { signal })
       try {
         if (isOwnedSession(observed.events)) {
@@ -187,7 +187,7 @@ export function createPluginModelChannel(ctx: Context) {
           agentOptions: { provider: model.provider, model: model.model,
             ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) },
           setup: (_scope, agent) => {
-            appendPluginRecord(agent.session, 'plugin:qaf/model-session', { owner: request.owner })
+            appendPluginRecord(agent.session, 'plugin:qbf/model-session', { owner: request.owner })
             agent.session.append('model/selection', { provider: model.provider, model: model.model,
               ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) })
           } })
@@ -277,7 +277,7 @@ export function createPluginModelChannel(ctx: Context) {
         const content = suppliedImages.length && attachments ? await attachments.admitPromptContent(promptContent)
           : [{ type: 'text' as const, text: promptText }]
         signal.throwIfAborted()
-        const message = createUserMessage({ source: { kind: 'qaf-plugin', owner: request.owner, requestId: request.requestId }, content })
+        const message = createUserMessage({ source: { kind: 'qbf-plugin', owner: request.owner, requestId: request.requestId }, content })
         submitted = true
         agent.followup(message)
         let run!: ModelRun
@@ -338,12 +338,12 @@ export function createPluginModelChannel(ctx: Context) {
         let terminal: Extract<SessionEvent, { type: 'turn/end' }> | undefined
         let validQueue = true
         const pending: Record<'next-turn' | 'next-step', boolean[]> = { 'next-turn': [], 'next-step': [] }
-        const matchesSource = (message: { readonly source: { readonly kind: string } }) => message.source.kind === 'qaf-plugin'
+        const matchesSource = (message: { readonly source: { readonly kind: string } }) => message.source.kind === 'qbf-plugin'
           && 'owner' in message.source && message.source.owner === request.owner
           && 'requestId' in message.source && message.source.requestId === request.requestId
         for (const event of observation.events) {
           if (event.type === 'turn/start') currentTurn = event.data.turn
-          if (event.type === 'user/message' && event.data.source.kind === 'qaf-plugin'
+          if (event.type === 'user/message' && event.data.source.kind === 'qbf-plugin'
             && event.data.source.owner === request.owner && event.data.source.requestId === request.requestId) claimedTurn = currentTurn
           if (event.type === 'turn/end') {
             if (event.data.turn === claimedTurn) terminal = event

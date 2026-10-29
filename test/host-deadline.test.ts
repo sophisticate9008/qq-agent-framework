@@ -137,7 +137,7 @@ function fixture(testContext: TestContext, options: {
   timeouts?: BridgeHostOptions['timeouts'];
   eventTimeoutMs?: number;
 }) {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-host-deadline-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-host-deadline-'));
   const store = createSqliteStore({ filename: join(directory, 'host.sqlite') });
   const host = createBridgeHost({
     store,
@@ -158,7 +158,7 @@ function fixture(testContext: TestContext, options: {
 }
 
 test('validates host operation and event deadlines', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-host-deadline-options-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-host-deadline-options-'));
   const store = createSqliteStore({ filename: join(directory, 'host.sqlite') });
   const base = {
     store,
@@ -324,7 +324,7 @@ test('unknown timed out send is not replayed and another conversation can send',
 });
 
 test('start deadline bounds a restoring follow and disposes its late setup', async testContext => {
-  const directory = mkdtempSync(join(tmpdir(), 'qq-agent-host-start-deadline-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-host-start-deadline-'));
   const filename = join(directory, 'host.sqlite');
   const firstStore = createSqliteStore({ filename });
   const firstHost = createBridgeHost({

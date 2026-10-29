@@ -30,9 +30,9 @@ test('output refuses malformed control envelopes, arbitrary paths, sender impers
   for (const content of [[{ type: 'image', url: 'https://example.test/private' }],
     [{ type: 'audio', file: '/root/private' }], [{ type: 'forward-reference', assetId: 'unread' }],
     [{ type: 'forward', nodes: [{ senderId: 'someone-else', content: [{ type: 'text', text: 'spoof' }] }] }]]) {
-    await assert.rejects(output.prepare([{ type: 'text', text: JSON.stringify({ schema: 'qaf.output/1', content }) }], event, signal))
+    await assert.rejects(output.prepare([{ type: 'text', text: JSON.stringify({ schema: 'qbf.output/1', content }) }], event, signal))
   }
-  await assert.rejects(output.prepare([{ type: 'text', text: '{"schema":"qaf.output/1",' }], event, signal))
+  await assert.rejects(output.prepare([{ type: 'text', text: '{"schema":"qbf.output/1",' }], event, signal))
 })
 
 test('stored legacy media false is ignored and removed from model facts, UI controls and subsequent saves', async context => {
@@ -89,7 +89,7 @@ test('explicit and obvious Markdown become scoped PNG content while long plain t
   } })
   const current = await registry.read('chat-output')
   await registry.compareAndSet('chat-output', current.revision, { ...DEFAULT_NATIVE_OUTPUT, longTextAsForward: true, longTextThreshold: 500 }, signal)
-  const envelope = { schema: 'qaf.output/1', format: 'markdown-image', body: '# 报告\n\n内容', title: '实际标题' }
+  const envelope = { schema: 'qbf.output/1', format: 'markdown-image', body: '# 报告\n\n内容', title: '实际标题' }
   assert.deepEqual(await output.prepare([{ type: 'text', text: JSON.stringify(envelope) }], event, signal), [{ type: 'image', assetId: 'scoped-generated-png' }])
   assert.equal(rendered[0]?.title, '实际标题')
   for (const text of ['# 标题\n正文', '名称 | 数量\n--- | ---\n甲 | 2', '```ts\nconst x = 1\n```']) {

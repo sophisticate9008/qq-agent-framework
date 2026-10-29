@@ -45,7 +45,7 @@ npm start
 
 安装、注册、就绪与授权分别显示。实际能力以所选模型、协议端、DSH 插件和已加载扩展为准。使用示例和限制见 [使用教程](docs/USAGE.md)。
 
-当前版本为 **v1.4.0**（框架、SDK 与 DSH 桥接插件统一为 `1.4.0`），安装包、兼容范围与限制见 [发布说明](docs/RELEASE_NOTES.md)。
+当前版本为 **v1.4.1**（框架、SDK 与 DSH 桥接插件统一为 `1.4.1`），安装包、兼容范围与限制见 [发布说明](docs/RELEASE_NOTES.md)。
 
 ## 文档
 
@@ -68,7 +68,7 @@ npm start
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |
 | 处理未决执行、会话和恢复 | [恢复手册](docs/RECOVERY.md) |
 | 判断版本与发布 | [版本规则](docs/VERSIONING.md) · [发布记录](docs/RELEASE_NOTES.md) |
-| 从旧项目名或包名升级 | [名称与兼容升级](docs/RENAMING.md) |
+| 统一命名与配套升级 | [命名统一与升级](docs/RENAMING.md) |
 | 参与开发与报告问题 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 | 了解验证范围与阶段记录 | [验收记录](docs/VALIDATION.md) · [2026-10-26 交付快照](docs/IMPROVEMENT_CHECKLIST_2026-10-25.md) |
 

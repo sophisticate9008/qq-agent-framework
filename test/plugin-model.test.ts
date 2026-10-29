@@ -35,7 +35,7 @@ test('plugin follower claims consumed inbox source before model admission and ob
   await emit('turn/start', { turn: 10 })
   await emit('turn/end', { turn: 10, reason: { kind: 'completed' } })
   assert.equal(events.length, 0)
-  await emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ source: { kind: 'qaf-plugin', owner: 'plugin', requestId: 'plugin-request' }, content: [] }] })
+  await emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ source: { kind: 'qbf-plugin', owner: 'plugin', requestId: 'plugin-request' }, content: [] }] })
   await emit('turn/start', { turn: 11 })
   await emit('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
   await emit('turn/end', { turn: 11, reason: { kind: 'error', error: { code: 'INVALID_MODEL_INFO', message: 'Configuration refused before user/message' } } })

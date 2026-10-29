@@ -58,7 +58,7 @@ class FixtureAttachments extends AttachmentStore {
 }
 
 test('SDK plugin sessions remain readable, resume history and exclude global complete persona, required context and all tools', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'qaf-plugin-model-'))
+  const directory = await mkdtemp(join(tmpdir(), 'qbf-plugin-model-'))
   const ctx = new Context()
   const adapter = new ModelAdapter()
   let channel: ReturnType<typeof createPluginModelChannel> | undefined
@@ -82,11 +82,11 @@ test('SDK plugin sessions remain readable, resume history and exclude global com
       apply(ownerContext: Context) { channel = createPluginModelChannel(ownerContext) } })
     await owner.inertia
     assert(channel)
-    const signal = AbortSignal.timeout(10_000), sessionId = 'qaf-plugin-readable-sdk'
+    const signal = AbortSignal.timeout(10_000), sessionId = 'qbf-plugin-readable-sdk'
     await channel.create({ sessionId, owner: 'fixture-plugin', model: { provider: 'fixture', model: 'fixture-model' } }, signal)
     const observed = await ctx.sessionQuery.observeSession(SessionId(sessionId), { signal })
     assert.equal(observed.header.cwd, process.cwd())
-    assert(observed.events.some(event => pluginRecordOf(event)?.type === 'plugin:qaf/model-session' && event.ignorable === true))
+    assert(observed.events.some(event => pluginRecordOf(event)?.type === 'plugin:qbf/model-session' && event.ignorable === true))
     observed[Symbol.dispose]()
     const agent = ctx.agents.get(SessionId(sessionId))!
     agent.ctx.systemPrompt.section({ name: 'sdk-local-file-reference', order: 10, text: 'LOCAL_SDK_PROMPT_MUST_BE_ABSENT' })

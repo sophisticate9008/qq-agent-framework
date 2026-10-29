@@ -6,10 +6,10 @@ import { createSqliteStore } from '../src/storage/sqlite.ts';
 
 test('only an exact versioned final reply decision is consumed as control', () => {
   const parse = (input: unknown) => parseNativeReplyDecision([{ type: 'text', text: JSON.stringify(input) }]);
-  assert.deepEqual(parse({ schema: 'qaf.reply/1', action: 'silent', reason: 'not-addressed' }), { state: 'silent', reason: 'not-addressed' });
+  assert.deepEqual(parse({ schema: 'qbf.reply/1', action: 'silent', reason: 'not-addressed' }), { state: 'silent', reason: 'not-addressed' });
   assert.equal(parse({ message: 'hello' }), null);
   assert.equal(parseNativeReplyDecision([{ type: 'text', text: 'hello' }]), null);
-  assert.deepEqual(parse({ schema: 'qaf.reply/1', action: 'send', reason: 'unknown' }), { state: 'invalid', reason: 'invalid_reply_decision' });
+  assert.deepEqual(parse({ schema: 'qbf.reply/1', action: 'send', reason: 'unknown' }), { state: 'invalid', reason: 'invalid_reply_decision' });
   assert.equal(parseNativeReplyDecision([{ type: 'image', assetId: 'resource' }]), null);
 });
 

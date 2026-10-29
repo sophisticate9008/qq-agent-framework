@@ -23,7 +23,7 @@ export interface ExtensionModuleLoader {
   load(signal?: AbortSignal): Promise<ExtensionModuleVersion>;
 }
 
-const generationParameter = '__qaf_extension_generation';
+const generationParameter = '__qbf_extension_generation';
 const maximumFiles = 256;
 const maximumFileBytes = 1024 * 1024;
 const maximumTotalBytes = 8 * 1024 * 1024;
@@ -248,7 +248,7 @@ async function loadVersion(state: LoaderState, signal: AbortSignal | undefined):
     const files = await collectSources(state.root, signal);
     if (!files.has(state.entry)) throw failure('EXTENSION_SOURCE_INVALID', 'The extension entry must be an included ordinary ESM source file.');
     await collectSources(state.root, signal, files);
-    const hash = createHash('sha256').update('qaf-extension-esm-v1\0').update(relative(state.root, state.entry)).update('\0');
+    const hash = createHash('sha256').update('qbf-extension-esm-v1\0').update(relative(state.root, state.entry)).update('\0');
     for (const [filename, file] of files) {
       hash.update(JSON.stringify([relative(state.root, filename), Buffer.byteLength(file.source)])).update('\0').update(file.source).update('\0');
     }

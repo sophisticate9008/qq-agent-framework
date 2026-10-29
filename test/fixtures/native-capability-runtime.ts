@@ -357,8 +357,8 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
   async function reply(content: string, stream = streams.at(-1)) {
     assert(stream)
     const requestId = String(calls.findLast(call => call.method === 'session/prompt' && call.input.sessionId === stream.sessionId)!.input.requestId)
-    await capabilityUntil(() => plugin.ready(stream.sessionId, 'qaf_reply', requestId), 'Reply requires its acknowledged prompt and installed tool lease')
-    const ticket = plugin.queue(stream.sessionId, 'qaf_reply', { content })
+    await capabilityUntil(() => plugin.ready(stream.sessionId, 'qbf_reply', requestId), 'Reply requires its acknowledged prompt and installed tool lease')
+    const ticket = plugin.queue(stream.sessionId, 'qbf_reply', { content })
     await capabilityUntil(() => plugin.result(ticket) !== undefined, 'Explicit reply tool did not settle')
     return plugin.result(ticket)!
   }

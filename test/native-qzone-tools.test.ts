@@ -36,12 +36,12 @@ function fixture(context: TestContext, response: unknown = { tid: 'actual-post' 
 test('model registration follows actual protocol capabilities and retains builtin provenance', context => {
   const runtime = fixture(context);
   const inventory = runtime.port.describe();
-  assert.deepEqual(availableNativeQzoneTools(inventory).map(tool => tool.definition.name), ['qaf_qzone_publish', 'qaf_qzone_delete']);
+  assert.deepEqual(availableNativeQzoneTools(inventory).map(tool => tool.definition.name), ['qbf_qzone_publish', 'qbf_qzone_delete']);
   assert.deepEqual(availableNativeQzoneTools({ ...inventory, tools: inventory.tools.filter(tool => tool.name === 'delete_qzone_msg') })
-    .map(tool => tool.definition.name), ['qaf_qzone_delete']);
+    .map(tool => tool.definition.name), ['qbf_qzone_delete']);
   assert.deepEqual(availableNativeQzoneTools({ ...inventory, state: 'unknown' }), []);
   assert.ok(NATIVE_QZONE_TOOLS.every(tool => tool.definition.registrationSource?.origin === 'framework-builtin'));
-  const publish = NATIVE_QZONE_TOOLS.find(tool => tool.definition.name === 'qaf_qzone_publish')!;
+  const publish = NATIVE_QZONE_TOOLS.find(tool => tool.definition.name === 'qbf_qzone_publish')!;
   for (const images of [['/tmp/private.png'], ['https://example.invalid/image.png']]) {
     assert.throws(() => publish.validate({ images, visibility: 'friends' }));
   }

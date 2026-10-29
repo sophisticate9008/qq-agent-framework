@@ -10,8 +10,8 @@
 
 | 工具 | 参数与结果 |
 | --- | --- |
-| `qaf_qzone_publish` | `content` 正文、`images` 当前会话图片 assetId 数组、明确的 `visibility`；确认后返回真实 `postId` 与可选发布时间 |
-| `qaf_qzone_delete` | `postId` 必须来自实际发布或读取结果；根据协议回执返回删除结果 |
+| `qbf_qzone_publish` | `content` 正文、`images` 当前会话图片 assetId 数组、明确的 `visibility`；确认后返回真实 `postId` 与可选发布时间 |
+| `qbf_qzone_delete` | `postId` 必须来自实际发布或读取结果；根据协议回执返回删除结果 |
 
 发布支持纯文字、纯图片和图文。`visibility` 可为 `public`、`friends`、`self`、`allow`、`deny`，后两种必须另给 `userIds`。模型入口只接收图片资源编号，复用普通 QQ 发送的原图解析与会话隔离，不直接接收路径或网址；本机文件可先通过已有助手文件资源链路登记。原始图片发送，不使用模型观察缩略图。
 

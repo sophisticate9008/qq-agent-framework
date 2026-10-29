@@ -21,7 +21,7 @@ test('versioned bounded observation pages expose process cursors, immutable meta
   const restarted=createNativeEventObserver({epoch:'epoch-2'})
   assert.equal(restarted.read({after:page.nextCursor}).gap,'epoch')
   assert.throws(()=>observer.read({after:{epoch:'epoch-1',sequence:6}}),{code:'EVENT_CURSOR_AHEAD'})
-  assert(!isNativeEventPage({...page,protocol:'qaf.events/2'}))
+  assert(!isNativeEventPage({...page,protocol:'qbf.events/2'}))
   assert(!isNativeObservationEvent({...page.events[0],content:'private model body'}))
 })
 
@@ -108,7 +108,7 @@ test('OneBot lifecycle observations require the strict normalized protocol and t
   assert.equal(mapOneBotProtocolObservation(protocol)?.status,'connected')
   assert.equal(mapOneBotProtocolObservation({...protocol,data:{...protocol.data,good:'true'}}),null)
   const tool=mapNativeToolObservation({id:'call-1',sessionId:'session-1',generation:1,requestId:'request-1',userMessageId:'message-1',turn:1,
-    name:'qaf_media_read',input:{private:'input'},expiresAt:1000},{status:'confirmed',value:{private:'result'}},'private:123')!
+    name:'qbf_media_read',input:{private:'input'},expiresAt:1000},{status:'confirmed',value:{private:'result'}},'private:123')!
   assert.equal(tool.status,'completed');assert.equal(tool.correlation.toolCallId,'call-1')
   assert(!JSON.stringify(tool).includes('private":"'))
 })

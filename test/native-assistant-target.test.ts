@@ -102,7 +102,7 @@ test('assistant explicit application creates one independent verified target whi
   const applied = await data.target.apply(request(prepared), signal)
   assert.equal(applied.state, 'verified', JSON.stringify(applied))
   assert.equal(applied.fullAccess, true)
-  assert.match(applied.agentPreset ?? '', /^qqafwork-/)
+  assert.match(applied.agentPreset ?? '', /^qqbfwork-/)
   const resolved = await data.target.resolve(signal)
   assert.equal(resolved.configuration.enabled, true)
   assert.equal(resolved.configuration.provider, 'assistant')
@@ -188,7 +188,7 @@ test('legacy verified assistant journal upgrades tools in its exact existing pre
       if (!candidate.config || object(candidate.config).id !== applied.agentPreset) continue
       const config = object(candidate.config)
       assert(Array.isArray(config.plugins))
-      config.plugins = config.plugins.filter(plugin => !String(object(plugin).id).startsWith('qaf-assistant-'))
+      config.plugins = config.plugins.filter(plugin => !String(object(plugin).id).startsWith('qbf-assistant-'))
     }
   }
   await writeFile(data.profilePath, JSON.stringify(profile), { mode: 0o600 })

@@ -67,7 +67,7 @@ test('media content reading uses registered protocol references, genuine image b
   try {
     const imageId = await registry.register({ ...asset, source: { file: 'opaque-image-id', url: 'http://127.0.0.1/never-directly-read' } }, signal);
     const image = await registry.read.execute({ input: { assetId: imageId }, scope, signal });
-    assert.deepEqual(image, { schema: 'qq-agent-framework.media-read/1', contentRead: true, kind: 'image', mediaType: 'image/png', data: png.toString('base64') });
+    assert.deepEqual(image, { schema: 'qq-bridge-framework.media-read/1', contentRead: true, kind: 'image', mediaType: 'image/png', data: png.toString('base64') });
     const inspected = await registry.inspect.execute({ input: { assetId: imageId }, scope, signal });
     assert.equal((inspected as { contentRead: boolean }).contentRead, false, 'fetching image bytes does not claim model interpretation');
     assert.equal((inspected as { bytesRead: boolean }).bytesRead, true);
@@ -78,7 +78,7 @@ test('media content reading uses registered protocol references, genuine image b
     mode = 'file';
     const fileId = await registry.register({ ...asset, kind: 'file', source: { id: 'opaque-file-id' } }, signal);
     assert.deepEqual(await registry.read.execute({ input: { assetId: fileId }, scope, signal }), {
-      schema: 'qq-agent-framework.media-read/1', contentRead: true, kind: 'text', sourceKind: 'file', text: '准确的UTF8文件正文' });
+      schema: 'qq-bridge-framework.media-read/1', contentRead: true, kind: 'text', sourceKind: 'file', text: '准确的UTF8文件正文' });
     mode = 'binary';
     assert.equal((await registry.read.execute({ input: { assetId: fileId }, scope, signal }) as { contentRead: boolean }).contentRead, false);
     mode = 'invalid-image';
@@ -99,7 +99,7 @@ test('media content reading uses registered protocol references, genuine image b
     const transcribing = createNativeMediaRegistry({ store, accountId: '999', contentReader, authorize: async () => { assert(allowed); },
       transcriber: { async transcribe(request) { transcriptions++; assert.equal(request.conversationId, scope.conversationId); return { text: '真实转录适配器返回的正文' }; } } });
     assert.deepEqual(await transcribing.read.execute({ input: { assetId: audioId }, scope, signal }), {
-      schema: 'qq-agent-framework.media-read/1', contentRead: true, kind: 'text', sourceKind: 'audio', text: '真实转录适配器返回的正文' });
+      schema: 'qq-bridge-framework.media-read/1', contentRead: true, kind: 'text', sourceKind: 'audio', text: '真实转录适配器返回的正文' });
     assert.equal(transcriptions, 1);
     allowed = false;
     await assert.rejects(async () => transcribing.read.execute({ input: { assetId: audioId }, scope, signal }));

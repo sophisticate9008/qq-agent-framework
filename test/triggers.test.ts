@@ -228,7 +228,7 @@ test('interrupted persisted intents recover to unknown and never replay', async 
 });
 
 test('once instants remain exact across time zones and execute once after reopening persistent storage', async context => {
-  const directory = mkdtempSync(join(tmpdir(), 'qaf-trigger-'));
+  const directory = mkdtempSync(join(tmpdir(), 'qbf-trigger-'));
   context.after(() => rmSync(directory, { recursive: true, force: true }));
   const filename = join(directory, 'triggers.sqlite');
   let now = utc('2026-01-01T00:00:00Z');

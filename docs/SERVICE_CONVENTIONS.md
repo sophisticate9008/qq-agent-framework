@@ -61,7 +61,7 @@ const TEXT = defineServiceContract<TextService>({ id: 'example-text', version: 1
 
 插件发送使用协议目录中的 `send_group_msg`、`send_private_msg` 及支持的转发动作；收藏表情使用 `fetch_custom_face`、`fetch_custom_face_detail`、`add_custom_face`、`delete_custom_face`、`set_custom_face_desc`。先读取实际动作的参数与支持状态，再提交调用，不另建发送或表情客户端。
 
-协议调用返回 `confirmed/rejected/unknown`，写操作使用稳定幂等键和宿主持久回执。直接协议发送按协议参数执行，不自动经过聊天输出排版、聊天 outbox 或历史追加。QQ 功能回调的 `FeatureExecution.send` 与模型 `qaf_reply` 则走聊天 policy、outbox、历史及输出流程。插件选择入口时应按所需语义组合，不能把生成了输出产物等同于已送达。
+协议调用返回 `confirmed/rejected/unknown`，写操作使用稳定幂等键和宿主持久回执。直接协议发送按协议参数执行，不自动经过聊天输出排版、聊天 outbox 或历史追加。QQ 功能回调的 `FeatureExecution.send` 与模型 `qbf_reply` 则走聊天 policy、outbox、历史及输出流程。插件选择入口时应按所需语义组合，不能把生成了输出产物等同于已送达。
 
 ## 身份、生命周期与恢复
 

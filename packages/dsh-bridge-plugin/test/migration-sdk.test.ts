@@ -46,7 +46,7 @@ class OfflineAdapter extends LlmAdapter {
 }
 
 test('real SDK owner fork preserves completed text, target model selection, workspace and durable source', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'qaf-migration-sdk-'))
+  const directory = await mkdtemp(join(tmpdir(), 'qbf-migration-sdk-'))
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = directory
   const ctx = new Context()
@@ -203,7 +203,7 @@ test('real SDK owner fork preserves completed text, target model selection, work
     await blockedAlias()
     child.session.append('model/selection', { provider: 'new-route', model: 'fixture-model' })
     assert.equal(adapter.calls, 0)
-    assert.equal((await readFile(join(directory, 'storages', 'qaf-session-migrations', `${migrationDigest(refs.migrationId)}.json`), 'utf8')).includes('离线原始问题'), false)
+    assert.equal((await readFile(join(directory, 'storages', 'qbf-session-migrations', `${migrationDigest(refs.migrationId)}.json`), 'utf8')).includes('离线原始问题'), false)
     await chmod(directory, 0o777)
     const unsafe = await invoke('forkPreview', { ...refs, migrationId: 'unsafe-workspace' }) as ForkPreviewResult
     assert.equal(unsafe.state, 'blocked')

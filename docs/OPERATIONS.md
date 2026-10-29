@@ -15,7 +15,7 @@ npm start
 
 接着配置外部 OneBot 与 DSH，选择模型方案和人设，填写主人与允许范围，再核对应用结果并启用聊天。本机 DSH 默认自动发现；远程和手动参数属于高级接入。详见 [DSH](DSH.md) 与 [控制台](UI.md)。
 
-管理配置路径优先级为 `--config`、`QQ_AGENT_CONFIG`、`runtime/admin/config.json`。复用已有网关可在初始化时显式传 `--gateway-config <文件>`；仅在信任并需要该程序时传 `--service-manager <程序>`，不会自动猜测运维脚本。
+管理配置路径优先级为 `--config`、`QQ_BRIDGE_FRAMEWORK_CONFIG`、`runtime/admin/config.json`。复用已有网关可在初始化时显式传 `--gateway-config <文件>`；仅在信任并需要该程序时传 `--service-manager <程序>`，不会自动猜测运维脚本。
 
 ## 常用命令
 
@@ -36,9 +36,9 @@ npm start
 
 ## 本机 boot 接入
 
-本机 `boot` 通过本框架的 `qqagent start` 启动所选协议端、DSH、已启用的辅助服务及框架网关和宿主。入口为 `ops/qqagent`，实现为 `scripts/service-manager.ts`，服务清单位于私有的 `runtime/live/services.json`。NapCat / SnowLuma 两套安装与登录数据保留，`qqagent protocol napcat|snowluma` 管理当前选择。框架宿主沿用已选择的部署入口和私有配置，按已保存的运行意图恢复原生聊天。
+本机 `boot` 通过本框架的 `qqbridge-framework start` 启动所选协议端、DSH、已启用的辅助服务及框架网关和宿主。入口为 `ops/qqbridge-framework`，实现为 `scripts/service-manager.ts`，服务清单位于私有的 `runtime/live/services.json`。NapCat / SnowLuma 两套安装与登录数据保留，`qqbridge-framework protocol napcat|snowluma` 管理当前选择。框架宿主沿用已选择的部署入口和私有配置，按已保存的运行意图恢复原生聊天。
 
-`qqagent restart framework-admin` 单独重启框架；`boot logs qqagent`、`boot logs framework-admin` 和 `qqagent logs` 均查看框架日志。`boot logs qqbridge` 保留为日志别名。`qqagent status` 展示当前选中的服务，`qqagent doctor` 只读核对配置的健康检查与 QQ 在线状态。启动或停止失败时返回非零退出码，停止未完成时不继续重启。服务安装目录可以独立配置，运维命令不调用其他项目的启动脚本。配置格式、安装与常用命令见 [服务运维](SERVICE_MANAGER.md)。
+`qqbridge-framework restart framework-admin` 单独重启框架；`boot logs qqbridge-framework`、`boot logs framework-admin` 和 `qqbridge-framework logs` 均查看框架日志。`boot logs qqbridge` 保留为日志别名。`qqbridge-framework status` 展示当前选中的服务，`qqbridge-framework doctor` 只读核对配置的健康检查与 QQ 在线状态。启动或停止失败时返回非零退出码，停止未完成时不继续重启。服务安装目录可以独立配置，运维命令不调用其他项目的启动脚本。配置格式、安装与常用命令见 [服务运维](SERVICE_MANAGER.md)。
 
 ## 需要区分的默认值
 
@@ -99,9 +99,8 @@ npm run test:sdk
 
 ## 升级与备份
 
-v1.4.0 起使用 QQ Bridge Framework 名称和 `qq-bridge-framework` 仓库；已有安装路径、运维命令和数据继续使用。远程地址更新及旧包名兼容安装见 [名称与兼容升级](RENAMING.md)。
 
-升级前核对本地修改，并按部署方式停止框架管理进程；使用 `qqagent` 的部署执行 `qqagent stop framework-admin`，前台 CLI 等待 Ctrl+C 完成。停止结果未知时先核对排空，不继续覆盖运行文件。
+升级前核对本地修改，并按部署方式停止框架管理进程；使用 `qqbridge-framework` 的部署执行 `qqbridge-framework stop framework-admin`，前台 CLI 等待 Ctrl+C 完成。停止结果未知时先核对排空，不继续覆盖运行文件。
 
 备份私有配置、账号目录、SQLite 与其有效 WAL、关联资源和外部 DSH 配置，保留文件权限。不要只复制单个数据库文件；运行中备份使用支持一致快照的工具。
 
@@ -113,7 +112,7 @@ npm ci
 npm run build
 ```
 
-继续使用原管理配置启动；受管部署使用 `qqagent start framework-admin`，前台使用原 `npm start` 命令及参数。升级不重新运行 `init`，不重置会话。DSH 桥接插件是独立安装，按 [DSH 接入](DSH.md) 重新构建、安装并加载相应版本。版本记录与已知限制见 [发布说明](RELEASE_NOTES.md)。
+继续使用原管理配置启动；受管部署使用 `qqbridge-framework start framework-admin`，前台使用原 `npm start` 命令及参数。升级不重新运行 `init`，不重置会话。DSH 桥接插件是独立安装，按 [DSH 接入](DSH.md) 重新构建、安装并加载相应版本。版本记录与已知限制见 [发布说明](RELEASE_NOTES.md)。
 
 ## 自动保留
 
@@ -121,4 +120,4 @@ npm run build
 
 文件日志由进程管理器轮转。仓库提供 `ops/logrotate.conf` 模板：将 `@LOG_DIRECTORY@` 替换为私有日志目录，通过 cron 每分钟调用 logrotate；采用每日或超过 10MiB 轮转，当前文件加最多四份历史、历史最多 7 天。持续写入日志通过 copytruncate 轮转，检查间隔内可能短暂超过大小阈值，截断交接有标准 copytruncate 的短暂丢行窗口。框架数据库的执行结果不依赖文本日志。
 
-本机使用独立的 `/etc/cron.d/qq-agent-framework-logrotate` 和 `/etc/logrotate.d/qq-agent-framework` 管理本框架及沿用的服务日志；进程无需重启即可启用轮转。部署到其他机器时由其进程管理器安装同等规则，模板见 `ops/logrotate.conf`。
+本机使用独立的 `/etc/cron.d/qq-bridge-framework-logrotate` 和 `/etc/logrotate.d/qq-bridge-framework` 管理本框架及沿用的服务日志；进程无需重启即可启用轮转。部署到其他机器时由其进程管理器安装同等规则，模板见 `ops/logrotate.conf`。

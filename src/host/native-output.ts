@@ -31,10 +31,10 @@ export function parseNativeOutputContent(content: readonly MessageContent[]): re
   const text = content.map(part => part.type === 'text' ? part.text : '').join('')
   let input: unknown
   try { input = JSON.parse(text) } catch {
-    assert(!/^\s*\{\s*"schema"\s*:\s*"qaf\.output\/1"/.test(text), 'NATIVE_OUTPUT_INVALID', 'The output envelope is malformed.')
+    assert(!/^\s*\{\s*"schema"\s*:\s*"qbf\.output\/1"/.test(text), 'NATIVE_OUTPUT_INVALID', 'The output envelope is malformed.')
     return content
   }
-  if (!isRecord(input) || input.schema !== 'qaf.output/1') return content
+  if (!isRecord(input) || input.schema !== 'qbf.output/1') return content
   if (input.format === 'markdown-image') {
     assert(Object.keys(input).every(key => ['schema', 'format', 'body', 'title'].includes(key))
       && typeof input.body === 'string' && input.body.trim().length > 0 && input.body.length <= 32000
@@ -108,7 +108,7 @@ export function createNativeOutputService(registry: PackageConfigurationRegistry
   }
   return Object.freeze({ prepare,
     async context(signal: AbortSignal) { signal.throwIfAborted(); const configuration = validateNativeOutputConfiguration((await registry.read('chat-output')).configuration)
-      signal.throwIfAborted(); return { ...configuration, protocol: 'qaf.output/1' as const, maxDeliveries: 4, markdownImageSupported: options.renderMarkdown !== undefined,
+      signal.throwIfAborted(); return { ...configuration, protocol: 'qbf.output/1' as const, maxDeliveries: 4, markdownImageSupported: options.renderMarkdown !== undefined,
         formats: ['text', ...(options.renderMarkdown ? ['markdown-image'] : [])], markdownImageMaxCharacters: 32000 } },
     split(content: readonly MessageContent[], event: FrameworkEvent) {
       const groups = planned.get(event.id); planned.delete(event.id)

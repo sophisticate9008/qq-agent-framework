@@ -62,12 +62,12 @@ function fixture(context: TestContext, count = 1, filename = ':memory:') {
   const port: DshSessionMigrationPort = {
     async forkPreview(request) {
       calls.push('preview')
-      return { ...request, migrationProtocol: 'qaf-session-migration/1', issuerEpoch: 'epoch', state: 'available',
+      return { ...request, migrationProtocol: 'qbf-session-migration/1', issuerEpoch: 'epoch', state: 'available',
         sourceCursor: 12, sourceDigest: 'a'.repeat(64), targetRevision: 'b'.repeat(64), missingReasons: [] }
     },
     async forkWithPreset(request) {
       calls.push('fork')
-      const receipt: DshSessionMigrationReceipt = { ...request, migrationProtocol: 'qaf-session-migration/1',
+      const receipt: DshSessionMigrationReceipt = { ...request, migrationProtocol: 'qbf-session-migration/1',
         state: 'completed', childSessionId: `child-${++controls.forks}`, idempotency: 'created', missingReasons: [] }
       receipts.set(request.migrationId, receipt)
       controls.beforeReply?.()
@@ -76,7 +76,7 @@ function fixture(context: TestContext, count = 1, filename = ':memory:') {
     },
     async inspectMigration(request) {
       calls.push('inspect')
-      if (controls.notFound) return { ...request, migrationProtocol: 'qaf-session-migration/1', state: 'not-found',
+      if (controls.notFound) return { ...request, migrationProtocol: 'qbf-session-migration/1', state: 'not-found',
         childSessionId: null, idempotency: 'not-found', missingReasons: [] }
       return { ...receipts.get(request.migrationId)!, idempotency: 'replayed' }
     }

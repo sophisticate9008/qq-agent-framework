@@ -23,10 +23,10 @@ export function readToolRegistrationSource(value: unknown): ToolRegistrationSour
 }
 
 /** Attach provenance before ctx.tools.register(); this never registers or authorizes a tool. */
-export function withToolRegistration<T extends { readonly name: string }>(definition: T, source: ToolRegistrationSource): T & { readonly qafRegistration: ToolRegistrationSource } {
+export function withToolRegistration<T extends { readonly name: string }>(definition: T, source: ToolRegistrationSource): T & { readonly qbfRegistration: ToolRegistrationSource } {
   const registration = readToolRegistrationSource(source)
   if (!registration) throw new TypeError('Invalid tool registration source')
-  return { ...definition, qafRegistration: Object.freeze(registration) }
+  return { ...definition, qbfRegistration: Object.freeze(registration) }
 }
 
 const mcpSources = new Map<symbol, { scopeId: string; prefix: string; source: ToolRegistrationSource }>()

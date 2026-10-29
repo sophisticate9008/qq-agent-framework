@@ -34,9 +34,9 @@ function deleteInput(input: JsonValue): { postId: string } {
   assert(isRecord(input) && Object.keys(input).length === 1 && postId(input.postId), 'INVALID_QZONE_INPUT', 'Delete requires one real postId.');
   return { postId: input.postId };
 }
-const source = { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' } as const;
+const source = { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' } as const;
 export const NATIVE_QZONE_TOOLS: readonly NativeToolContribution[] = Object.freeze<readonly NativeToolContribution[]>([
-  { definition: { name: 'qaf_qzone_publish', capability: 'native.qzone.publish', featureId: 'framework-tools', timeoutMs: 60000,
+  { definition: { name: 'qbf_qzone_publish', capability: 'native.qzone.publish', featureId: 'framework-tools', timeoutMs: 60000,
     registrationSource: source, description: nativeToolCapabilityDefinition('native.qzone.publish').description,
     parameters: { type: 'object', additionalProperties: false, required: ['visibility'], properties: {
       content: { type: 'string', maxLength: 32768, description: '说说正文；有图片时可留空' },
@@ -44,7 +44,7 @@ export const NATIVE_QZONE_TOOLS: readonly NativeToolContribution[] = Object.free
       visibility: { enum: ['public', 'friends', 'self', 'allow', 'deny'], description: '公开、好友、仅自己、指定好友、排除指定好友；必须明确给出' },
       userIds: { type: 'array', minItems: 1, maxItems: 1000, items: { type: 'string', pattern: '^[1-9][0-9]{0,15}$' }, description: '仅 allow/deny 时提供对应好友账号列表' },
     } } }, validate: input => json(publishInput(input)) },
-  { definition: { name: 'qaf_qzone_delete', capability: 'native.qzone.delete', featureId: 'framework-tools', timeoutMs: 60000,
+  { definition: { name: 'qbf_qzone_delete', capability: 'native.qzone.delete', featureId: 'framework-tools', timeoutMs: 60000,
     registrationSource: source, description: nativeToolCapabilityDefinition('native.qzone.delete').description,
     parameters: { type: 'object', additionalProperties: false, required: ['postId'], properties: { postId: { type: 'string', minLength: 1, maxLength: 512, description: '发布结果或实际读取结果中的真实说说编号' } } } },
     validate: input => deleteInput(input) },

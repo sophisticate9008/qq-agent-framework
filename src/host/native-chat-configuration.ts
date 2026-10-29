@@ -50,7 +50,7 @@ export interface NativeChatDeploymentConfiguration {
 }
 
 export const DEFAULT_NATIVE_CHAT_DEPLOYMENT: NativeChatDeploymentConfiguration = Object.freeze({
-  target: null, modelSettings: null, namespace: 'qqaf'
+  target: null, modelSettings: null, namespace: 'qqbf'
 })
 
 export interface NativeChatDeploymentRuntime {

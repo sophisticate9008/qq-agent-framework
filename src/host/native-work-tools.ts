@@ -7,17 +7,17 @@ import type { NativeMessageSourceReader } from './native-message-sources.ts';
 import { json } from './data.ts';
 
 const definitions: readonly { name: string; capability: NativeToolCapability; properties: JsonObject }[] = [
-  { name: 'qaf_work_start', capability: 'native.work.start',
+  { name: 'qbf_work_start', capability: 'native.work.start',
     properties: { task: { type: 'string', minLength: 1, maxLength: 16000, description: '交给助手执行的具体要求，保留用户指定的路径、内容和交付目标。' },
       context: { type: 'string', maxLength: 32000, description: '完成任务必需的上下文；没有补充时传空字符串，不复制整段聊天或把先前未经核实的能力判断当成限制。' } } },
-  { name: 'qaf_work_status', capability: 'native.work.status', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
-  { name: 'qaf_work_followup', capability: 'native.work.followup',
+  { name: 'qbf_work_status', capability: 'native.work.status', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
+  { name: 'qbf_work_followup', capability: 'native.work.followup',
     properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' }, text: { type: 'string', minLength: 1, maxLength: 16000 }, delivery: { enum: ['queue', 'steer'] } } },
-  { name: 'qaf_work_interrupt', capability: 'native.work.interrupt', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
-  { name: 'qaf_work_reconcile', capability: 'native.work.reconcile', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } }
+  { name: 'qbf_work_interrupt', capability: 'native.work.interrupt', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } },
+  { name: 'qbf_work_reconcile', capability: 'native.work.reconcile', properties: { id: { type: 'string', pattern: '^[a-f0-9]{64}$' } } }
 ];
 export const NATIVE_WORK_TOOLS: readonly NativeToolContribution[] = definitions.map(tool => ({
-  definition: { registrationSource: { origin: 'framework-builtin' as const, ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' as const }, name: tool.name, capability: tool.capability, description: nativeToolCapabilityDefinition(tool.capability).description, featureId: 'framework-tools', timeoutMs: tool.name === 'qaf_work_start' ? 30000 : 10000,
+  definition: { registrationSource: { origin: 'framework-builtin' as const, ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' as const }, name: tool.name, capability: tool.capability, description: nativeToolCapabilityDefinition(tool.capability).description, featureId: 'framework-tools', timeoutMs: tool.name === 'qbf_work_start' ? 30000 : 10000,
     parameters: { type: 'object', additionalProperties: false, required: Object.keys(tool.properties), properties: tool.properties } },
   validate(input: JsonValue): JsonValue {
     assert(isRecord(input) && Object.keys(input).length === Object.keys(tool.properties).length

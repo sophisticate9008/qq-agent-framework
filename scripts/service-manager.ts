@@ -185,7 +185,7 @@ function selected(config: Configuration, stop = false): string[] {
   });
 }
 function component(config: Configuration, id: string): Service {
-  if (!identifier.test(id) || !Object.hasOwn(config.services, id)) fail('未知组件，请用 qqagent status 查看配置。');
+  if (!identifier.test(id) || !Object.hasOwn(config.services, id)) fail('未知组件，请用 qqbridge-framework status 查看配置。');
   return config.services[id]!;
 }
 function remaining(deadline: number, maximum: number): number {
@@ -195,10 +195,10 @@ function remaining(deadline: number, maximum: number): number {
 }
 async function ensureProtocol(config: Configuration, service: Service): Promise<void> {
   if (service.group !== 'napcat' && service.group !== 'snowluma') return;
-  if (service.group !== config.activeProtocol) fail('请使用 qqagent protocol 切换协议端。');
+  if (service.group !== config.activeProtocol) fail('请使用 qqbridge-framework protocol 切换协议端。');
   for (const other of Object.values(config.services)) {
     if ((other.group === 'napcat' || other.group === 'snowluma') && other.group !== service.group
-      && ((await sessions(other)).length > 0 || await listening(other))) fail('另一协议端仍在运行，请使用 qqagent protocol 切换。');
+      && ((await sessions(other)).length > 0 || await listening(other))) fail('另一协议端仍在运行，请使用 qqbridge-framework protocol 切换。');
   }
 }
 async function startOne(config: Configuration, id: string, deadline: number): Promise<void> {
@@ -222,7 +222,7 @@ async function startOne(config: Configuration, id: string, deadline: number): Pr
     await handle.chmod(0o600);
     await handle.close();
     const environment = { ...process.env };
-    delete environment.QQ_AGENT_OPS_LOCKED;
+    delete environment.QQ_BRIDGE_FRAMEWORK_OPS_LOCKED;
     const result = await execute('/usr/bin/screen', ['-L', '-Logfile', logfile, '-dmS', service.screen, process.execPath, entry, 'run', id], { cwd: root, env: environment, timeout: remaining(deadline, 5000) });
     if (result.code !== 0) fail(`${id} 启动失败（${result.code}）。`);
     console.log(`${id} 正在启动。`);
@@ -331,7 +331,7 @@ async function switchProtocol(config: Configuration, target: Protocol): Promise<
 async function supervise(config: Configuration, id: string): Promise<void> {
   const service = component(config, id);
   const environment = { ...process.env, ...service.env };
-  delete environment.QQ_AGENT_OPS_LOCKED;
+  delete environment.QQ_BRIDGE_FRAMEWORK_OPS_LOCKED;
   const child = spawn(service.command, service.args, { cwd: service.cwd, env: environment, shell: false, stdio: 'inherit', detached: true });
   let stopping = false;
   let completed = false;
@@ -365,7 +365,7 @@ async function supervise(config: Configuration, id: string): Promise<void> {
 }
 
 function help(): void {
-  console.log(`qqagent [start|stop|restart|status|doctor|logs|console|protocol|extensions|describe|help] [组件]
+  console.log(`qqbridge-framework [start|stop|restart|status|doctor|logs|console|protocol|extensions|describe|help] [组件]
 
 不带参数：启动框架、当前协议端与已启用的辅助服务。
 start [组件]       启动并等待就绪，接管已有 screen 会话
@@ -387,7 +387,7 @@ async function lockAndRun(config: Configuration, argumentsList: string[]): Promi
   await file.chmod(0o600);
   await file.close();
   const result = await execute('/usr/bin/flock', ['--exclusive', '--nonblock', '--conflict-exit-code', '75', '--close', config.lockFile, process.execPath, entry, ...argumentsList], {
-    env: { ...process.env, QQ_AGENT_OPS_LOCKED: '1' }, inherit: true, timeout: 300000,
+    env: { ...process.env, QQ_BRIDGE_FRAMEWORK_OPS_LOCKED: '1' }, inherit: true, timeout: 300000,
   });
   if (result.code === 75) fail('另一项运维操作正在运行，请稍后查看状态。');
   process.exitCode = result.code;
@@ -403,21 +403,21 @@ async function main(): Promise<void> {
     catch (error) { if (error instanceof ExtensionManagementError) fail(error.message); throw error; }
     return;
   }
-  if (!['start', 'stop', 'restart', 'status', 'doctor', 'logs', 'console', 'protocol', 'describe', 'run'].includes(action)) fail('未知命令，请运行 qqagent help。');
+  if (!['start', 'stop', 'restart', 'status', 'doctor', 'logs', 'console', 'protocol', 'describe', 'run'].includes(action)) fail('未知命令，请运行 qqbridge-framework help。');
   if (action === 'describe' ? rest.length !== 1 || rest[0] !== '--json'
     : action === 'logs' ? rest.filter(value => value !== '-f').length > 1 || rest.filter(value => value === '-f').length > 1
-    : rest.length > 1) fail('命令参数无效，请运行 qqagent help。');
+    : rest.length > 1) fail('命令参数无效，请运行 qqbridge-framework help。');
   const config = await load();
   if (action === 'describe') {
     if (!Object.hasOwn(config.services, 'dsh')) fail('当前部署未配置受管 DSH 服务。');
-    console.log(JSON.stringify({ schema: 1, kind: 'qq-agent-framework', dshHome: config.dshHome }));
+    console.log(JSON.stringify({ schema: 1, kind: 'qq-bridge-framework', dshHome: config.dshHome }));
     return;
   }
   if (action === 'protocol' && rest.length === 0) { console.log(config.activeProtocol); return; }
   if (action === 'protocol' && rest[0] !== 'napcat' && rest[0] !== 'snowluma') fail('协议端须为 napcat 或 snowluma。');
   const id = action === 'logs' ? rest.find(value => value !== '-f') : rest[0];
   if (id && action !== 'protocol') component(config, id);
-  if (['start', 'stop', 'restart', 'protocol'].includes(action) && process.env.QQ_AGENT_OPS_LOCKED !== '1') {
+  if (['start', 'stop', 'restart', 'protocol'].includes(action) && process.env.QQ_BRIDGE_FRAMEWORK_OPS_LOCKED !== '1') {
     await lockAndRun(config, argumentsList);
     return;
   }

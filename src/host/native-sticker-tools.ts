@@ -35,18 +35,18 @@ function manageInput(input: JsonValue): ManageInput {
 }
 
 export const NATIVE_STICKER_TOOLS: readonly NativeToolContribution[] = Object.freeze<readonly NativeToolContribution[]>([{
-  definition: { name: 'qaf_sticker_list', capability: 'native.stickers.list', featureId: 'framework-tools', timeoutMs: 15000,
-    registrationSource: { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' },
-    description: '查看或按备注搜索QQ账号当前收藏的表情包，返回当前会话可用的图片assetId及真实stickerId；stickerId为null时只能读取或发送。没有收藏或匹配项时返回空列表。可用qaf_media_read读取图片；选择后调用qaf_reply({content:[{type:"image",assetId:"实际返回的assetId"}]})发送。读取列表不等于已经发送，实际发送由宿主核验会话权限、资源归属和协议端支持情况。',
+  definition: { name: 'qbf_sticker_list', capability: 'native.stickers.list', featureId: 'framework-tools', timeoutMs: 15000,
+    registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' },
+    description: '查看或按备注搜索QQ账号当前收藏的表情包，返回当前会话可用的图片assetId及真实stickerId；stickerId为null时只能读取或发送。没有收藏或匹配项时返回空列表。可用qbf_media_read读取图片；选择后调用qbf_reply({content:[{type:"image",assetId:"实际返回的assetId"}]})发送。读取列表不等于已经发送，实际发送由宿主核验会话权限、资源归属和协议端支持情况。',
     parameters: { type: 'object', additionalProperties: false, properties: {
       query: { type: 'string', maxLength: 128, description: '按表情备注或标识搜索；无备注时可以读取图片判断。' },
       limit: { type: 'integer', minimum: 1, maximum: 50, description: '最多返回数量，默认24。' },
     } } },
   validate,
 }, {
-  definition: { name: 'qaf_sticker_manage', capability: 'native.stickers.manage', featureId: 'framework-tools', timeoutMs: 30000,
-    registrationSource: { origin: 'framework-builtin', ownerId: 'qq-agent-framework', ownerName: '框架内置工具', transport: 'native' },
-    description: '管理QQ账号收藏表情。add收藏当前会话已登记图片assetId；delete删除列表返回的真实stickerId；describe修改该stickerId的description（空字符串清除描述）。先用qaf_sticker_list选择，禁止编造标识。收藏需协议与宿主在同一本机且图片资源可解析；收藏与删除影响账号收藏。confirmed表示协议已确认，unknown时不重复同一次动作；可重新查询收藏核对。',
+  definition: { name: 'qbf_sticker_manage', capability: 'native.stickers.manage', featureId: 'framework-tools', timeoutMs: 30000,
+    registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' },
+    description: '管理QQ账号收藏表情。add收藏当前会话已登记图片assetId；delete删除列表返回的真实stickerId；describe修改该stickerId的description（空字符串清除描述）。先用qbf_sticker_list选择，禁止编造标识。收藏需协议与宿主在同一本机且图片资源可解析；收藏与删除影响账号收藏。confirmed表示协议已确认，unknown时不重复同一次动作；可重新查询收藏核对。',
     parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
       action: { enum: ['add', 'delete', 'describe'] }, assetId: { type: 'string', minLength: 1, maxLength: 512 },
       stickerId: { type: 'string', minLength: 1, maxLength: 512 }, description: { type: 'string', maxLength: 255 },

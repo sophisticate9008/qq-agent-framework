@@ -35,7 +35,7 @@ table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:22px
 th,td { border:1px solid #bbc6d4; padding:11px 14px; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
 th { background:#e9eff8; font-weight:700; } tr:nth-child(even) td { background:#f8fafc; }
 hr { border:0; border-top:1px solid #c9d3df; margin:22px 0; }
-.md-image { color:#697c91; } .qaf-checkbox { display:inline-block; width:20px; height:20px; line-height:18px; font-size:18px; text-align:center; border:1px solid #60748b; margin-right:7px; } .qaf-math-block { display:block; margin:16px 0; }
+.md-image { color:#697c91; } .qbf-checkbox { display:inline-block; width:20px; height:20px; line-height:18px; font-size:18px; text-align:center; border:1px solid #60748b; margin-right:7px; } .qbf-math-block { display:block; margin:16px 0; }
 .hljs-keyword,.hljs-selector-tag,.hljs-literal { color:#8041b0; }
 .hljs-string,.hljs-attr { color:#167147; } .hljs-number,.hljs-symbol { color:#a65514; }
 .hljs-comment,.hljs-quote { color:#718095; } .hljs-title,.hljs-built_in,.hljs-function { color:#1f62b5; }
@@ -43,7 +43,7 @@ hr { border:0; border-top:1px solid #c9d3df; margin:22px 0; }
 for (const [name, language] of Object.entries({ javascript, typescript, python, json, bash, xml, css, sql })) hljs.registerLanguage(name, language)
 
 function mathRules(parser: InstanceType<typeof MarkdownIt>) {
-  parser.inline.ruler.before('escape', 'qaf_math_inline', (state, silent) => {
+  parser.inline.ruler.before('escape', 'qbf_math_inline', (state, silent) => {
     const start = state.pos
     const opening = state.src.startsWith('\\(', start) ? '\\(' : state.src[start] === '$' && state.src[start + 1] !== '$' ? '$' : null
     if (!opening) return false
@@ -53,11 +53,11 @@ function mathRules(parser: InstanceType<typeof MarkdownIt>) {
     while (end >= 0 && state.src[end - 1] === '\\') end = state.src.indexOf(closing, end + closing.length)
     if (end < 0 || end === start + opening.length || end - start > 2000 || state.src.slice(start, end).includes('\n')
       || opening === '$' && (/\s/.test(state.src[end - 1]) || /[0-9]/.test(state.src[end + 1] ?? ''))) return false
-    if (!silent) { const token = state.push('qaf_math_inline', '', 0); token.content = state.src.slice(start + opening.length, end) }
+    if (!silent) { const token = state.push('qbf_math_inline', '', 0); token.content = state.src.slice(start + opening.length, end) }
     state.pos = end + closing.length
     return true
   })
-  parser.block.ruler.before('fence', 'qaf_math_block', (state, start, end, silent) => {
+  parser.block.ruler.before('fence', 'qbf_math_block', (state, start, end, silent) => {
     const first = state.src.slice(state.bMarks[start] + state.tShift[start], state.eMarks[start]).trim()
     const opening = first.startsWith('$$') ? '$$' : first.startsWith('\\[') ? '\\[' : null
     if (!opening) return false
@@ -75,7 +75,7 @@ function mathRules(parser: InstanceType<typeof MarkdownIt>) {
     expression = expression.slice(0, -closing.length).trim()
     if (expression.length > 2000 || !expression) return false
     if (silent) return true
-    const token = state.push('qaf_math_block', '', 0); token.block = true; token.content = expression; token.map = [start, last + 1]
+    const token = state.push('qbf_math_block', '', 0); token.block = true; token.content = expression; token.map = [start, last + 1]
     state.line = last + 1
     return true
   }, { alt: ['paragraph', 'blockquote', 'list'] })
@@ -112,13 +112,13 @@ async function run(): Promise<readonly MarkdownPngPage[]> {
       const text = token.children[0]
       const match = text.content.match(/^\[([ xX])\]\s+/)
       if (match) {
-        taskHtml.set(text, `<span class="qaf-checkbox">${match[1] === ' ' ? '&nbsp;' : 'x'}</span>${parser.utils.escapeHtml(text.content.slice(match[0].length))}`)
-        text.type = 'qaf_task'
+        taskHtml.set(text, `<span class="qbf-checkbox">${match[1] === ' ' ? '&nbsp;' : 'x'}</span>${parser.utils.escapeHtml(text.content.slice(match[0].length))}`)
+        text.type = 'qbf_task'
       }
     }
   }
-  parser.renderer.rules.qaf_task = (tokens, index) => taskHtml.get(tokens[index]) ?? ''
-  const mathTokens = flattened.filter(token => token.type === 'qaf_math_inline' || token.type === 'qaf_math_block')
+  parser.renderer.rules.qbf_task = (tokens, index) => taskHtml.get(tokens[index]) ?? ''
+  const mathTokens = flattened.filter(token => token.type === 'qbf_math_inline' || token.type === 'qbf_math_block')
   assert(mathTokens.length <= 32 && mathTokens.reduce((length, token) => length + token.content.length, 0) <= 8000,
     'MARKDOWN_MATH_LIMIT', 'The document contains too many or overly large formulas.')
   const images: ImageSource[] = []
@@ -126,15 +126,15 @@ async function run(): Promise<readonly MarkdownPngPage[]> {
   if (mathTokens.length) {
     const math = await (await import('./builtin-markdown-math.ts')).loadBuiltinMath()
     for (const token of mathTokens) {
-      const result = math(token.content, token.type === 'qaf_math_block')
+      const result = math(token.content, token.type === 'qbf_math_block')
       const scale = Math.min(1, (width - 96) / result.width)
       const imageWidth = Math.max(1, Math.ceil(result.width * scale)); const imageHeight = Math.max(1, Math.ceil(result.height * scale))
-      const key = `qaf-formula-${images.length}`
+      const key = `qbf-formula-${images.length}`
       images.push({ src: key, data: result.svg })
-      mathHtml.set(token, `<img class="${token.type === 'qaf_math_block' ? 'qaf-math-block' : 'qaf-math-inline'}" src="${key}" width="${imageWidth}" height="${imageHeight}">`)
+      mathHtml.set(token, `<img class="${token.type === 'qbf_math_block' ? 'qbf-math-block' : 'qbf-math-inline'}" src="${key}" width="${imageWidth}" height="${imageHeight}">`)
     }
   }
-  parser.renderer.rules.qaf_math_inline = parser.renderer.rules.qaf_math_block = (tokens, index) => mathHtml.get(tokens[index]) ?? ''
+  parser.renderer.rules.qbf_math_inline = parser.renderer.rules.qbf_math_block = (tokens, index) => mathHtml.get(tokens[index]) ?? ''
   const body = parser.renderer.render(tokens, parser.options, {})
   const title = typeof input.title === 'string' && input.title ? `<h1>${parser.utils.escapeHtml(input.title)}</h1>` : ''
   const { node: parsedNode } = fromHtml(`<html lang="zh-CN"><body>${title}${body}</body></html>`)

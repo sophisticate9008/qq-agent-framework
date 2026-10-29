@@ -41,9 +41,9 @@ const result = await client.run({
 
 宿主传入 `store`、`backend: dsh.pluginModels` 和 `withSessionLease`；统一会话队列必须覆盖 QQ、助手与插件对同一实际会话的写入。`defaultModel` 可提供固定选择或读取当前配置的函数；未指定时使用实际 DSH 模型目录的首项。`onUsage` 收到插件身份、执行标识、实际会话和有界终态用量，供账本记录。
 
-DSH 桥接包提供 `pluginModels`、`createPluginModelSession`、`inspectPluginModelSession`、`startPluginModel`、`waitPluginModelIdle`、`inspectPluginModelRun` 六个管理 RPC，只接受已认证的 DSH owner 调用。插件输入持久标记 `source.kind: qaf-plugin`、插件 ID 与请求 ID，不产生 QQ 发言者或主人消息。已有会话沿用历史和原有组成；本次纯模型生成会移除模型输入中的全部工具 schema，并通过 SDK 的单调工具 guard 拒绝执行，包括历史和会话局部登记的工具。限制持续到实际 agent 完全空闲后才撤销。
+DSH 桥接包提供 `pluginModels`、`createPluginModelSession`、`inspectPluginModelSession`、`startPluginModel`、`waitPluginModelIdle`、`inspectPluginModelRun` 六个管理 RPC，只接受已认证的 DSH owner 调用。插件输入持久标记 `source.kind: qbf-plugin`、插件 ID 与请求 ID，不产生 QQ 发言者或主人消息。已有会话沿用历史和原有组成；本次纯模型生成会移除模型输入中的全部工具 schema，并通过 SDK 的单调工具 guard 拒绝执行，包括历史和会话局部登记的工具。限制持续到实际 agent 完全空闲后才撤销。
 
-新建会话使用 SDK 的 `plugin:qaf/model-session` 可忽略记录保存插件归属，供持久读取与续轮使用；工作目录作为原生会话查询与事件流要求的地址元数据，不授予文件或工具能力。自建会话在装配前覆盖全局部署提示词与上下文贡献，并禁用可选运行上下文；SDK 在会话自身作用域登记的必需运行事实（例如当前目录）仍由 SDK 保留，不作为 QQ 人设或能力授权。执行来源同时核对实际 inbox 消费与用户消息，因此模型在写入用户正文之前发生的配置失败也能对应到原请求的失败终态。
+新建会话使用 SDK 的 `plugin:qbf/model-session` 可忽略记录保存插件归属，供持久读取与续轮使用；工作目录作为原生会话查询与事件流要求的地址元数据，不授予文件或工具能力。自建会话在装配前覆盖全局部署提示词与上下文贡献，并禁用可选运行上下文；SDK 在会话自身作用域登记的必需运行事实（例如当前目录）仍由 SDK 保留，不作为 QQ 人设或能力授权。执行来源同时核对实际 inbox 消费与用户消息，因此模型在写入用户正文之前发生的配置失败也能对应到原请求的失败终态。
 
 宿主先建立结果监听，再提交请求；同一实际会话串行，生成结束并确认 DSH 排空后才释放队列。生命周期停止后拒绝新调用。临时连接失败、提交结果未知或中断均保留原绑定，阻止同一会话继续写入；不通过新建会话绕过未知结果，也不自动重放请求。
 

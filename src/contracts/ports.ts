@@ -57,6 +57,8 @@ export interface DurableStore {
   write(namespace: string, key: string, value: JsonValue, options?: WriteOptions): StoredRecord;
   delete(namespace: string, key: string, expectedRevision?: number): boolean;
   list(namespace: string, options?: { limit?: number; after?: string }): readonly StoredRecord[];
+  /** Opaque mutation token for this open store and namespace. Compare only for equality; expiry still requires a read. */
+  changeToken?(namespace: string): string;
   /** A bounded all-or-nothing CAS batch; no callbacks or external actions execute inside storage. */
   compareAndSetBatch?(mutations: readonly DurableCasMutation[]): readonly (StoredRecord | null)[];
   purgeExpired(limit?: number): number;

@@ -101,6 +101,8 @@ export function createNativeInbox(options: {
   assert(Number.isSafeInteger(groupContinuationCoalesceMs) && groupContinuationCoalesceMs >= 0 && groupContinuationCoalesceMs <= 1500,
     'INVALID_INBOX_OPTIONS', 'The group observation window must be bounded.');
   const running = new Map<string, Promise<void>>();
+  const active = new Set<string>();
+  let scannedToken: string | undefined;
   let stopped = false;
   const read = (id: string) => options.store.read(namespace, digest(id));
   function write(prior: StoredRecord | null, queue: Queue) {
@@ -177,11 +179,37 @@ export function createNativeInbox(options: {
       entries: current.entries.filter(entry => !ids.has(entry.message.id)),
       receipts: receipts(current, submitted, result.status, batch.at(-1)!.message.id), errorCode: result.errorCode ?? null });
   }
+  function pendingQueues(): readonly { record: StoredRecord; queue: Queue }[] {
+    // Capture the token before scanning: a commit during/after the scan must
+    // invalidate it on the next tick rather than hide a newly queued message.
+    const token = options.store.changeToken?.(namespace);
+    if (token === undefined || token !== scannedToken) {
+      const records = options.store.list(namespace, { limit: 256 });
+      const nextActive = new Set<string>();
+      const pending = records.flatMap(record => {
+        const queue = decode(record);
+        if (!queue.entries.length) return [];
+        nextActive.add(queue.conversationId);
+        return [{ record, queue }];
+      });
+      active.clear();
+      for (const id of nextActive) active.add(id);
+      scannedToken = token;
+      return pending;
+    }
+    const pending: { record: StoredRecord; queue: Queue }[] = [];
+    for (const id of active) {
+      const record = read(id);
+      // Keep expired/missing identities until the next mutation scan. The
+      // store's expiry clock may move backwards; live reads remain authoritative.
+      if (record) pending.push({ record, queue: decode(record) });
+    }
+    return pending;
+  }
   function tick() {
     if (stopped) return Promise.resolve();
     const pending: Promise<void>[] = [];
-    for (const record of options.store.list(namespace, { limit: 256 })) {
-      const queue = decode(record);
+    for (const { record, queue } of pendingQueues()) {
       if (!queue.entries.length) continue;
       const previous = running.get(queue.conversationId);
       if (previous) { pending.push(previous); continue; }

@@ -25,6 +25,7 @@ export interface SqliteStoreOptions {
 }
 
 interface StoreStatements {
+  dataVersion: StatementSync;
   selectRecord: StatementSync;
   selectRevision: StatementSync;
   countRecords: StatementSync;
@@ -105,20 +106,19 @@ function decodeRecord(row: Record<string, unknown>): StoredRecord {
   } catch {
     fail('STORE_CORRUPT', 'Durable store contains invalid data.');
   }
-  let value: JsonValue;
   try {
-    value = snapshot(parsed) as JsonValue;
+    // Validate and detach the parsed value once, together with its metadata.
+    return snapshot({
+      namespace: textField(row, 'namespace'),
+      key: textField(row, 'key'),
+      revision: integerField(row, 'revision'),
+      updatedAt: integerField(row, 'updatedAt'),
+      expiresAt: nullableIntegerField(row, 'expiresAt'),
+      value: parsed as JsonValue
+    });
   } catch {
     fail('STORE_CORRUPT', 'Durable store contains invalid data.');
   }
-  return snapshot({
-    namespace: textField(row, 'namespace'),
-    key: textField(row, 'key'),
-    revision: integerField(row, 'revision'),
-    updatedAt: integerField(row, 'updatedAt'),
-    expiresAt: nullableIntegerField(row, 'expiresAt'),
-    value
-  });
 }
 
 function existingRow(row: Record<string, unknown> | undefined): ExistingRow | null {
@@ -149,6 +149,7 @@ function secureFile(filename: string): void {
 
 function prepareStatements(database: DatabaseSync): StoreStatements {
   return {
+    dataVersion: database.prepare('PRAGMA data_version'),
     selectRecord: database.prepare(`
       SELECT namespace, key, value, revision, updated_at AS updatedAt, expires_at AS expiresAt
       FROM durable_records WHERE namespace = ? AND key = ?
@@ -305,6 +306,26 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
   }
   let closed = false;
   const lookupStatements = new Map<string, StatementSync>();
+  const namespaceChanges = new Map<string, bigint>();
+  let allNamespaceChanges = 0n;
+
+  function markChanged(namespace: string): void {
+    const previous = namespaceChanges.get(namespace);
+    if (previous !== undefined) namespaceChanges.set(namespace, previous + 1n);
+  }
+
+  function changeToken(namespace: string): string {
+    assertOpen();
+    assertReference(namespace, 'namespace');
+    try {
+      const row = statements.dataVersion.get();
+      if (!row) fail('STORE_CORRUPT', 'Durable store contains invalid metadata.');
+      // data_version tracks commits by other connections. Local counters track
+      // our commits without invalidating an idle inbox for unrelated writes.
+      if (!namespaceChanges.has(namespace)) namespaceChanges.set(namespace, 0n);
+      return `${integerField(row, 'data_version')}:${allNamespaceChanges}:${namespaceChanges.get(namespace)}`;
+    } catch (error) { redact(error); }
+  }
 
   function assertOpen(): void {
     if (closed) fail('STORE_CLOSED', 'Durable store is closed.');
@@ -365,7 +386,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) fail('STORE_INVALID_INDEX', 'Indexed lookup limit is invalid.');
     try {
       const equals = typeof query.equals === 'boolean' ? Number(query.equals) : query.equals;
-      return snapshot(statement.all(equals, now(), limit).map(decodeRecord));
+      return Object.freeze(statement.all(equals, now(), limit).map(decodeRecord));
     } catch (error) { redact(error); }
   }
 
@@ -375,7 +396,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     return value;
   }
 
-  function transaction<Result>(operation: () => Result): Result {
+  function transaction<Result>(operation: () => Result, changedNamespaces: readonly string[] = []): Result {
     assertOpen();
     try {
       database.exec('BEGIN IMMEDIATE');
@@ -385,6 +406,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     try {
       const result = operation();
       database.exec('COMMIT');
+      for (const namespace of new Set(changedNamespaces)) markChanged(namespace);
       return result;
     } catch (error: unknown) {
       try {
@@ -467,7 +489,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
         statements.updateRecord.run(serialized, revision, currentTime, expiresAt, namespace, key);
       }
       return snapshot({ namespace, key, revision, updatedAt: currentTime, expiresAt, value: canonical });
-    });
+    }, [namespace]);
   }
 
   function compareAndSetBatch(input: readonly DurableCasMutation[]): readonly (StoredRecord | null)[] {
@@ -528,7 +550,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
           expiresAt: entry.expiresAt, value: mutation.value }));
       }
       return snapshot(result);
-    });
+    }, prepared.filter(entry => entry.mutation.kind !== 'check').map(entry => entry.mutation.namespace));
   }
 
   function deleteRecord(namespace: string, key: string, expectedRevision?: number): boolean {
@@ -542,6 +564,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       const result = expectedRevision === undefined
         ? statements.deleteRecord.run(namespace, key)
         : statements.deleteRecordAtRevision.run(namespace, key, expectedRevision);
+      if (Number(result.changes) > 0) markChanged(namespace);
       return Number(result.changes) === 1;
     } catch (error: unknown) {
       redact(error);
@@ -564,7 +587,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       const rows = listOptions.after === undefined
         ? statements.listRecords.all(namespace, currentTime, limit)
         : statements.listRecordsAfter.all(namespace, listOptions.after, currentTime, limit);
-      return snapshot(rows.map(decodeRecord));
+      return Object.freeze(rows.map(decodeRecord));
     } catch (error: unknown) {
       redact(error);
     }
@@ -576,7 +599,9 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
       fail('STORE_INVALID_ARGUMENT', 'Expected a purge limit between 1 and 1000.');
     }
     try {
-      return Number(statements.purgeExpired.run(now(), limit).changes);
+      const changes = Number(statements.purgeExpired.run(now(), limit).changes);
+      if (changes > 0) allNamespaceChanges += 1n;
+      return changes;
     } catch (error: unknown) {
       redact(error);
     }
@@ -648,8 +673,8 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
 
   function listByNumber(query: DurableNumberPage): readonly StoredRecord[] {
     assertOpen();
-    try { return snapshot(readNumberPage(database, query, now(), true).map(decodeRecord)); }
+    try { return Object.freeze(readNumberPage(database, query, now(), true).map(decodeRecord)); }
     catch (error) { redact(error); }
   }
-  return { read, write, delete: deleteRecord, list, listByNumber, compareAndSetBatch, purgeExpired, stats, createIndex, lookup, maintenancePage, close };
+  return { read, write, delete: deleteRecord, list, changeToken, listByNumber, compareAndSetBatch, purgeExpired, stats, createIndex, lookup, maintenancePage, close };
 }

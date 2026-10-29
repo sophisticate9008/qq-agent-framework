@@ -128,3 +128,57 @@ test('TTL visibility is non-destructive and explicit purge is bounded', (context
   const third = store.write('ttl', 'third', 3, { expectedRevision: null });
   assert(third.revision > first.revision);
 });
+
+test('namespace tokens track committed writes, deletes, batches, purge and other connections', (context) => {
+  const temporary = temporaryDatabase();
+  context.after(() => rmSync(temporary.directory, { recursive: true, force: true }));
+  let now = 10;
+  const store = createSqliteStore({ filename: temporary.filename, clock: () => now });
+  const other = createSqliteStore({ filename: temporary.filename, clock: () => now });
+  context.after(() => store.close()); context.after(() => other.close());
+  const token = () => store.changeToken!('inbox');
+  const empty = token();
+  store.write('unrelated', 'event', true);
+  assert.equal(token(), empty);
+  const record = store.write('inbox', 'first', { nested: [{ value: 1 }] });
+  const written = token(); assert.notEqual(written, empty);
+  assert.throws(() => store.write('inbox', 'first', {}, { expectedRevision: record.revision + 1 }), { code: 'STORE_CONFLICT' });
+  assert.equal(token(), written);
+  store.compareAndSetBatch!([{ kind: 'check', namespace: 'inbox', key: 'first', expectedRevision: record.revision }]);
+  assert.equal(token(), written);
+  store.compareAndSetBatch!([{ kind: 'write', namespace: 'inbox', key: 'second', expectedRevision: null, value: true }]);
+  const batched = token(); assert.notEqual(batched, written);
+  assert.equal(store.delete('inbox', 'first', record.revision + 1), false);
+  assert.equal(token(), batched);
+  assert.equal(store.delete('inbox', 'first', record.revision), true);
+  const deleted = token(); assert.notEqual(deleted, batched);
+  other.write('inbox', 'external', true);
+  const external = token(); assert.notEqual(external, deleted);
+  const externalRecord = other.read('inbox', 'external')!;
+  other.delete('inbox', 'external', externalRecord.revision);
+  assert.notEqual(token(), external);
+  store.write('inbox', 'expiring', true, { expiresAt: 20 });
+  const beforeExpiry = token(); now = 20;
+  assert.equal(token(), beforeExpiry); // Tokens describe mutations, not TTL visibility.
+  assert.equal(store.read('inbox', 'expiring'), null);
+  assert.equal(store.purgeExpired(), 1);
+  assert.notEqual(token(), beforeExpiry);
+  store.close();
+  assert.throws(token, { code: 'STORE_CLOSED' });
+});
+
+test('read and list preserve deeply frozen detached records after a later write', () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  try {
+    store.write('inbox', 'queue', { entries: [{ message: { text: 'original' } }] });
+    const read = store.read('inbox', 'queue')!;
+    const listed = store.list('inbox');
+    assert(Object.isFrozen(read)); assert(Object.isFrozen(listed)); assert(Object.isFrozen(listed[0]));
+    const value = listed[0]!.value as { entries: { message: { text: string } }[] };
+    assert(Object.isFrozen(value)); assert(Object.isFrozen(value.entries)); assert(Object.isFrozen(value.entries[0]!.message));
+    assert.throws(() => { value.entries[0]!.message.text = 'changed'; }, TypeError);
+    store.write('inbox', 'queue', { entries: [] });
+    assert.deepEqual(read.value, { entries: [{ message: { text: 'original' } }] });
+    assert.deepEqual(listed[0]!.value, read.value);
+  } finally { store.close(); }
+});

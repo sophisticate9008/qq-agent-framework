@@ -3,10 +3,88 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createNativeInbox, type NativeInboxEntry } from '../src/host/native-inbox.ts';
 import { createSqliteStore } from '../src/storage/sqlite.ts';
+import type { DurableStore } from '../src/contracts/ports.ts';
 
 const entry = (id: string, userId = '123', admittedAt = 10): NativeInboxEntry => ({ admittedAt, deadlineAt: admittedAt + 100,
   message: { id, userId, conversationId: 'group:456', receivedAt: admittedAt, directed: true, isSelf: false,
     content: [{ type: 'text', text: `correction-${id}` }] } });
+
+test('unchanged idle queues avoid full scans while local enqueues and readiness still wake pending input', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  let scans = 0;
+  let ready: 'busy' | 'ready' = 'ready';
+  let calls = 0;
+  const tracked: DurableStore = { ...store, list(namespace, options) {
+    if (namespace === 'native-chat.inbox') scans++;
+    return store.list(namespace, options);
+  } };
+  const inbox = createNativeInbox({ store: tracked, clock: () => 20, readiness: () => ready,
+    async deliver() { calls++; return { status: 'accepted' }; } });
+  try {
+    inbox.enqueue(entry('first')); await inbox.tick();
+    await inbox.tick(); // Observe the committed dispatch result once.
+    scans = 0;
+    for (let index = 0; index < 4; index++) await inbox.tick();
+    store.write('unrelated', 'activity', { count: 1 });
+    await inbox.tick();
+    assert.equal(scans, 0);
+    assert.equal(calls, 1);
+    ready = 'busy'; inbox.enqueue(entry('second')); await inbox.tick();
+    const busyScans = scans;
+    await inbox.tick(); assert.equal(scans, busyScans);
+    ready = 'ready'; await inbox.tick();
+    assert.equal(calls, 2);
+  } finally { await inbox.stop(); store.close(); }
+});
+
+test('an enqueue after a scan snapshot is discovered on the next tick', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  let inject = true;
+  let calls = 0;
+  const writer = createNativeInbox({ store, clock: () => 20, readiness: () => 'busy',
+    async deliver() { assert.fail('The writer must not dispatch'); } });
+  const tracked: DurableStore = { ...store, list(namespace, options) {
+    const records = store.list(namespace, options);
+    if (inject && namespace === 'native-chat.inbox') { inject = false; writer.enqueue(entry('late')); }
+    return records;
+  } };
+  const inbox = createNativeInbox({ store: tracked, clock: () => 20, readiness: () => 'ready',
+    async deliver() { calls++; return { status: 'accepted' }; } });
+  try {
+    await inbox.tick(); assert.equal(calls, 0);
+    await inbox.tick(); assert.equal(calls, 1);
+  } finally { await inbox.stop(); await writer.stop(); store.close(); }
+});
+
+test('pending input still expires without any intervening storage mutation', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  let clock = 20;
+  const inbox = createNativeInbox({ store, clock: () => clock, readiness: () => 'busy',
+    async deliver() { assert.fail('Expired input must not dispatch'); } });
+  try {
+    inbox.enqueue(entry('expiry')); await inbox.tick();
+    const token = store.changeToken!('native-chat.inbox');
+    clock = 110;
+    assert.equal(store.changeToken!('native-chat.inbox'), token);
+    await inbox.tick();
+    assert.equal(inbox.hasPending('group:456'), false);
+    assert.equal(inbox.list()[0]?.receipts[0]?.outcome, 'expired');
+  } finally { await inbox.stop(); store.close(); }
+});
+
+test('stores without mutation tokens continue scanning each tick', async () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  let scans = 0;
+  const tracked: DurableStore = { ...store, changeToken: undefined, list(namespace, options) {
+    scans++; return store.list(namespace, options);
+  } };
+  const inbox = createNativeInbox({ store: tracked, clock: () => 20, readiness: () => 'ready',
+    async deliver() { return { status: 'accepted' }; } });
+  try {
+    await inbox.tick(); await inbox.tick();
+    assert.equal(scans, 2);
+  } finally { await inbox.stop(); store.close(); }
+});
 
 test('busy group input becomes one latest observation without merging identities or extending deadlines', async () => {
   const store = createSqliteStore({ filename: ':memory:' });

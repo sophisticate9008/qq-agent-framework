@@ -98,6 +98,7 @@ export function createPluginSchedulerService(options: {
   let timer: ReturnType<typeof setInterval> | undefined;
   let ticking: Promise<void> | undefined;
   let stopping: Promise<void> | undefined;
+  let lastCleanupAt: number | undefined;
   const calendarStore: DurableStore = {
     ...store,
     read: (namespace, key) => store.read(prefix + namespace, key),
@@ -168,9 +169,12 @@ export function createPluginSchedulerService(options: {
     return snapshot({ ...rule, id: value.id, revision: record.revision, handler: value.handler,
       payload: value.payload, state, nextAt });
   }
-  function cleanup() {
-    const history = historyRows();
+  function cleanup(force = false) {
     const now = clock();
+    // Capacity-sensitive registration still cleans immediately. Background collection
+    // needs no per-second scan, and clock rollback starts a fresh maintenance interval.
+    if (!force && lastCleanupAt !== undefined && now >= lastCleanupAt && now - lastCleanupAt < 60_000) return;
+    const history = historyRows();
     for (const record of rows()) {
       const value = object(record.value);
       const schedule = object(value.schedule);
@@ -181,6 +185,7 @@ export function createPluginSchedulerService(options: {
       if (history.some(row => object(row.value).ruleId === record.key)) continue;
       store.delete(rulesNamespace, record.key, record.revision);
     }
+    lastCleanupAt = now;
   }
   async function tick(): Promise<void> {
     if (!running) return;
@@ -219,7 +224,7 @@ export function createPluginSchedulerService(options: {
           check();
           assert(reference(input.id) && identifier(input.handler) && isRecord(input.payload),
             'PLUGIN_SCHEDULER_INVALID_INPUT', 'A bounded identified plugin schedule is required.');
-          cleanup();
+          cleanup(true);
           const current = read(input.id);
           cas(current, request);
           const desired = { scope: owner, timeZone: input.timeZone ?? 'UTC', schedule: input.schedule,
@@ -278,6 +283,7 @@ export function createPluginSchedulerService(options: {
         after = result.next ?? undefined;
       } while (after !== undefined);
       running = true;
+      lastCleanupAt = undefined;
       timer = setInterval(() => { void tick().catch(error => { try { options.onFault?.(errorCode(error, 'PLUGIN_SCHEDULER_TICK_FAILED')); } catch {} }); }, intervalMs);
       timer.unref();
     },

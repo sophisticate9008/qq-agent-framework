@@ -129,6 +129,15 @@ const dayMs = 86_400_000;
 const maxWindowMs = 8 * dayMs;
 const maxPayloadBytes = 64 * 1024;
 const formatters = new Map<string, Intl.DateTimeFormat>();
+// These caches contain only calendar calculations, never rule state or execution evidence.
+const resolvedLocalTimes = new Map<string, number | null>();
+const nextScheduledTimes = new Map<string, number | null>();
+
+function cacheTime(cache: Map<string, number | null>, key: string, value: number | null, limit: number) {
+  if (cache.size >= limit) cache.delete(cache.keys().next().value!);
+  cache.set(key, value);
+  return value;
+}
 
 function formatter(timeZone: string) {
   let value = formatters.get(timeZone);
@@ -189,6 +198,8 @@ function localEpoch(parts: LocalParts) {
 }
 
 function resolveLocal(parts: LocalParts, timeZone: string, overlap: CalendarOverlapPolicy) {
+  const key = JSON.stringify([timeZone, overlap, parts.year, parts.month, parts.day, parts.hour, parts.minute]);
+  if (resolvedLocalTimes.has(key)) return resolvedLocalTimes.get(key)!;
   const target = localEpoch(parts);
   const candidates = new Set<number>();
   for (let sample = target - 2 * dayMs; sample <= target + 2 * dayMs; sample += 3 * 60 * minuteMs) {
@@ -196,7 +207,7 @@ function resolveLocal(parts: LocalParts, timeZone: string, overlap: CalendarOver
     if (sameLocal(localParts(candidate, timeZone), parts)) candidates.add(candidate);
   }
   const ordered = [...candidates].sort((left, right) => left - right);
-  return overlap === 'earlier' ? ordered[0] ?? null : ordered.at(-1) ?? null;
+  return cacheTime(resolvedLocalTimes, key, overlap === 'earlier' ? ordered[0] ?? null : ordered.at(-1) ?? null, 4096);
 }
 
 function validateSchedule(value: unknown): CalendarSchedule {
@@ -326,14 +337,22 @@ function scheduledBetween(value: Pick<StoredRule, 'schedule' | 'timeZone' | 'dst
   return [...new Set(result)].sort((left, right) => left - right);
 }
 
+function nextScheduledAt(value: Pick<StoredRule, 'schedule' | 'timeZone' | 'dst'>, from: number): number | null {
+  if (value.schedule.kind === 'once') return value.schedule.at >= from ? value.schedule.at : null;
+  const schedule = value.schedule;
+  const key = JSON.stringify([value.timeZone, value.dst.overlap, schedule.kind,
+    schedule.kind === 'weekly' ? schedule.dayOfWeek : null, schedule.hour, schedule.minute, from]);
+  if (nextScheduledTimes.has(key)) return nextScheduledTimes.get(key)!;
+  const through = from + 16 * dayMs;
+  finiteTimestamp(through, 'INVALID_CALENDAR_TIME');
+  return cacheTime(nextScheduledTimes, key, scheduledBetween(value, from, through)[0] ?? null, 1024);
+}
+
 /** Read-only next occurrence calculation shared by management projections and the scheduler. */
 export function nextCalendarTriggerAt(input: Pick<CalendarTriggerInput, 'schedule' | 'timeZone' | 'dst'>, after: number): number | null {
   finiteTimestamp(after, 'INVALID_CALENDAR_TIME')
   const value = { schedule: validateSchedule(input.schedule), timeZone: canonicalTimeZone(input.timeZone), dst: validateDst(input.dst) }
-  if (value.schedule.kind === 'once') return value.schedule.at > after ? value.schedule.at : null
-  const through = after + 16 * dayMs
-  finiteTimestamp(through, 'INVALID_CALENDAR_TIME')
-  return scheduledBetween(value, after + 1, through)[0] ?? null
+  return nextScheduledAt(value, after + 1)
 }
 
 function occurrenceId(ruleId: string, generation: number, scheduledAt: number) {
@@ -490,8 +509,12 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
       report.scanned++;
       const value = rule(record);
       if (!value.enabled || value.cancelled || value.evaluatedThrough >= now) continue;
-      if (value.schedule.kind === 'once' && (value.schedule.at > now || value.schedule.at <= value.evaluatedThrough)) continue;
-      const from = Math.max(value.activeFrom, value.evaluatedThrough + 1, now - value.windowMs + 1);
+      const unevaluatedFrom = Math.max(value.activeFrom, value.evaluatedThrough + 1);
+      const first = nextScheduledAt(value, unevaluatedFrom);
+      // Nothing can be replayed within an empty interval. Persist progress when an actual
+      // occurrence is handled or skipped, so rollback/restart still cannot revive it.
+      if (first === null || first > now) continue;
+      const from = Math.max(unevaluatedFrom, now - value.windowMs + 1);
       const due = scheduledBetween(value, from, now).filter(scheduledAt => scheduledAt + value.windowMs > now);
       if (!due.length) {
         advance(record, now);

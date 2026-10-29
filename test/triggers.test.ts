@@ -299,3 +299,61 @@ test('daily plans resume only the latest eligible local day after a multi-day in
   assert.equal(calls.length, 2);
   await restarted.stop();
 });
+
+test('idle calendar intervals keep their durable revision and expired occurrences remain skipped after rollback', async context => {
+  let now = utc('2026-01-01T09:00:00Z');
+  const store = storeFor(context, () => now);
+  const input = daily('idle-progress', { windowMs: 60_000 });
+  const first = createCalendarTriggerService({ store, clock: () => now, callback() { assert.fail('Nothing is due'); } });
+  first.register(input);
+  const initial = store.read('calendar-triggers', input.id)!;
+  await first.tick();
+  now += 1_000;
+  await first.tick();
+  now = utc('2026-01-01T09:59:59Z');
+  await first.tick();
+  assert.equal(store.read('calendar-triggers', input.id)!.revision, initial.revision);
+  await first.stop();
+
+  const second = createCalendarTriggerService({ store, clock: () => now, callback() { assert.fail('Expired work must not replay'); } });
+  now = utc('2026-01-01T10:01:00Z');
+  assert.equal((await second.tick()).attempted, 0);
+  const skipped = store.read('calendar-triggers', input.id)!;
+  assert.equal(second.list()[0].evaluatedThrough, now);
+  assert.ok(skipped.revision > initial.revision);
+  now += 1_000;
+  await second.tick();
+  assert.equal(store.read('calendar-triggers', input.id)!.revision, skipped.revision);
+  await second.stop();
+
+  now = utc('2026-01-01T10:00:00Z');
+  const recovered = createCalendarTriggerService({ store, clock: () => now,
+    callback() { assert.fail('Rollback must not revive skipped work'); } });
+  assert.equal((await recovered.tick()).attempted, 0);
+  await recovered.stop();
+});
+
+test('an idle calculation cannot hide a concurrent schedule replacement or callback readiness change', async context => {
+  let now = utc('2026-01-01T09:00:00Z');
+  const store = storeFor(context, () => now);
+  let ready = false;
+  const calls: CalendarTriggerOccurrence[] = [];
+  const service = createCalendarTriggerService({ store, clock: () => now, isReady: () => ready,
+    callback(occurrence) { calls.push(occurrence); } });
+  const editor = createCalendarTriggerService({ store, clock: () => now, callback() {} });
+  service.register(daily('replaced'));
+  await service.tick();
+  now += 1_000;
+  editor.update('replaced', { schedule: { kind: 'daily', hour: 9, minute: 1 }, payload: { updated: true } });
+  now = utc('2026-01-01T09:01:00Z');
+  assert.equal((await service.tick()).attempted, 0);
+  ready = true;
+  assert.equal((await service.tick()).completed, 1);
+  assert.equal(calls[0].generation, 2);
+  assert.deepEqual(calls[0].payload, { updated: true });
+  editor.cancel('replaced');
+  now += 86_400_000;
+  assert.equal((await service.tick()).attempted, 0);
+  await service.stop();
+  await editor.stop();
+});

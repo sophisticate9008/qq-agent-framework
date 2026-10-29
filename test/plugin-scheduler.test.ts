@@ -249,3 +249,35 @@ test('rules and completed histories expire with bounded capacity while cancelled
   assert.equal(client.history().length, 0);
   assert.equal(client.list().length, 0);
 });
+
+test('idle background collection runs once a minute while registration immediately reclaims expired capacity', async context => {
+  let now = initial;
+  const base = createSqliteStore({ filename: ':memory:', clock: () => now });
+  let historyReads = 0;
+  const store: DurableStore = { ...base, list(namespace, query) {
+    if (namespace === 'plugin-scheduler.calendar-trigger-occurrences') historyReads++;
+    return base.list(namespace, query);
+  } };
+  const service = createPluginSchedulerService({ store, clock: () => now, intervalMs: 60_000, maxRules: 1 });
+  context.after(async () => { await service.stop(); base.close(); });
+  const client = service.forPlugin('maintenance', new AbortController().signal);
+  client.schedule(once('old', initial, { enabled: false, windowMs: 60_000 }));
+  service.start();
+  historyReads = 0;
+  await service.tick();
+  now += 1_000;
+  await service.tick();
+  now += 58_999;
+  await service.tick();
+  assert.equal(historyReads, 1);
+  now += 1;
+  await service.tick();
+  assert.equal(historyReads, 2);
+
+  // Collect just before expiry, then register inside the normal maintenance interval.
+  now = initial + 7 * day + 59_999;
+  await service.tick();
+  now += 1;
+  assert.equal(client.schedule(once('new', now + 60_000)).id, 'new');
+  assert.equal(client.list().length, 1);
+});

@@ -1092,6 +1092,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           messagePort: createOneBotActionPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
             ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}) }),
           register: (asset, signal) => { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.register(asset, signal) },
+          readImage: request => { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.readImage(request) },
           selfId, store: store!, sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         const replyEffects = createNativeReplyEffects({ sources: () => messageSources?.reader,

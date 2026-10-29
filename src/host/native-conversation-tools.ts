@@ -9,16 +9,18 @@ import type { NativeMessageSourceReader } from './native-message-sources.ts';
 import type { DurableStore } from './types.ts';
 import { readScopedProtocolMessage } from './native-protocol-message.ts';
 import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
+import type { NativeImageReferenceReader } from '../contracts/native-media.ts';
 
 interface QueryInput {
-  kind: 'info' | 'members' | 'history' | 'message' | 'directories'; query: string; offset: number; limit: number;
-  messageId?: string; directory?: 'friends' | 'groups';
+  kind: 'info' | 'members' | 'history' | 'message' | 'directories' | 'avatar'; query: string; offset: number; limit: number;
+  messageId?: string; directory?: 'friends' | 'groups'; userId?: string;
 }
 const userId = (value: unknown): value is string => typeof value === 'string' && /^[1-9]\d{0,31}$/.test(value);
 const messageId = (value: unknown): value is string => typeof value === 'string' && /^-?[1-9]\d{0,31}$/.test(value);
 function queryInput(input: JsonValue): QueryInput {
-  assert(isRecord(input) && Object.keys(input).every(key => ['kind', 'query', 'offset', 'limit', 'messageId', 'directory'].includes(key))
-    && ['info', 'members', 'history', 'message', 'directories'].includes(String(input.kind))
+  assert(isRecord(input) && Object.keys(input).every(key => ['kind', 'query', 'offset', 'limit', 'messageId', 'directory', 'userId'].includes(key))
+    && ['info', 'members', 'history', 'message', 'directories', 'avatar'].includes(String(input.kind))
+    && (input.userId === undefined || input.kind === 'avatar' && userId(input.userId))
     && (input.query === undefined || typeof input.query === 'string' && input.query.length <= 128 && !/[\x00-\x1f\x7f]/.test(input.query))
     && (input.offset === undefined || typeof input.offset === 'number' && Number.isSafeInteger(input.offset) && input.offset >= 0 && input.offset <= 10000)
     && (input.limit === undefined || typeof input.limit === 'number' && Number.isSafeInteger(input.limit) && input.limit >= 1 && input.limit <= 50)
@@ -31,6 +33,7 @@ function queryInput(input: JsonValue): QueryInput {
   return { kind: input.kind as QueryInput['kind'], query: typeof input.query === 'string' ? input.query.trim() : '',
     offset: typeof input.offset === 'number' ? input.offset : 0, limit: typeof input.limit === 'number' ? input.limit : 20,
     ...(typeof input.messageId === 'string' ? { messageId: input.messageId } : {}),
+    ...(typeof input.userId === 'string' ? { userId: input.userId } : {}),
     ...(input.directory === 'friends' || input.directory === 'groups' ? { directory: input.directory } : {}) };
 }
 function pokeInput(input: JsonValue): { userId?: string } {
@@ -68,9 +71,10 @@ export const NATIVE_CONVERSATION_TOOLS: readonly NativeToolContribution[] = Obje
     } } }, validate: input => json(cardInput(input)) },
   { definition: { name: 'qaf_conversation_query', capability: 'native.conversation.query', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: source,
-    description: '查询当前QQ会话：info为会话信息，members为当前群成员（可按昵称/群名片/QQ号搜索并分页），history为当前群或私聊最近最多10条消息，message按messageId读取当前会话单条消息，directories读取账号好友或群目录。媒体返回可读取和发送的会话assetId；查询不代表已经看懂图片。目录支持query/offset/limit，不要整份目录灌入回复。',
+    description: '查询当前QQ会话：info为会话信息，members为当前群成员（可按昵称/群名片/QQ号搜索并分页），history为当前群或私聊最近最多10条消息，message按messageId读取当前会话单条消息，avatar获取QQ头像图片（userId省略取当前发言者，也可指定当前群成员或机器人自己），directories读取账号好友或群目录。头像和消息媒体返回可复用的会话assetId；获取图片不调用视觉或生图，不代表已经看懂，不自动发送。目录支持query/offset/limit，不要整份目录灌入回复。',
     parameters: { type: 'object', additionalProperties: false, required: ['kind'], properties: {
-      kind: { enum: ['info', 'members', 'history', 'message', 'directories'] }, query: { type: 'string', maxLength: 128 },
+      kind: { enum: ['info', 'members', 'history', 'message', 'directories', 'avatar'] }, query: { type: 'string', maxLength: 128 },
+      userId: { type: 'string', pattern: '^[1-9][0-9]{0,31}$' },
       offset: { type: 'integer', minimum: 0, maximum: 10000 }, limit: { type: 'integer', minimum: 1, maximum: 50 },
       messageId: { type: 'string', pattern: '^-?[1-9][0-9]{0,31}$' }, directory: { enum: ['friends', 'groups'] },
     } } }, validate: input => json(queryInput(input)) },
@@ -95,6 +99,7 @@ export const NATIVE_CONVERSATION_TOOLS: readonly NativeToolContribution[] = Obje
 export function createNativeConversationService(options: {
   readonly port: OneBotConversationPort; readonly messagePort: Pick<OneBotActionPort, 'getMessage'>;
   readonly register: OneBotIncomingAssetRegistrar; readonly selfId: string; readonly store: DurableStore;
+  readonly readImage?: NativeImageReferenceReader['readImage'];
   readonly sources: () => NativeMessageSourceReader | undefined;
   readonly authorize: (conversationId: string, signal: AbortSignal) => Promise<void>;
 }): Readonly<Record<string, EffectAdapter>> {
@@ -208,9 +213,40 @@ export function createNativeConversationService(options: {
     } }),
     'native.conversation.query': Object.freeze<EffectAdapter>({ async execute(request) {
       const input = queryInput(request.input);
-      await guard(request, input.kind === 'directories');
+      const source = await guard(request, input.kind === 'directories');
       const scope = /^(group|private):([1-9]\d{0,31})$/.exec(request.scope.conversationId);
       assert(scope, 'CONVERSATION_SCOPE_INVALID', 'A current QQ conversation is required.');
+      if (input.kind === 'avatar') {
+        if (!options.port.avatar || !options.readImage) return { status: 'rejected', code: 'AVATAR_UNSUPPORTED' };
+        const target = input.userId ?? source.userId;
+        if (scope[1] === 'private') {
+          assert(target === scope[2] || target === options.selfId, 'AVATAR_SCOPE_MISMATCH', 'Avatar target must be the current peer or the bot.');
+        } else if (target !== source.userId && target !== options.selfId) {
+          if (options.port.groupMember) {
+            const member = await options.port.groupMember({ groupId: scope[2]!, userId: target, signal: request.signal });
+            await guard(request);
+            if (member.status !== 'confirmed') return json(member);
+            assert(member.data.userId === target, 'AVATAR_TARGET_NOT_MEMBER', 'Avatar target must be a current group member.');
+          } else {
+            const members = await options.port.groupMembers({ groupId: scope[2]!, signal: request.signal });
+            await guard(request);
+            if (members.status !== 'confirmed') return json(members);
+            assert(members.data.some(member => member.userId === target), 'AVATAR_TARGET_NOT_MEMBER', 'Avatar target must be a current group member.');
+          }
+        }
+        const avatar = await options.port.avatar({ userId: target, signal: request.signal });
+        await guard(request);
+        if (avatar.status !== 'confirmed') return json(avatar);
+        assert(avatar.data.userId === target, 'AVATAR_TARGET_MISMATCH', 'Avatar source belongs to a different account.');
+        const registered = await options.register({ kind: 'image', conversationId: request.scope.conversationId,
+          messageId: `qq-avatar:${digest([source.sourceMessageId, target])}`, source: { url: avatar.data.url } }, request.signal);
+        assert(registered, 'AVATAR_RESOURCE_UNAVAILABLE', 'The avatar could not be registered as a conversation image.');
+        const image = await options.readImage({ conversationId: request.scope.conversationId, referenceId: registered,
+          signal: request.signal });
+        await guard(request);
+        return { status: 'confirmed', userId: target, assetId: image.assetId, mediaType: image.mediaType,
+          bytes: image.data.byteLength, sha256: image.sha256, expiresAt: image.expiresAt, contentRead: false };
+      }
       if (input.kind === 'directories') {
         if (input.directory === 'friends') {
           const found = await options.port.friends({ signal: request.signal });

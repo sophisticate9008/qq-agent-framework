@@ -8,6 +8,7 @@ export interface OneBotConversationMember { readonly userId: string; readonly ni
 export interface OneBotConversationGroup { readonly groupId: string; readonly name: string | null; readonly memberCount: number | null; readonly maxMemberCount: number | null }
 export interface OneBotConversationMessage { readonly messageId: string; readonly userId: string; readonly displayName?: string; readonly conversationId: string; readonly time: number | null; readonly message: readonly JsonObject[] }
 export interface OneBotConversationPort {
+  avatar?(request: { readonly userId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<{ readonly userId: string; readonly url: string }>>;
   groupInfo(request: { readonly groupId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<OneBotConversationGroup>>;
   groupMembers(request: { readonly groupId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<readonly OneBotConversationMember[]>>;
   groupMember?(request: { readonly groupId: string; readonly userId: string; readonly signal: AbortSignal }): Promise<OneBotReadResult<OneBotConversationMember>>;
@@ -30,6 +31,12 @@ function id(value: unknown, signed = false): string | null {
 }
 function count(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/** QQ's public avatar source; the host checks conversation membership before requesting it. */
+export function qqAvatarUrl(userId: string): string {
+  if (!id(userId)) throw new TypeError('Invalid QQ avatar account');
+  return `https://q1.qlogo.cn/g?b=qq&nk=${userId}&s=640`;
 }
 function group(value: unknown, expected?: string): OneBotConversationGroup | null {
   if (!isRecord(value)) return null;
@@ -116,6 +123,12 @@ export function createOneBotConversationPort(options: {
     } catch { return { status: 'unknown', code: combined.aborted ? 'ONEBOT_CONVERSATION_ABORTED_UNKNOWN' : 'ONEBOT_CONVERSATION_TRANSPORT_UNKNOWN' }; }
   }
   return Object.freeze<OneBotConversationPort>({
+    async avatar(request) {
+      if (!id(request.userId)) return { status: 'rejected', code: 'ONEBOT_CONVERSATION_INVALID_INPUT' };
+      if (request.signal.aborted) return { status: 'rejected', code: 'ONEBOT_CONVERSATION_CANCELLED' };
+      // This resolves the source only. The host downloads and validates image bytes before returning a resource.
+      return { status: 'confirmed', data: { userId: request.userId, url: qqAvatarUrl(request.userId) } };
+    },
     groupInfo: request => invoke('get_group_info', id(request.groupId) ? { group_id: request.groupId, no_cache: true } : null,
       request.signal, value => group(value, request.groupId)),
     groupMember: request => invoke('get_group_member_info', id(request.groupId) && id(request.userId)

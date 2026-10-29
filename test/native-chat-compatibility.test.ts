@@ -275,3 +275,15 @@ test('actual SQLite baseline insert failures are not swallowed and roll back the
     assert.equal(readNativeConfigurationBaseline(fake.directory).state, 'missing')
   } finally { database.close() }
 })
+
+test('a persisted three-field wake configuration retains its checksum after adding optional continuation settings', context => {
+  const wake = { nicknames: ['helper'], wakeOnReply: true, continuationMs: 90000 }
+  const legacy = { ...candidate, persona: { ...persona, wake } }
+  const fake = fixture(context, legacy)
+  assert.equal(captureNativeConfigurationBaseline(fake.store, legacy, []), true)
+  const baseline = readNativeConfigurationBaseline(fake.directory)
+  assert.equal(baseline.state, 'available')
+  assert.deepEqual(baseline.values?.persona.wake, wake)
+  const current = { ...legacy, persona: { ...legacy.persona, wake: { ...wake, replyExtensionMs: 500 } } }
+  assert.equal(inspectNativeConfigurationCompatibility(fake.directory, current).state, 'compatible')
+})

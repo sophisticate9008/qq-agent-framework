@@ -241,7 +241,7 @@ const EXAMPLE = defineServiceContract<ExampleService>({
 // 消费包 start(context)：const formatter = useService(context, EXAMPLE);
 ```
 
-共享服务用 `publishService`。绑定消费者身份的服务用 `publishScopedService(context, contract, consumer => client)`；`consumer` 由宿主提供 `{ owner, signal, assertActive }`，不能取自模型参数。注册器缓存各消费者的客户端，并在取得、方法访问和调用时检查提供方及消费者生命周期。停止后旧句柄不能开始新调用；进行中的外部工作是否可取消和如何排空由具体服务约定。底层 `context.publish/service/publishScoped` 仍可用，类型化 helper 是公共契约的常用入口。
+共享服务用 `publishService`。绑定消费者身份的服务用 `publishScopedService(context, contract, consumer => client)`；`consumer` 由宿主提供 `{ owner, signal, assertActive }`，不能取自模型参数。注册器缓存各消费者的客户端，并在取得、方法访问和调用时检查提供方及消费者生命周期。停止后旧服务句柄不能开始新调用。方法返回的新操作句柄或迭代器不被代理自动包装，提供方须自行绑定消费者 signal 和活动检查；进行中的外部工作是否可取消和如何排空由具体服务约定。底层 `context.publish/service/publishScoped` 仍可用，类型化 helper 是公共契约的常用入口。
 
 包管理器 `services()` 与宿主运行快照 `services` 提供 ID、版本、owner、来源、用途、方法名、`scoped` 和 `declared/registered/ready/unavailable`。`ready` 仅表示提供包运行且服务已发布，协议动作与模型的实际支持仍需 `catalog/inspect` 等领域接口确认。
 

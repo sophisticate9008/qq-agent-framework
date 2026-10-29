@@ -154,7 +154,7 @@ QQ 入站完成白名单、唤醒、历史登记与持久入队后返回协议�
 
 服务共用 `ServiceContract<T>`，由 `defineServiceContract` 定义 ID、版本、用途及必需方法。`serviceDeclaration` 生成 manifest 的 `provides/requires`，消费者同时声明对提供包的 `dependencies`。`publishService/useService` 发布和取得共享类型化服务；`publishScopedService` 提供按消费者绑定的客户端，工厂仅接收宿主注入的 `{ owner, signal, assertActive }`。结构校验检查必需方法，不能替代参数和结果解码。底层 `context.publish/service/publishScoped` 保持兼容。
 
-服务代理在取得、方法访问和调用时检查提供包及消费者生命周期，停止后的旧句柄不能开始新调用；代理不强制取消已经运行的外部操作。注册器 `services()` 与宿主运行快照 `services` 报告 ID、版本、提供包、来源、用途、方法名、`scoped` 及 `declared/registered/ready/unavailable`。`ready` 只表示服务发布且提供包运行；协议支持、外部模型可用和当前权限仍由各领域接口核验。可选服务缺失明确报不可用，`requires` 没有可选标志。
+服务代理在取得、方法访问和调用时检查提供包及消费者生命周期，停止后的旧句柄不能开始新调用；代理不强制取消已经运行的外部操作，也不自动包装方法返回的任意新值；新操作句柄或迭代器由提供方绑定消费者 signal 与活动检查。注册器 `services()` 与宿主运行快照 `services` 报告 ID、版本、提供包、来源、用途、方法名、`scoped` 及 `declared/registered/ready/unavailable`。`ready` 只表示服务发布且提供包运行；协议支持、外部模型可用和当前权限仍由各领域接口核验。可选服务缺失明确报不可用，`requires` 没有可选标志。
 
 配置、状态和受限存储保留包上下文基础设施，不另建服务总线。`configuration` 只访问已声明配置；`state` 依赖包状态 schema；`context.store(store)` 包装可信装配提供的 store，不自动取得宿主原始数据库。
 

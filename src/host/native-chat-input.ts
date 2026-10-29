@@ -127,6 +127,8 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
     && entry.actor !== 'system' && (unreadIds === null || unreadIds.has(entry.id))
     && nativeChatWakeKind(entry.id, entry.content, options.selfId) === null);
   const wake = wakeKind ? { kind: wakeKind, mode: unreadMessages.length > 0 ? 'read-unread' : 'greet' } : undefined;
+  const consumedWakeIds = new Set(wake?.mode === 'read-unread'
+    ? [event.id, ...history.filter(entry => nativeChatWakeKind(entry.id, entry.content, options.selfId) !== null).map(entry => entry.id)] : []);
   for (const entry of unreadMessages.slice().reverse()) {
     const full = contentText(entry.content);
     const item = { id: entry.id, actor: entry.actor, text: full.slice(0, 800), truncated: full.length > 800,
@@ -171,9 +173,13 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
       note: '这些旧消息的模型回复尚未发送，因为会话有新消息需要结合理解。先合并原请求与后续纠正，保留数量等未被修改的要求；其他人的顺嘴闲聊不是新的答复任务。此前模型回复未送达，不能把其中新编的玩笑、称呼、约定或事实当成双方共同语境，也不能把后续消息当作对这些草稿的回应。重新依据真实用户消息与已确认发送的内容判断；已执行的其他工具动作仍以真实结果为准，不重复执行。' } } : {}),
     senderId: event.userId ?? null, senderIsConfiguredOwner: options.owner !== null && event.userId === options.owner,
     participants, ...(relevantActors.length > participants.length ? { participantsLimited: true } : {}),
-    participation, ...(wake ? { wake } : {}), ...(groupParticipation ? { groupParticipation, groupWake: options.groupWake ?? [] } : {}),
+    participation, ...(groupParticipation ? {
+      groupParticipation: wake?.mode === 'read-unread' ? { ...groupParticipation, currentAddressing: undefined,
+        addressedMessageIds: groupParticipation.addressedMessageIds.filter(id => !consumedWakeIds.has(id)) } : groupParticipation,
+      groupWake: (options.groupWake ?? []).filter(item => !consumedWakeIds.has(item.messageId)) } : {}),
     unread: options.unread ? { readThrough: options.unread.readThrough, through: options.unread.through,
-      count: options.unread.ids.length, included: recent.filter(item => item.unread).length + (options.unread.ids.includes(event.id) ? 1 : 0),
+      count: options.unread.ids.length, included: recent.filter(item => item.unread).length
+        + (options.unread.ids.includes(event.id) && wake?.mode !== 'read-unread' ? 1 : 0),
       partial: options.unread.partial || historyTruncated } : null,
     recent, quoted, memory: options.memory ?? null, tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ? { ...options.output, sendMode: 'explicit-tool', sendTool: 'qaf_reply' } : null, historyTruncated, currentTruncated });
 
@@ -181,16 +187,16 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
     const parts: MessageContent[] = [];
     const context = `会话事实：\n${envelope(length < text.length)}`;
     for (let offset = 0; offset < context.length; offset += 8_000) parts.push({ type: 'text', text: context.slice(offset, offset + 8_000) });
+    // The bridge consumes the contact signal. DSH receives the unread batch only,
+    // without an empty current message or instructions asking it to ignore one.
+    // Keep the actual submission identity for tool authorization; never impersonate an unread author.
+    if (wake?.mode === 'read-unread') return parts;
     const groupMessage = event.conversationId.startsWith('group:');
     // Keep the current speaker beside their words as well as in the structured facts.
     // A shared DSH user role does not imply every group message is from the same person.
     const speaker = groupMessage ? `发言者：${JSON.stringify({ userId: event.userId ?? null,
       displayName: event.userId ? displayNames.get(event.userId) ?? null : null })}\n` : '';
-    const current = wake
-      ? `本次唤醒（${wake.kind === 'mention' ? '纯艾特' : '戳一戳'}）：\n${speaker}${wake.mode === 'read-unread'
-        ? '本次只有唤醒信号。结合 recent 中的未读内容选择回应，忽略艾特或戳一戳本身，不点评空消息、不另发招呼，不要求逐条回复。'
-        : '没有待处理的未读正文，请自然回应这次招呼。'}`
-      : `${groupMessage ? '本批最新消息（结合未读消息选择回应对象）' : '当前消息'}：\n${speaker}${text.slice(0, length)}${length < text.length ? '\n[当前消息超出输入预算，部分内容未提供]' : ''}`;
+    const current = `${groupMessage ? '本批最新消息（结合未读消息选择回应对象）' : '当前消息'}：\n${speaker}${wakeKind === 'mention' ? '[对方 @ 了你]' : text.slice(0, length)}${length < text.length ? '\n[当前消息超出输入预算，部分内容未提供]' : ''}`;
     for (let offset = 0; offset < current.length; offset += 8_000) parts.push({ type: 'text', text: current.slice(offset, offset + 8_000) });
     return parts;
   }

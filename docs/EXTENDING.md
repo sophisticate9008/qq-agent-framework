@@ -69,7 +69,7 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 模型通过 `qaf_capability_catalog` 查分类或搜索摘要，指定单个 `id` 才读取其参数，再用 `qaf_capability_call` 执行。二级目录条目不会额外投影到每轮顶层工具 schema；控制台仍显示其真实扩展来源。模型是否使用目录，需要结合实际会话及模型请求日志观察。
 
-可选的 `image-generation` v1 服务使用 `ImageGenerationService` 契约：接受提示词、稳定幂等键、主体选择和取消信号，返回原始图片字节、类型与 SHA-256，不隐式发送。服务实现由生图扩展提供，自己的形象参考可在服务内部组合；依赖它的业务插件无需复制 QQ 发送或会话鉴权链路。完整实例见 [空间生活日记插件](../plugins/qzone-diary/README.md)。
+可选的 `image-generation` v1 服务使用 `ImageGenerationService` 契约：接受提示词、稳定幂等键、主体选择和取消信号，返回原始图片字节、类型与 SHA-256，不隐式发送。服务实现由生图扩展提供，自己的形象参考可在服务内部组合；依赖它的业务插件无需复制 QQ 发送或会话鉴权链路。组合服务示例见 [空间生活日记](../examples/qzone-diary/README.md)，需安装者另行提供生图实现、素材与模型配置，不随框架自动启用。
 
 ## 插件代码重载与配置即时更新
 
@@ -113,7 +113,7 @@ npm pack ./packages/framework-sdk --pack-destination /tmp
 # 在一个新的外部目录中
 npm init -y
 npm pkg set type=module
-npm install --ignore-scripts /tmp/qq-agent-framework-sdk-1.2.0.tgz
+npm install --ignore-scripts /tmp/qq-agent-framework-sdk-1.3.0.tgz
 npm install --save-dev typescript@5.9.3
 ```
 

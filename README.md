@@ -36,11 +36,12 @@ npm start
 | 空间说说 | 依据协议实际能力登记发布、删除工具；支持文字、图片和图文，未知结果不自动重试 |
 | 记忆、偏好与提醒 | 提供内置持久服务，由扩展接入业务、工具和上下文；默认不向模型注册记忆及提醒工具 |
 | 扩展与多账号 | TypeScript SDK、功能包、宿主服务、可登记的扩展热重载及独立账号数据目录 |
+| 任务与日程 | 插件任务与执行记录、持久暂停／恢复、支持的单次任务跳过，以及业务结果详情 |
 | 运行维护 | 会话与执行记录、用量估算、逐会话诊断、未知结果核对和后台记录维护 |
 
 安装、注册、就绪与授权分别显示。实际能力以所选模型、协议端、DSH 插件和已加载扩展为准。使用示例和限制见 [使用教程](docs/USAGE.md)。
 
-当前版本为 **v1.2.0**（包版本 `1.2.0`），安装包、兼容范围与限制见 [发布说明](docs/RELEASE_NOTES.md)。
+当前版本为 **v1.3.0**（SDK `1.3.0`，DSH 桥接插件 `1.2.0`），安装包、兼容范围与限制见 [发布说明](docs/RELEASE_NOTES.md)。
 
 ## 文档
 
@@ -59,9 +60,10 @@ npm start
 | 框架服务契约、依赖与生命周期 | [服务规范](docs/SERVICE_CONVENTIONS.md) |
 | 插件热重载与完整示例 | [热重载服务](docs/RELOADABLE_SERVICES.md) · [示例](examples/reloadable-plugin/README.md) |
 | 编写扩展及使用 SDK | [扩展开发](docs/EXTENDING.md) · [SDK](packages/framework-sdk/README.md) |
-| 插件调度与空间日记实例 | [持久定时任务](docs/TRIGGERS.md) · [空间生活日记](plugins/qzone-diary/README.md) |
+| 插件调度与业务示例 | [持久定时任务](docs/TRIGGERS.md) · [可选扩展示例](examples/README.md) |
 | 理解目标、接口与模块职责 | [目标](docs/GOALS.md) · [契约](docs/CONTRACTS.md) · [架构](docs/ARCHITECTURE.md) |
 | 处理未决执行、会话和恢复 | [恢复手册](docs/RECOVERY.md) |
+| 判断版本与发布 | [版本规则](docs/VERSIONING.md) · [发布记录](docs/RELEASE_NOTES.md) |
 | 参与开发与报告问题 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 | 了解验证范围与阶段记录 | [验收记录](docs/VALIDATION.md) · [2026-10-26 交付快照](docs/IMPROVEMENT_CHECKLIST_2026-10-25.md) |
 

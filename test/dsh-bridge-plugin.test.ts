@@ -7,7 +7,7 @@ import { createDshBridgePluginPort, type ClaimReceiptQuery } from '../src/adapte
 
 test('bridge descriptions accept released versions and reject unrecognized versions', async () => {
   const journal = createClaimReceiptJournal()
-  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0', '1.1.0', '2.0.0']) {
+  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0', '1.1.0', '1.2.0', '2.0.0']) {
     const port = createDshBridgePluginPort(async () => ({ protocol: BRIDGE_PLUGIN_PROTOCOL,
       issuerEpoch: journal.issuerEpoch, pluginVersion, sdkVersion: '0.2.1-rc.2',
       authentication: 'dsh-owner-peer', durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed',

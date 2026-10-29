@@ -167,14 +167,14 @@ test('inflight and aborted non-cooperative commits never dispatch another fork',
   assert.equal(fake.forks(), 1)
 })
 
-test('legacy base describe remains readable without advertising migration support', async () => {
-  const legacy = { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1', sdkVersion: '0.2.1-rc.2', issuerEpoch: 'epoch-legacy',
+test('current plugin without migration capabilities is readable but cannot start a migration', async () => {
+  const minimal = { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.4.1', sdkVersion: '0.2.1-rc.2', issuerEpoch: 'epoch-minimal',
     authentication: 'dsh-owner-peer', durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed', retention: RECEIPT_LIMITS,
     externalToolAuthorizationVerified: false }
   const baseCalls: string[] = []
-  const base = createDshBridgePluginPort(async method => { baseCalls.push(method); return legacy })
+  const base = createDshBridgePluginPort(async method => { baseCalls.push(method); return minimal })
   const read = await base.describe(signal())
-  assert.equal(read.pluginVersion, '0.1.0')
+  assert.equal(read.pluginVersion, '1.4.1')
   assert.equal(read.migrationProtocol, undefined)
   assert.equal(read.methods, undefined)
   let migrationCalls = 0

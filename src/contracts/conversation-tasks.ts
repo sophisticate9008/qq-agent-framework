@@ -36,6 +36,7 @@ export interface ConversationTask extends ConversationTaskInput {
   readonly generation: number
   readonly revision: number
   readonly createdAt: number
+  readonly waitAt?: number
   readonly updatedAt: number
   readonly steps: number
   readonly checkpoint: JsonObject
@@ -53,6 +54,8 @@ export interface TaskEvent {
   readonly sequence?: number
 }
 export interface TaskRun {
+  readonly title?: string
+  readonly conversationId?: string
   readonly schema: 1
   readonly id: string
   readonly taskId: string
@@ -133,6 +136,7 @@ export function parseConversationTask(value: unknown): ConversationTask | null {
       || !['waiting', 'running', 'paused', 'completed', 'failed', 'unknown', 'cancelled', 'expired', 'blocked'].includes(String(value.state))
       || !integer(value.generation, 1) || !integer(value.revision, 0) || !integer(value.steps, 0)
       || !integer(value.createdAt, 0) || !integer(value.updatedAt, 0) || !isRecord(value.checkpoint)
+      || value.waitAt !== undefined && !integer(value.waitAt, 0)
       || !Object.hasOwn(value, 'result') || value.lastError !== null && typeof value.lastError !== 'string'
       || value.runId !== null && !reference(value.runId)) return null
     const input = parseConversationTaskInput(Object.fromEntries(['title', 'instruction', 'condition', 'deadlineAt', 'executor', 'context', 'maxSteps'].map(key => [key, value[key]])))

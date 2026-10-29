@@ -330,6 +330,7 @@ export function createConversationTaskRuntime(options: {
           update(row, { state: 'blocked', lastError: 'TASK_BUDGET_EXHAUSTED' }); continue
         }
         const id = digest([task.id, task.generation, task.steps + 1]), run: TaskRun = { schema: 1, id, taskId: task.id,
+          title: task.title, conversationId: task.origin.binding.conversationId,
           generation: task.generation, owner, state: 'running', leaseUntil: now() + leaseMs, startedAt: now(), finishedAt: null,
           evidence: evidence.slice(0, 32), outcome: null }
         try {

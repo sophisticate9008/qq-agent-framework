@@ -23,7 +23,7 @@ export function ConversationTasks({ api, connected }: { api: ApiClient; connecte
     actions={<Button size="sm" variant="ghost" onClick={data.refresh}>刷新</Button>}>
     {data.error ? <p>任务暂时无法读取。</p> : !data.snapshot ? <p>正在读取任务…</p> : !data.snapshot.items.length ? <p className="small muted">暂无会话任务。可以在 QQ 说“十分钟后提醒我”或“构建结束后告诉我”。</p> :
       <div className="stack">{data.snapshot.items.map(task => <div className="row flex-wrap" key={task.id}>
-        <strong className="grow">{task.title}</strong><span className="small muted">{task.origin.binding.conversationId} · {describe(task.condition)}</span>
+        <strong className="grow">{task.title}</strong><span className="small muted">{task.origin.binding.conversationId} · {task.condition.kind === 'delay' ? new Date((task.waitAt ?? task.createdAt) + task.condition.delayMs).toLocaleString('zh-CN') : describe(task.condition)}</span>
         <StatusPill tone={['unknown', 'failed', 'blocked'].includes(task.state) ? 'warning' : task.state === 'completed' ? 'success' : 'neutral'}>{states[task.state]}</StatusPill>
         <ReadOnlyDetails title={task.title} label="详情"><div className="stack">
           <p>{task.instruction}</p><TaskHistory api={api} id={task.id} /><p>已执行 {task.steps} 次 · 截止 {new Date(task.deadlineAt).toLocaleString('zh-CN')}</p>

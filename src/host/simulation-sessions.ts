@@ -8,6 +8,8 @@ import { FrameworkError, isRecord, snapshot } from '../core/values.ts'
 import { openReadonlySqliteStore } from '../storage/sqlite-readonly.ts'
 import { nativeSessionBindingRevision, resetNativeSessionContext, validNativeSessionResetTarget } from './native-session-management.ts'
 import { readSessionMetadata } from './sessions.ts'
+import { readConversationTasks } from './conversation-tasks.ts'
+import { parseSimulationTasks } from '../contracts/simulation-tasks.ts'
 
 function fail(code: string): never { throw new FrameworkError(code, 'The simulation session could not be managed safely.') }
 function missing(error: unknown): boolean { return isRecord(error) && error.code === 'ENOENT' }
@@ -78,6 +80,38 @@ async function runtimeBusy(directory: string): Promise<boolean> {
 export function createSimulationSessionManagement(options: { readonly sourceDirectory: string }) {
   const sourceDirectory = resolve(options.sourceDirectory)
   return Object.freeze({
+    async tasks(runId: string, signal: AbortSignal, after?: string, before?: string) {
+      if (!validSimulationRunId(runId) || after !== undefined && !/^[a-f0-9]{64}$/.test(after)
+        || before !== undefined && !/^\d{1,16}:[a-f0-9]{64}$/.test(before)) fail('SIMULATION_SESSION_INVALID_TARGET')
+      const selected = await simulationRoot(sourceDirectory, signal)
+      if (!selected) fail('SIMULATION_SESSION_NOT_FOUND')
+      const directory = await nativeDirectoryForRun(selected.root, runId, sourceDirectory, signal)
+      if (!directory) fail('SIMULATION_SESSION_NOT_FOUND')
+      const busy = await runtimeBusy(directory)
+      const store = openReadonlySqliteStore(join(directory, 'native-chat.sqlite'))
+      try {
+        return store.withSnapshot(() => {
+          const cursor = before?.split(':')
+          const rows = store.listByNumber!({ namespace: 'conversation-tasks.runs', field: 'startedAt', limit: 21,
+            ...(cursor ? { before: { value: Number(cursor[0]), key: cursor[1]! } } : {}) })
+          const runs = rows.slice(0, 20).map(row => {
+            const run = row.value
+            if (!isRecord(run) || typeof run.taskId !== 'string') fail('SIMULATION_TASK_RECORD_INVALID')
+            const task = store.read('conversation-tasks.tasks', run.taskId)?.value
+            return { id: run.id, taskId: run.taskId, title: run.title ?? (isRecord(task) ? task.title : null),
+              conversationId: run.conversationId ?? (isRecord(task) && isRecord(task.origin) && isRecord(task.origin.binding)
+                ? task.origin.binding.conversationId : null), taskDeleted: !task,
+              state: run.state, startedAt: run.startedAt, finishedAt: run.finishedAt }
+          })
+          const last = runs.at(-1)
+          const result = parseSimulationTasks({ schema: 1, runId, runtimeState: busy ? 'busy' : 'stopped',
+            tasks: readConversationTasks(store, undefined, after), runs,
+            nextRun: rows.length > 20 && last ? `${last.startedAt}:${last.id}` : null })
+          if (!result) fail('SIMULATION_TASK_RECORD_INVALID')
+          return result
+        })
+      } finally { store.close() }
+    },
     async list(signal: AbortSignal): Promise<SimulationSessionSnapshot> {
       const selected = await simulationRoot(sourceDirectory, signal)
       if (!selected) return { schema: 1, sessions: [], limited: false, unavailableRuns: 0 }

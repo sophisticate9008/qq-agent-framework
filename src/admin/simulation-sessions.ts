@@ -6,7 +6,16 @@ import { validSimulationRunId } from '../contracts/admin-activity.ts'
 
 export function createSimulationSessionRoutes(sourceDirectory: string): readonly AdminRoute[] {
   const service = createSimulationSessionManagement({ sourceDirectory })
-  return [{ method: 'GET', pathname: '/api/chat/simulations/tasks', maxResponseBytes: 4_194_304,
+  return [{ method: 'GET', pathname: '/api/chat/simulations/tasks/recent', maxResponseBytes: 4_194_304,
+    async handle({ query, signal }) {
+      if (query.size !== 0) throw new AdminRequestError(400, 'invalid_simulation_task_query')
+      try { return await service.recentTasks(signal) }
+      catch {
+        if (signal.aborted) throw new AdminRequestError(499, 'request_aborted')
+        throw new AdminRequestError(503, 'simulation_tasks_unavailable')
+      }
+    },
+  }, { method: 'GET', pathname: '/api/chat/simulations/tasks', maxResponseBytes: 4_194_304,
     async handle({ query, signal }) {
       const runId = query.get('runId'), after = query.get('after'), before = query.get('before')
       if (!validSimulationRunId(runId) || [...query.keys()].some(key => !['runId', 'after', 'before'].includes(key))

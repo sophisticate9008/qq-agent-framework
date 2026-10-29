@@ -1,5 +1,4 @@
 import { ConversationTasks } from '../components/conversation-tasks.tsx';
-import { SimulationTasks } from '../components/simulation-tasks.tsx';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarClock, LoaderCircle, Pause, Play, RefreshCw, SkipForward } from 'lucide-react';
 import {
@@ -219,7 +218,6 @@ export function SchedulesPage({ api, connected, connect }: PageProps) {
   return <div className="page-stack" data-page="schedules">
     <PageHeading title="任务与日程" description="查看会话任务与插件日程的执行进展和实际结果" actions={<Button size="sm" variant="ghost" disabled={!connected || rules.loading || tab === 'history' && history.loading} onClick={refresh}><RefreshCw className={rules.loading || tab === 'history' && history.loading ? 'size-3 animate-spin' : 'size-3'} />刷新</Button>} />
     {connected && <ConversationTasks api={api} connected={connected} />}
-    {connected && <SimulationTasks api={api} connected={connected} />}
     {!connected ? <ConnectPrompt connect={connect} /> : <>
       <div id="schedule-summary" className="summaryline small" aria-label="日程概览"><span className="row"><CalendarClock className="size-3.5 text-muted-foreground" /><strong>运行</strong><StatusPill tone={snapshot?.running ? 'success' : 'neutral'}>{snapshot ? !snapshot.available ? '尚未接入' : snapshot.running ? '调度运行中' : '调度已停止' : '待确认'}</StatusPill></span><span>待执行 <strong>{snapshot?.summary.pending ?? '—'}</strong></span><span>执行中 <strong>{snapshot?.summary.running ?? '—'}</strong></span><span className={snapshot && snapshot.summary.failed + snapshot.summary.unknown > 0 ? 'text-[var(--warning)]' : undefined}>异常 <strong>{snapshot ? snapshot.summary.failed + snapshot.summary.unknown : '—'}</strong></span><HelpTip label="日程统计">数字来自当前插件范围的调度汇总。回调结束不代表发送或发布成功；插件进展与实际结果在详情中分别展示。</HelpTip><span className="push muted">{rules.updatedAt ? `${rules.error ? '上次读取' : '读取于'} ${scheduleTime(rules.updatedAt)}` : '尚未读取'}</span></div>
       {rules.error && <p className="strip warn" role="alert">日程读取失败，{snapshot ? '保留上次快照；当前状态需要重新核对。' : '当前计划与运行状态尚未确认。'}</p>}

@@ -10,6 +10,7 @@ import { nativeSessionBindingRevision, resetNativeSessionContext, validNativeSes
 import { readSessionMetadata } from './sessions.ts'
 import { readConversationTasks } from './conversation-tasks.ts'
 import { parseSimulationTasks } from '../contracts/simulation-tasks.ts'
+import { conversationTaskListItem, deletedTaskListItem, type ConversationTaskListItem } from '../contracts/conversation-task-list.ts'
 
 function fail(code: string): never { throw new FrameworkError(code, 'The simulation session could not be managed safely.') }
 function missing(error: unknown): boolean { return isRecord(error) && error.code === 'ENOENT' }
@@ -48,7 +49,8 @@ async function simulationRoot(sourceDirectory: string, signal: AbortSignal) {
     || typeof index.root !== 'string' || !isAbsolute(index.root) || resolve(index.root) !== index.root
     || index.root === sourceDirectory || !validSimulationRunId(index.latestRunId)) fail('SIMULATION_SESSIONS_SOURCE_INVALID')
   await privateDirectory(index.root)
-  return { root: index.root, latestRunId: index.latestRunId }
+  const runIds = Array.isArray(index.runIds) ? index.runIds.filter(validSimulationRunId) : []
+  return { root: index.root, latestRunId: index.latestRunId, runIds: [...new Set([index.latestRunId, ...runIds])].slice(0, 4) }
 }
 
 async function nativeDirectoryForRun(root: string, runId: string, sourceDirectory: string, signal: AbortSignal): Promise<string | null> {
@@ -81,7 +83,25 @@ async function runtimeBusy(directory: string): Promise<boolean> {
 /** Resolve only the current account's fixed pointer, then inspect each run's actual private database. */
 export function createSimulationSessionManagement(options: { readonly sourceDirectory: string }) {
   const sourceDirectory = resolve(options.sourceDirectory)
-  return Object.freeze({
+  const service = Object.freeze({
+    async recentTasks(signal: AbortSignal): Promise<{ items: readonly ConversationTaskListItem[]; limited: boolean; unavailableRuns: number }> {
+      const selected = await simulationRoot(sourceDirectory, signal)
+      if (!selected) return { items: [], limited: false, unavailableRuns: 0 }
+      const pages = await Promise.allSettled(selected.runIds.map(id => service.tasks(id, signal)))
+      signal.throwIfAborted()
+      const items: ConversationTaskListItem[] = []
+      let unavailableRuns = 0, limited = false
+      for (const page of pages) {
+        if (page.status === 'rejected') { unavailableRuns++; continue }
+        const value = page.value, ids = new Set(value.tasks.items.map(task => task.id))
+        items.push(...value.tasks.items.map(task => {
+          const run = value.runs.find(candidate => candidate.id === task.runId)
+          return { ...conversationTaskListItem(task, value.runId), startedAt: run?.startedAt ?? null, finishedAt: run?.finishedAt ?? null }
+        }), ...value.runs.filter(run => run.taskDeleted && !ids.has(run.taskId)).map(run => deletedTaskListItem(run, value.runId)))
+        limited ||= value.tasks.next !== null || value.nextRun !== null
+      }
+      return { items: items.sort((a, b) => b.updatedAt - a.updatedAt), limited, unavailableRuns }
+    },
     async tasks(runId: string, signal: AbortSignal, after?: string, before?: string) {
       if (!validSimulationRunId(runId) || after !== undefined && !/^[a-f0-9]{64}$/.test(after)
         || before !== undefined && !/^\d{1,16}:[a-f0-9]{64}$/.test(before)) fail('SIMULATION_SESSION_INVALID_TARGET')
@@ -185,4 +205,5 @@ export function createSimulationSessionManagement(options: { readonly sourceDire
       return { schema: 1 as const, runId: target.runId, ...result }
     },
   })
+  return service
 }

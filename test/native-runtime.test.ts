@@ -105,7 +105,7 @@ test('native runtime exposes empty editable resources without fabricating a conn
     'GET /api/chat/providers', 'POST /api/chat/providers',
     'GET /api/chat/access', 'POST /api/chat/access',
     'GET /api/chat/status', 'GET /api/chat/features', 'GET /api/chat/qzone', 'GET /api/chat/tool-inventory',
-    'GET /api/chat/maintenance', 'GET /api/chat/simulations/tasks', 'GET /api/chat/simulations/sessions', 'POST /api/chat/simulations/sessions/reset', 'POST /api/chat/usage/session/delete',
+    'GET /api/chat/maintenance', 'GET /api/chat/simulations/tasks/recent', 'GET /api/chat/simulations/tasks', 'GET /api/chat/simulations/sessions', 'POST /api/chat/simulations/sessions/reset', 'POST /api/chat/usage/session/delete',
     'GET /api/chat/inbox', 'GET /api/chat/sessions', 'GET /api/chat/usage',
     'POST /api/chat/sessions/reset', 'POST /api/chat/sessions/bind',
     'GET /api/chat/plugin-sessions', 'GET /api/chat/plugin-sessions/models', 'POST /api/chat/plugin-sessions',

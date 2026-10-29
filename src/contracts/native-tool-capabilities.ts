@@ -45,7 +45,7 @@ export const NATIVE_TOOL_CAPABILITY_CATALOG = Object.freeze([
   { capability: 'native.tasks.create', tool: 'qbf_task_create', name: '创建会话任务', summary: '安排未来的会话行动。', description: '创建持久任务并绑定当前会话，满足条件后继续执行。' },
   { capability: 'native.tasks.update', tool: 'qbf_task_update', name: '修改会话任务', summary: '修改任务安排或明确衔接会话。', description: '按当前版本更新已结清任务的目的、等待条件和绑定，保留原预算。' },
   { capability: 'native.tasks.list', tool: 'qbf_task_list', name: '查看会话任务', summary: '查看任务进度与状态。', description: '分页查看所属会话的持久任务。' },
-  { capability: 'native.tasks.control', tool: 'qbf_task_control', name: '管理会话任务', summary: '暂停、恢复、取消或核对任务。', description: '按当前版本管理任务，核对不会重放未知执行。' },
+  { capability: 'native.tasks.control', tool: 'qbf_task_control', name: '管理会话任务', summary: '暂停、恢复、取消、核对或删除已结任务。', description: '按当前版本管理任务，核对不会重放未知执行，删除保留去重凭据。' },
   { capability: 'native.tasks.continue', tool: 'qbf_task_continue', name: '继续会话任务', summary: '保存进度并等待下个条件。', description: '在任务执行中保存后续安排，结束后原子生效。' },
   { capability: 'reminders.list', tool: 'qbf_reminder_list', name: '查看提醒',
     summary: '查看提醒计划和执行结果。',

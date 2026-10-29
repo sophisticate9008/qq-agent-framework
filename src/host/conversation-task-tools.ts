@@ -17,7 +17,7 @@ const specs = [
   ['qbf_task_create', 'native.tasks.create', '创建属于当前会话的持久任务。时间到、事件发生或依赖任务结束后，AI会在原会话继续执行。提供明确目的、触发条件和期限；创建成功才确认已安排。子任务共享原任务预算。', object(fields)],
   ['qbf_task_update', 'native.tasks.update', '修改尚未执行的任务，或显式把已结清任务绑定到当前会话上下文。必须先读取最新revision，保留原预算和截止期限。', object({ id: text, revision: { type: 'integer', minimum: 1 }, configuration: object(fields) })],
   ['qbf_task_list', 'native.tasks.list', '分页查看当前会话的任务、状态、任务编号和revision。', object({ after: { type: 'string' } }, [])],
-  ['qbf_task_control', 'native.tasks.control', '按最新revision暂停、恢复、取消或核对任务。reconcile只检查原执行，不重复提交。', object({ id: text, revision: { type: 'integer', minimum: 1 }, action: { enum: ['pause', 'resume', 'cancel', 'reconcile'] } })],
+  ['qbf_task_control', 'native.tasks.control', '按最新revision暂停、恢复、取消或核对任务。delete只删除已结束且执行已核清、没有未结依赖的记录；活跃任务先cancel。reconcile只检查原执行，不重复提交。', object({ id: text, revision: { type: 'integer', minimum: 1 }, action: { enum: ['pause', 'resume', 'cancel', 'reconcile', 'delete'] } })],
   ['qbf_task_continue', 'native.tasks.continue', '仅在任务触发的执行内使用：保存本轮结果和进度，并安排下一次等待。省略wait表示完成；本轮确认完成后原子应用。', object({ result: {}, checkpoint: { type: 'object' }, wait: condition }, ['result', 'checkpoint'])]
 ] as const
 export const CONVERSATION_TASK_TOOLS: readonly NativeToolContribution[] = specs.map(([name, capability, description, parameters]) => ({
@@ -60,10 +60,11 @@ export function createConversationTaskEffects(options: { runtime: () => Conversa
       return { saved: true, appliesAfterExecution: true }
     }
     assert(typeof input.id === 'string' && Number.isSafeInteger(input.revision)
-      && ['pause', 'resume', 'cancel', 'reconcile'].includes(String(input.action)), 'TASK_INVALID_CONTROL', 'A current task identity, revision and action are required.')
+      && ['pause', 'resume', 'cancel', 'reconcile', 'delete'].includes(String(input.action)), 'TASK_INVALID_CONTROL', 'A current task identity, revision and action are required.')
     const task = runtime.get(input.id)
     assert(task && task.origin.binding.conversationId === binding.conversationId && (task.origin.actorId === source.userId || source.isOwner),
       'TASK_NOT_FOUND', 'Task management is limited to its creator or the configured owner in this conversation.')
+    if (input.action === 'delete') return json(await runtime.remove(task.id, Number(input.revision), request.signal))
     return json(await runtime.control(task.id, Number(input.revision), input.action as 'pause' | 'resume' | 'cancel' | 'reconcile', request.signal))
   } }
   return effects

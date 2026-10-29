@@ -385,6 +385,21 @@ export function createConversationTaskRuntime(options: {
     }
     return get(id)!
   }
+  async function remove(id: string, revision: number, signal = lifetime.signal) {
+    const { row, task } = exact(id, revision)
+    await options.authorize(task.origin, signal); exact(id, revision)
+    const run = task.runId ? store.read(runs, task.runId) : null
+    assert(terminal.has(task.state) && !active.has(id) && (!run || isRecord(run.value) && !['running', 'unknown'].includes(String(run.value.state))),
+      'TASK_DELETE_UNSETTLED', 'End the task and reconcile its execution before deleting it.')
+    assert(!records(tasks).map(taskOf).some(other => other.id !== id && !terminal.has(other.state)
+      && (other.parentId === id || other.rootId === id || dependencies(other.condition).includes(id))),
+      'TASK_DELETE_REFERENCED', 'An unfinished task still depends on this record.')
+    const receipt = store.read(receipts, id)
+    batch([{ kind: 'delete', namespace: tasks, key: id, expectedRevision: row.revision },
+      { kind: 'write', namespace: receipts, key: id, expectedRevision: receipt?.revision ?? null,
+        value: { deletedAt: now(), inputHash: (row.value as JsonObject).inputHash ?? null }, expiresAt: Math.max(now(), task.deadlineAt) + retention }])
+    return { id, deleted: true as const }
+  }
   async function replace(id: string, revision: number, input: unknown, origin: TaskOrigin, signal = lifetime.signal) {
     const { row, task } = exact(id, revision), next = parseConversationTaskInput(input)
     assert(['waiting', 'paused', 'blocked', 'failed', 'expired'].includes(task.state), 'TASK_UPDATE_BUSY', 'Settle active or unknown executions before replacing a task.')
@@ -420,7 +435,7 @@ export function createConversationTaskRuntime(options: {
     const remaining = records(tasks).map(taskOf)
     for (const row of records(roots)) if (!remaining.some(task => task.rootId === row.key)) store.delete(roots, row.key, row.revision)
   }
-  return Object.freeze({ create, get, emit, tick, control, replace, propose, maintain,
+  return Object.freeze({ create, get, emit, tick, control, remove, replace, propose, maintain,
     register(name: string, executor: ConversationTaskExecutor) {
       assert(reference(name) && executor.version === 1 && !executors.has(name), 'TASK_EXECUTOR_CONFLICT', 'Executor registration is versioned and unique.')
       executors.set(name, executor); return () => { executors.delete(name) }

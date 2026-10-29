@@ -102,3 +102,13 @@ test('one model session is serialized while an unrelated session proceeds, and s
   release({ status: 'completed', result: null }); await settle()
   await f.runtime.tick(); await settle(); assert(calls.includes('queued'))
 })
+
+test('deletion rejects active or unknown tasks and retains a tombstone after settled removal', async t => {
+  const f = fixture(t, { version: 1, async execute() { return { status: 'completed', result: null } }, async inspect() { return null } })
+  const task = await f.runtime.create(input(), origin, 'delete-one')
+  await assert.rejects(f.runtime.remove(task.id, task.revision), { code: 'TASK_DELETE_UNSETTLED' })
+  f.advance(1000); await f.runtime.tick(); await settle()
+  assert.deepEqual(await f.runtime.remove(task.id, f.runtime.get(task.id)!.revision), { id: task.id, deleted: true })
+  assert.equal(f.runtime.list().items.length, 0)
+  await assert.rejects(f.runtime.create(input(), origin, 'delete-one'), { code: 'TASK_OPERATION_RETIRED' })
+})

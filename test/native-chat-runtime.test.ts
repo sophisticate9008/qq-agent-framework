@@ -2597,3 +2597,47 @@ for (const stopReason of ['completed', 'failed', 'running'] as const) test(stopR
   assert.match(JSON.stringify(fake.sends), new RegExp(finalText))
   assert.doesNotMatch(JSON.stringify(fake.sends), /还在检查第一份材料/)
 })
+
+test('simulated QQ creates a durable task through model tools, reactivates the same session and deletes the temporary task', async context => {
+  const fake = await fixture(context, { accountScope: { protocolId: 'onebot', accountId: '999' } })
+  await fake.configure(); await fake.start()
+  fake.message(78001, { message: [{ type: 'text', data: { text: '一秒后提醒我喝水，这是一条临时测试任务' } }] })
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  const prompt = fake.rpc.find(call => call.method === 'session/prompt')!.request
+  const sessionId = String(prompt.sessionId)
+  async function tool(id: string, name: string, input: JsonValue, turn: number) {
+    const requestId = String(fake.rpc.filter(call => call.method === 'session/prompt')[turn - 1]!.request.requestId)
+    const lease = fake.toolLeases.get(sessionId)!
+    assert(lease.names.includes(name))
+    fake.toolCalls.push({ ticket: id, leaseId: lease.leaseId, call: { id, name, input, sessionId, requestId,
+      generation: lease.generation, userMessageId: `user-${requestId}`, turn, expiresAt: Date.now() + 10000 } })
+    await until(() => fake.toolResults.has(id))
+    const result = fake.toolResults.get(id)!
+    assert.equal(result.status, 'confirmed', JSON.stringify(result))
+    return result
+  }
+  const created = await tool('create-temporary', 'qbf_task_create', { title: '临时喝水提醒', instruction: '到点提醒原会话喝水',
+    condition: { kind: 'delay', delayMs: 1000 }, executor: 'conversation', deadlineAt: Date.now() + 60000, context: {}, maxSteps: 4 }, 1)
+  assert(created.status === 'confirmed' && isRecord(created.value) && typeof created.value.id === 'string')
+  const id = created.value.id
+  assert.equal(fake.runtime().readConversationTasks().items[0]?.id, id)
+  fake.rawFinal(1)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 2)
+  const activation = fake.rpc.filter(call => call.method === 'session/prompt')[1]!.request
+  assert.equal(activation.sessionId, sessionId)
+  assert.match(JSON.stringify(activation.content), /到点提醒原会话喝水/)
+  assert.equal(fake.creates(), 1)
+  await tool('save-task-result', 'qbf_task_continue', { result: '已提醒喝水', checkpoint: { reminded: true } }, 2)
+  const reply = await fake.reply('到时间了，喝点水吧', 2)
+  assert.equal(reply.status, 'confirmed', JSON.stringify(reply))
+  fake.rawFinal(2)
+  await until(() => fake.runtime().readConversationTasks().items[0]?.state === 'completed')
+  assert.deepEqual(fake.runtime().readConversationTasks().items[0]?.checkpoint, { reminded: true })
+  assert.equal(fake.sends.length, 1)
+  fake.message(78002, { message: [{ type: 'text', data: { text: '删除刚才的临时任务' } }] })
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
+  const task = fake.runtime().readConversationTasks().items[0]!
+  await tool('delete-temporary', 'qbf_task_control', { id, revision: task.revision, action: 'delete' }, 3)
+  assert.equal(fake.runtime().readConversationTasks().items.length, 0)
+  fake.rawFinal(3)
+})

@@ -2,7 +2,7 @@
 
 扩展通过功能定义、宿主服务、包贡献和生命周期进入框架。模型和 QQ 命令入口按真实调用者与当前 policy 核验；已安装的可信插件通过宿主内部服务执行任务，身份由加载器注入。bootstrap 在宿主进程内运行，安装扩展需要运维信任。
 
-全框架服务的现状盘点、统一契约与分批收敛设计见 [服务规范](SERVICE_CONVENTIONS.md)。该文明确区分现有入口与待实现目标；本文下列代码仍描述当前 API。
+服务声明、类型化取得、内置能力目录及各项边界见 [服务规范](SERVICE_CONVENTIONS.md)。完整的稳定入口与实现重载示例见 [热重载插件](../examples/reloadable-plugin/README.md)。
 
 能力名称与工具说明只描述功能，例如“启动工作”“发布动态”；身份、白名单和自主执行权限由宿主策略单独配置与检查，不写入能力定义或模型参数。SDK `contracts` 导出独立的 `NATIVE_TOOL_CAPABILITY_CATALOG`、`nativeToolCapabilityDefinition` 与 `NativeToolCapability`，供工具和界面复用。目录列出能力不等于能力已安装、就绪或获得授权。
 
@@ -63,9 +63,9 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 ## 插件定时任务与按需工具目录
 
-插件通过 `context.runtime.scheduler` 登记 once/daily/weekly 任务，日历和业务发生记录由宿主持久保存；框架只启动一套有界调度循环。先 `registerHandler`，再 `schedule`，构造插件本身不会执行任务。停止、错过窗口、重启及未知结果的语义见 [插件调度](TRIGGERS.md)。
+插件通过 `PLUGIN_SCHEDULER_SERVICE_CONTRACT` 取得调度客户端，登记 once/daily/weekly 任务，日历和业务发生记录由宿主持久保存。使用它的包声明 `dependencies: ['plugin-runtime']` 与 `requires: [serviceDeclaration(PLUGIN_SCHEDULER_SERVICE_CONTRACT)]`，在 `start` 中调用 `useService(context, PLUGIN_SCHEDULER_SERVICE_CONTRACT)`。所有插件日程共用宿主的有界插件调度循环；提醒服务保留独立业务生命周期。先 `registerHandler`，再 `schedule`，构造插件本身不会执行任务。停止、错过窗口、重启及未知结果的语义见 [插件调度](TRIGGERS.md)。
 
-`context.runtime.tools.register({ id, description, parameters, permission, readOnly, execute })` 将工具加入二级目录，返回撤销函数，应交给 `context.own` 管理。宿主固定插件身份，完整名称为 `extension.<插件标识>.<id>`。`permission` 在工具说明之外声明：`owner` 核验当前 QQ 主人，`autonomous` 仍经过当前会话准入；定时任务直接使用插件宿主服务，不伪造 QQ 发言者。写调用按事件身份持久去重，未确认结果保留且不自动重放。
+同样声明 `PLUGIN_TOOLS_SERVICE_CONTRACT`，使用 `useService(context, PLUGIN_TOOLS_SERVICE_CONTRACT).register({ id, description, parameters, permission, readOnly, execute })` 将工具加入二级目录，返回撤销函数，应交给 `context.own` 管理。`context.runtime.scheduler/tools` 是同一客户端的便利 getter，也要求对应 `requires`。宿主固定插件身份，完整名称为 `extension.<插件标识>.<id>`。`permission` 在工具说明之外声明：`owner` 核验当前 QQ 主人，`autonomous` 仍经过当前会话准入；定时任务直接使用插件宿主服务，不伪造 QQ 发言者。写调用按事件身份持久去重，未确认结果保留且不自动重放。
 
 模型通过 `qaf_capability_catalog` 查分类或搜索摘要，指定单个 `id` 才读取其参数，再用 `qaf_capability_call` 执行。二级目录条目不会额外投影到每轮顶层工具 schema；控制台仍显示其真实扩展来源。模型是否使用目录，需要结合实际会话及模型请求日志观察。
 
@@ -73,7 +73,9 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 ## 插件代码重载与配置即时更新
 
-可信 bootstrap 可以通过 `createReloadableExtension()` 管理实例，再用 `context.extensions?.register(manager)` 登记到当前宿主。登记返回撤销函数，应随 bootstrap 生命周期清理。只有主动接入该管理器并登记的插件出现在重载目录；已有插件需要完成这一接入。重载请求只接受登记的稳定插件标识，不接受模块路径或执行表达式。宿主维护入口和插件每次调用的真实主人、白名单检查分别执行，登记不扩大权限。
+包插件通过 `PLUGIN_EXTENSIONS_SERVICE_CONTRACT` 取得登记服务，将 `createReloadableService()` 或 `createReloadableExtension()` 的管理器交给 `extensions.register(manager)`；该包声明对 `plugin-runtime` 的依赖和服务 `requires`。可信 bootstrap 也保留 `context.extensions?.register(manager)` 入口。登记返回撤销函数，应随所属生命周期清理。只有主动接入该管理器并登记的插件出现在重载目录；已有插件需要完成这一接入。重载请求只接受登记的稳定插件标识，不接受模块路径或执行表达式。宿主维护入口和插件每次调用的真实主人、白名单检查分别执行，登记不扩大权限。
+
+`createReloadableService({ contract, asyncMethods, load, ... })` 为显式选择的 Promise 方法提供稳定服务代理；每次调用租用当前实例，直到完整 Promise 结束才归还。`createReloadableHandler(manager, callback)` 为固定工具或调度入口持有同样的租约。候选公共契约核对 ID、版本和方法集合；参数及返回值语义仍由版本和边界校验负责。同步方法使用 `manager.withCurrent` 明确持有租约，不暗中改成异步接口。详细用法见 [稳定服务与可替换行为](RELOADABLE_SERVICES.md)。
 
 `createExtensionModuleLoader({ entry, root })` 的路径由可信装配代码预先确定。加载器对本地 ESM `.ts`、`.mts`、`.js`、`.mjs` 源码快照计算 64 位小写十六进制指纹，并让同代本地依赖使用一致的模块身份；宿主 SDK 和已安装依赖保持共享。JSON、资源、配置、测试与安装依赖不属于源码快照，资源和配置仍通过原 `import.meta.url` 或宿主服务读取。每个固定入口在同一宿主进程中最多保留 64 个不同源码代次，失败导入也占用代次；达到上限后保留当前实例，需重启宿主才能继续加载新的代码。ESM 执行具有宿主进程权限，AbortSignal 不能强制终止已经开始的模块执行。
 
@@ -219,21 +221,41 @@ try {
 
 bootstrap 的 `create()` 可返回 `packages`。每个包声明 `manifest`：`schema`、`id`、`version`、`dependencies`、`provides`、`requires` 和 `contributions`；需要持久状态时声明 `stateSchemaVersion`。重复包、服务或贡献、缺依赖、循环与服务版本不匹配在启动前拒绝。独立包按数组顺序、依赖包按依赖顺序装配。
 
-包执行 `prepare → migrate → install → recover → start`。在 `install` 中调用 `context.publish()` 或 `context.contribute()`，其 kind/id 必须已经声明。通用贡献包括 `feature`、`effect`、`event-validator` 和带 capabilities/order 的 `input-provider`；保留的 core/agent 能力不能被替换。输入准备只变换内容，不得替换账号、会话、来源或授权上下文。
+包执行 `prepare → migrate → install → recover → start`。在 `install` 中通过 `publishService()` 发布类型化服务或调用 `context.contribute()`，其 kind/id 必须已经声明。通用贡献包括 `feature`、`effect`、`event-validator` 和带 capabilities/order 的 `input-provider`；保留的 core/agent 能力不能被替换。输入准备只变换内容，不得替换账号、会话、来源或授权上下文。
 
 `context.own(kind, id, dispose)` 登记 task、timer、subscription 等清理责任，停止按逆序排空、释放与注销。长期任务不能捕获原消息 execution；触发时取得新的受控执行，并重新核验当前权限。未知 disposer 已调用一次就保留证据，不靠 stop 重放。
 
-默认 `native-services` 包提供五个版本 1 的服务：`native-agent`、`native-interactions`、`native-executions`、`native-tools`、`native-work`。消费者必须在 manifest 中声明 `requires: [{ id: 'native-work', version: 1 }]`。例如，在已装配包中获取服务：
+服务提供方与消费者共用 `defineServiceContract<T>`；`serviceDeclaration` 将契约转为 manifest 的 `provides/requires` 声明。取得服务还需要在 `dependencies` 声明提供包，不能仅凭服务 ID 绕过包依赖。发布和取得时检查必需方法形状；参数、结果和副作用边界仍由具体服务负责。
 
 ```ts
-import { requireNativeHostService } from '@qq-agent-framework/sdk/host';
-// packageContext 来自本包 install；execution 来自本包功能回调。
-const work = requireNativeHostService(packageContext, 'native-work');
+import { defineServiceContract, publishService, serviceDeclaration, useService }
+  from '@qq-agent-framework/sdk/host';
+
+interface ExampleService { format(text: string): string }
+const EXAMPLE = defineServiceContract<ExampleService>({
+  id: 'example-format', version: 1, description: '整理传入的文字。', methods: ['format'],
+});
+// 提供包 manifest.provides: [serviceDeclaration(EXAMPLE)]
+// 提供包 install(context)：publishService(context, EXAMPLE, { format: text => text.trim() });
+// 消费包 manifest.dependencies: ['提供包标识']，requires: [serviceDeclaration(EXAMPLE)]
+// 消费包 start(context)：const formatter = useService(context, EXAMPLE);
+```
+
+共享服务用 `publishService`。绑定消费者身份的服务用 `publishScopedService(context, contract, consumer => client)`；`consumer` 由宿主提供 `{ owner, signal, assertActive }`，不能取自模型参数。注册器缓存各消费者的客户端，并在取得、方法访问和调用时检查提供方及消费者生命周期。停止后旧句柄不能开始新调用；进行中的外部工作是否可取消和如何排空由具体服务约定。底层 `context.publish/service/publishScoped` 仍可用，类型化 helper 是公共契约的常用入口。
+
+包管理器 `services()` 与宿主运行快照 `services` 提供 ID、版本、owner、来源、用途、方法名、`scoped` 和 `declared/registered/ready/unavailable`。`ready` 仅表示提供包运行且服务已发布，协议动作与模型的实际支持仍需 `catalog/inspect` 等领域接口确认。
+
+默认 `native-services` 包提供五个版本 1 的服务：`native-agent`、`native-interactions`、`native-executions`、`native-tools`、`native-work`。使用后台工作时，包声明 `dependencies: ['native-services']` 与 `requires: [serviceDeclaration(NATIVE_WORK_SERVICE_CONTRACT)]`：
+
+```ts
+import { NATIVE_WORK_SERVICE_CONTRACT, useService } from '@qq-agent-framework/sdk/host';
+// packageContext 来自本包 start；execution 来自本包功能回调。
+const work = useService(packageContext, NATIVE_WORK_SERVICE_CONTRACT);
 const status = work.status();
 if (status.available) await work.start(execution, { task: '整理当前明确要求的资料' });
 ```
 
-这是局部调用片段。work 写操作内部仍调用该 execution 的 `invoke('native.work.*', ...)`，需要调用方 capability、会话 policy 和实际 QQ 来源；服务版本不授予权限。其余接口提供当前 binding、交互快照、执行读查和工具目录，不公开原始 DSH RPC、凭据或可直接产生副作用的 executor。见 [native-services.ts](../src/host/native-services.ts)、[native-services.test.ts](../test/native-services.test.ts)。
+这是局部调用片段。work 写操作内部仍调用该 execution 的 `invoke('native.work.*', ...)`，需要调用方 capability、会话 policy 和实际 QQ 来源；服务版本不授予权限。插件自主模型任务使用 `plugin-models`。其余接口提供当前 binding、交互快照、执行读查和工具目录，不公开原始 DSH RPC 或凭据。全部内置契约可从 SDK host 的 `FRAMEWORK_SERVICE_CONTRACTS` 查找，该目录也包含可选提供方，不是运行就绪清单。
 
 生命周期 hook 可在以下 12 个 checkpoint 声明 observe：`runtime.starting`、`runtime.ready`、`runtime.stopping`、`runtime.stopped`、`message.normalized`、`message.admitted`、`message.rejected`、`agent.submitting`、`agent.submitted`、`send.before`、`send.after`、`access.changed`。只有 starting/admitted/submitting/send.before 支持限制性 guard。hook 按 order 再按 id 排序，缺省期限 1 秒、单项最多 30 秒；guard 可以拒绝，不能授权。局部定义如下：
 
@@ -249,7 +271,7 @@ const hook = { id: 'example-send-guard', checkpoint: 'send.before' as const,
 
 在 `defineNativeBootstrap({ packageConfigurations: [...] })` 顶层提供配置贡献，使管理端在未执行 create/start 时就能读取 schema、默认值和受控字段。运行包通过 `configurationIds` 引用同一贡献；不要复制另一份 schema。`context.configuration.read/inspect` 限于本 owner，`migrate` 限于本包迁移阶段。管理端支持 boolean、integer、string-list 声明式字段；保存使用文档 revision CAS，应用影响另行声明，配置保存不创建 grant。见 [package-configuration.ts](../src/contracts/package-configuration.ts)、[package-configuration.test.ts](../test/package-configuration.test.ts)。
 
-SDK 日历服务提供 daily/weekly、IANA 时区、DST 与 misfire 策略；由宿主调用 tick，不在注册时暗中启动计时循环。下面是使用已有私有 `store` 和受控 `dispatchOccurrence` 的局部片段：
+常规插件优先使用上文的 `plugin-scheduler` 服务。下层 SDK 日历服务提供 daily/weekly、IANA 时区、DST 与 misfire 策略；由宿主调用 tick，不在注册时暗中启动计时循环。下面是使用已有私有 `store` 和受控 `dispatchOccurrence` 的局部片段：
 
 ```ts
 import { createCalendarTriggerService } from '@qq-agent-framework/sdk/host';
@@ -469,31 +491,90 @@ try {
 
 ## 空间底层服务
 
-内置包 `qzone` 通过 `context.service("qzone", 1)` 提供 `QzoneToolPort`。扩展在 manifest 中声明对 `qzone` 的依赖及所需服务版本；`inspect` 核对当前协议能力，`execute` 按原 OneBot 名称与参数调用。原生聊天会按实际协议能力另行登记发布与删除工具，复用会话白名单和真实消息来源校验；扩展直接调用底层服务时，自行通过宿主 policy 确认触发与访问范围。完整示例与边界见 [空间说说](QZONE.md)。
+内置包 `qzone` 提供 `QzoneToolPort`。扩展在 manifest 中声明 `dependencies: ['qzone']` 与 `requires: [serviceDeclaration(QZONE_SERVICE_CONTRACT)]`，通过 `useService(context, QZONE_SERVICE_CONTRACT)` 取得；`inspect` 核对当前协议能力，`execute` 按原 OneBot 名称与参数调用。原生聊天会按实际协议能力另行登记发布与删除工具，复用会话白名单和真实消息来源校验；扩展直接调用底层服务时，自行通过宿主 policy 确认触发与访问范围。完整示例与边界见 [空间说说](QZONE.md)。
 
 
 ## 插件直接使用协议能力和模型会话
 
-包的 `NativePackageContext` 与可信 bootstrap 的 context 提供可选 `runtime`（原生聊天宿主装配时可用）。包在 `start` 后使用：
+配置了宿主 `runtimeServices` 工厂时，包管理器自动加入内置 `plugin-runtime` 包。插件声明包依赖和所需服务，用 `useService` 取得带宿主身份及生命周期的客户端。以下是一个包定义片段：
 
 ```ts
-const runtime = context.runtime
-if (!runtime) throw new Error('当前宿主未提供插件运行服务')
-const catalog = await runtime.capabilities.catalog({ category: 'qzone' })
-const result = await runtime.models.run({ name: 'daily-writing', prompt: '接着之前的主题，起草今天的短文案。' })
-// result.text 交回插件，由插件决定是否发布；框架不会自动发到 QQ。
+import { PLUGIN_MODELS_SERVICE_CONTRACT, PLUGIN_PROTOCOL_SERVICE_CONTRACT,
+  serviceDeclaration, useService } from '@qq-agent-framework/sdk/host';
+import type { NativePackageDefinition } from '@qq-agent-framework/sdk/host';
+
+export const writingPackage: NativePackageDefinition = {
+  manifest: { schema: 1, id: 'example-writing', version: '1.0.0',
+    displayName: '文案起草', description: '在插件会话中起草文案。',
+    dependencies: ['plugin-runtime'], provides: [], contributions: [],
+    requires: [serviceDeclaration(PLUGIN_MODELS_SERVICE_CONTRACT),
+      serviceDeclaration(PLUGIN_PROTOCOL_SERVICE_CONTRACT)] },
+  start(context) {
+    const models = useService(context, PLUGIN_MODELS_SERVICE_CONTRACT);
+    const protocol = useService(context, PLUGIN_PROTOCOL_SERVICE_CONTRACT);
+    // 在已登记的任务回调中执行，不在安装时自动调用模型或发布：
+    const draft = async () => {
+      const result = await models.run({ name: 'daily-writing',
+        prompt: '接着之前的主题，起草今天的短文案。' });
+      return result.text; // 只交回业务，不自动发到 QQ。
+    };
+    // 将 draft 接入本包任务；protocol.catalog/call 用于明确的协议动作。
+  },
+};
 ```
 
-`runtime.capabilities.catalog({ id })` 读取具体参数；`call({ id, input, idempotencyKey })` 调用协议动作。写操作必须给稳定幂等键，重启后相同动作仍使用原键，不能为绕过未知结果换键重发。当前适配器按实际协议版本与能力清单开放；插件获得 `confirmed`、`rejected` 或 `unknown` 回执。插件可用协议原生本机文件参数处理自己生成的素材，不必伪造 QQ 发言或会话媒体资源。
+`context.runtime` 是同一组服务的便利 getter；读取 `models/capabilities/sessions/scheduler/tools/media/extensions/usage/events` 分别要求对应契约的 `requires`。不要依赖未声明的 getter，或把可选宿主能力缺失当作成功。可信 bootstrap 保留由宿主注入的 runtime 便利入口。
+
+协议客户端的 `catalog({ id })` 读取具体参数；`call({ id, input, idempotencyKey })` 调用协议动作。写操作必须给稳定幂等键，重启后相同动作仍使用原键，不能为绕过未知结果换键重发。当前适配器按实际协议版本与能力清单开放；插件获得 `confirmed`、`rejected` 或 `unknown` 回执。插件可用协议原生本机文件参数处理自己生成的素材，不必伪造 QQ 发言或会话媒体资源。
+
+发送和收藏表情沿用这一客户端：`send_group_msg/send_private_msg` 及实际支持的转发动作；`fetch_custom_face/fetch_custom_face_detail/add_custom_face/delete_custom_face/set_custom_face_desc`。先读取实际参数，再提交稳定幂等键。直接协议发送不自动执行聊天排版、聊天 outbox 或历史追加；`chat-output` 只准备内容和分组。需要聊天发送语义的功能回调使用 `FeatureExecution.send`，模型使用 `qaf_reply`，这些入口继续走聊天 policy 与真实发送回执。
+
+以下是已声明协议服务的任务回调片段；目标与业务操作标识来自插件自己的可信配置和持久业务记录：
+
+```ts
+const protocol = useService(context, PLUGIN_PROTOCOL_SERVICE_CONTRACT);
+const sendSupport = await protocol.catalog({ id: 'send_private_msg' });
+const stickers = await protocol.call({ id: 'fetch_custom_face_detail', input: { count: 10 },
+  signal: context.signal });
+// 业务已要求发送，并核实当前协议支持：
+if (sendSupport.capabilities.some(item => item.id === 'send_private_msg')) {
+  const receipt = await protocol.call({ id: 'send_private_msg',
+    input: { user_id: configuredUserId, message: [{ type: 'text', data: { text: draftText } }] },
+    idempotencyKey: savedOperationId, signal: context.signal });
+  // 持久保存 receipt；unknown 时核对原动作，不换键重发。
+}
+```
+
 
 `runtime.models` 提供 `models/list/create/bind/unbind/run`；`run` 首次自动建会话，默认持续复用。插件自建会话不加载 QQ 人设、聊天方案或工具，绑定已有会话沿用已有历史；模型服务细节见 [插件模型与持久会话](PLUGIN_MODELS.md)。插件业务数据仍放在包持久状态中，模型上下文仅保存必要任务历史。
 
 `runtime.sessions.resolve('group:123456')` 或 `private:123456` 返回实际 QQ 绑定及可直接用于管理的 `target` 版本；`bind(target, sessionId, signal)`、`unbind(target)` 要求完整当前版本，保留 DSH 历史。插件可以解析 QQ 绑定后把该实际 ID 交给 `runtime.models.bind`。插件固定绑定该 ID，QQ 后来换绑不会自动改变插件上下文。
 
-`runtime.media?.readImage({ conversationId, referenceId, signal })` 读取当前账号与 QQ 会话已登记的原图，返回 `{ assetId, data: Uint8Array, mediaType, sha256, expiresAt }`。图片最大 8 MiB，支持 PNG、JPEG、WebP、GIF；`sha256` 是返回原图字节的 SHA256。插件在实际工具调用中使用宿主核验的所属会话，不接受模型另指定的目标会话。该接口不接收 URL 或文件路径，只从对应登记取得协议来源；每次读取及返回前重新核验访问规则和插件生命周期。
+通过 `PLUGIN_MEDIA_SERVICE_CONTRACT` 取得原图客户端，其 `readImage({ conversationId, referenceId, signal })` 读取当前账号与 QQ 会话已登记的原图，返回 `{ assetId, data: Uint8Array, mediaType, sha256, expiresAt }`。图片最大 8 MiB，支持 PNG、JPEG、WebP、GIF；`sha256` 是返回原图字节的 SHA256。插件在实际工具调用中使用宿主核验的所属会话，不接受模型另指定的目标会话。该接口不接收 URL 或文件路径，只从对应登记取得协议来源；每次读取及返回前重新核验访问规则和插件生命周期。
 
 `referenceId` 优先使用 `media-<64 位十六进制>` 登记编号；也兼容图片附件的 SHA256（可带 `sha256:` 前缀）。模型实际读取的静态图片可能经过缩放压缩，框架把该附件字节的指纹保存为原图登记的别名，每图最多四个、每次最多扫描一千条登记，账号、会话和原有效期均保持一致；指纹本身不授予跨会话访问。不存在别名的旧指纹不会触发扫描下载或猜测匹配。读取原图供生成、编辑等插件使用，不把原图读取等同于已交给模型理解。
 
 读取错误通过 `FrameworkError.code` 区分：`NATIVE_IMAGE_REFERENCE_NOT_FOUND` 表示当前会话找不到登记或附件别名（记录可能已清理），`NATIVE_IMAGE_REFERENCE_SCOPE_MISMATCH` 表示登记账号或会话不符，`NATIVE_IMAGE_REFERENCE_EXPIRED` 表示可读取元数据中的原有效期已到，`NATIVE_IMAGE_REFERENCE_READ_FAILED` 表示登记、原图下载、大小或格式不符合读取要求。存储已隐藏或清理的过期登记按 `NOT_FOUND` 返回，插件应据实际错误说明原因，不把所有失败归为登记过期。
 
 对 QQ 命令开放这些内部接口时，插件入口负责校验真实发言者；定时任务以已登记插件身份执行，不需要伪造主人消息。生命周期结束后旧实例不能继续提交调用。对模型开放的管理动作使用框架二级能力目录，由宿主核验实际主人。
+
+## 插件用量与事件读取
+
+声明 `plugin-runtime` 依赖及 `PLUGIN_USAGE_SERVICE_CONTRACT`、`PLUGIN_EVENTS_SERVICE_CONTRACT` 后，可在包 `start` 或业务回调中读取：
+
+```ts
+import { PLUGIN_USAGE_SERVICE_CONTRACT, PLUGIN_EVENTS_SERVICE_CONTRACT, useService }
+  from '@qq-agent-framework/sdk/host';
+// context 来自本包生命周期回调，manifest.requires 已声明两个契约。
+const usage = useService(context, PLUGIN_USAGE_SERVICE_CONTRACT);
+const page = usage.list({ limit: 20 });
+const totals = usage.summary();
+const events = useService(context, PLUGIN_EVENTS_SERVICE_CONTRACT);
+const recent = events.read({ limit: 20 });
+// 在受管理任务内订阅，signal 结束或退出循环后关闭底层订阅。
+// for await (const item of events.subscribe({ signal: context.signal })) { ... }
+```
+
+用量直接查询现有宿主账本，按逐轮保存的 `plugin:<owner>` 归属过滤；支持 session/provider/model/时间和游标筛选。插件绑定共享会话不获得该会话其他调用者的用量；旧绑定的本插件记录仍可查。未知 token/成本保持未知，多币种分别统计；读取结果须检查 `partial/next`，不能把扫描上限内的结果当作完整账本。没有清账或改价接口。
+
+事件读取和订阅复用宿主实际有界观察流，仅提供公共 runtime 生命周期和能从插件请求 ID 或已确认 turn 核实归属的元数据。共享 session 本身不是归属证明，无法证明的事件不返回；不提供 QQ 正文、地址或完整私有协议追踪。宿主游标、epoch 与缺口继续保留，缺口和过滤后的空页不能解释为没有发生动作；流不替代持久账本、业务 `subscriptions/services.on` 或未知执行核对。

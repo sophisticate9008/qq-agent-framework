@@ -144,13 +144,19 @@ QQ 入站完成白名单、唤醒、历史登记与持久入队后返回协议�
 
 运行态状态检查复用当前持久存储连接读取账号与配置基线，避免每次状态读取重复打开多个 SQLite 连接；每次仍核验私有目录、主文件身份与 sidecar 权限。文件被替换或权限异常仍报告不可用，离线查询继续使用只读快照。
 
-`qaf.events/1` 事件接口提供关联标识和状态元数据，支持过滤、分页、有界背压、取消及 epoch 缺口。事件流不承载私有正文；流断开后的缺口不能被解释为“没有发生操作”。
+`qaf.events/1` 事件接口提供关联标识和状态元数据，支持过滤、分页、有界背压、取消及 epoch 缺口。事件流不承载私有正文；流断开后的缺口不能被解释为“没有发生操作”。插件的 `plugin-events` 复用此实际观察流，只返回公共 runtime 生命周期及有可靠插件调用归属的事件，无法证明归属的条目不暴露，不承诺完整私有协议追踪。
 
 ## 包与账号
 
 功能定义、包 manifest 与运行快照支持可选 `displayName`（1–80 字符）和 `description`（1–500 字符）；禁止空白文本和控制字符。可选 `toolNames` 提供最多 128 个唯一完整工具标识，用于扩展归属展示；包运行快照同时报告 `dependencies`，沿用 manifest 的依赖顺序。字段不授予工具权限，稳定 id 继续承担身份关联。`/api/chat/features` 与 `/api/chat/runtime` 透传已登记的展示信息，旧插件缺省仍可加载；用途不再由能力列表推断。新插件登记规范见 [扩展开发](EXTENDING.md)。
 
 包 manifest 检查依赖、重名、循环和服务版本。输入 prepare、context provider、限制性 guard 与只读 observe 各司其职；确定排序、预算、期限与失败策略。定时器、订阅、服务和任务都有包归属，依赖顺序启动、逆序停止，回滚只处理本次安装资源。
+
+服务共用 `ServiceContract<T>`，由 `defineServiceContract` 定义 ID、版本、用途及必需方法。`serviceDeclaration` 生成 manifest 的 `provides/requires`，消费者同时声明对提供包的 `dependencies`。`publishService/useService` 发布和取得共享类型化服务；`publishScopedService` 提供按消费者绑定的客户端，工厂仅接收宿主注入的 `{ owner, signal, assertActive }`。结构校验检查必需方法，不能替代参数和结果解码。底层 `context.publish/service/publishScoped` 保持兼容。
+
+服务代理在取得、方法访问和调用时检查提供包及消费者生命周期，停止后的旧句柄不能开始新调用；代理不强制取消已经运行的外部操作。注册器 `services()` 与宿主运行快照 `services` 报告 ID、版本、提供包、来源、用途、方法名、`scoped` 及 `declared/registered/ready/unavailable`。`ready` 只表示服务发布且提供包运行；协议支持、外部模型可用和当前权限仍由各领域接口核验。可选服务缺失明确报不可用，`requires` 没有可选标志。
+
+配置、状态和受限存储保留包上下文基础设施，不另建服务总线。`configuration` 只访问已声明配置；`state` 依赖包状态 schema；`context.store(store)` 包装可信装配提供的 store，不自动取得宿主原始数据库。
 
 状态使用稳定包键和 schemaVersion，通过可恢复 CAS 与分页迁移演进。旧状态必须明确接管。内容指纹声明覆盖的文件、依赖和锁文件；entry-only 指纹不能冒充完整包内容身份。内容改变需要重新核验，进程内 ESM 缓存不能当作热更新保证。
 
@@ -272,9 +278,19 @@ GIF 仍登记为当前会话的图片，不受视频观察开关影响。`qaf_me
 
 ## 插件能力与会话服务
 
-可信插件上下文提供 `runtime.capabilities`、`runtime.models` 和 `runtime.sessions`。宿主绑定插件身份及生命周期；QQ 命令入口仍校验实际调用者。协议写操作要求稳定幂等键，已确认或拒绝回执保留七天，未确认结果保留且不自动重放；业务永久去重由插件持久业务状态承担。模型只直接接收常用工具与能力目录入口，按具体工具 ID 才展开参数，原始协议管理调用核验主人。
+宿主配置 `runtimeServices` 工厂时，包管理器自动加入内置 `plugin-runtime` 包，通过同一注册器发布消费者范围的服务。插件在 manifest 声明对 `plugin-runtime` 的依赖及具体契约 `requires`，使用 SDK `useService(context, contract)` 取得。`context.runtime` 保留便利 getter，也经过相同声明、身份绑定和生命周期检查，不能绕过服务依赖。
 
-插件上下文另提供 `runtime.scheduler` 与 `runtime.tools`：调度支持持久一次性和日历规则，按插件隔离身份、回调及生命周期；已开始但中断的发生记录保留为 unknown，不在重启时重放。显式回调期限最多一小时，默认三十秒，实际执行也受时间窗口限制。二级工具注册在 `extension.<owner>.<id>` 名下，撤销或插件停止后不可调用；摘要查询不返回全部 schema，只有具体 ID 查询展开参数。二级写调用以插件、工具、账号、会话和事件身份去重，未知回执不设普通七天过期。详见 [插件调度](TRIGGERS.md) 与 [扩展开发](EXTENDING.md)。
+宿主服务均为版本 1：`plugin-protocol`（协议目录与调用）、`plugin-models`（模型与插件会话）、`plugin-sessions`（QQ 会话绑定）、`plugin-scheduler`（日程）、`plugin-tools`（二级工具登记）、`plugin-media`（已登记原图）、`plugin-extensions`（重载登记）、`plugin-usage`（本插件用量）、`plugin-events`（受限观察）。SDK 分别导出 `PLUGIN_*_SERVICE_CONTRACT`；部分客户端是可选宿主配置，声明不代表对应适配器可用。内置领域服务共用 `FRAMEWORK_SERVICE_CONTRACTS`，可选提供方也有公开类型，契约目录本身不是安装或健康证明。
+
+宿主绑定插件身份及生命周期；QQ 命令入口仍校验实际调用者。协议写操作要求稳定幂等键，已确认或拒绝回执保留七天，未确认结果保留且不自动重放；业务永久去重由插件持久业务状态承担。发送、转发和收藏表情复用协议目录的原子动作及支持判断，不另建重复服务。直接协议发送不自动经过聊天排版、聊天 outbox 或历史追加；`chat-output` 只准备产物。QQ 功能发送与模型 `qaf_reply` 继续经过真实 execution、policy 和聊天发送链路。模型只直接接收常用工具与能力目录入口，按具体工具 ID 才展开参数，原始协议管理调用核验主人。
+
+插件调度支持持久一次性和日历规则，按插件隔离身份、回调及生命周期；已开始但中断的发生记录保留为 unknown，不在重启时重放。显式回调期限最多一小时，默认三十秒，实际执行也受时间窗口限制。插件日程共用有界插件调度循环；提醒服务保留独立生命周期，两者复用日历计算。二级工具注册在 `extension.<owner>.<id>` 名下，撤销或插件停止后不可调用；摘要查询不返回全部 schema，只有具体 ID 查询展开参数。二级写调用以插件、工具、账号、会话和事件身份去重，未知回执不设普通七天过期。详见 [插件调度](TRIGGERS.md) 与 [扩展开发](EXTENDING.md)。
+
+`plugin-usage.list/summary` 直接读取现有账本，按逐轮 `plugin:<owner>` 归属过滤，支持 session/provider/model/时间及分页。绑定共享会话不会授予读取该会话 QQ 或其他插件记录的权利，旧绑定本插件用量仍可查。未知数值与多币种保持原账本语义，不提供清账、改价或补记接口。
+
+`plugin-events.read/subscribe` 不创建另一条总线：复用宿主实际有界观察流，保留游标、epoch、缺口、取消和背压。公共 runtime 事件清除会话关联；执行事件须由插件请求 ID 或终态 turn 证据证明归属，不能单凭共享 session 推断。返回的关联字段限执行元数据，不提供 QQ 正文和地址。没有归属证据的事件省略，观察窗口及当前归属证据有限，不承诺完整审计；业务事件仍通过功能 `subscriptions/services.on` 投递。
+
+同一接口的实现重载可使用 `createReloadableService` 的稳定异步代理，固定工具或调度回调可用 `createReloadableHandler`。租约覆盖完整返回 Promise；候选契约 ID、版本及方法集合不兼容时保留旧实例。同步方法通过显式 `withCurrent` 持有租约。契约语义、工具 schema、依赖或注册结构改变需维护版本并完整应用装配，不能靠实现重载自动同步。详见 [稳定服务与可替换行为](RELOADABLE_SERVICES.md)。
 
 插件模型默认首次自动创建持久会话，只加载插件任务与历史，不注入 QQ 人设、聊天方案、回复协议或工具。绑定现有会话保留上下文，固定指向实际 DSH 会话 ID，不随 QQ 换绑自动漂移。模型输出只交回插件，不自动发送到 QQ。共享实际会话有界串行，未知执行必须核对原记录，不通过新会话自动绕过；仅确认原会话不存在且执行已结清时才重建并记录来源。插件用量按插件及实际会话记录。
 

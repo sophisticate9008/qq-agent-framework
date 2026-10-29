@@ -59,6 +59,10 @@ export function createPluginEventsService(options: {
       'PLUGIN_EVENTS_FILTER_INVALID', 'Only bounded metadata filters are supported.')
     return snapshot(parsed)
   }
+  function validateQuery(value: unknown, allowed: readonly string[]): void {
+    assert(isRecord(value) && Object.keys(value).every(key => allowed.includes(key)),
+      'PLUGIN_EVENTS_QUERY_INVALID', 'Only bounded observation queries are supported.')
+  }
   return Object.freeze({
     forPlugin(owner: string, lifetime: AbortSignal, assertActive: () => void = () => {}): PluginEventsClient {
       assert(pluginModelIdentifier(owner), 'PLUGIN_EVENTS_OWNER_INVALID', 'A host-injected plugin owner is required.')
@@ -68,8 +72,7 @@ export function createPluginEventsService(options: {
       return Object.freeze<PluginEventsClient>({
         read(query = {}) {
           active()
-          assert(isRecord(query) && Object.keys(query).every(key => ['after', 'filter', 'limit'].includes(key)),
-            'PLUGIN_EVENTS_QUERY_INVALID', 'Only bounded observation queries are supported.')
+          validateQuery(query, ['after', 'filter', 'limit'])
           const page = options.observer.read({ ...query, filter: filter(query.filter) })
           assert(isNativeEventPage(page), 'PLUGIN_EVENTS_SOURCE_INVALID', 'The host observation page is invalid.')
           const events = page.events.flatMap(event => { const visible = project(owner, event); return visible ? [visible] : [] })
@@ -80,8 +83,9 @@ export function createPluginEventsService(options: {
         },
         subscribe(query = {}) {
           active()
-          assert(isRecord(query) && Object.keys(query).every(key => ['after', 'filter', 'signal', 'capacity'].includes(key)),
-            'PLUGIN_EVENTS_QUERY_INVALID', 'Only bounded observation subscriptions are supported.')
+          validateQuery(query, ['after', 'filter', 'signal', 'capacity'])
+          assert(query.signal === undefined || query.signal instanceof AbortSignal,
+            'PLUGIN_EVENTS_QUERY_INVALID', 'The subscription signal must be an AbortSignal.')
           const signal = query.signal ? AbortSignal.any([lifetimeSignal, query.signal]) : lifetimeSignal
           signal.throwIfAborted()
           const source = options.observer.subscribe({ ...query, filter: filter(query.filter), signal })

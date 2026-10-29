@@ -1,84 +1,84 @@
-# 全框架服务规范与收敛设计
+# 全框架服务规范
 
-本文记录基于当前实现的服务盘点与目标规范。**服务统一尚未全部实现**；现行 API 以 `CONTRACTS.md`、SDK 导出和源码为准。下列待办不能作为已安装、已就绪或已实测的证明。
+框架服务复用现有包依赖、服务注册器和 SDK。内置包与扩展使用同一套类型契约、声明和取得入口；模型工具、调用权限及外部执行证据分别管理。取得服务不会自动登记模型工具，也不授予 QQ 主人身份。
 
-## 目标与边界
+## 声明、发布与取得
 
-所有跨包复用能力采用统一的服务声明、类型契约、依赖解析、调用身份、生命周期及运行证据。内置包和后续扩展采用同一规范，来源保留各自真实归属。
+公共契约使用 `defineServiceContract<T>({ id, version, description, methods })` 定义。`serviceDeclaration(contract)` 生成 manifest 中的服务声明，提供方用 `publishService(context, contract, value)` 发布，消费者用 `useService(context, contract)` 取得类型化接口。这些 helper 从 `@qq-agent-framework/sdk/host` 导出；纯契约类型也从 `contracts` 导出。
 
-沿用 `NativePackageManifest.provides/requires` 与现有包管理器。服务之间继续直接调用类型化方法，不新增网络跳转、通用 JSON RPC 总线、逐次审批或每轮全量服务 schema 注入。适配器内部实现和纯函数留在所属模块；对外提供的服务负责声明它们对应的实际能力与限制。
+```ts
+import { defineServiceContract, publishService, serviceDeclaration, useService }
+  from '@qq-agent-framework/sdk/host';
 
-服务、模型工具、权限策略分别建模：插件取得服务句柄；模型通过明确登记的工具调用服务；宿主依据真实来源检查权限。仅发布服务不会自动向模型开放，也不会增加插件之外其他调用者的权限。
+interface TextService { summarize(text: string, signal: AbortSignal): Promise<string> }
+const TEXT = defineServiceContract<TextService>({ id: 'example-text', version: 1,
+  description: '整理插件提供的文字。', methods: ['summarize'] });
 
-## 当前盘点
+// 提供包：manifest.provides: [serviceDeclaration(TEXT)]
+// install(context) 中发布实际实现：
+// publishService(context, TEXT, implementation);
+// 消费包同时声明 dependencies: ['提供包标识']、requires: [serviceDeclaration(TEXT)]。
+// start(context) 中取得：const text = useService(context, TEXT);
+```
 
-| 能力 | 当前入口与实现事实 | 收敛工作 |
+包版本和服务接口版本分别维护。提供方与消费者引用同一个契约；校验覆盖契约格式及必需方法是否存在，参数和返回值仍由各方法的类型与边界解码负责。依赖缺失、循环、重复服务、接口版本不匹配、未声明取得在包管理器中明确拒绝。`requires` 没有可选标志；需要可选能力时，由可信装配决定安装哪些包，并显式处理服务不可用。
+
+一般服务发布共享实现；需要绑定消费者身份的宿主服务通过 `publishScopedService(context, contract, factory)` 提供客户端工厂，接收宿主建立的 `{ owner, signal, assertActive }`；底层入口为 `context.publishScoped`。插件的模型、协议等客户端由 `plugin-runtime` 包发布；配置了 `runtimeServices` 工厂的宿主自动加入该包。消费者仍须声明 `dependencies: ['plugin-runtime']` 和实际使用的服务 `requires`。包上下文的 `context.runtime` 保留便利 getter，读取它也经过同一依赖校验和服务解析。
+
+注册器 `services()` 与运行快照 `services` 返回 ID、版本、提供包、来源、用途、方法名、是否按消费者绑定及 `declared/registered/ready/unavailable` 状态。`ready` 表示提供包运行且服务已发布；它不证明所需协议动作受支持、模型已联网或当前调用有权限。可选宿主客户端缺失时取得服务明确报不可用。
+
+## 已公开能力
+
+下表服务均为版本 1。`PLUGIN_*_SERVICE_CONTRACT` 来自 `plugin-service-contracts`，其余常量来自 `framework-service-contracts`；SDK host 统一导出。契约目录包含可选提供方，目录本身不是安装清单。
+
+| 能力 | 服务与契约 | 实际范围 |
 | --- | --- | --- |
-| QQ 协议操作 | `runtime.capabilities`，固定协议目录与适配器 | 将插件绑定的客户端纳入服务依赖声明，保留实际协议支持判断 |
-| 空间操作 | 已发布 `qzone` v1；通用协议目录也可执行空间原子操作 | 共用协议实现及回执语义；类型化空间接口和原子目录保持不同用途，避免复制实现 |
-| 模型调用 | `runtime.models`，已有持久/单次会话、图像输入及用量 | 纳入服务注册，统一公开类型与运行状态 |
-| 会话绑定 | `runtime.sessions`、模型绑定接口、`native-agent.binding` 只读入口 | 明确 QQ 绑定、插件绑定和 DSH 会话的关系，共用实际绑定管理实现 |
-| 后台助手 | 已发布 `native-work` v1 | 保留调用身份检查，补齐方法级取消、执行与恢复说明 |
-| 定时任务 | `runtime.scheduler`；已有 `reminders` v1 | 通用调度进入依赖图；提醒业务复用调度，不再维护业务私有定时循环 |
-| 媒体资源 | 已发布 `media` v1；另有 `runtime.media` 图片引用读取入口 | 统一引用解析与生命周期，明确会话资源、插件产物和外部资源范围 |
-| 输出与排版 | 已发布 `chat-output` v1；消息发送另经宿主 effect/outbox | 明确生成输出产物与实际发送两种操作；发送继续复用宿主回执与去重 |
-| GIF、视频、语音 | 媒体服务内部接适配器，语音转写依赖安装方提供实现 | 纳入媒体子能力及就绪状态；可选适配器缺失时明确不可用 |
-| 收藏表情等交互 | 专门工具/宿主实现与通用协议目录并存 | 提供统一的可复用客户端，复用已有资源与协议链路 |
-| 记忆 | 已发布 `memory` v1 | 明确查询、建议写入及确认来源，统一公开类型与调用证据 |
-| 聊天输入 | 已发布 `chat-input` v1 | 保留输入贡献机制，不让它成为所有插件会话的隐式依赖 |
-| 工具目录 | `runtime.tools` 注册；已发布 `native-tools` v1 用于目录读取 | 区分注册与只读查询，使用同一来源记录和注销生命周期 |
-| 生图 | 可选扩展发布 `image-generation` v1 | 类型化依赖取得、提供方状态与产物契约；角色参考仍由扩展处理 |
-| 状态与执行记录 | 已发布 `native-interactions`、`native-executions`、`native-agent` v1 | 对外保留受限只读视图，明确分页、脱敏和容量 |
-| 用量 | 宿主用量服务与模型调用记录 | 提供按调用者/会话限定的读取入口，采集仍由真实执行方完成 |
-| 配置、状态、存储 | `context.configuration`、`context.state`、`context.store(store)` | 保留为包上下文基础设施，统一范围、版本和保留规则；业务包不再需要取得宿主原始库 |
-| 事件与输入贡献 | `contribute`、功能订阅及宿主事件接口 | 统一声明、来源、大小限制、订阅清理；仅承诺实际支持的投递语义 |
+| 协议、发消息与收藏表情 | `plugin-protocol` / `PLUGIN_PROTOCOL_SERVICE_CONTRACT` | `catalog/call`，读取实际协议支持并执行动作；发送、转发、收藏表情使用同一协议目录 |
+| 插件模型 | `plugin-models` / `PLUGIN_MODELS_SERVICE_CONTRACT` | `models/list/create/bind/unbind/run`，持久或单次调用，不自动发 QQ |
+| QQ 会话绑定 | `plugin-sessions` / `PLUGIN_SESSIONS_SERVICE_CONTRACT` | `resolve/bind/unbind`，实际绑定版本与具体 DSH 会话 ID |
+| 插件日程 | `plugin-scheduler` / `PLUGIN_SCHEDULER_SERVICE_CONTRACT` | `registerHandler/schedule/list/cancel/history`，按插件隔离，持久发生记录 |
+| 模型二级工具登记 | `plugin-tools` / `PLUGIN_TOOLS_SERVICE_CONTRACT` | `register`，固定插件来源、权限分类和注销生命周期 |
+| 会话原图读取 | `plugin-media` / `PLUGIN_MEDIA_SERVICE_CONTRACT` | `readImage`，当前账号和 QQ 会话已登记图片，不接收任意 URL 或路径 |
+| 实现重载登记 | `plugin-extensions` / `PLUGIN_EXTENSIONS_SERVICE_CONTRACT` | `register/list`，只管理本插件已接入的可替换实现 |
+| 插件用量 | `plugin-usage` / `PLUGIN_USAGE_SERVICE_CONTRACT` | `list/summary`，只读实际账本中归属于本插件的调用 |
+| 插件观察事件 | `plugin-events` / `PLUGIN_EVENTS_SERVICE_CONTRACT` | `read/subscribe`，公共生命周期和有可靠归属证据的执行元数据 |
+| 空间底层操作 | `qzone` / `QZONE_SERVICE_CONTRACT` | `describe/inspect/execute`，类型化协议入口；协议目录可提供同源原子动作 |
+| 输入配置 | `chat-input` / `CHAT_INPUT_SERVICE_CONTRACT` | `read`，聊天唤醒配置；输入准备仍使用包贡献 |
+| 媒体 | `media` / `MEDIA_SERVICE_CONTRACT` | 登记、模型读取、出站解析及媒体效果适配器；GIF、视频、语音能力取决于实际适配器 |
+| 回复准备 | `chat-output` / `CHAT_OUTPUT_SERVICE_CONTRACT` | `prepare/context/split/clear`，排版与分组，不执行协议发送 |
+| 提醒业务 | `reminders` / `REMINDERS_SERVICE_CONTRACT` | 规则、CAS、发生记录、启停和调度；发送仍经过当前 policy |
+| 记忆 | `memory` / `MEMORY_SERVICE_CONTRACT` | `query/context/propose`，建议写入与确认来源分开 |
+| 聊天状态 | `native-agent` / `NATIVE_AGENT_SERVICE_CONTRACT` | `status/binding`，当前代理与绑定只读状态 |
+| 模型交互状态 | `native-interactions` / `NATIVE_INTERACTIONS_SERVICE_CONTRACT` | `snapshot`，有界快照 |
+| 执行记录 | `native-executions` / `NATIVE_EXECUTIONS_SERVICE_CONTRACT` | `read/list`，实际执行查询 |
+| 模型工具目录 | `native-tools` / `NATIVE_TOOLS_SERVICE_CONTRACT` | `catalog`，只读；与 `plugin-tools` 的注册用途分别处理 |
+| 后台工作 | `native-work` / `NATIVE_WORK_SERVICE_CONTRACT` | 状态、读查、启动、追加、停止及核对；写操作需要真实 `FeatureExecution` |
+| 可选生图 | `image-generation` / `IMAGE_GENERATION_SERVICE_CONTRACT` | `generate`，实际图片字节、类型和 SHA-256，不隐式发送 |
 
-代码入口：[包管理器](../src/host/native-packages.ts)、[运行时客户端](../src/host/plugin-runtime.ts)、[默认服务包](../src/host/default-native-packages.ts)、[宿主服务包](../src/host/native-services.ts)、[输出服务](../src/host/native-output.ts)。
+`native-*` 五个服务由 `native-services` 包提供，其余内置领域服务依赖各自提供包。插件配置与状态保持包上下文基础设施：`configuration` 只访问本包声明的配置域，`state` 使用包 schema 和 CAS；`context.store(store)` 只包装可信装配已提供的 store，不自动授予原始宿主数据库。业务数据优先使用包状态。
 
-## 统一契约
+## 发送、表情和输出组合
 
-### 声明与取得
+插件发送使用协议目录中的 `send_group_msg`、`send_private_msg` 及支持的转发动作；收藏表情使用 `fetch_custom_face`、`fetch_custom_face_detail`、`add_custom_face`、`delete_custom_face`、`set_custom_face_desc`。先读取实际动作的参数与支持状态，再提交调用，不另建发送或表情客户端。
 
-- 每个公开服务具有稳定 ID、接口版本、提供包、来源及用户可读用途。包版本与服务接口版本分别维护。
-- 依赖明确列入 manifest；可选依赖须单独声明并显式处理缺失，不能通过静默空实现伪装成功。
-- 提供方和调用方引用同一个契约定义。SDK 提供类型化的发布/取得入口和必要的结构校验，逐步消除业务侧 `context.service(...) as 某接口`。
-- 服务契约描述方法、输入输出及方法适用范围；协议实例和模型元数据决定具体可用子能力。声明过服务不代表所有协议端支持同一功能。
-- 宿主客户端与扩展服务进入同一依赖和状态体系。`runtime.models` 等快捷入口若保留，只转发到同一个已绑定客户端，不再成为绕过声明的第二套实现。
+协议调用返回 `confirmed/rejected/unknown`，写操作使用稳定幂等键和宿主持久回执。直接协议发送按协议参数执行，不自动经过聊天输出排版、聊天 outbox 或历史追加。QQ 功能回调的 `FeatureExecution.send` 与模型 `qaf_reply` 则走聊天 policy、outbox、历史及输出流程。插件选择入口时应按所需语义组合，不能把生成了输出产物等同于已送达。
 
-### 身份与权限
+## 身份、生命周期与恢复
 
-- 宿主绑定插件 owner、账号、生命周期，以及确有需要时的会话范围。模型或业务参数不能自行指定可信调用者。
-- QQ 用户触发、可信插件自主任务、管理操作分别保留真实来源；定时任务不伪造主人消息。
-- 能力描述与权限规则分开。调用端核验主人、会话白名单和自主执行策略；底层适配器只执行已验证请求。
-- 包的受限状态存储、配置、媒体与调用记录按账号和包隔离。扩展无需取得供应商密钥、原始数据库或宿主授权对象。
-- 本机可信 TypeScript 插件仍在进程内运行；服务规范不是恶意代码沙箱。
+宿主注入插件 owner、账号和生命周期，模型参数不能覆盖它们。QQ 工具与命令入口仍核验实际发言者及当前权限；定时任务以已登记插件身份执行。`native-work` 写方法继续通过调用方 execution 的 `invoke` 核验能力和实际 QQ 来源，不能仅凭取得服务启动主人工作。
 
-### 调用与恢复
+服务代理在取得、方法访问和调用时检查提供包及消费者生命周期；停止后的旧句柄不能开始新调用。外部调用的取消、期限、实际排空及恢复由具体服务负责，代理不能强行终止任意 Promise 或外部操作。可信 TypeScript 插件仍在宿主进程运行，服务边界不是恶意代码沙箱。
 
-- 异步外部调用接受取消信号与有界期限。服务实现与提供包停止状态必须在实际调用时检查，不能只在首次取得句柄时检查。
-- 普通只读调用直接返回类型化结果，不强制落一条操作日志。长任务按实际需要提供任务标识、进度、结果查询和取消能力。
-- 外部写操作使用稳定幂等键，区分未执行的拒绝、确认完成和结果未知。失败回执不伪装成功；取消本机等待不宣称外部已经停止。
-- 提供方声明是否支持外部去重、查询结果及恢复。未知状态只有在取得证据后才能继续；禁止一套通用重试规则重放所有写操作。
-- 重启、卸载和热重载的行为属于每项服务的契约。能恢复的步骤从持久记录继续；不能恢复的步骤明确标记，不能因使用统一服务接口就声称支持断点续跑。
-- 新一代服务的调用使用新实例，正在执行的调用在具备租约机制时由旧实例排空。契约不兼容时拒绝替换。
+外部写入保持稳定幂等键，取消本机等待不等于外部已停止。未知执行保存证据，不自动重放；每个领域分别规定核对、保留和容量。插件模型共享同一实际会话时串行执行，绑定不会随 QQ 地址换绑漂移。自动建会话仅加载插件任务和自身历史，不加载 QQ 人设、聊天方案或工具。
 
-### 数据与观察
+插件调度共用宿主的有界插件调度循环；提醒服务有独立业务生命周期和循环，两者复用日历计算。业务事件订阅仍使用功能 `subscriptions` 与 `services.on`，输入准备仍使用贡献机制，观察流不替代业务事件投递。
 
-- 图片、文件、音视频使用统一资源/产物类型，声明类型、大小、来源、有效期及读取方式；实际字节和资源描述分别表达。
-- 统一操作关联标识，关联插件、服务、实际模型会话及调度发生记录。日志按需记录阶段、耗时和结果，不保存密钥或默认复制完整提示词与图片。
-- 每个持久记录域声明时间与数量上限；结束操作默认遵循七天规则。未知写入的防重放证据有独立保留和容量处理，不被普通日志清理误删。
-- 已安装、已注册、已就绪、实际协议支持、权限允许和验证覆盖分开显示。查询状态不默认发模型请求或外部写请求。
-- 模型只取得常用工具和按需目录。服务 schema 不是聊天上下文的默认内容。
+## 用量、观察与热重载
 
-## 实施顺序与验收门槛
+插件用量读取现有账本中 `plugin:<owner>` 的逐轮归属，允许按 session/provider/model/时间和游标筛选；共享同一会话不会获得 QQ 或其他插件用量。旧绑定解除后，已归属自己的账本记录仍可读。未知 token 和成本保持未知，多币种分别汇总；读取遵守宿主扫描上限，调用方应检查 `partial` 与 `next`。插件客户端不提供清账、改价或补记入口。
 
-1. **公共契约与服务目录**：在现有注册器上补类型化契约及状态描述，先迁移已发布的内置服务；依赖冲突在包启动前报告。
-2. **宿主客户端收敛**：将模型、绑定、协议、调度、工具注册纳入同一声明和绑定路径，同时修改实际调用方，覆盖当前空间插件。
-3. **余下公共能力**：补齐媒体产物、发送、表情、工作、用量、事件等跨包入口；审计原有宿主直连，清理重复实现。
-4. **完整调用验收**：覆盖实际安装入口、插件调用、QQ 模型工具调用，以及不同协议/供应商组合；分别报告替身测试、真实模型与真实协议的证据。
+插件事件复用宿主实际有界观察流，保留原 epoch、游标、缺口和背压语义。公共 runtime 生命周期不含会话关联；执行事件必须能从实际插件请求 ID 或终态 turn 证明归属，不能只凭共享 session 推断。无法证明归属的事件不返回，QQ 正文与地址等关联信息不向该客户端开放。这是有限的状态观察，不是完整私有协议追踪，也不是持久审计日志；缺口不能解释为没有发生操作。
 
-每批迁移包含契约、提供方、调用方、状态展示和文档；公共接口变化对应的验证用例随代码更新，自动化执行遵循当次用户授权。移除失效入口时同时更新现有调用方，保留用户会话和运行数据。
+同一接口内的行为实现可用 `createReloadableService` 和 `createReloadableHandler` 保持稳定登记，活动调用通过租约留在旧实例排空。契约 ID、版本和方法集合不兼容时拒绝替换；参数语义变化仍需维护版本。工具 schema、依赖和注册结构变化需要完整应用装配。用法及完整例子见 [扩展开发](EXTENDING.md)、[稳定服务与可替换行为](RELOADABLE_SERVICES.md) 和 [热重载插件示例](../examples/reloadable-plugin/README.md)。
 
-每项服务至少验证依赖缺失、版本不匹配、正常调用、身份范围、超时取消、停止后的旧句柄，以及适用的并发/幂等/未知结果恢复。只读服务不强塞写入恢复测试，纯同步方法不强塞后台任务包装。
-
-完成标准是清单中每个对外能力都有明确归属和调用路径，插件可以仅依赖公开 SDK 编写业务，所有未覆盖的协议/模型组合明确列出；某个业务插件成功不能代替全框架验收。
+源码入口：[契约 helper](../src/host/service-contract.ts)、[包注册器](../src/host/native-packages.ts)、[宿主服务包](../src/host/plugin-runtime-package.ts)、[内置契约](../src/host/framework-service-contracts.ts)、[插件契约](../src/host/plugin-service-contracts.ts)。安装、构建、真实协议和真实模型验证分别记录，服务接口存在不代表所有提供方组合已经实测；当前验收范围见 [VALIDATION.md](VALIDATION.md)。

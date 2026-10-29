@@ -40,4 +40,4 @@ const handler = createReloadableHandler(manager, async (behavior, occurrence) =>
 
 用 `context.own` 管理重载管理器、登记撤销函数、工具及调度 handler。停止时先撤销稳定入口，再等待已有调用排空并关闭管理器。模型工具 schema、依赖或注册结构的变化应完整应用插件装配；相同业务契约内的实现修改才使用代码重载。
 
-可运行的 SDK 示例位于 [examples/reloadable-plugin](../examples/reloadable-plugin/README.md)，同时演示稳定服务发布、固定模型工具与每日调度入口。加载器最多保留 64 代源码，达到上限或清理未知时使用现有维护语义，不另建重载管理器。
+可运行的 SDK 示例位于 [examples/reloadable-plugin](../examples/reloadable-plugin/README.md)，同时演示稳定服务发布、固定模型工具与每日调度入口。加载器最多保留 64 代源码，共享未变化的源码文本，默认去重源码总预算 64 MiB（`maxRetainedSourceBytes` 可配置，最大 512 MiB）；旧任务的延迟 import 仍读取所属代次，达到上限或清理未知时使用现有维护语义，不另建重载管理器。

@@ -10,6 +10,8 @@ export interface ExtensionModuleLoaderOptions {
   readonly entry: string;
   readonly root?: string;
   readonly maxVersions?: number;
+  /** UTF-8 bytes of distinct retained module source; compiled modules consume additional memory. */
+  readonly maxRetainedSourceBytes?: number;
 }
 
 export interface ExtensionModuleVersion {
@@ -67,6 +69,9 @@ interface LoaderState {
   readonly root: string;
   readonly entry: string;
   readonly versions: Map<string, Generation>;
+  readonly sourcePool: Map<string, string>;
+  retainedSourceBytes: number;
+  maximumRetainedSourceBytes: number;
   maximumVersions: number;
   busy: boolean;
 }
@@ -254,16 +259,32 @@ async function loadVersion(state: LoaderState, signal: AbortSignal | undefined):
       throw failure('EXTENSION_RELOAD_LIMIT', 'The extension reached its module generation limit; the running version remains available. Restart the host to load further code versions.');
     }
     const sources = new Map<string, string>();
+    const additions = new Map<string, string>();
+    let additionalBytes = 0;
     for (const [filename, file] of files) {
       checkSignal(signal);
       // Parse the whole snapshot before reserving a cache generation. No TypeScript runtime dependency.
       const javascript = stripTypeScriptTypes(file.source, { mode: 'strip' });
       // Node's internal referrer retains the generation URL, while resource/config reads see the original file.
       const body = javascript.replace(/^#![^\r\n]*/, '');
-      sources.set(filename, `import.meta.url = ${JSON.stringify(pathToFileURL(filename).href)};\n${body}`);
+      const source = `import.meta.url = ${JSON.stringify(pathToFileURL(filename).href)};\n${body}`;
+      const sourceKey = createHash('sha256').update(source).digest('hex');
+      const retained = state.sourcePool.get(sourceKey) ?? additions.get(sourceKey);
+      if (retained === undefined) {
+        additionalBytes += Buffer.byteLength(source);
+        if (state.retainedSourceBytes + additionalBytes > state.maximumRetainedSourceBytes) {
+          throw failure('EXTENSION_RELOAD_LIMIT', 'The extension reached its retained source byte limit; the running version remains available. Restart the host to load further code versions.');
+        }
+        additions.set(sourceKey, source);
+      }
+      sources.set(filename, retained ?? source);
     }
     checkSignal(signal);
     installHooks();
+    // Keep unchanged source text shared across generations. Modules and lazy local imports
+    // retain their original generation identity; do not evict source needed by old tasks.
+    for (const [key, source] of additions) state.sourcePool.set(key, source);
+    state.retainedSourceBytes += additionalBytes;
     const generation: Generation = { token: randomUUID(), root: state.root, sources,
       result: Promise.resolve({ revision, namespace: undefined }) };
     generations.set(generation.token, generation);
@@ -295,16 +316,20 @@ export function createExtensionModuleLoader(options: ExtensionModuleLoaderOption
   const entry = resolve(options.entry);
   const root = resolve(options.root ?? dirname(entry));
   const maximumVersions = options.maxVersions ?? 64;
-  if (!within(root, entry) || !isSource(entry) || !Number.isSafeInteger(maximumVersions) || maximumVersions < 1 || maximumVersions > 64) {
+  const maximumRetainedSourceBytes = options.maxRetainedSourceBytes ?? 64 * 1024 * 1024;
+  if (!within(root, entry) || !isSource(entry) || !Number.isSafeInteger(maximumVersions) || maximumVersions < 1 || maximumVersions > 64
+    || !Number.isSafeInteger(maximumRetainedSourceBytes) || maximumRetainedSourceBytes < 1 || maximumRetainedSourceBytes > 512 * 1024 * 1024) {
     throw failure('EXTENSION_SOURCE_INVALID', 'The extension entry, source root or generation limit is invalid.');
   }
   const key = JSON.stringify([root, entry]);
   let state = loaders.get(key);
   if (!state) {
-    state = { root, entry, versions: new Map(), maximumVersions, busy: false };
+    state = { root, entry, versions: new Map(), sourcePool: new Map(), retainedSourceBytes: 0,
+      maximumRetainedSourceBytes, maximumVersions, busy: false };
     loaders.set(key, state);
   } else {
     state.maximumVersions = Math.min(state.maximumVersions, maximumVersions);
+    state.maximumRetainedSourceBytes = Math.min(state.maximumRetainedSourceBytes, maximumRetainedSourceBytes);
   }
   const shared = state;
   return Object.freeze({

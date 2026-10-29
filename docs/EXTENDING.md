@@ -77,7 +77,7 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 `createReloadableService({ contract, asyncMethods, load, ... })` 为显式选择的 Promise 方法提供稳定服务代理；每次调用租用当前实例，直到完整 Promise 结束才归还。`createReloadableHandler(manager, callback)` 为固定工具或调度入口持有同样的租约。候选公共契约核对 ID、版本和方法集合；参数及返回值语义仍由版本和边界校验负责。同步方法使用 `manager.withCurrent` 明确持有租约，不暗中改成异步接口。详细用法见 [稳定服务与可替换行为](RELOADABLE_SERVICES.md)。
 
-`createExtensionModuleLoader({ entry, root })` 的路径由可信装配代码预先确定。加载器对本地 ESM `.ts`、`.mts`、`.js`、`.mjs` 源码快照计算 64 位小写十六进制指纹，并让同代本地依赖使用一致的模块身份；宿主 SDK 和已安装依赖保持共享。JSON、资源、配置、测试与安装依赖不属于源码快照，资源和配置仍通过原 `import.meta.url` 或宿主服务读取。每个固定入口在同一宿主进程中最多保留 64 个不同源码代次，失败导入也占用代次；达到上限后保留当前实例，需重启宿主才能继续加载新的代码。ESM 执行具有宿主进程权限，AbortSignal 不能强制终止已经开始的模块执行。
+`createExtensionModuleLoader({ entry, root })` 的路径由可信装配代码预先确定。加载器对本地 ESM `.ts`、`.mts`、`.js`、`.mjs` 源码快照计算 64 位小写十六进制指纹，并让同代本地依赖使用一致的模块身份；宿主 SDK 和已安装依赖保持共享。JSON、资源、配置、测试与安装依赖不属于源码快照，资源和配置仍通过原 `import.meta.url` 或宿主服务读取。每个固定入口在同一宿主进程中最多保留 64 个不同源码代次，失败导入也占用代次；达到上限后保留当前实例，需重启宿主才能继续加载新的代码。未变更模块的源码文本在代次间共享；每入口另设默认 64 MiB 的去重 UTF-8 源码总预算，可用 `maxRetainedSourceBytes` 调整（1 字节至 512 MiB）。此预算不等于进程堆内存上限，编译模块和业务对象另占内存。超预算候选不执行，保留当前实例；重新创建同入口加载器不能扩大已有预算。ESM 执行具有宿主进程权限，AbortSignal 不能强制终止已经开始的模块执行。
 
 管理器异步工厂的 `load(signal)` 返回 `{ revision, value, dispose? }`。候选实例必须独立，准备和校验阶段不能发布注册、启动定时器或执行外部动作。新实例准备成功且宿主仍在运行时才切换；准备失败保留旧实例。`withCurrent(fn)` 的租约覆盖 `fn` 返回的 Promise，包括后台任务的实际完成期。切换后的新调用使用新实例，旧生图任务继续使用原实例完成，最后一项旧租约结束后才清理旧实例。直接 `current()` 仅用于同步检查，持续工作必须使用租约。
 

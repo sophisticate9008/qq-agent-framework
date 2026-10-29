@@ -74,7 +74,7 @@
 
 插件代码重载使用独立的 64 位小写十六进制内容指纹，不与包配置、状态或聊天配置 revision 混用。`GET /api/chat/extensions/reload` 返回 `{ schema: 1, items }`；条目仅含 `id`、`displayName`、`currentRevision`、`activeCalls`、`retiring`（`null` 或 `{ revision, activeCalls }`）、`reloading`、`closed` 与标准错误码 `error`，不返回源码路径、配置或错误正文。目录只包含可信 bootstrap 显式登记的插件。
 
-同路径 `POST` 严格接受 `{ id, expectedRevision }`，沿用管理端鉴权，按登记标识查找并核验指纹，单个插件同一时刻只受理一项重载。成功返回 `{ schema: 1, id, previousRevision, currentRevision, changed, draining }`。旧任务租约结束前保留旧实例，最多一代旧实例排空；候选准备失败保持当前实例，同版本候选也会释放，清理失败保留错误码并阻止下一次换代。停机后禁止切换实例，网络结果未知时只查询状态，不自动重放请求。加载器在同一进程内对每个固定入口最多保留 64 个源码代次，达到上限需重启宿主。
+同路径 `POST` 严格接受 `{ id, expectedRevision }`，沿用管理端鉴权，按登记标识查找并核验指纹，单个插件同一时刻只受理一项重载。成功返回 `{ schema: 1, id, previousRevision, currentRevision, changed, draining }`。旧任务租约结束前保留旧实例，最多一代旧实例排空；候选准备失败保持当前实例，同版本候选也会释放，清理失败保留错误码并阻止下一次换代。停机后禁止切换实例，网络结果未知时只查询状态，不自动重放请求。加载器在同一进程内对每个固定入口最多保留 64 个源码代次，未变源码共享文本；默认去重 UTF-8 源码预算 64 MiB，可由 `maxRetainedSourceBytes` 调整至最多 512 MiB。此值不限制编译模块及业务对象的总堆内存。代次或源码预算达到上限时保持当前实例，需重启宿主释放旧 ESM 模块。
 
 代码重载要求工具名称、输入输出 schema 与注册结构保持兼容；结构变化通过完整应用更新。生图配置 `generationAccess` 的 `owner` 或 `whitelist` 在运行权限检查时即时读取，仍由宿主真实身份和会话白名单决定执行资格。配置与源码分别更新，不借内容版本扩大授权。接入约定见 [扩展开发](EXTENDING.md)。
 

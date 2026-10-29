@@ -15,7 +15,7 @@ test('simulation task history survives definition deletion, paginates tied times
   await mkdir(nativeDirectory, { recursive: true, mode: 0o700 })
   await writeFile(join(sourceDirectory, 'simulation-activity-index.json'), JSON.stringify({ schema: 1, sourceDirectory, root, latestRunId: runId }), { mode: 0o600 })
   const manifestPath = join(root, runId, 'simulation.json')
-  const manifest = { schema: 1, sourceDirectory, nativeDirectory, protocolMode: 'local-capture', productionBootstrapMounted: false }
+  const manifest = { schema: 1, sourceDirectory, nativeDirectory, protocolMode: 'local-capture', automaticBootstrapSelection: false, explicitBootstrap: null }
   await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 })
   const store = createSqliteStore({ filename: join(nativeDirectory, 'native-chat.sqlite') })
   for (let n = 1; n <= 25; n++) {
@@ -34,6 +34,9 @@ test('simulation task history survives definition deletion, paginates tied times
   assert.equal(new Set([...first.runs, ...second.runs].map(run => run.id)).size, 25)
   await assert.rejects(service.tasks('../account', signal))
   await writeFile(manifestPath, JSON.stringify({ ...manifest, sourceDirectory: join(directory, 'foreign') }))
+  await assert.rejects(service.tasks(runId, signal))
+  await writeFile(manifestPath, JSON.stringify(manifest))
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, explicitBootstrap: '/untrusted/bootstrap.ts' }))
   await assert.rejects(service.tasks(runId, signal))
   await writeFile(manifestPath, JSON.stringify(manifest))
   await symlink(join(root, runId), join(root, 'qq-linked'))

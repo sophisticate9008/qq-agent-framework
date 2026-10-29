@@ -66,8 +66,10 @@ async function nativeDirectoryForRun(root: string, runId: string, sourceDirector
     || !isAbsolute(manifest.sourceDirectory)) fail('SIMULATION_SESSIONS_SOURCE_INVALID')
   // Other accounts can share a simulation root, but never each other's management scope.
   if (resolve(manifest.sourceDirectory) !== sourceDirectory) return null
+  const isolatedBootstrap = manifest.productionBootstrapMounted === false
+    || manifest.productionBootstrapMounted === undefined && manifest.automaticBootstrapSelection === false && manifest.explicitBootstrap === null
   if (manifest.nativeDirectory !== nativeDirectory || nativeDirectory === sourceDirectory
-    || manifest.protocolMode !== 'local-capture' || manifest.productionBootstrapMounted !== false) fail('SIMULATION_SESSIONS_SOURCE_INVALID')
+    || manifest.protocolMode !== 'local-capture' || !isolatedBootstrap) fail('SIMULATION_SESSIONS_SOURCE_INVALID')
   return nativeDirectory
 }
 

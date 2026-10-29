@@ -38,7 +38,7 @@ export async function startDemo({ token, port = 3210, host = '127.0.0.1' }:
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   startDemo({ token: process.env.BRIDGE_ADMIN_TOKEN, port: Number(process.env.PORT ?? 3210) }).then(demo => {
-    console.log(`QQ Bridge Framework 1.4.1 — local demo on 127.0.0.1:${demo.address.port}`);
+    console.log(`QQ Bridge Framework 1.5.0 — local demo on 127.0.0.1:${demo.address.port}`);
     console.log('演示模式：无 QQ 连接、无付费模型、无自动触发；管理令牌仅从环境变量读取。');
     const stop = () => demo.stop().catch(() => { process.exitCode = 1; });
     process.once('SIGINT', stop);

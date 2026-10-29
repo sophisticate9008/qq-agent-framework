@@ -114,7 +114,7 @@ npm pack ./packages/framework-sdk --pack-destination /tmp
 # 在一个新的外部目录中
 npm init -y
 npm pkg set type=module
-npm install --ignore-scripts /tmp/qq-bridge-framework-sdk-1.4.1.tgz
+npm install --ignore-scripts /tmp/qq-bridge-framework-sdk-1.5.0.tgz
 npm install --save-dev typescript@5.9.3
 ```
 
@@ -579,3 +579,7 @@ const recent = events.read({ limit: 20 });
 用量直接查询现有宿主账本，按逐轮保存的 `plugin:<owner>` 归属过滤；支持 session/provider/model/时间和游标筛选。插件绑定共享会话不获得该会话其他调用者的用量；旧绑定的本插件记录仍可查。未知 token/成本保持未知，多币种分别统计；读取结果须检查 `partial/next`，不能把扫描上限内的结果当作完整账本。没有清账或改价接口。
 
 事件读取和订阅复用宿主实际有界观察流，仅提供公共 runtime 生命周期和能从插件请求 ID 或已确认 turn 核实归属的元数据。共享 session 本身不是归属证明，无法证明的事件不返回；不提供 QQ 正文、地址或完整私有协议追踪。宿主游标、epoch 与缺口继续保留，缺口和过滤后的空页不能解释为没有发生动作；流不替代持久账本、业务 `subscriptions/services.on` 或未知执行核对。
+
+## 会话任务执行器
+
+框架内置持久会话任务，SDK 可注册版本化执行器、发出相关事件，承接时间与条件触发的工作。接口、恢复与预算要求见 [会话任务与续聊](CONVERSATION_TASKS.md#扩展执行器)。

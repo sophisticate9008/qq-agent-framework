@@ -182,3 +182,53 @@ test('read and list preserve deeply frozen detached records after a later write'
     assert.deepEqual(listed[0]!.value, read.value);
   } finally { store.close(); }
 });
+
+test('clock rollback invalidates namespace tokens using all existing storage clock samples', () => {
+  let clock = 10;
+  const store = createSqliteStore({ filename: ':memory:', clock: () => clock });
+  try {
+    store.write('inbox', 'expiring', true, { expiresAt: 28 });
+    const beforeScan = store.changeToken!('inbox');
+    const unrelatedBeforeScan = store.changeToken!('unrelated');
+    clock = 30; assert.deepEqual(store.list('inbox'), []);
+    // The new token time remains later than the previous token time, but is
+    // earlier than the list's clock sample that hid this still-persisted row.
+    clock = 25;
+    const restored = store.changeToken!('inbox');
+    assert.notEqual(restored, beforeScan);
+    assert.notEqual(store.changeToken!('unrelated'), unrelatedBeforeScan);
+    assert.equal(store.list('inbox').length, 1);
+    assert.equal(store.changeToken!('inbox'), restored);
+    clock = 24; assert(store.read('inbox', 'expiring'));
+    assert.notEqual(store.changeToken!('inbox'), restored);
+  } finally { store.close(); }
+});
+
+test('bounded token tracking invalidates evicted namespace observations safely', () => {
+  const store = createSqliteStore({ filename: ':memory:' });
+  try {
+    const original = store.changeToken!('inbox');
+    for (let index = 0; index < 1_024; index++) store.changeToken!(`temporary.${index}`);
+    store.write('inbox', 'after-eviction', true);
+    const restored = store.changeToken!('inbox');
+    assert.notEqual(restored, original);
+    store.write('inbox', 'after-registration', true);
+    assert.notEqual(store.changeToken!('inbox'), restored);
+  } finally { store.close(); }
+});
+
+test('token clock observation leaves CAS with one pretransaction expiry sample', () => {
+  let clock = 10;
+  let samples = 0;
+  const store = createSqliteStore({ filename: ':memory:', clock: () => { samples++; return clock; } });
+  try {
+    const record = store.write('inbox', 'expiring', true, { expiresAt: 20 });
+    store.changeToken!('inbox');
+    clock = 19; samples = 0;
+    assert(store.compareAndSetBatch!([{ kind: 'check', namespace: 'inbox', key: 'expiring', expectedRevision: record.revision }])[0]);
+    assert.equal(samples, 1);
+    clock = 20; samples = 0;
+    assert.equal(store.compareAndSetBatch!([{ kind: 'check', namespace: 'inbox', key: 'expiring', expectedRevision: null }])[0], null);
+    assert.equal(samples, 1);
+  } finally { store.close(); }
+});

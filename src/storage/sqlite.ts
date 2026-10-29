@@ -14,6 +14,7 @@ const DEFAULT_MAX_VALUE_BYTES = 1_048_576;
 const MAX_PAGE_SIZE = 1_000;
 const MAX_REFERENCE_LENGTH = 1_024;
 const MAX_SQLITE_INTEGER = Number.MAX_SAFE_INTEGER;
+const MAX_CHANGE_TOKEN_NAMESPACES = 1_024;
 
 export interface SqliteStoreOptions {
   filename: string;
@@ -308,6 +309,7 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
   const lookupStatements = new Map<string, StatementSync>();
   const namespaceChanges = new Map<string, bigint>();
   let allNamespaceChanges = 0n;
+  let lastClockValue: number | undefined;
 
   function markChanged(namespace: string): void {
     const previous = namespaceChanges.get(namespace);
@@ -318,11 +320,18 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
     assertOpen();
     assertReference(namespace, 'namespace');
     try {
+      now();
       const row = statements.dataVersion.get();
       if (!row) fail('STORE_CORRUPT', 'Durable store contains invalid metadata.');
       // data_version tracks commits by other connections. Local counters track
       // our commits without invalidating an idle inbox for unrelated writes.
-      if (!namespaceChanges.has(namespace)) namespaceChanges.set(namespace, 0n);
+      if (!namespaceChanges.has(namespace)) {
+        if (namespaceChanges.size >= MAX_CHANGE_TOKEN_NAMESPACES) {
+          namespaceChanges.clear();
+          allNamespaceChanges += 1n;
+        }
+        namespaceChanges.set(namespace, 0n);
+      }
       return `${integerField(row, 'data_version')}:${allNamespaceChanges}:${namespaceChanges.get(namespace)}`;
     } catch (error) { redact(error); }
   }
@@ -393,6 +402,10 @@ export function createSqliteStore(options: SqliteStoreOptions): SqliteStore {
   function now(): number {
     const value = clock();
     if (!Number.isSafeInteger(value)) fail('STORE_CLOCK_INVALID', 'Durable store clock returned an invalid value.');
+    // Expired rows can become visible again after a clock rollback. Observe the
+    // same clock samples used by reads, without adding samples inside CAS work.
+    if (lastClockValue !== undefined && value < lastClockValue) allNamespaceChanges += 1n;
+    lastClockValue = value;
     return value;
   }
 

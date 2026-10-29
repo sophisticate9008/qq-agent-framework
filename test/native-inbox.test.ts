@@ -86,6 +86,26 @@ test('stores without mutation tokens continue scanning each tick', async () => {
   } finally { await inbox.stop(); store.close(); }
 });
 
+test('a store clock rollback rediscovers TTL-hidden input independently of the inbox clock', async () => {
+  let storeClock = 10;
+  const store = createSqliteStore({ filename: ':memory:', clock: () => storeClock });
+  let calls = 0;
+  const writer = createNativeInbox({ store, clock: () => 20, readiness: () => 'busy',
+    async deliver() { assert.fail('The writer must not dispatch'); } });
+  const inbox = createNativeInbox({ store, clock: () => 20, readiness: () => 'ready',
+    async deliver() { calls++; return { status: 'accepted' }; } });
+  try {
+    writer.enqueue(entry('imported'));
+    const row = store.list('native-chat.inbox')[0]!;
+    store.write(row.namespace, row.key, row.value, { expectedRevision: row.revision, expiresAt: 28 });
+    storeClock = 30; await inbox.tick();
+    assert.equal(calls, 0);
+    storeClock = 25; await inbox.tick();
+    assert.equal(calls, 1);
+    assert.equal(inbox.hasPending('group:456'), false);
+  } finally { await inbox.stop(); await writer.stop(); store.close(); }
+});
+
 test('busy group input becomes one latest observation without merging identities or extending deadlines', async () => {
   const store = createSqliteStore({ filename: ':memory:' });
   let ready: 'busy' | 'ready' = 'busy';

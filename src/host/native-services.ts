@@ -2,14 +2,16 @@ import { createBuiltinPackageContent } from './native-package-content.ts'
 import type { DshToolCatalog } from '../adapters/dsh-tool-catalog.ts'
 import type { FeatureExecution, JsonValue } from '../core/types.ts'
 import { assert, reference, snapshot } from '../core/values.ts'
-import { NATIVE_HOST_SERVICE_IDS, NATIVE_HOST_SERVICE_VERSION, NATIVE_HOST_SERVICES_PACKAGE_ID,
+import { NATIVE_HOST_SERVICES_PACKAGE_ID,
   type NativeServiceAgentBinding, type NativeServiceAvailability } from '../contracts/native-services.ts'
 import type { NativeWorkReadQuery, NativeWorkView } from '../contracts/native-work.ts'
 import type { createNativeExecutionController, NativeExecutionRecord } from './native-execution.ts'
 import type { NativeInteractions } from './native-interactions.ts'
 import type { NativePackageContext, NativePackageDefinition } from './native-packages.ts'
+import { NATIVE_HOST_SERVICE_CONTRACTS } from './framework-service-contracts.ts'
+import { publishService, serviceDeclaration, useService } from './service-contract.ts'
 
-const CONTENT = createBuiltinPackageContent(import.meta.url)
+const CONTENT = createBuiltinPackageContent(import.meta.url, ['./framework-service-contracts', './service-contract', '../contracts/service-contract'])
 
 export type NativeServiceInteractionsSnapshot = ReturnType<NativeInteractions['snapshot']>
 export type NativeServiceExecutionQuery = { readonly limit?: number; readonly after?: string }
@@ -51,16 +53,21 @@ export interface NativeHostServicePorts {
 
 /** Version resolution remains checked by the package registry's declared dependency graph. */
 export function requireNativeHostService<Id extends keyof NativeHostServiceMap>(context: Pick<NativePackageContext, 'service'>, id: Id): NativeHostServiceMap[Id] {
-  return context.service(id, NATIVE_HOST_SERVICE_VERSION) as NativeHostServiceMap[Id]
+  return useService<NativeHostServiceMap[Id]>(context, NATIVE_HOST_SERVICE_CONTRACTS[id])
 }
 
 /** Publish only host facts and caller-scoped invocations; no raw adapter, store or grants enter the package. */
 export function createNativeServicesPackage(options: { readonly ports: NativeHostServicePorts }): NativePackageDefinition {
-  const ids = Object.values(NATIVE_HOST_SERVICE_IDS)
   return Object.freeze({
     content: CONTENT,
     manifest: { schema: 1, id: NATIVE_HOST_SERVICES_PACKAGE_ID, version: '1.0.0', dependencies: [],
-      provides: ids.map(id => ({ id, version: NATIVE_HOST_SERVICE_VERSION })), requires: [], contributions: [] },
+      provides: [
+        serviceDeclaration(NATIVE_HOST_SERVICE_CONTRACTS['native-agent']),
+        serviceDeclaration(NATIVE_HOST_SERVICE_CONTRACTS['native-interactions']),
+        serviceDeclaration(NATIVE_HOST_SERVICE_CONTRACTS['native-executions']),
+        serviceDeclaration(NATIVE_HOST_SERVICE_CONTRACTS['native-tools']),
+        serviceDeclaration(NATIVE_HOST_SERVICE_CONTRACTS['native-work'])
+      ], requires: [], contributions: [] },
     install(context) {
       const ports = options.ports
       function active(): void { context.signal.throwIfAborted() }
@@ -105,7 +112,11 @@ export function createNativeServicesPackage(options: { readonly ports: NativeHos
           reconcile: (execution, id) => invoke(execution, 'native.work.reconcile', { id })
         })
       }
-      for (const id of ids) context.publish(id, NATIVE_HOST_SERVICE_VERSION, services[id])
+      publishService(context, NATIVE_HOST_SERVICE_CONTRACTS['native-agent'], services['native-agent'])
+      publishService(context, NATIVE_HOST_SERVICE_CONTRACTS['native-interactions'], services['native-interactions'])
+      publishService(context, NATIVE_HOST_SERVICE_CONTRACTS['native-executions'], services['native-executions'])
+      publishService(context, NATIVE_HOST_SERVICE_CONTRACTS['native-tools'], services['native-tools'])
+      publishService(context, NATIVE_HOST_SERVICE_CONTRACTS['native-work'], services['native-work'])
     }
   } satisfies NativePackageDefinition)
 }

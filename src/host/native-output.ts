@@ -7,6 +7,8 @@ import { splitNativeChatBubbles } from './native-chat-bubbles.ts'
 import { boundedTextChunks } from '../core/text-chunks.ts'
 import type { PackageConfigurationContribution, PackageConfigurationRegistry } from './package-configuration.ts'
 import type { NativePackageDefinition } from './native-packages.ts'
+import { CHAT_OUTPUT_SERVICE_CONTRACT } from './framework-service-contracts.ts'
+import { publishService, serviceDeclaration } from './service-contract.ts'
 
 export const NATIVE_OUTPUT_CONFIGURATION: PackageConfigurationContribution = Object.freeze<PackageConfigurationContribution>({
   descriptor: { id: 'chat-output', owner: 'chat-output', schemaVersion: 1, title: '回复方式',
@@ -115,9 +117,11 @@ export function createNativeOutputService(registry: PackageConfigurationRegistry
     }, clear() { planned.clear() }
   })
 }
-export function createNativeOutputPackage(service: ReturnType<typeof createNativeOutputService>): NativePackageDefinition {
-  return { content: createBuiltinPackageContent(import.meta.url, ['../contracts/native-output', './native-chat-bubbles', '../core/text-chunks', './native-markdown', '../rendering/builtin-markdown', '../rendering/builtin-markdown-worker', '../rendering/builtin-markdown-math']), manifest: { schema: 1, id: 'chat-output', version: '1.0.0', displayName: '回复呈现与 Markdown 转图',
+export type NativeOutputService = ReturnType<typeof createNativeOutputService>
+
+export function createNativeOutputPackage(service: NativeOutputService): NativePackageDefinition {
+  return { content: createBuiltinPackageContent(import.meta.url, ['./framework-service-contracts', './service-contract', '../contracts/service-contract', '../contracts/native-output', './native-chat-bubbles', '../core/text-chunks', './native-markdown', '../rendering/builtin-markdown', '../rendering/builtin-markdown-worker', '../rendering/builtin-markdown-math']), manifest: { schema: 1, id: 'chat-output', version: '1.0.0', displayName: '回复呈现与 Markdown 转图',
     description: '框架内置 Markdown 图片渲染、短回复分条与长纯文本转发。', dependencies: [], requires: [],
-    provides: [{ id: 'chat-output', version: 1 }], contributions: [] }, configurations: [NATIVE_OUTPUT_CONFIGURATION],
-    install(context) { context.publish('chat-output', 1, service); context.own('subscription', 'output-plans', () => service.clear()) } }
+    provides: [serviceDeclaration(CHAT_OUTPUT_SERVICE_CONTRACT)], contributions: [] }, configurations: [NATIVE_OUTPUT_CONFIGURATION],
+    install(context) { publishService(context, CHAT_OUTPUT_SERVICE_CONTRACT, service); context.own('subscription', 'output-plans', () => service.clear()) } }
 }

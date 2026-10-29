@@ -1,4 +1,5 @@
-import { defineServiceContract, type JsonObject } from '@qq-agent-framework/sdk/contracts'
+import { defineServiceContract } from '@qq-agent-framework/sdk/host'
+import type { JsonObject } from '@qq-agent-framework/sdk/contracts'
 
 export interface ExampleBehavior {
   describe(input: { readonly lastRunAt: number | null }): Promise<JsonObject>

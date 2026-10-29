@@ -402,6 +402,12 @@ export function createNativeUsage({ store, clock = Date.now, maxScan = 10_000, b
         assert(receipt.schema === 1 && fingerprints.has(String(receipt.fingerprint)), 'USAGE_TURN_CONFLICT', 'A retired turn has different usage.')
         return Object.freeze({ retired: true as const, cursor: key, fingerprint })
       }
+      // A failed call with no usage or billed amount adds no accounting evidence.
+      // Keep execution failures in their own journal; allow later actual usage to be ingested.
+      if (turn.status === 'failed' && turn.reportedCost === null
+        && tokenKeys.every(key => turn.tokens[key] === null || turn.tokens[key] === undefined)) {
+        return Object.freeze({ retired: true as const, filtered: true as const, cursor: key, fingerprint })
+      }
       const prices = turn.recordKind === 'opening-balance' || turn.recordKind === 'detail-only'
         ? { revision: null, prices: [] } : pricing()
       const recordedAt = clock()

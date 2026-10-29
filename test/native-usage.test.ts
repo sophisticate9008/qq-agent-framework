@@ -162,3 +162,21 @@ test('full usage projections preserve mature UI sections and distinguish flat pr
   assert.equal(incomplete.knownCosts.USD, 0.000145)
   assert.equal(projection.series().totals.cost, 0.000145)
 })
+
+test('failed calls without any usage are filtered while known costs, partial usage and later evidence survive', context => {
+  const store = createSqliteStore({ filename: ':memory:' })
+  context.after(() => store.close())
+  const usage = createNativeUsage({ store })
+  const empty: NativeUsageTurn = { ...usageTurn, status: 'failed', coverage: 'unknown',
+    tokens: { input: null, output: null, cacheRead: null, cacheWrite: null, total: null }, reportedCost: null }
+  assert('filtered' in usage.append(empty))
+  assert('filtered' in usage.append(empty))
+  assert.equal(usage.summary().records, 0)
+  assert.equal(store.list('native-usage.turns').length, 0)
+  usage.append({ ...empty, turnId: 'billed', reportedCost: { amount: 0.25, currency: 'USD' } })
+  usage.append({ ...empty, turnId: 'partial', tokens: { ...empty.tokens, output: 2 } })
+  usage.append({ ...empty, turnId: 'unresolved', status: 'unknown' })
+  usage.append(usageTurn)
+  assert.equal(usage.summary().records, 4)
+  assert.equal(usage.summary().tokens.output, 22)
+})

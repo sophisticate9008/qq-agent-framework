@@ -1,18 +1,24 @@
 import { validateServiceContractImplementation, type ServiceContract, type ServiceMetadata } from '../contracts/service-contract.ts'
 import type { NativeServiceConsumer } from './native-packages.ts'
+import { FrameworkError } from '../core/values.ts'
+
+function validate<Value extends object>(contract: ServiceContract<Value>, value: unknown): asserts value is Value {
+  try { validateServiceContractImplementation(contract, value) }
+  catch { throw new FrameworkError('SERVICE_IMPLEMENTATION_INVALID', 'The service does not implement its declared interface.') }
+}
 
 export function serviceDeclaration<Value extends object>(contract: ServiceContract<Value>) {
   return Object.freeze({ id: contract.id, version: contract.version })
 }
 export function useService<Value extends object>(context: { service(id: string, version: number): unknown }, contract: ServiceContract<Value>): Value {
   const value = context.service(contract.id, contract.version)
-  validateServiceContractImplementation(contract, value)
+  validate(contract, value)
   return value
 }
 export function publishService<Value extends object>(context: {
   publish(id: string, version: number, value: unknown, metadata?: ServiceMetadata): void
 }, contract: ServiceContract<Value>, value: Value): void {
-  validateServiceContractImplementation(contract, value)
+  validate(contract, value)
   context.publish(contract.id, contract.version, value, { description: contract.description, methods: contract.methods })
 }
 
@@ -21,7 +27,7 @@ export function publishScopedService<Value extends object>(context: {
 }, contract: ServiceContract<Value>, factory: (consumer: NativeServiceConsumer) => Value): void {
   context.publishScoped(contract.id, contract.version, consumer => {
     const value = factory(consumer)
-    validateServiceContractImplementation(contract, value)
+    validate(contract, value)
     return value
   }, { description: contract.description, methods: contract.methods })
 }
@@ -59,6 +65,7 @@ export function guardService(value: unknown, active: () => void): unknown {
           value: Reflect.get(facade, key) } : undefined
       },
       set() { return false }, defineProperty() { return false }, deleteProperty() { return false },
+      preventExtensions() { return false }, setPrototypeOf() { return false },
     })
     objects.set(current, facade)
     return facade

@@ -185,8 +185,9 @@ test('chat-input and media packages coexist with hot CAS configuration, owned st
   assert.equal(store.list('native-chat.media').length, 1)
   assert.equal(manager.contributions().length, 3)
   await manager.stop()
-  await assert.rejects(chat.read('group:123'))
-  await assert.rejects(media.register({ kind: 'image', messageId: '789', conversationId: 'group:123', source: { file: 'opaque-id' } }, signal))
+  assert.throws(() => chat.read('group:123'), { code: 'NATIVE_PACKAGE_SERVICE_UNAVAILABLE' })
+  assert.throws(() => media.register({ kind: 'image', messageId: '789', conversationId: 'group:123', source: { file: 'opaque-id' } }, signal),
+    { code: 'NATIVE_PACKAGE_SERVICE_UNAVAILABLE' })
   assert.equal(store.list('native-chat.media').length, 1)
   await assert.rejects(configurations.read('chat-input'), { code: 'PACKAGE_CONFIGURATION_NOT_FOUND' })
   assert.equal(configurations.descriptors().length, 1)

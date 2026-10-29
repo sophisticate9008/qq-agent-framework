@@ -4,7 +4,6 @@ export class FrameworkError extends Error {
     super(message);
     this.code = code;
     this.name = 'FrameworkError';
-    this.code = code;
   }
 }
 
@@ -51,7 +50,8 @@ export function identifier(value: unknown): value is string {
 export function errorCode(error: unknown, fallback = 'INTERNAL_ERROR'): string {
   // Reloaded extensions and deployment snapshots can load distinct constructors.
   // Read only a bounded, own data property; never forward messages or getters.
-  if (!(error instanceof Error) || Object.getOwnPropertyDescriptor(error, 'name')?.value !== 'FrameworkError') return fallback;
+  if (!(error instanceof FrameworkError) && (!(error instanceof Error)
+    || Object.getOwnPropertyDescriptor(error, 'name')?.value !== 'FrameworkError')) return fallback;
   const code: unknown = Object.getOwnPropertyDescriptor(error, 'code')?.value;
   return typeof code === 'string' && /^[A-Z][A-Z_]{1,63}$/.test(code) ? code : fallback;
 }

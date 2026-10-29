@@ -8,6 +8,8 @@ test('error codes survive separate extension constructors without exposing arbit
     constructor() { super('private detail'); this.name = 'FrameworkError'; }
   }
   assert.equal(errorCode(new FrameworkError('DIARY_PLAN_INVALID', 'detail')), 'DIARY_PLAN_INVALID');
+  class AdapterError extends FrameworkError { constructor() { super('DSH_FOLLOW_ENDED', 'detail'); this.name = 'DshAdapterError'; } }
+  assert.equal(errorCode(new AdapterError()), 'DSH_FOLLOW_ENDED');
   assert.equal(errorCode(new ExtensionError()), 'PLUGIN_MODEL_SESSION_UNAVAILABLE');
   assert.equal(errorCode(Object.assign(new Error('private detail'), { code: 'PRIVATE_DETAIL' })), 'INTERNAL_ERROR');
   assert.equal(errorCode({ name: 'FrameworkError', code: 'PRIVATE_DETAIL' }), 'INTERNAL_ERROR');

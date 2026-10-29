@@ -13,11 +13,11 @@ const states: Record<string, string> = { waiting: '等待触发', running: '正�
   rejected: '未接纳', unknown: '结果待核对', cancelled: '已取消', expired: '已过期', blocked: '等待处理' }
 const time = (at: number | null) => at === null ? '—' : new Date(at).toLocaleString('zh-CN')
 const key = (task: ConversationTaskListItem) => JSON.stringify([task.origin, task.simulationRunId, task.id, task.taskDeleted ? task.runId : null])
-export function ConversationTasks({ api, connected }: { api: ApiClient; connected: boolean }) {
+export function ConversationTasks({ api, connected, active = true }: { api: ApiClient; connected: boolean; active?: boolean }) {
   const [after, setAfter] = useState<string | null>(null)
   const [selected, setSelected] = useState<ConversationTaskListItem | null>(null)
-  const data = useReadResource(api, '/api/chat/tasks' + (after ? '?after=' + after : ''), connected, parseConversationTaskPage, { intervalMs: 5000 })
-  const simulation = useReadResource(api, '/api/chat/simulations/tasks/recent', connected, parseSimulationTaskList, { intervalMs: 5000 })
+  const data = useReadResource(api, '/api/chat/tasks' + (after ? '?after=' + after : ''), connected && active, parseConversationTaskPage, { intervalMs: 5000 })
+  const simulation = useReadResource(api, '/api/chat/simulations/tasks/recent', connected && active, parseSimulationTaskList, { intervalMs: 5000 })
   const rows = [...(data.snapshot?.items.map(task => conversationTaskListItem(task)) ?? []), ...(simulation.snapshot?.items ?? [])]
     .sort((a, b) => b.updatedAt - a.updatedAt || key(a).localeCompare(key(b)))
   const detail = selected && (rows.find(task => key(task) === key(selected)) ?? selected)

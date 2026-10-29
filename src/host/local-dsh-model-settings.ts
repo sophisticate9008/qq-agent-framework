@@ -20,7 +20,9 @@ export interface LocalDshModelSettings {
 }
 
 export interface LocalDshModelCapabilities {
-  readonly cache?: { readonly source: 'dsh' | 'provider'; readonly updatedAt: number }
+  readonly cache?: { readonly source: 'dsh' | 'provider' | 'manual'; readonly updatedAt: number }
+  readonly cacheRevision?: string
+  readonly modelSettings?: DshDeploymentModelSettings
   readonly capacity?: ChatCapacityRecommendation | null
   readonly provider: string
   readonly model: string
@@ -244,7 +246,7 @@ export async function readLocalDshModelMetadata(provider: NativeModelProvider, m
   }
 }
 
-/** Project only supported public controls; retain complete model metadata in the private cache. */
+/** Expose model controls and editable metadata without provider credentials. */
 export function modelSettingsCapabilities(provider: string, model: string, settings: DshDeploymentModelSettings,
   cache?: LocalDshModelCapabilities['cache']): LocalDshModelCapabilities {
   const validated = validateDshModelSettings(settings)
@@ -252,7 +254,7 @@ export function modelSettingsCapabilities(provider: string, model: string, setti
   return snapshot({ provider, model, state: 'available',
     reasoningEfforts: declared === false ? ['off']
       : publicReasoningEfforts.filter(level => Object.hasOwn(declared, level)),
-    missingReasons: [], capacity: recommendChatCapacity(validated)!, ...(cache ? { cache } : {}) })
+    missingReasons: [], capacity: recommendChatCapacity(validated)!, modelSettings: validated, ...(cache ? { cache } : {}) })
 }
 
 export async function resolveLocalDshModelSettings(configuration: NativeChatConfiguration, target: DeploymentTarget,

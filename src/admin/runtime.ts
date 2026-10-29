@@ -4,6 +4,7 @@ import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from 
 import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
 import { createPluginSessionRoutes } from './plugin-sessions.ts'
 import { createPluginScheduleRoutes } from './plugin-schedules.ts'
+import { validateManualDshModelSettings, type DshDeploymentModelSettings } from '../contracts/dsh-model-settings.ts'
 import { createSimulationSessionRoutes } from './simulation-sessions.ts'
 import { NATIVE_USAGE_SESSION_DELETE_PATH, parseNativeUsageSessionDeleteRequest } from '../contracts/native-usage-session.ts'
 import { isNativeEventCursor, isNativeEventFilter } from '../contracts/native-events.ts'
@@ -510,7 +511,8 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         signal.throwIfAborted()
         const models = provider.models.map(model => {
           const cached = capabilityCache.find(document, provider, model.id)
-          return cached ? cachedCapabilities(cached) : unavailableCapabilities(id, model.id, 'model_capability_cache_empty')
+          return { ...(cached ? cachedCapabilities(cached) : unavailableCapabilities(id, model.id, 'model_capability_cache_empty')),
+            cacheRevision: capabilityCache.revision(document, provider, model.id) }
         })
         if ((await repository.readProviders()).revision !== providers.revision) requestError(409, 'chat_revision_conflict')
         return { provider: id, providersRevision: providers.revision, models }
@@ -520,13 +522,22 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
       method: 'POST', pathname: '/api/chat/model-capabilities', maxRequestBytes: 4096,
       async handle({ body, query, signal }) {
         requireEmptyQuery(query)
-        if (!isRecord(body) || !hasExactKeys(body, ['provider', 'model', 'action', 'providersRevision'])
+        if (!isRecord(body) || !hasExactKeys(body, ['provider', 'model', 'action', 'providersRevision',
+          ...(body.cacheRevision === undefined ? [] : ['cacheRevision']), ...(body.action === 'save' ? ['modelSettings'] : [])])
           || !reference(body.provider) || body.provider.length > 128 || !reference(body.model) || body.model.length > 128
-          || body.action !== 'refresh' && body.action !== 'clear'
+          || body.action !== 'refresh' && body.action !== 'clear' && body.action !== 'save'
+          || (body.action === 'save' || body.cacheRevision !== undefined)
+            && (typeof body.cacheRevision !== 'string' || !NATIVE_REVISION_PATTERN.test(body.cacheRevision))
           || typeof body.providersRevision !== 'string' || !NATIVE_REVISION_PATTERN.test(body.providersRevision)) {
           requestError(400, 'invalid_model_capability_request')
         }
         const { provider: providerId, model, action, providersRevision } = body
+        const cacheRevision = typeof body.cacheRevision === 'string' ? body.cacheRevision : undefined
+        let manualSettings: DshDeploymentModelSettings | undefined
+        if (action === 'save') {
+          try { manualSettings = validateManualDshModelSettings(body.modelSettings) }
+          catch { requestError(400, 'invalid_model_capability_settings') }
+        }
         const providers = await repository.readProviders()
         if (providers.revision !== providersRevision) requestError(409, 'chat_revision_conflict')
         const provider = providers.value.providers.find(entry => entry.id === providerId)
@@ -539,11 +550,14 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         let failure: string | undefined
         try {
           if (action === 'clear') {
-            await capabilityCache.clear(provider, model, providersRevision, combined)
+            await capabilityCache.clear(provider, model, providersRevision, combined, cacheRevision)
             capabilities = unavailableCapabilities(providerId, model, 'model_capability_cache_empty')
             ok = true
+          } else if (action === 'save' && manualSettings && cacheRevision) {
+            capabilities = cachedCapabilities(await capabilityCache.saveManual(provider, model, providersRevision, manualSettings, cacheRevision, combined))
+            ok = true
           } else {
-            const resolved = await capabilityCache.resolve({ provider, model, providersRevision, refresh: true,
+            const resolved = await capabilityCache.resolve({ provider, model, providersRevision, refresh: true, expectedRevision: cacheRevision,
               signal: combined, loadDsh: () => loadDshMetadata(provider, model, combined) })
             if (resolved) { capabilities = cachedCapabilities(resolved); ok = true }
             else failure = 'model_metadata_unavailable'
@@ -556,6 +570,11 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
           failure = deadline.aborted ? 'model_capabilities_timeout' : 'model_capability_update_failed'
         }
         if ((await repository.readProviders()).revision !== providersRevision) requestError(409, 'chat_revision_conflict')
+        // Pair the returned values with the same per-model revision for the next edit.
+        const latest = await capabilityCache.read()
+        const entry = capabilityCache.find(latest, provider, model)
+        capabilities = { ...(entry ? cachedCapabilities(entry) : unavailableCapabilities(providerId, model, 'model_capability_cache_empty')),
+          cacheRevision: capabilityCache.revision(latest, provider, model) }
         return { ok, action, providersRevision, capabilities, ...(failure ? { error: failure } : {}) }
       }
     },

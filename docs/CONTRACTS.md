@@ -303,3 +303,11 @@ GIF 仍登记为当前会话的图片，不受视频观察开关影响。`qaf_me
 `DurableStore.changeToken(namespace)` 是可选优化：令牌只在同一打开实例内比较相等，涵盖本连接该命名空间的提交及其他连接的数据库变更；存储自身时钟回拨或命名空间跟踪达到 1024 项上限时也会保守全域失效。它不表示 TTL 是否到期，不代替实际读取、权限或 CAS 校验。原生入站队列在令牌未变时只检查已知非空队列；不支持令牌的存储继续完整扫描。
 
 DSH 桥接插件的 `pollFrameworkTools` 接受可选 `waitMs`（0–10000 毫秒，默认 0）。空队列等待期间，新工具入队立即唤醒；取消和关闭清理等待器，每个通道最多 32 个等待器。宿主空闲时请求等待 1000 毫秒，并按实际 RPC 剩余期限进一步压缩等待；有执行中工具时沿用短轮询观察撤销与过期。旧插件忽略附加字段并保持原有轮询，调用票据、租约、来源校验和完成回执不变。
+
+## 供应商模型能力手动声明
+
+`GET /api/chat/provider-model-capabilities` 为每个模型返回 `cacheRevision`，已有能力附完整 `modelSettings`（容量、输入模态和思考映射），不包含凭据。`POST /api/chat/model-capabilities` 增加 `action: "save"`，需要 `provider`、`model`、`providersRevision`、`cacheRevision` 和 `modelSettings`；手动写入同时核验供应商版本与该模型缓存版本。原 `refresh`、`clear` 仍兼容，可附 `cacheRevision` 进行条件更新。
+
+`modelSettings` 使用现有 DSH 模型设置结构：正整数 `contextWindow`、小于窗口的 `maxTokens`、`inputModalities` 和 `reasoningEfforts`。思考配置为 `false` 或 `off/low/medium/high/max` 到供应商请求值的映射；手动值限定为字母、数字、下划线、点、冒号或短横线构成的非空标记，只有 `off` 可为 `null`（不传参数），不接受表达式。未勾选档位不声明支持。
+
+手动记录的 `cache.source` 为 `manual`，按现有供应商连接身份隔离，复用聊天与助手的能力解析及 DSH 部署通路。保存不调用模型、不重启或改写当前 DSH 路由；选择档位并应用后写入该模型的 `reasoningEfforts`。手动记录直到明确编辑或清除才改变，自动读取与缓存淘汰不会覆盖。多窗口修改冲突不覆盖旧草稿，按已有管理界面刷新后重新编辑。

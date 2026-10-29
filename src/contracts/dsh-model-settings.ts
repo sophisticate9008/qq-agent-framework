@@ -32,3 +32,13 @@ export function validateDshModelSettings(value: unknown): DshDeploymentModelSett
     reasoningEfforts: efforts === false ? false : Object.freeze({ ...efforts }) as DshDeploymentModelSettings['reasoningEfforts'],
     ...(inputModalities === undefined ? {} : { inputModalities }) })
 }
+
+/** Operator input is a literal wire token, never a configuration expression. */
+export function validateManualDshModelSettings(value: unknown): DshDeploymentModelSettings {
+  const settings = validateDshModelSettings(value)
+  if (settings.reasoningEfforts !== false && Object.values(settings.reasoningEfforts).some(wire =>
+    wire !== null && (typeof wire !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(wire)))) {
+    throw new TypeError('Invalid manual reasoning wire value')
+  }
+  return settings
+}

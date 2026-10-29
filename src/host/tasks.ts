@@ -56,6 +56,7 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
   const active = new Map<string, AbortController>();
   let stopped = false;
   let cursor: string | undefined;
+  let emptyToken: string | undefined;
   let running: Promise<{ scanned: number; executed: number }> | null = null;
 
   function editable() { assert(!stopped, 'TASK_QUEUE_STOPPED', 'The task queue is stopped.'); }
@@ -135,8 +136,18 @@ export function createTaskQueue({ store, clock = Date.now, maxScan = 1000, handl
         await nextTurn();
         if (stopped) break;
       }
+      const firstPage = cursor === undefined && scanned === 0;
+      // Only an empty first page proves the entire index is empty. Capture its
+      // token before listing so concurrent arrivals invalidate the next run.
+      const token = firstPage ? store.changeToken?.(pendingNamespace) : undefined;
+      if (token !== undefined && token === emptyToken) break;
       const batch = store.list(pendingNamespace, cursor === undefined ? { limit: 1 } : { limit: 1, after: cursor });
-      if (!batch.length) { cursor = undefined; break; }
+      if (!batch.length) {
+        if (firstPage) emptyToken = token;
+        cursor = undefined;
+        break;
+      }
+      if (firstPage) emptyToken = undefined;
       const indexed = batch[0];
       cursor = indexed.key;
       scanned++;

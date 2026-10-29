@@ -60,6 +60,94 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('an unchanged empty pending index skips later scans and scheduling invalidates it', async context => {
+  const base = memoryStore(context);
+  const measured = instrumentStore(base);
+  const queue = createTaskQueue({ store: measured.store, clock: () => 10 });
+  context.after(() => queue.stop());
+  const called: string[] = [];
+  queue.register('test.handler', execution => { called.push(execution.id); });
+  measured.reset();
+  assert.deepEqual(await queue.runDue(), { scanned: 0, executed: 0 });
+  assert.equal(measured.lists.length, 1);
+  measured.reset();
+  await queue.runDue();
+  base.write('unrelated', 'event', {});
+  await queue.runDue();
+  assert.equal(measured.lists.length, 0);
+  queue.schedule(input('new'));
+  assert.deepEqual(await queue.runDue(), { scanned: 1, executed: 1 });
+  assert.deepEqual(called, ['new']);
+});
+
+test('an empty trailing page never caches a future task as an empty queue', async context => {
+  const base = memoryStore(context);
+  let clock = 10;
+  const queue = createTaskQueue({ store: base, maxScan: 1, clock: () => clock });
+  context.after(() => queue.stop());
+  let calls = 0;
+  queue.register('test.handler', () => { calls++; });
+  queue.schedule(input('future', 100));
+  assert.deepEqual(await queue.runDue(), { scanned: 1, executed: 0 });
+  assert.deepEqual(await queue.runDue(), { scanned: 0, executed: 0 });
+  clock = 100;
+  assert.deepEqual(await queue.runDue(), { scanned: 1, executed: 1 });
+  assert.equal(calls, 1);
+});
+
+test('an arrival after an empty index snapshot invalidates the next run', async context => {
+  const base = memoryStore(context);
+  let inject: (() => void) | undefined;
+  const store: DurableStore = { ...base, list(namespace, options) {
+    const rows = base.list(namespace, options);
+    if (namespace === 'tasks.pending' && inject) {
+      const action = inject; inject = undefined; action();
+    }
+    return rows;
+  } };
+  const queue = createTaskQueue({ store, clock: () => 10 });
+  context.after(() => queue.stop());
+  let calls = 0;
+  queue.register('test.handler', () => { calls++; });
+  inject = () => { queue.schedule(input('late')); };
+  assert.deepEqual(await queue.runDue(), { scanned: 0, executed: 0 });
+  assert.deepEqual(await queue.runDue(), { scanned: 1, executed: 1 });
+  assert.equal(calls, 1);
+});
+
+test('empty pending indexes remain visible to external writes and store clock rollback', async context => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-index-token-'));
+  let storeClock = 10;
+  const filename = join(directory, 'tasks.sqlite');
+  const base = createSqliteStore({ filename, clock: () => storeClock });
+  const external = createSqliteStore({ filename, clock: () => storeClock });
+  const queue = createTaskQueue({ store: base, clock: () => 10 });
+  context.after(async () => { await queue.stop(); base.close(); external.close(); rmSync(directory, { recursive: true, force: true }); });
+  const called: string[] = [];
+  queue.register('test.handler', execution => { called.push(execution.id); });
+  await queue.runDue(); await queue.runDue();
+  seedTask(external, 'external', 'waiting');
+  external.write('tasks.pending', 'external', { id: 'external' });
+  assert.equal((await queue.runDue()).executed, 1);
+  seedTask(external, 'ttl', 'waiting');
+  external.write('tasks.pending', 'ttl', { id: 'ttl' }, { expiresAt: 20 });
+  storeClock = 20;
+  assert.deepEqual(await queue.runDue(), { scanned: 0, executed: 0 });
+  storeClock = 15;
+  assert.deepEqual(await queue.runDue(), { scanned: 1, executed: 1 });
+  assert.deepEqual(called, ['external', 'ttl']);
+});
+
+test('stores without mutation tokens still query an empty pending index each run', async context => {
+  const base = memoryStore(context);
+  const measured = instrumentStore({ ...base, changeToken: undefined });
+  const queue = createTaskQueue({ store: measured.store });
+  context.after(() => queue.stop());
+  measured.reset();
+  await queue.runDue(); await queue.runDue();
+  assert.equal(measured.lists.length, 2);
+});
+
 test('runDue lists only pending keys and reads no terminal history as task IDs advance', async context => {
   const base = memoryStore(context);
   for (let index = 0; index < 1500; index++) seedTask(base, `history-${String(index).padStart(4, '0')}`, 'completed');

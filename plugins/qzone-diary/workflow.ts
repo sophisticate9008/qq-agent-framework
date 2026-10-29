@@ -3,6 +3,7 @@ import { assert, errorCode, isRecord } from '../../src/core/values.ts'
 import { json } from '../../src/host/data.ts'
 import type { DiaryConfiguration, DiaryDay, DiaryOptions, DiarySchedulerHandlers, DiarySlot } from './types.ts'
 import { localDay, localMinute } from './time.ts'
+import { diaryPlanRecovery, MAX_AUTOMATIC_PLANS, PLAN_RETRY_DELAY_MS, MANUAL_PLAN_DELAY_MS } from './planning.ts'
 export { DIARY_WORKFLOW_CONTRACT } from './workflow-contract.ts'
 
 const namespace = 'qzone-diary.days'
@@ -93,16 +94,39 @@ export function createQzoneDiary(options: DiaryOptions) {
         timeZone: config().timeZone, windowMs: slot.until - slot.at, misfire: 'skip' })
     }
   }
-  async function planDay(current: AbortSignal = signal): Promise<void> {
+  function schedulePlanRetry(day: DiaryDay) {
+    if (day.state !== 'unknown' || diaryPlanRecovery(day, options).state !== 'ready'
+      || (day.planningAttempts ?? 1) >= MAX_AUTOMATIC_PLANS || signal.aborted) return
+    const at = Math.max(now() + 5000, day.updatedAt + PLAN_RETRY_DELAY_MS)
+    if (!config().windows.some(window => localMinute(day.date, window.end, config().timeZone) - at >= 1_860_000)) return
+    const id = `retry-plan-${day.date}-${day.planningAttempts ?? 1}`
+    if (scheduler!.list({ limit: 1000 }).some(rule => rule.id === id)) return
+    scheduler!.schedule({ id, handler: 'plan', payload: { date: day.date }, schedule: { kind: 'once', at },
+      presentation: { title: '恢复今日空间日记规划', ownerLabel: '空间生活日记', description: '核对模型会话后恢复尚未生成的计划。' },
+      timeZone: config().timeZone, windowMs: 1800000, misfire: 'skip' })
+  }
+  async function planDay(current: AbortSignal = signal, request: { recover?: boolean; date?: string } = {}): Promise<void> {
     const c = config(), date = localDay(now(), c.timeZone)
-    if (!c.enabled) return
+    current.throwIfAborted()
+    if (!c.enabled || request.date !== undefined && request.date !== date) return
     return serial(`plan:${date}`, async () => {
       const existing = read(date)
-      if (existing) { if (existing.state === 'planned') scheduleDay(existing); return }
-      assert(store.list(namespace, { limit: 366 }).length < 366, 'DIARY_HISTORY_LIMIT', 'Resolve retained unfinished days before creating new ones.')
+      if (existing?.state === 'planned') { scheduleDay(existing); return }
+      if (existing) {
+        const recovery = diaryPlanRecovery(existing, options)
+        assert(recovery.state === 'ready', 'DIARY_PLAN_RECOVERY_BLOCKED', recovery.message)
+        if (!request.recover && (existing.planningAttempts ?? 1) >= MAX_AUTOMATIC_PLANS) return
+        const delay = request.recover ? MANUAL_PLAN_DELAY_MS : PLAN_RETRY_DELAY_MS
+        if (now() < existing.updatedAt + delay) {
+          if (request.recover) assert(false, 'DIARY_PLAN_RECOVERY_COOLDOWN', '恢复规划至少间隔一分钟。')
+          schedulePlanRetry(existing); return
+        }
+      }
+      assert(existing || store.list(namespace, { limit: 366 }).length < 366, 'DIARY_HISTORY_LIMIT', 'Resolve retained unfinished days before creating new ones.')
       const windows = c.windows.map(window => ({ start: Math.max(localMinute(date, window.start, c.timeZone), now() + 60000),
         end: localMinute(date, window.end, c.timeZone) })).filter(window => window.end - window.start >= 1800000)
-      const day: DiaryDay = { date, createdAt: now(), updatedAt: now(), state: 'planning', slots: [] }; save(day)
+      const day: DiaryDay = { ...existing, date, createdAt: existing?.createdAt ?? now(), updatedAt: now(), state: 'planning', slots: [],
+        planningAttempts: (existing ? existing.planningAttempts ?? 1 : 0) + 1 }; save(day)
       if (!windows.length) { day.state = 'planned'; save(day); return }
       const count = 1 + Math.floor(random() * windows.length)
       const selected = windows.map(window => ({ ...window, order: random() })).sort((a, b) => a.order - b.order).slice(0, count).sort((a, b) => a.start - b.start)
@@ -119,7 +143,15 @@ export function createQzoneDiary(options: DiaryOptions) {
             state: window.until - at >= 1800000 ? 'scheduled' : 'skipped', attempts: 0 }
         })
         current.throwIfAborted(); day.state = 'planned'; save(day); scheduleDay(day); observe('planned', date)
-      } catch (error) { day.state = 'unknown'; save(day); observe('planning-failed', date, undefined, undefined, errorCode(error)); throw error }
+      } catch (error) {
+        // A saved plan stays authoritative even when registering its schedules fails.
+        if (day.state !== 'planned') day.state = 'unknown'
+        const code = errorCode(error)
+        day.planningFailures = [...(day.planningFailures ?? []), { at: now(), code, attempt: day.planningAttempts! }].slice(-16)
+        save(day); observe('planning-failed', date, undefined, day.planningAttempts, code)
+        if (!current.aborted) schedulePlanRetry(day)
+        throw error
+      }
     })
   }
   async function publishSlot(date: string, index: number, current: AbortSignal = signal): Promise<void> {
@@ -188,6 +220,8 @@ export function createQzoneDiary(options: DiaryOptions) {
   function status() {
     const date = localDay(now(), config().timeZone), day = read(date)
     return { enabled: config().enabled, publish: config().publish, date, state: day?.state ?? 'not-planned',
+      recovery: diaryPlanRecovery(day, options), planningAttempts: day?.planningAttempts ?? (day ? 1 : 0),
+      planningFailures: day?.planningFailures ?? [],
       sessions: runtime.models.list().map(b => ({ name: b.name, sessionId: b.sessionId, state: b.state })),
       slots: day?.slots.map(({ prompt: _prompt, receipt: _receipt, protocolImage: _file, ...slot }) => slot) ?? [] }
   }
@@ -224,7 +258,10 @@ export function createQzoneDiary(options: DiaryOptions) {
     // Direct workflow users continue to release their own handlers through stop().
     if (!handlers) cleanups.push(release)
     try {
-      registrations.push(scheduler.registerHandler('plan', handlers?.plan ?? (async occurrence => { await maintain(); await planDay(occurrence.signal) })))
+      registrations.push(scheduler.registerHandler('plan', handlers?.plan ?? (async occurrence => {
+        await maintain(); await planDay(occurrence.signal, { recover: occurrence.payload.recover === true,
+          ...(typeof occurrence.payload.date === 'string' ? { date: occurrence.payload.date } : {}) })
+      })))
       registrations.push(scheduler.registerHandler('publish', handlers?.publish ?? (async occurrence => {
         assert(typeof occurrence.payload.date === 'string' && typeof occurrence.payload.slot === 'number', 'DIARY_TRIGGER_INVALID', 'A saved slot is required.')
         await publishSlot(occurrence.payload.date, occurrence.payload.slot, occurrence.signal)
@@ -238,7 +275,9 @@ export function createQzoneDiary(options: DiaryOptions) {
       if (!read(date) && config().enabled && !rules.some(rule => rule.id === `start-${date}`)) scheduler.schedule({ id: `start-${date}`, handler: 'plan', payload: {},
         presentation: { title: '检查今天的空间日记安排', ownerLabel: '空间生活日记', description: '保留已有安排，尚无计划时创建当天计划。' },
         schedule: { kind: 'once', at: now() + 5000 }, timeZone: config().timeZone, windowMs: 1800000 })
-      const existing = read(date); if (existing?.state === 'planned') scheduleDay(existing)
+      const existing = read(date)
+      if (existing?.state === 'planned') scheduleDay(existing)
+      else if (existing?.state === 'unknown') schedulePlanRetry(existing)
       return release
     } catch (error) { release(); throw error }
   }

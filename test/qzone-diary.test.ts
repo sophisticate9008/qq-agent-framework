@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import type { AgentEvent, DurableStore } from '../src/contracts/ports.ts';
 import type { JsonValue } from '../src/contracts/data.ts';
+import { json } from '../src/host/data.ts';
 import type { PluginModelBackend } from '../src/contracts/plugin-model.ts';
 import type { ImageGenerationService } from '../src/contracts/image-generation.ts';
 import type { OneBotReadResult } from '../src/adapters/onebot-actions.ts';
@@ -32,6 +33,7 @@ interface FixtureOptions {
   readonly outcome?: OneBotReadResult<JsonValue> | 'lost';
   readonly onPlan?: (request: ModelStart) => void;
   readonly onReview?: (request: ModelStart, index: number) => void;
+  readonly inspectFails?: () => boolean;
 }
 
 async function fixture(context: TestContext, options: FixtureOptions = {}) {
@@ -49,7 +51,7 @@ async function fixture(context: TestContext, options: FixtureOptions = {}) {
   const followers = new Map<string, (event: AgentEvent) => void | Promise<void>>();
   const backend: PluginModelBackend = {
     async models() { return ['writer', 'vision'].map(model => ({ provider: 'fixture', model, providerName: 'Fixture', modelName: model })); },
-    async inspect(sessionId) { return { exists: remoteSessions.has(sessionId) }; },
+    async inspect(sessionId) { if (options.inspectFails?.()) throw new Error('Session storage temporarily unavailable'); return { exists: remoteSessions.has(sessionId) }; },
     async create(request) { request.signal.throwIfAborted(); stats.created.push(request); remoteSessions.add(request.sessionId); },
     async follow(request) { const key = request.sessionId + ':' + request.requestId; followers.set(key, request.onEvent); return () => { followers.delete(key); }; },
     async start(request) {
@@ -374,4 +376,62 @@ test('an extension directory write returning unknown keeps its durable barrier b
   assert.equal(record.value.status, 'unknown'); assert.equal(record.expiresAt, null); assert.equal(calls, 1);
   now += 8 * dayMs; store.purgeExpired();
   await effect.execute(request); assert.equal(calls, 1);
+});
+
+test('pre-submit planning failures retry at most three times across restarts and explicit recovery retains the session', async context => {
+  let unavailable = true;
+  const f = await fixture(context, { inspectFails: () => unavailable });
+  const day = await f.startPlan();
+  assert.equal(day.state, 'unknown'); assert.equal(day.slots.length, 0);
+  assert.equal(f.stats.planning, 0);
+  const session = f.models.listBindings('qzone-diary')[0]!.sessionId;
+  const rules = () => f.scheduler.forPlugin('qzone-diary', new AbortController().signal).list({ limit: 1000 });
+  for (let attempt = 1; attempt < 3; attempt++) {
+    const retry = rules().find(rule => rule.id === `retry-plan-${day.date}-${attempt}`)!;
+    assert(retry); assert(retry.nextAt! >= f.now + 300_000);
+    await f.restart();
+    assert.equal(rules().filter(rule => rule.id === retry.id).length, 1);
+    f.setNow(retry.nextAt!); await f.tick();
+  }
+  assert.equal(f.diary.read(day.date)!.planningAttempts, 3);
+  assert.equal(f.diary.read(day.date)!.planningFailures?.length, 3);
+  assert.equal(rules().some(rule => rule.id === `retry-plan-${day.date}-3`), false);
+  await f.restart();
+  await assert.rejects(f.diary.planDay(undefined, { recover: true }), { code: 'DIARY_PLAN_RECOVERY_COOLDOWN' });
+  unavailable = false; f.setNow(f.now + 60_000);
+  await f.diary.planDay(undefined, { recover: true });
+  const recovered = f.diary.read(day.date)!;
+  assert.equal(recovered.state, 'planned'); assert.equal(recovered.planningAttempts, 4);
+  assert.equal(recovered.planningFailures?.length, 3); assert.equal(recovered.createdAt, day.createdAt);
+  assert.equal(f.models.listBindings('qzone-diary')[0]!.sessionId, session);
+  assert.equal(f.stats.planning, 1); assert.equal(f.stats.images.length, 0); assert.equal(f.stats.publications.length, 0);
+  await f.diary.planDay(undefined, { recover: true }); assert.equal(f.stats.planning, 1);
+});
+
+test('unknown model execution blocks manual and automatic planning until the original execution is reconciled', async context => {
+  let lost = true;
+  const f = await fixture(context, { onPlan() { if (lost) throw new Error('Submission result lost'); } });
+  const day = await f.startPlan();
+  assert.equal(f.models.listBindings('qzone-diary')[0]!.state, 'unknown');
+  assert.equal(f.diary.status().recovery.state, 'unsettled');
+  await f.restart(); f.setNow(f.now + 300_000);
+  await assert.rejects(f.diary.planDay(undefined, { recover: true }), { code: 'DIARY_PLAN_RECOVERY_BLOCKED' });
+  assert.equal(f.stats.planning, 1);
+  assert.equal(f.scheduler.forPlugin('qzone-diary', new AbortController().signal).list().some(rule => rule.id.startsWith('retry-plan-')), false);
+  const binding = f.models.listBindings('qzone-diary')[0]!;
+  await f.models.reconcile('qzone-diary', { name: 'diary', expectedRevision: binding.revision }, new AbortController().signal);
+  lost = false; await f.diary.planDay(undefined, { recover: true });
+  assert.equal(f.diary.read(day.date)!.state, 'planned'); assert.equal(f.stats.planning, 2);
+  assert.equal(f.stats.publications.length, 0);
+});
+
+test('recovery cannot replace partial saved slots and a previous-day recovery cannot plan a different day', async context => {
+  const f = await fixture(context);
+  const day = await f.startPlan(); const row = f.store.read('qzone-diary.days', day.date)!;
+  f.store.write(row.namespace, row.key, json({ ...day, state: 'unknown' }), { expectedRevision: row.revision });
+  await assert.rejects(f.diary.planDay(undefined, { recover: true }), { code: 'DIARY_PLAN_RECOVERY_BLOCKED' });
+  assert.deepEqual(f.diary.read(day.date)!.slots, day.slots); assert.equal(f.stats.planning, 1);
+  f.setNow(f.now + dayMs);
+  await f.diary.planDay(undefined, { recover: true, date: day.date });
+  assert.equal(f.diary.read('2026-01-02'), null); assert.equal(f.stats.planning, 1);
 });

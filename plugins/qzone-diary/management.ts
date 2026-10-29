@@ -4,6 +4,7 @@ import type { PluginScheduleBusinessDetails, PluginScheduleBusinessSummary } fro
 import type { PluginSchedulerClient, PluginScheduledRule, PluginScheduledHistory } from '../../src/host/plugin-scheduler.ts'
 import type { DiaryDay, DiaryOptions, DiarySlot } from './types.ts'
 import { localDay } from './time.ts'
+import { diaryPlanRecovery, MAX_AUTOMATIC_PLANS } from './planning.ts'
 
 type DetailsProvider = Parameters<PluginSchedulerClient['registerDetailsProvider']>[1]
 type Step = NonNullable<PluginScheduleBusinessDetails['steps']>[number]
@@ -55,8 +56,17 @@ export function createDiaryScheduleDetails(handler: 'plan' | 'publish', options:
     const date = dateFor(rule, occurrence?.scheduledAt), day = read(date)
     if (handler === 'plan') {
       const count = day?.slots.length ?? 0, published = day?.slots.filter(slot => slot.state === 'published').length ?? 0
+      if (day?.state === 'unknown') {
+        const recovery = diaryPlanRecovery(day, options)
+        const retry = options.runtime.scheduler.list({ limit: 1000 }).find(item => item.handler === 'plan'
+          && item.payload.date === date && item.enabled && !item.cancelled && item.nextAt !== null)
+        return { stage: recovery.state === 'ready' ? '规划失败，可恢复' : '规划待核对',
+          summary: `${recovery.message}${retry && recovery.state === 'ready' ? ' 已登记后续规划检查。'
+            : recovery.state === 'ready' ? (day.planningAttempts ?? 1) >= MAX_AUTOMATIC_PLANS
+              ? ' 自动恢复次数已用完，可在 QQ 请求“恢复今天的空间日记规划”。' : ' 可在 QQ 请求“恢复今天的空间日记规划”。' : ''}` }
+      }
       return { stage: !day ? '等待安排' : day.state === 'planning' ? '正在安排今日计划'
-        : day.state === 'unknown' ? '计划结果未确认' : '今日计划已安排',
+        : '今日计划已安排',
       summary: !day ? `${date} 尚未生成计划。` : day.state === 'planned'
         ? `${date} 已安排 ${count} 条，已发布 ${published} 条。` : day.state === 'planning' ? '正在生成各时间段的生活片段。' : '规划中断，保留已有记录。' }
     }

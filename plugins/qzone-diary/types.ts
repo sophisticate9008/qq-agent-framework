@@ -60,4 +60,6 @@ export interface DiaryDay {
   createdAt: number
   updatedAt: number
   slots: DiarySlot[]
+  planningAttempts?: number
+  planningFailures?: { at: number; code: string; attempt: number }[]
 }

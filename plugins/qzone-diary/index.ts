@@ -1,5 +1,6 @@
 import { assert } from '../../src/core/values.ts'
 import { json } from '../../src/host/data.ts'
+import type { JsonValue } from '../../src/contracts/data.ts'
 import { fileURLToPath } from 'node:url'
 import type { NativePackageDefinition } from '../../src/host/native-packages.ts'
 import { validateServiceContractImplementation } from '../../src/contracts/service-contract.ts'
@@ -13,8 +14,10 @@ import { serviceDeclaration, useService } from '../../src/host/service-contract.
 import { DIARY_WORKFLOW_CONTRACT } from './workflow-contract.ts'
 import type { DiaryOptions, DiaryWorkflow } from './types.ts'
 import { createDiaryScheduleDetails } from './management.ts'
+import { localDay } from './time.ts'
+import { diaryPlanRecovery, MANUAL_PLAN_DELAY_MS } from './planning.ts'
 
-const fixedContent = createBuiltinPackageContent(import.meta.url, ['./workflow-contract', './types', './management', './media-store', './time'])
+const fixedContent = createBuiltinPackageContent(import.meta.url, ['./workflow-contract', './types', './management', './media-store', './time', './planning'])
 const moduleExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js'
 
 export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 'images' | 'signal'> & {
@@ -69,7 +72,10 @@ export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 
       context.own('task', 'workflow', () => manager.close())
       context.own('subscription', 'workflow-reload', extensions.register(manager))
       const releaseHandlers = manager.current().start({
-        plan: occurrence => manager.withCurrent(async diary => { await diary.maintain(); await diary.planDay(occurrence.signal) }),
+        plan: occurrence => manager.withCurrent(async diary => {
+          await diary.maintain(); await diary.planDay(occurrence.signal, { recover: occurrence.payload.recover === true,
+            ...(typeof occurrence.payload.date === 'string' ? { date: occurrence.payload.date } : {}) })
+        }),
         publish: occurrence => manager.withCurrent(async diary => {
           assert(typeof occurrence.payload.date === 'string' && typeof occurrence.payload.slot === 'number', 'DIARY_TRIGGER_INVALID', 'A saved slot is required.')
           await diary.publishSlot(occurrence.payload.date, occurrence.payload.slot, occurrence.signal)
@@ -79,14 +85,24 @@ export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 
       context.own('subscription', 'status', tools.register({ id: 'status', description: '查看空间生活日记插件的今日时间安排、图文审查与发布状态。',
         readOnly: true, permission: 'owner', parameters: { type: 'object', properties: {}, additionalProperties: false },
         execute() { return manager.withCurrent(diary => json(diary.status())) } }))
-      context.own('subscription', 'plan', tools.register({ id: 'plan', description: '为空间生活日记安排今日计划；已有计划保持不变，不额外增加当天发布次数。',
-        readOnly: false, permission: 'owner', parameters: { type: 'object', properties: {}, additionalProperties: false },
-        execute(_input, request) { return manager.withCurrent(async () => {
+      context.own('subscription', 'plan', tools.register({ id: 'plan', description: '检查今日空间日记安排；recover=true 时核对并恢复失败规划。已有日记保留，模型执行未确认时须先核对插件会话。',
+        readOnly: false, permission: 'owner', parameters: { type: 'object', properties: { recover: { type: 'boolean', description: '明确恢复今日尚未生成的计划。' } }, additionalProperties: false },
+        execute(input, request) { return manager.withCurrent(async (diary): Promise<JsonValue> => {
           request.signal.throwIfAborted()
-          scheduler.schedule({ id: `manual-${request.invocationId}`, handler: 'plan', payload: {},
+          assert(input.recover === undefined || typeof input.recover === 'boolean', 'DIARY_RECOVERY_INVALID', '恢复选项必须是布尔值。')
+          const at = (options.clock ?? Date.now)(), date = localDay(at, options.configuration().timeZone)
+          const day = diary.read(date)
+          if (!options.configuration().enabled) return { status: 'rejected', code: 'DIARY_DISABLED', summary: '请先启用空间生活日记。' }
+          if (day && day.state !== 'planned') {
+            const recovery = diaryPlanRecovery(day, workflowOptions)
+            if (recovery.state !== 'ready') return { status: 'rejected', code: 'DIARY_PLAN_RECOVERY_BLOCKED', summary: recovery.message }
+            if (!input.recover) return { status: 'rejected', code: 'DIARY_PLAN_RECOVERY_REQUIRED', summary: '今日规划失败；需要恢复时请设置 recover=true。' }
+            if (at < day.updatedAt + MANUAL_PLAN_DELAY_MS) return { status: 'rejected', code: 'DIARY_PLAN_RECOVERY_COOLDOWN', summary: '恢复规划至少间隔一分钟，请稍后再试。' }
+          }
+          scheduler.schedule({ id: `manual-${request.invocationId}`, handler: 'plan', payload: { date, recover: input.recover === true },
             presentation: { title: '检查今天的空间日记安排', ownerLabel: '空间生活日记', description: '沿用已有计划，不额外增加当天发布次数。' },
-            schedule: { kind: 'once', at: Date.now() + 1000 }, windowMs: 1800000, timeZone: options.configuration().timeZone })
-          return { status: 'confirmed', state: 'scheduled', summary: '已安排检查今日计划，已有日程不会重复创建。' }
+            schedule: { kind: 'once', at: at + 1000 }, windowMs: 1800000, timeZone: options.configuration().timeZone })
+          return { status: 'confirmed', state: 'scheduled', summary: '已登记今日规划检查；是否恢复成功请查看空间日记状态，已有日程会保留。' }
         }) } }))
       context.own('subscription', 'set-enabled', tools.register({ id: 'set-enabled', description: '启用或暂停空间生活日记；暂停后不再生成或发布新的动态。',
         readOnly: false, permission: 'owner', parameters: { type: 'object', required: ['enabled'], additionalProperties: false,

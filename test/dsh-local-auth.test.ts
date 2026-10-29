@@ -70,3 +70,25 @@ test('concurrent local authentication isolates caller cancellation', { skip: pro
   await assert.rejects(canceled, { code: 'DSH_LOCAL_AUTH_ABORTED' })
   signature(await active, secret)
 })
+
+test('local authentication replaces future-dated cached cookies after clock rollback', { skip: process.platform !== 'linux' }, async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-local-auth-clock-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, '.credentials.yaml')
+  const secret = Buffer.alloc(32, 4)
+  await writeFile(path, credentials(secret), { mode: 0o600 })
+  let now = Date.now()
+  context.mock.method(Date, 'now', () => now)
+  const provider = createLocalDshAuthenticationProvider({ endpoint: 'http://127.0.0.1:3000', credentialsPath: path })
+  const signal = new AbortController().signal
+  const initial = await provider('none', signal)
+  now -= 60_000
+  const replaced = await provider('none', signal)
+  assert.notEqual(replaced, initial)
+  signature(replaced, secret)
+  const payload: unknown = JSON.parse(Buffer.from(replaced.split('.')[1]!, 'base64url').toString('utf8'))
+  assert(payload !== null && typeof payload === 'object' && 'issuedAt' in payload)
+  assert.equal(payload.issuedAt, now)
+  now += 1_000
+  assert.equal(await provider('none', signal), replaced)
+})

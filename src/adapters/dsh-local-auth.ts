@@ -48,6 +48,7 @@ function object(value: unknown): value is Record<string, unknown> {
 interface ValidatedCookie {
   readonly revision: string
   readonly cookie: string
+  readonly issuedAt: number
   readonly refreshAt: number
 }
 
@@ -81,7 +82,8 @@ async function authenticatedCookie(filename: string, authority: string, cached: 
     if (!before.isFile() || before.uid !== BigInt(process.getuid()) || before.nlink !== 1n || mode !== 0o600 && mode !== 0o400
       || before.size < 1n || before.size > 1_048_576n) fail('DSH_LOCAL_AUTH_UNSAFE_FILE')
     const revision = fileRevision(before)
-    const reusable = cached?.revision === revision && cached.refreshAt > Date.now() ? cached : undefined
+    const now = Date.now()
+    const reusable = cached?.revision === revision && cached.issuedAt <= now && cached.refreshAt > now ? cached : undefined
     let bytesRead = 0
     if (!reusable) {
       bytes = Buffer.alloc(Number(before.size) + 1)
@@ -116,7 +118,7 @@ async function authenticatedCookie(filename: string, authority: string, cached: 
       const body = Buffer.from(JSON.stringify({ version: 1, authority, issuedAt, expiresAt: issuedAt + 300_000 }), 'utf8').toString('base64url')
       const signature = createHmac('sha256', secret).update(body).digest('base64url')
       const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
-      return { revision, cookie: `${name}=v1.${body}.${signature}`, refreshAt: issuedAt + 240_000 }
+      return { revision, cookie: `${name}=v1.${body}.${signature}`, issuedAt, refreshAt: issuedAt + 240_000 }
     } finally { secret.fill(0) }
   } catch {
     checkSignal(signal)

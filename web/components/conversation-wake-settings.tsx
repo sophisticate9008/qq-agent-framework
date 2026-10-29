@@ -46,21 +46,23 @@ export function ConversationWakeSettings({ api, connected, setDirty }: Pick<Page
     } catch (error) { setNotice(errorMessage(error)) } finally { setBusy(false) }
   }
   function reload() { setDraft(null); setUncertain(false); setNotice(''); catalog.refresh(); plans.refresh() }
-  return <div className="flatgroup stack">
-    <div className="row"><span>续聊策略</span><HelpTip label="续聊与唤醒策略">在白名单会话中，直接 @、昵称呼叫，以及开启引用唤醒后的引用机器人消息，会刷新基础续聊窗口。空 @ 机器人和协议识别的戳一戳也会唤醒，模型结合上下文决定如何回应；普通文字模拟戳一戳不算。窗口内本会话所有人的消息可进入参与判断，包括 @ 或引用他人，模型可以保持安静。窗口按实际时间减少。只有一轮执行通过新消息覆盖检查、真正决定发言时才追加一次；静默、仅处理、被覆盖的旧结果和分拆气泡不重复追加。基础时长设为 0 关闭续聊，追加时长设为 0 关闭动态追加；剩余窗口最多 300 秒。</HelpTip></div>
-    <div className="row flex-wrap">
-      <label htmlFor="overview-continuation">基础续聊时长</label><Input id="overview-continuation" className="w-24" type="number" min={0} max={300} step={0.1}
-        value={draft?.base ?? wake.continuationMs / 1000} disabled={!persona || busy || uncertain} onChange={event => edit('base', event.target.value)} /><span>秒</span>
-      <HelpTip label="基础续聊时长">默认 90 秒，从实际呼叫时开始计时；再次呼叫刷新基础窗口。普通群消息不会刷新计时，0 表示关闭续聊。</HelpTip>
+  return <div className="flatgroup" data-continuation-settings>
+    <div className="row mb-2"><span>续聊策略</span><HelpTip label="续聊与唤醒策略">在白名单会话中，直接 @、昵称呼叫，以及开启引用唤醒后的引用机器人消息，会刷新基础续聊窗口。空 @ 机器人和协议识别的戳一戳也会唤醒，模型结合上下文决定如何回应；普通文字模拟戳一戳不算。窗口内本会话所有人的消息可进入参与判断，包括 @ 或引用他人，模型可以保持安静。窗口按实际时间减少。只有一轮执行通过新消息覆盖检查、真正决定发言时才追加一次；静默、仅处理、被覆盖的旧结果和分拆气泡不重复追加。基础时长设为 0 关闭续聊，追加时长设为 0 关闭动态追加；剩余窗口最多 300 秒。设置跟随当前人设，无需重启。</HelpTip><div className="row push"><Button size="xs" disabled={!draft || busy || uncertain} onClick={() => void save()}>保存</Button><Button size="xs" variant="ghost" disabled={busy} onClick={reload}>重新读取</Button></div></div>
+    <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+      <div className="min-w-0"><div className="row small mb-1"><label htmlFor="overview-continuation">基础续聊</label>
+        <HelpTip label="基础续聊时长">默认 90 秒，从实际呼叫时开始计时；再次呼叫刷新基础窗口。普通群消息不会刷新计时，0 表示关闭续聊。</HelpTip></div>
+        <div className="relative"><Input id="overview-continuation" className="w-full pr-7" type="number" min={0} max={300} step={0.1}
+          value={draft?.base ?? wake.continuationMs / 1000} disabled={!persona || busy || uncertain} onChange={event => edit('base', event.target.value)} />
+          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">秒</span></div>
+      </div>
+      <div className="min-w-0"><div className="row small mb-1"><label htmlFor="overview-continuation-extra">发言后追加</label>
+        <HelpTip label="发言后的续聊追加">默认 0.5 秒，每轮通过新消息覆盖检查并决定发言后，在剩余窗口上追加一次，随后随时间减少。分拆气泡不重复计数，静默和被覆盖而未发言的执行不增加。窗口耗尽时仅获得这次追加。</HelpTip></div>
+        <div className="relative"><Input id="overview-continuation-extra" className="w-full pr-7" type="number" min={0} max={60} step={0.1}
+          value={draft?.extra ?? (wake.replyExtensionMs ?? 500) / 1000} disabled={!persona || busy || uncertain} onChange={event => edit('extra', event.target.value)} />
+          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">秒</span></div>
+      </div>
     </div>
-    <div className="row flex-wrap">
-      <label htmlFor="overview-continuation-extra">每轮决定发言后追加</label><Input id="overview-continuation-extra" className="w-24" type="number" min={0} max={60} step={0.1}
-        value={draft?.extra ?? (wake.replyExtensionMs ?? 500) / 1000} disabled={!persona || busy || uncertain} onChange={event => edit('extra', event.target.value)} /><span>秒</span>
-      <HelpTip label="发言后的续聊追加">默认 0.5 秒，增加到当时剩余窗口上，随后继续随时间减少。按有效执行编号只计算一次，与发送气泡数量无关；被新消息覆盖而没有发言的执行不增加。处理期间窗口已耗尽时，仅获得这次追加的时长。</HelpTip>
-    </div>
-    <p className="small muted">设置跟随当前人设{persona ? `「${persona.name}」` : ''}，无需重启。</p>
     {(catalog.error || plans.error) && <p className="small">设置读取失败，请重新读取。</p>}
     {notice && <p className="small" role="status">{notice}</p>}
-    <div className="row"><Button size="sm" disabled={!draft || busy || uncertain} onClick={() => void save()}>保存续聊设置</Button><Button size="sm" variant="ghost" disabled={busy} onClick={reload}>重新读取</Button></div>
   </div>
 }

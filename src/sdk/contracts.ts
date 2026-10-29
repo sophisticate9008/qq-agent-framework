@@ -27,6 +27,7 @@ export type { NativeToolRegistrationSource } from '../contracts/native-tool-inve
 
 export type * from '../contracts/qzone-tools.ts';
 export * from '../contracts/plugin-model.ts';
+export * from '../contracts/plugin-schedules.ts';
 export * from '../contracts/qq-capabilities.ts';
 export type { ImageGenerationService } from '../contracts/image-generation.ts';
 export * from '../contracts/service-contract.ts';

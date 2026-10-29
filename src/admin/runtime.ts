@@ -3,6 +3,7 @@ import { readAdminActivity } from './simulation-activity.ts'
 import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
 import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
 import { createPluginSessionRoutes } from './plugin-sessions.ts'
+import { createPluginScheduleRoutes } from './plugin-schedules.ts'
 import { createSimulationSessionRoutes } from './simulation-sessions.ts'
 import { NATIVE_USAGE_SESSION_DELETE_PATH, parseNativeUsageSessionDeleteRequest } from '../contracts/native-usage-session.ts'
 import { isNativeEventCursor, isNativeEventFilter } from '../contracts/native-events.ts'
@@ -990,6 +991,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
   routes.push(...createNativeToolsRoutes({ state: () => chatRuntime?.activity().state ?? 'stopped',
     ...(options.tools === undefined ? {} : { read: options.tools }) }))
   if (chatRuntime !== undefined) {
+    routes.push(...createPluginScheduleRoutes({ runtime: chatRuntime }))
     routes.push(...nativeChatControlRoutes(directory, chatRuntime, options.deploymentRuntime === undefined ? undefined : checkedNativeDeploymentRuntime(options.deploymentRuntime)))
     routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state,
       unbind: target => chatRuntime.unbindSession(target), bind: (target, sessionId, signal) => chatRuntime.bindSession(target, sessionId, signal) })

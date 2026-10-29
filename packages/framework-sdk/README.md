@@ -35,4 +35,6 @@ printf '安装包目录：%s\n' "$artifact_dir"
 
 `createReloadableService` 为异步方法维护稳定入口，`createReloadableHandler` 将工具及定时回调绑定到当前实现；旧调用结束后再释放旧版本。工具 schema、依赖或注册结构变化需要完整应用。参见[服务规范](https://github.com/sophisticate9008/qq-agent-framework/blob/main/docs/SERVICE_CONVENTIONS.md)及[可运行的插件示例](https://github.com/sophisticate9008/qq-agent-framework/tree/main/examples/reloadable-plugin)。
 
+日程客户端支持可选 `presentation` 与 `registerDetailsProvider`，为任务列表登记友好名称、同步业务摘要、只读详情及明确支持的业务跳过回调；宿主管理暂停单独持久保存。`contracts` 导出 `PluginScheduleSnapshot`、`PluginScheduleDetail`、历史与管理动作 DTO，以及对应 `parsePluginSchedule*` 严格解码函数；`host` 导出详情提供方类型和 `createPluginScheduleReader`。见[持久定时任务](https://github.com/sophisticate9008/qq-agent-framework/blob/main/docs/TRIGGERS.md)。
+
 源码许可见随包 `LICENSE`，来源与第三方许可见随包 `NOTICE.md`。

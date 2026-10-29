@@ -5,7 +5,8 @@ import { CHAT_INPUT_SERVICE_CONTRACT, MEDIA_SERVICE_CONTRACT, MEMORY_SERVICE_CON
 import { createOneBotCapabilitiesPort } from '../adapters/onebot-capabilities.ts'
 import { createPluginCapabilityService, type PluginCapabilityService } from './plugin-capability-service.ts'
 import { createPluginModelService, type PluginModelService } from './plugin-model-service.ts'
-import { createPluginSchedulerService, type PluginSchedulerService } from './plugin-scheduler.ts'
+import { createPluginSchedulerService, createPluginScheduleReader, emptyPluginScheduleSnapshot, type PluginSchedulerService } from './plugin-scheduler.ts'
+import type { PluginScheduleManagementRequest, PluginScheduleReadOptions } from '../contracts/plugin-schedules.ts'
 import { createPluginToolDirectory } from './plugin-tool-directory.ts'
 import { createSessionTurnQueue } from './session-turns.ts'
 import type { PluginRuntimeServices } from './plugin-runtime.ts'
@@ -281,6 +282,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         list() { check(); return extensions.list().filter(item => item.id === owner) }
       },
       scheduler: { registerHandler: (kind, handler) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).registerHandler(kind, handler) },
+        registerDetailsProvider: (kind, provider) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).registerDetailsProvider(kind, provider) },
         schedule: (input, options) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).schedule(input, options) },
         list: options => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).list(options) },
         cancel: (id, options) => { check(); if (!pluginScheduler) failure('PLUGIN_RUNTIME_UNAVAILABLE'); return pluginScheduler.forPlugin(owner, signal, check).cancel(id, options) },
@@ -1929,6 +1931,56 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     inboxSummary() {
       if (closed) failure('NATIVE_CHAT_CLOSED')
       return inbox?.summary() ?? readHistorySnapshot(history => history.inbox.summary())
+    },
+    readPluginSchedules(query: PluginScheduleReadOptions = {}) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      verifyPersistedAccount()
+      if (pluginScheduler) return pluginScheduler.listManaged(query)
+      if (store) return createPluginScheduleReader({ store, canManage: true }).list(query)
+      let reader: ReturnType<typeof openReadonlySqliteStore>
+      try { reader = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite')) }
+      catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return emptyPluginScheduleSnapshot(); throw error }
+      try {
+        assertAccountStore(reader, accountScope)
+        return reader.withSnapshot(() => createPluginScheduleReader({ store: reader, canManage: true }).list(query))
+      } finally { reader.close() }
+    },
+    readPluginScheduleHistory(query: PluginScheduleReadOptions = {}) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      verifyPersistedAccount()
+      if (pluginScheduler) return pluginScheduler.managedHistory(query)
+      if (store) return createPluginScheduleReader({ store, canManage: true }).history(query)
+      let reader: ReturnType<typeof openReadonlySqliteStore>
+      try { reader = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite')) }
+      catch (error) { if (error instanceof FrameworkError && error.code === 'STORE_NOT_FOUND') return { schema: 1 as const, items: [], next: null }; throw error }
+      try {
+        assertAccountStore(reader, accountScope)
+        return reader.withSnapshot(() => createPluginScheduleReader({ store: reader, canManage: true }).history(query))
+      } finally { reader.close() }
+    },
+    async readPluginScheduleDetail(owner: string, id: string, occurrenceId: string | undefined, signal: AbortSignal) {
+      if (closed) failure('NATIVE_CHAT_CLOSED')
+      signal.throwIfAborted()
+      verifyPersistedAccount()
+      if (pluginScheduler) return pluginScheduler.readDetail(owner, id, occurrenceId, signal)
+      if (store) return createPluginScheduleReader({ store, canManage: true }).detail(owner, id, occurrenceId)
+      const reader = openReadonlySqliteStore(join(options.directory, 'native-chat.sqlite'))
+      try {
+        assertAccountStore(reader, accountScope)
+        return reader.withSnapshot(() => createPluginScheduleReader({ store: reader, canManage: true }).detail(owner, id, occurrenceId))
+      } finally { reader.close() }
+    },
+    async managePluginSchedule(request: PluginScheduleManagementRequest, signal: AbortSignal) {
+      if (closed || starting || stopping) failure('PLUGIN_SCHEDULER_MANAGEMENT_BUSY')
+      signal.throwIfAborted()
+      verifyPersistedAccount()
+      if (pluginScheduler) return pluginScheduler.manage(request, signal)
+      if (request.action !== 'set-paused') failure('PLUGIN_SCHEDULER_SKIP_UNAVAILABLE')
+      const writer = store ?? createSqliteStore({ filename: join(options.directory, 'native-chat.sqlite'), requireExisting: true })
+      try {
+        assertAccountStore(writer, accountScope)
+        return await createPluginSchedulerService({ store: writer }).manage(request, signal)
+      } finally { if (writer !== store) writer.close() }
     },
     readReminders(readOptions: NativeReminderReadOptions = {}) { return reminders.read(readOptions) },
     readReminderHistory(readOptions: NativeReminderReadOptions & { readonly ruleId?: string } = {}) { return reminders.history(readOptions) },

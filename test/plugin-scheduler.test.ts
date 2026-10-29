@@ -195,6 +195,14 @@ test('stored dispatch intents recover to unknown, retain beyond seven days, and 
   context.after(() => base.close());
   let interrupt = true;
   const store: DurableStore = { ...base,
+    compareAndSetBatch(mutations) {
+      const result = base.compareAndSetBatch!(mutations);
+      if (interrupt && mutations.some(mutation => mutation.kind === 'write' && mutation.namespace === 'plugin-scheduler.calendar-trigger-occurrences')) {
+        interrupt = false;
+        throw new FrameworkError('SIMULATED_POWER_LOSS', 'Interrupted after durable claim.');
+      }
+      return result;
+    },
     write(namespace: string, key: string, value: JsonValue, options?: WriteOptions) {
       const result = base.write(namespace, key, value, options);
       if (interrupt && namespace === 'plugin-scheduler.calendar-trigger-occurrences') {

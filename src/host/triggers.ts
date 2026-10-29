@@ -111,6 +111,8 @@ interface StoredOccurrence {
   payloadDigest: string;
   status: CalendarOccurrenceStatus;
   errorCode: string | null;
+  /** Actual claim time; absent in historical records, never inferred from scheduledAt. */
+  startedAt?: number;
   updatedAt: number;
 }
 
@@ -306,6 +308,7 @@ function occurrence(record: StoredRecord): StoredOccurrence {
   finiteTimestamp(value.scheduledAt);
   finiteTimestamp(value.deadlineAt);
   finiteTimestamp(value.updatedAt);
+  if (value.startedAt !== undefined) finiteTimestamp(value.startedAt);
   assert(value.deadlineAt > value.scheduledAt, 'INVALID_STORED_DATA', 'Stored calendar occurrence window is invalid.');
   return value as unknown as StoredOccurrence;
 }
@@ -479,6 +482,7 @@ export function createCalendarTriggerService({ store, callback, clock = Date.now
         payloadDigest: digest(value.payload),
         status: 'running',
         errorCode: null,
+        startedAt: now,
         updatedAt: now
       }), { expectedRevision: null });
     } catch (error) {

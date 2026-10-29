@@ -9,7 +9,7 @@ export const PLUGIN_PROTOCOL_SERVICE_CONTRACT = defineServiceContract<PluginRunt
 export const PLUGIN_SESSIONS_SERVICE_CONTRACT = defineServiceContract<PluginRuntimeServices['sessions']>({ id: 'plugin-sessions', version: 1,
   description: '读取及管理实际 QQ 会话绑定。', methods: ['resolve', 'bind', 'unbind'] })
 export const PLUGIN_SCHEDULER_SERVICE_CONTRACT = defineServiceContract<NonNullable<PluginRuntimeServices['scheduler']>>({ id: 'plugin-scheduler', version: 1,
-  description: '插件持久日程、回调登记与发生记录。', methods: ['registerHandler', 'schedule', 'list', 'cancel', 'history'] })
+  description: '插件持久日程、回调与只读业务详情登记及发生记录。', methods: ['registerHandler', 'registerDetailsProvider', 'schedule', 'list', 'cancel', 'history'] })
 export const PLUGIN_TOOLS_SERVICE_CONTRACT = defineServiceContract<NonNullable<PluginRuntimeServices['tools']>>({ id: 'plugin-tools', version: 1,
   description: '登记插件二级工具并随生命周期撤销。', methods: ['register'] })
 export const PLUGIN_MEDIA_SERVICE_CONTRACT = defineServiceContract<NonNullable<PluginRuntimeServices['media']>>({ id: 'plugin-media', version: 1,

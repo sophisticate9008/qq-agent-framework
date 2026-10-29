@@ -94,7 +94,7 @@ export function PackageConfigurationManager({ api, connected, setDirty, onlyIds,
   const resource = useReadResource(api, PACKAGE_CONFIGURATION_PATH, connected, parsePackageConfigurationList);
   if (!connected) return null;
   const entries = resource.snapshot?.packages.filter(entry => (!onlyIds || onlyIds.includes(entry.descriptor.id)) && !excludeIds.includes(entry.descriptor.id)) ?? [];
-  return <div className="grid gap-2" data-package-configuration-directory>
+  return <div className={embedded ? "embedded-settings-directory" : "grid gap-2"} data-package-configuration-directory>
     {resource.error && <div className="flex flex-wrap items-center gap-2 text-xs"><p role="alert" className="text-destructive">设置列表读取失败，已保留上次结果。</p><Button size="sm" variant="outline" onClick={resource.refresh}>重新读取</Button><ReadOnlyDetails title="设置列表读取详情"><TechnicalDetails fields={[{ label: '错误', value: errorMessage(resource.error) }]} /></ReadOnlyDetails></div>}
     {!resource.error && entries.length === 0 && onlyIds && <p role="status" className="text-sm text-muted-foreground">{resource.loading ? '正在读取回复设置…' : '当前服务未提供回复设置。'}</p>}
     {entries.map(entry => <PackageConfigurationCard embedded={embedded} key={entry.descriptor.id} api={api} connected={connected} entry={entry} setDirty={setDirty} refreshCatalog={resource.refresh} catalogUpdatedAt={resource.updatedAt} />)}

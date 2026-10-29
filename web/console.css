@@ -274,8 +274,12 @@
 }
 @layer components {
   .compact-chat-editor { gap:0; }
-  .compact-chat-editor>.formgrid { padding:10px; border-bottom:1px solid var(--border); }
-  .compact-chat-editor>.row:last-child { padding:8px 10px; justify-content:flex-end; background:color-mix(in srgb,var(--muted) 65%,var(--card)); }
+  .settings-group-title, .compact-chat-editor .reply-settings-embedded .panel-title { font-size:12px; line-height:18px; font-weight:500; color:var(--foreground); }
+  .compact-chat-editor .embedded-settings-directory { display:grid; gap:0; }
+  .compact-chat-editor .reply-settings-embedded { border-bottom:1px solid var(--border); }
+  .compact-chat-editor .reply-settings-embedded>.panel-header { padding:10px 10px 0; }
+  .compact-chat-editor .reply-settings-embedded>.panel-body { padding:8px 10px 10px; }
+  .compact-chat-editor>.row:last-child { border-top:0; padding:8px 10px; justify-content:flex-end; background:color-mix(in srgb,var(--muted) 65%,var(--card)); }
   .compact-chat-editor>.row:last-child>[data-application-controls]>.flex { justify-content:flex-end; }
 }
 @layer components {

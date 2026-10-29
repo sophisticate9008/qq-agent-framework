@@ -16,6 +16,11 @@ const explanations: Readonly<Record<string, string>> = {
   DIARY_WINDOW_CLOSED: '处理期间时间段已结束，或插件已停用。',
   DIARY_IMAGE_REJECTED: '三版图片均未通过检查，本条未发布。',
   DIARY_INTERRUPTED_UNKNOWN: '上次执行中断，尚未确认最终结果。',
+  PLUGIN_MODEL_SESSION_UNAVAILABLE: '模型会话读取或恢复失败，请检查 DSH 会话状态。',
+  PLUGIN_MODEL_SELECTION_UNAVAILABLE: '所选模型不可用，请检查插件的模型配置。',
+  PLUGIN_MODEL_SESSION_BUSY: '模型会话正在处理其他请求，本次尚未提交。',
+  PLUGIN_MODEL_CONTEXT_UNAVAILABLE: '模型上下文准备失败，本次尚未提交。',
+  PLUGIN_MODEL_REJECTED: '模型服务拒绝了本次请求，请检查 DSH 运行状态。',
 }
 
 function slotStage(slot: DiarySlot): string {
@@ -57,18 +62,21 @@ export function createDiaryScheduleDetails(handler: 'plan' | 'publish', options:
     if (handler === 'plan') {
       const count = day?.slots.length ?? 0, published = day?.slots.filter(slot => slot.state === 'published').length ?? 0
       if (day?.state === 'unknown') {
+        const failure = day.planningFailures?.at(-1)
+        const reason = failure ? explanations[failure.code] : undefined
         const recovery = diaryPlanRecovery(day, options)
         const retry = options.runtime.scheduler.list({ limit: 1000 }).find(item => item.handler === 'plan'
           && item.payload.date === date && item.enabled && !item.cancelled && item.nextAt !== null)
         return { stage: recovery.state === 'ready' ? '规划失败，可恢复' : '规划待核对',
-          summary: `${recovery.message}${retry && recovery.state === 'ready' ? ' 已登记后续规划检查。'
+          summary: `${reason ? `${reason} ` : ''}${recovery.message}${retry && recovery.state === 'ready' ? ' 已登记后续规划检查。'
             : recovery.state === 'ready' ? (day.planningAttempts ?? 1) >= MAX_AUTOMATIC_PLANS
               ? ' 自动恢复次数已用完，可在 QQ 请求“恢复今天的空间日记规划”。' : ' 可在 QQ 请求“恢复今天的空间日记规划”。' : ''}` }
       }
       return { stage: !day ? '等待安排' : day.state === 'planning' ? '正在安排今日计划'
         : '今日计划已安排',
       summary: !day ? `${date} 尚未生成计划。` : day.state === 'planned'
-        ? `${date} 已安排 ${count} 条，已发布 ${published} 条。` : day.state === 'planning' ? '正在生成各时间段的生活片段。' : '规划中断，保留已有记录。' }
+        ? `${date} 已安排 ${count} 条，已发布 ${published} 条。${occurrence && ['failed', 'unknown'].includes(occurrence.status)
+          ? ' 此次执行曾失败或中断，后续规划已成功；原执行记录保留。' : ''}` : day.state === 'planning' ? '正在生成各时间段的生活片段。' : '规划中断，保留已有记录。' }
     }
     const slot = day?.slots.find(item => item.index === rule.payload.slot)
     if (!slot) return { stage: '日程记录不可用', summary: '未找到这条任务对应的业务日程。' }

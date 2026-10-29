@@ -1,6 +1,6 @@
 import { createDshAdapter, DshAdapterError, type DshClientPort, type DshPortResult, type DshSessionEvent } from './dsh.ts'
 import { isRecord } from '../contracts/values.ts'
-import { parsePluginModelImages, parsePluginModelSelection, pluginModelIdentifier } from '../contracts/plugin-model.ts'
+import { parsePluginModelImages, parsePluginModelSelection, pluginModelIdentifier, PLUGIN_MODEL_REJECTION_CODES } from '../contracts/plugin-model.ts'
 import type { PluginModelBackend, PluginModelDescription } from '../contracts/plugin-model.ts'
 import type { JsonObject, JsonValue } from '../contracts/data.ts'
 
@@ -44,9 +44,11 @@ export function createDshPluginModelBackend(options: {
           owner: request.owner, prompt: request.prompt, ...(request.images ? { images: parsePluginModelImages(request.images).map(image => ({ ...image })) } : {}),
           ...(request.model ? { model: { ...parsePluginModelSelection(request.model) } } : {}) }, request.signal)
         if (!result.ok) return { status: 'rejected' }
+        const reportedCode = isRecord(result.value) ? result.value.code : undefined
+        const code = PLUGIN_MODEL_REJECTION_CODES.find(code => code === reportedCode)
         return isRecord(result.value) && result.value.accepted === true ? { status: 'accepted' }
           : isRecord(result.value) && result.value.accepted === false ? { status: 'rejected',
-            ...(result.value.code === 'PLUGIN_MODEL_IMAGE_UNSUPPORTED' || result.value.code === 'PLUGIN_MODEL_INVALID_IMAGES' ? { code: result.value.code } : {}) }
+            ...(code ? { code } : {}) }
           : { status: 'unknown' }
       } catch { return { status: 'unknown' } }
     },

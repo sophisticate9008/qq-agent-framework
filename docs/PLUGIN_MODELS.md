@@ -62,3 +62,9 @@ DSH 桥接包提供 `pluginModels`、`createPluginModelSession`、`inspectPlugin
 配置、协议与工具的额外副作用通过插件对应的宿主能力服务执行。可信本机 TypeScript 插件在宿主进程内运行，这些接口用于组织身份、生命周期和可管理状态。
 
 独立助手的工作子会话由工作调度器专用，不接受插件或 QQ 换绑，避免影响助手工具和工作生命周期；需要共享上下文时绑定 QQ 主会话，或为插件建立独立会话。
+
+### 请求提交前的失败诊断
+
+DSH 桥接插件在提交模型前拒绝请求时，分别返回会话读取或恢复失败（`PLUGIN_MODEL_SESSION_UNAVAILABLE`）、模型配置不可用（`PLUGIN_MODEL_SELECTION_UNAVAILABLE`）、会话忙碌（`PLUGIN_MODEL_SESSION_BUSY`）和上下文准备失败（`PLUGIN_MODEL_CONTEXT_UNAVAILABLE`）。这些结果表示本次输入尚未交给模型，不需要把它当作已提交的未知执行。错误码采用固定白名单，不返回供应商错误原文、凭据或上下文。
+
+会话恢复失败时，先核对 DSH 运行状态、会话存储和模型配置；确需重启时先停止聊天并排空执行，保留会话 ID 与绑定，重启后再恢复业务任务。已提交但结果未知的执行仍须核对原请求，不能据此自动重放。

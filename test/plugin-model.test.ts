@@ -57,3 +57,20 @@ test('plugin model transport sends images as separate fields and retains explici
   assert.equal(input?.prompt, 'Read actual image')
   assert.deepEqual(input?.images, [{ mediaType: 'image/png', data: 'aGVsbG8=' }])
 })
+
+test('plugin refusal diagnostics retain known stages and discard untrusted detail', async () => {
+  let code = 'PLUGIN_MODEL_SESSION_UNAVAILABLE'
+  const backend = createDshPluginModelBackend({
+    client: { async createSession() { return { ok: true, value: { sessionId: 'fixture' } } },
+      async prompt() { return { ok: true, value: null } }, async cancel() { return { ok: true, value: null } },
+      async follow() { return () => {} } },
+    async invoke() { return { ok: true, value: { accepted: false, code } } },
+  })
+  const request = { sessionId: 'fixture', requestId: 'request', owner: 'plugin', prompt: 'Plan', signal: new AbortController().signal }
+  for (const stage of ['SESSION_UNAVAILABLE', 'SELECTION_UNAVAILABLE', 'SESSION_BUSY', 'CONTEXT_UNAVAILABLE']) {
+    code = `PLUGIN_MODEL_${stage}`
+    assert.deepEqual(await backend.start(request), { status: 'rejected', code })
+  }
+  code = 'private provider error text'
+  assert.deepEqual(await backend.start(request), { status: 'rejected' })
+})

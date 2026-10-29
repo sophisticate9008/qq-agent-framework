@@ -205,14 +205,17 @@ export function createPluginModelChannel(ctx: Context) {
       const disposers: (() => void)[] = []
       let handedOff = false
       let submitted = false
-      let rejectionCode = 'PLUGIN_MODEL_REJECTED'
+      let rejectionCode = 'PLUGIN_MODEL_SESSION_UNAVAILABLE'
       try {
         const agent = await resolve(request.sessionId, signal)
+        rejectionCode = 'PLUGIN_MODEL_SELECTION_UNAVAILABLE'
         const model = request.model === undefined ? undefined : selection(request.model)
         if (model) await verifySelection(model, signal)
         signal.throwIfAborted()
         assertOpen()
+        rejectionCode = 'PLUGIN_MODEL_SESSION_BUSY'
         if (agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new TypeError('Plugin session is not idle')
+        rejectionCode = 'PLUGIN_MODEL_CONTEXT_UNAVAILABLE'
         const ownContext = isOwnedSession(agent.session.snapshotEvents())
         // restrict() alone masks global tools only. Assembly removes scoped schemas,
         // while the monotonic guard also rejects calls reconstructed from old history.
@@ -268,6 +271,7 @@ export function createPluginModelChannel(ctx: Context) {
           const call = await llm.prepareCall({ provider: route.provider, model: route.model }, signal)
           if (!call.inputModalities?.includes('image')) throw new TypeError('Plugin model image capability is not verified')
         }
+        rejectionCode = 'PLUGIN_MODEL_REJECTED'
         const promptText = `本轮来源为插件 ${request.owner} 的生成请求。结果返回该插件；本轮没有 QQ 发言者或 QQ 主人身份，工具不可用。\n\n${request.prompt}`
         const promptContent: PromptContentPart[] = [{ type: 'text', text: promptText },
           ...suppliedImages.map(image => ({ type: 'image' as const, ...image }))]

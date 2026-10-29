@@ -47,7 +47,10 @@ export interface PluginModelImage {
   readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp'
   readonly data: string
 }
-export type PluginModelRejectionCode = 'PLUGIN_MODEL_REJECTED' | 'PLUGIN_MODEL_IMAGE_UNSUPPORTED' | 'PLUGIN_MODEL_INVALID_IMAGES'
+export const PLUGIN_MODEL_REJECTION_CODES = ['PLUGIN_MODEL_REJECTED', 'PLUGIN_MODEL_IMAGE_UNSUPPORTED', 'PLUGIN_MODEL_INVALID_IMAGES',
+  'PLUGIN_MODEL_SESSION_UNAVAILABLE', 'PLUGIN_MODEL_SELECTION_UNAVAILABLE', 'PLUGIN_MODEL_SESSION_BUSY',
+  'PLUGIN_MODEL_CONTEXT_UNAVAILABLE'] as const
+export type PluginModelRejectionCode = typeof PLUGIN_MODEL_REJECTION_CODES[number]
 export const PLUGIN_MODEL_IMAGE_LIMITS = Object.freeze({ count: 4, bytesPerImage: 8 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 })
 export function parsePluginModelImages(value: unknown): readonly PluginModelImage[] {
   if (!Array.isArray(value) || value.length > PLUGIN_MODEL_IMAGE_LIMITS.count) throw new TypeError('Invalid plugin model images')

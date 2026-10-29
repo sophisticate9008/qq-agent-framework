@@ -83,7 +83,12 @@ test('SDK plugin sessions remain readable, resume history and exclude global com
     await owner.inertia
     assert(channel)
     const signal = AbortSignal.timeout(10_000), sessionId = 'qbf-plugin-readable-sdk'
+    assert.deepEqual(await channel.start({ sessionId: 'missing-session', requestId: 'missing', owner: 'fixture-plugin', prompt: 'Plan' }, signal),
+      { accepted: false, code: 'PLUGIN_MODEL_SESSION_UNAVAILABLE' })
     await channel.create({ sessionId, owner: 'fixture-plugin', model: { provider: 'fixture', model: 'fixture-model' } }, signal)
+    assert.deepEqual(await channel.start({ sessionId, requestId: 'unconfigured', owner: 'fixture-plugin', prompt: 'Plan',
+      model: { provider: 'fixture', model: 'unconfigured' } }, signal), { accepted: false, code: 'PLUGIN_MODEL_SELECTION_UNAVAILABLE' })
+    assert.equal(adapter.requests.length, 0, 'pre-admission refusal sends no model request and a later valid request can proceed')
     const observed = await ctx.sessionQuery.observeSession(SessionId(sessionId), { signal })
     assert.equal(observed.header.cwd, process.cwd())
     assert(observed.events.some(event => pluginRecordOf(event)?.type === 'plugin:qbf/model-session' && event.ignorable === true))

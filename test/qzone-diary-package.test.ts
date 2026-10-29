@@ -10,6 +10,11 @@ import { createPluginSchedulerService } from '../src/host/plugin-scheduler.ts';
 import { createPluginToolDirectory } from '../src/host/plugin-tool-directory.ts';
 import { createPluginModelService } from '../src/host/plugin-model-service.ts';
 import { createPluginCapabilityService } from '../src/host/plugin-capability-service.ts';
+import { createReloadableExtensionRegistry } from '../src/host/reloadable-extensions.ts';
+import { IMAGE_GENERATION_SERVICE_CONTRACT } from '../src/host/framework-service-contracts.ts';
+import { PLUGIN_RUNTIME_PACKAGE_ID, PLUGIN_MODELS_SERVICE_CONTRACT, PLUGIN_PROTOCOL_SERVICE_CONTRACT,
+  PLUGIN_SCHEDULER_SERVICE_CONTRACT, PLUGIN_TOOLS_SERVICE_CONTRACT, PLUGIN_EXTENSIONS_SERVICE_CONTRACT } from '../src/host/plugin-service-contracts.ts';
+import { serviceDeclaration } from '../src/host/service-contract.ts';
 import { createQzoneDiaryPackage } from '../plugins/qzone-diary/index.ts';
 import type { DiaryConfiguration } from '../plugins/qzone-diary/types.ts';
 
@@ -17,6 +22,7 @@ function fixture(context: TestContext) {
   const store = createSqliteStore({ filename: ':memory:' });
   const scheduler = createPluginSchedulerService({ store, intervalMs: 60_000 });
   const tools = createPluginToolDirectory({ store });
+  const extensions = createReloadableExtensionRegistry();
   const calls = { models: 0, images: 0, protocol: 0, settings: [] as boolean[] };
   function unexpectedModel(): never { calls.models++; assert.fail('Package assembly must not call a model'); }
   const backend: PluginModelBackend = {
@@ -53,6 +59,7 @@ function fixture(context: TestContext) {
       runtimeServices(owner, lifetime, active) { return {
         scheduler: scheduler.forPlugin(owner, lifetime, active), tools: tools.forPlugin(owner, lifetime, active),
         models: models.forPlugin(owner, lifetime), capabilities: capabilities.forPlugin(owner, lifetime, active),
+        extensions,
         sessions: { resolve() { assert.fail('Independent diary must not access QQ bindings'); },
           async bind() { assert.fail('Independent diary must not bind QQ sessions'); }, async unbind() { assert.fail('Independent diary must not unbind QQ sessions'); } },
       }; },
@@ -60,22 +67,26 @@ function fixture(context: TestContext) {
     managers.push(result); return result;
   }
   context.after(async () => { for (const manager of managers) await manager.stop(); await scheduler.stop(); store.close(); });
-  return { manager, diary, provider, tools, scheduler, calls,
+  return { manager, diary, provider, tools, scheduler, extensions, calls,
     configure(changes: Partial<DiaryConfiguration>) { configuration = { ...configuration, ...changes }; } };
 }
 
 test('public diary package starts under the real package manager with declared services, owned resources and extension tools', async context => {
   const f = fixture(context);
-  assert.deepEqual(f.diary.manifest.dependencies, ['fixture-images']);
-  assert.deepEqual(f.diary.manifest.requires, [{ id: 'image-generation', version: 1 }]);
+  assert.deepEqual(f.diary.manifest.dependencies, ['fixture-images', PLUGIN_RUNTIME_PACKAGE_ID]);
+  assert.deepEqual(f.diary.manifest.requires, [serviceDeclaration(IMAGE_GENERATION_SERVICE_CONTRACT), serviceDeclaration(PLUGIN_MODELS_SERVICE_CONTRACT),
+    serviceDeclaration(PLUGIN_PROTOCOL_SERVICE_CONTRACT), serviceDeclaration(PLUGIN_SCHEDULER_SERVICE_CONTRACT),
+    serviceDeclaration(PLUGIN_TOOLS_SERVICE_CONTRACT), serviceDeclaration(PLUGIN_EXTENSIONS_SERVICE_CONTRACT)]);
   const manager = f.manager();
   assert.equal(f.tools.entries().length, 0); assert.equal(f.scheduler.status().handlers, 0);
   const started = await manager.start();
-  assert.deepEqual(started.map(entry => [entry.id, entry.state]), [['fixture-images', 'running'], ['qzone-diary', 'running']]);
+  assert.deepEqual(started.map(entry => [entry.id, entry.state]), [[PLUGIN_RUNTIME_PACKAGE_ID, 'running'], ['fixture-images', 'running'], ['qzone-diary', 'running']]);
   const diary = started.find(entry => entry.id === 'qzone-diary')!;
   assert.deepEqual(diary.resources.map(entry => [entry.kind, entry.id, entry.state]), [
-    ['task', 'workflow', 'active'], ['subscription', 'status', 'active'], ['subscription', 'plan', 'active'], ['subscription', 'set-enabled', 'active'],
+    ['task', 'workflow', 'active'], ['subscription', 'workflow-reload', 'active'], ['subscription', 'workflow-handlers', 'active'],
+    ['subscription', 'status', 'active'], ['subscription', 'plan', 'active'], ['subscription', 'set-enabled', 'active'],
   ]);
+  assert.deepEqual(f.extensions.list().map(entry => entry.id), ['qzone-diary']);
   const entries = f.tools.entries();
   assert.deepEqual(entries.map(entry => entry.tool.definition.name), ['status', 'plan', 'set-enabled'].map(id => 'extension.qzone-diary.' + id));
   assert.deepEqual(f.diary.manifest.toolNames, entries.map(entry => entry.tool.definition.name));
@@ -101,6 +112,7 @@ test('public diary package starts under the real package manager with declared s
   const stopped = await manager.stop();
   assert(stopped.every(entry => entry.state === 'stopped' && entry.resources.every(resource => resource.state === 'disposed')));
   assert.equal(f.tools.entries().length, 0); assert.equal(f.scheduler.status().handlers, 0);
+  assert.equal(f.extensions.list().length, 0);
   await manager.stop(); assert.equal(f.tools.entries().length, 0);
   await assert.rejects(async () => status.effect.execute(request), { name: 'AbortError' });
 });
@@ -120,7 +132,7 @@ test('an invalid image service fails package startup without leaking tools or ta
   const manager = f.manager([f.diary, provider]);
   const started = await manager.start();
   const diary = started.find(entry => entry.id === 'qzone-diary')!;
-  assert.equal(diary.state, 'failed'); assert.equal(diary.reason, 'DIARY_IMAGES_UNAVAILABLE');
+  assert.equal(diary.state, 'failed'); assert.equal(diary.reason, 'SERVICE_IMPLEMENTATION_INVALID');
   assert.equal(f.tools.entries().length, 0); assert.equal(f.scheduler.status().handlers, 0);
   assert.equal(f.calls.models + f.calls.images + f.calls.protocol, 0);
 });
@@ -131,7 +143,7 @@ test('a workflow startup failure rolls back already registered owned tools and s
   const manager = f.manager();
   const diary = (await manager.start()).find(entry => entry.id === 'qzone-diary')!;
   assert.equal(diary.state, 'failed'); assert.equal(diary.reason, 'DIARY_CONFIGURATION_INVALID');
-  assert.equal(diary.resources.length, 4);
+  assert.equal(diary.resources.length, 2);
   assert(diary.resources.every(resource => resource.state === 'disposed'));
   assert.equal(f.tools.entries().length, 0); assert.equal(f.scheduler.status().handlers, 0);
   assert.equal(f.calls.models + f.calls.images + f.calls.protocol, 0);

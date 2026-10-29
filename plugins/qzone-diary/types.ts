@@ -1,6 +1,7 @@
 import type { PluginModelSelection } from '../../src/contracts/plugin-model.ts'
 import type { ImageGenerationService } from '../../src/contracts/image-generation.ts'
 import type { PluginRuntimeServices } from '../../src/host/plugin-runtime.ts'
+import type { PluginScheduledHandler } from '../../src/host/plugin-scheduler.ts'
 import type { DurableStore } from '../../src/contracts/ports.ts'
 
 export interface DiaryConfiguration {
@@ -19,7 +20,9 @@ export interface DiaryMedia {
 }
 export interface DiaryOptions {
   readonly store: DurableStore
-  readonly runtime: PluginRuntimeServices
+  readonly runtime: Pick<PluginRuntimeServices, 'models' | 'capabilities'> & {
+    readonly scheduler: NonNullable<PluginRuntimeServices['scheduler']>
+  } & Partial<Omit<PluginRuntimeServices, 'models' | 'capabilities' | 'scheduler'>>
   readonly images: ImageGenerationService
   readonly media: DiaryMedia
   readonly configuration: () => DiaryConfiguration
@@ -28,6 +31,11 @@ export interface DiaryOptions {
   readonly random?: () => number
   readonly observe?: (event: { phase: string; day: string; slot?: number; attempt?: number; code?: string }) => void
 }
+export interface DiarySchedulerHandlers {
+  readonly plan: PluginScheduledHandler
+  readonly publish: PluginScheduledHandler
+}
+export type DiaryWorkflow = ReturnType<typeof import('./workflow.ts').createQzoneDiary>
 export interface DiarySlot {
   index: number
   at: number

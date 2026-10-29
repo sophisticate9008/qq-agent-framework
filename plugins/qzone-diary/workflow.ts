@@ -1,8 +1,9 @@
 import { randomInt } from 'node:crypto'
 import { assert, errorCode, isRecord } from '../../src/core/values.ts'
 import { json } from '../../src/host/data.ts'
-import type { DiaryConfiguration, DiaryDay, DiaryOptions, DiarySlot } from './types.ts'
+import type { DiaryConfiguration, DiaryDay, DiaryOptions, DiarySchedulerHandlers, DiarySlot } from './types.ts'
 import { localDay, localMinute } from './time.ts'
+export { DIARY_WORKFLOW_CONTRACT } from './workflow-contract.ts'
 
 const namespace = 'qzone-diary.days'
 const terminal = new Set(['published', 'preview', 'skipped'])
@@ -193,8 +194,8 @@ export function createQzoneDiary(options: DiaryOptions) {
     const retained = store.list(namespace, { limit: 366 }).flatMap(row => (row.value as unknown as DiaryDay).slots.flatMap(slot => slot.artifactId ? [slot.artifactId] : []))
     await options.media.prune?.(retained)
   }
-  function start() {
-    if (started) return; signal.throwIfAborted(); started = true
+  function start(handlers?: DiarySchedulerHandlers): () => void {
+    if (started) return () => {}; signal.throwIfAborted(); started = true
     for (const row of store.list(namespace, { limit: 366 })) {
       const day = structuredClone(row.value) as unknown as DiaryDay
       let changed = false
@@ -204,19 +205,27 @@ export function createQzoneDiary(options: DiaryOptions) {
       }
       if (changed) save(day)
     }
-    cleanups.push(scheduler!.registerHandler('plan', async occurrence => { await maintain(); await planDay(occurrence.signal) }))
-    cleanups.push(scheduler!.registerHandler('publish', async occurrence => {
-      assert(typeof occurrence.payload.date === 'string' && typeof occurrence.payload.slot === 'number', 'DIARY_TRIGGER_INVALID', 'A saved slot is required.')
-      await publishSlot(occurrence.payload.date, occurrence.payload.slot, occurrence.signal)
-    }))
-    const rules = scheduler!.list({ limit: 1000 })
-    const daily = rules.find(rule => rule.id === 'daily-plan')
-    scheduler!.schedule({ id: 'daily-plan', handler: 'plan', payload: {}, schedule: { kind: 'daily', hour: 8, minute: 30 },
-      timeZone: config().timeZone, windowMs: 15 * 3600000, misfire: 'coalesce' }, daily ? { expectedRevision: daily.revision } : undefined)
-    const date = localDay(now(), config().timeZone)
-    if (!read(date) && config().enabled && !rules.some(rule => rule.id === `start-${date}`)) scheduler!.schedule({ id: `start-${date}`, handler: 'plan', payload: {},
-      schedule: { kind: 'once', at: now() + 5000 }, timeZone: config().timeZone, windowMs: 1800000 })
-    const existing = read(date); if (existing?.state === 'planned') scheduleDay(existing)
+    const registrations: (() => void)[] = []
+    const release = () => { for (const unregister of registrations.splice(0).reverse()) unregister() }
+    // A package owning fixed entry points retains these registrations across behavior generations.
+    // Direct workflow users continue to release their own handlers through stop().
+    if (!handlers) cleanups.push(release)
+    try {
+      registrations.push(scheduler.registerHandler('plan', handlers?.plan ?? (async occurrence => { await maintain(); await planDay(occurrence.signal) })))
+      registrations.push(scheduler.registerHandler('publish', handlers?.publish ?? (async occurrence => {
+        assert(typeof occurrence.payload.date === 'string' && typeof occurrence.payload.slot === 'number', 'DIARY_TRIGGER_INVALID', 'A saved slot is required.')
+        await publishSlot(occurrence.payload.date, occurrence.payload.slot, occurrence.signal)
+      })))
+      const rules = scheduler.list({ limit: 1000 })
+      const daily = rules.find(rule => rule.id === 'daily-plan')
+      scheduler.schedule({ id: 'daily-plan', handler: 'plan', payload: {}, schedule: { kind: 'daily', hour: 8, minute: 30 },
+        timeZone: config().timeZone, windowMs: 15 * 3600000, misfire: 'coalesce' }, daily ? { expectedRevision: daily.revision } : undefined)
+      const date = localDay(now(), config().timeZone)
+      if (!read(date) && config().enabled && !rules.some(rule => rule.id === `start-${date}`)) scheduler.schedule({ id: `start-${date}`, handler: 'plan', payload: {},
+        schedule: { kind: 'once', at: now() + 5000 }, timeZone: config().timeZone, windowMs: 1800000 })
+      const existing = read(date); if (existing?.state === 'planned') scheduleDay(existing)
+      return release
+    } catch (error) { release(); throw error }
   }
   return { start, planDay, publishSlot, publishApproved, status, read, maintain,
     async stop() { for (const release of cleanups.splice(0)) release(); await Promise.allSettled(tasks.values()) } }

@@ -14,7 +14,9 @@
 
 ## 接入
 
-可信 bootstrap 调用 `createQzoneDiaryPackage`，传入私有存储、配置读取函数、图片产物存储及提供生图服务的包标识。该包声明并发布 `image-generation` v1 服务，其接口为 SDK 的 `ImageGenerationService`。注册的生图服务返回字节，不自动向 QQ 发送；协议发布复用 `runtime.capabilities` 的幂等调用。
+可信 bootstrap 调用 `createQzoneDiaryPackage`，传入私有存储、配置读取函数、图片产物存储及提供生图服务的包标识。安装方同时提供框架的 `plugin-runtime` 包。日记包通过共享契约声明并取得 `image-generation`、`plugin-models`、`plugin-protocol`、`plugin-scheduler`、`plugin-tools` 和 `plugin-extensions` v1 服务；依赖缺失或版本不匹配时在启动前拒绝。
+
+生图包声明并发布 `IMAGE_GENERATION_SERVICE_CONTRACT`，接口为 SDK 的 `ImageGenerationService`。服务返回实际图片字节，不自动向 QQ 发送；协议发布复用绑定插件身份的协议服务与幂等回执。
 
 配置包括 `enabled`、`publish`、`timeZone`、`persona`、写作 `model`、`visionModel` 和 `windows`。模型选择沿用已配置供应商标识；视觉模型必须声明图像输入能力。
 
@@ -28,7 +30,15 @@
 - 开关在生成和发布前重新读取。禁用后不再开始后续生成或发布；已经送往外部的请求不能靠改开关撤回。
 - 正在规划、生成、检查或发布时发生进程中断，记录转为 unknown，保留证据且不自动续发。当前实现没有自动核对已发布说说的通道，需按协议实际回执和空间页面检查。
 - 已结束的日程及无引用图片保留七天。未知记录和仍被引用的图片保留；日程最多 366 条，达到容量上限停止新增，避免无限增长。通用调度另有规则与历史容量限制。
-- 配置读取和 `setEnabled` 写入由安装方提供；业务代码或注册结构变化需要重新应用装配。底层生图扩展继续使用自己的热重载机制。
+- 配置读取和 `setEnabled` 写入由安装方提供。底层生图扩展继续使用自己的热重载机制。
+
+## 工作流热重载
+
+包启动后登记 `qzone-diary` 热重载项。更新工作流实现后先执行 `qqagent extensions` 查看当前登记，再执行 `qqagent extensions reload qzone-diary`。候选模块按源码指纹加载，固定 v1 行为契约不兼容或加载失败时保留旧代；同一源码版本不切换。固定入口 `index.ts`、行为契约 `workflow-contract.ts` 和输入类型 `types.ts` 的指纹在加载前后核对，修改这些文件会拒绝热重载，要求完整重新应用装配。工作流和其本地依赖采用有界 ESM 代际缓存，最多 64 个源码版本，达到上限后需重新应用宿主版本。
+
+工具和定时任务 handler 只在包首次启动时注册，各次完整执行持有对应工作流代的租约。新调用使用新代，已开始的规划、生成、检查或发布沿原代排空；旧代排空前不接受下一次重载。候选构造不调用 `start()`，不会重复登记 handler、更新每日规则、执行中断恢复或将仍在运行的日程改成 unknown。所有代继续使用同一持久日程和模型绑定，不因重载重排当天计划或重放发布。
+
+包停止时先撤销固定工具、handler 和热重载登记，再关闭管理器并等待各代排空。进程退出仍遵守上述未知记录恢复语义。工具 schema、handler 输入、行为契约版本、依赖声明、包入口和媒体存储适配器变化需要完整重新应用装配；热重载只替换工作流行为及它实际导入的本地实现。
 
 ## 验证
 

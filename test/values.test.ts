@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshot } from '../src/core/values.ts';
+import { errorCode, FrameworkError, snapshot } from '../src/core/values.ts';
+
+test('error codes survive separate extension constructors without exposing arbitrary errors or getters', () => {
+  class ExtensionError extends Error {
+    readonly code = 'PLUGIN_MODEL_SESSION_UNAVAILABLE';
+    constructor() { super('private detail'); this.name = 'FrameworkError'; }
+  }
+  assert.equal(errorCode(new FrameworkError('DIARY_PLAN_INVALID', 'detail')), 'DIARY_PLAN_INVALID');
+  assert.equal(errorCode(new ExtensionError()), 'PLUGIN_MODEL_SESSION_UNAVAILABLE');
+  assert.equal(errorCode(Object.assign(new Error('private detail'), { code: 'PRIVATE_DETAIL' })), 'INTERNAL_ERROR');
+  assert.equal(errorCode({ name: 'FrameworkError', code: 'PRIVATE_DETAIL' }), 'INTERNAL_ERROR');
+  const malformed = new FrameworkError('private detail', 'private detail');
+  assert.equal(errorCode(malformed), 'INTERNAL_ERROR');
+  Object.defineProperty(malformed, 'code', { get() { throw new Error('must not be invoked'); } });
+  assert.equal(errorCode(malformed), 'INTERNAL_ERROR');
+});
 
 test('snapshots detach and freeze nested data without prototype setters', () => {
   const input: { identity: { name: string }; authorized?: boolean } = JSON.parse('{"identity":{"name":"demo"},"__proto__":{"authorized":true}}');

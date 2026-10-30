@@ -6,6 +6,7 @@ dist/
 !.env.example
 state/
 runtime/
+/private/
 coverage/
 *.log
 *.pem

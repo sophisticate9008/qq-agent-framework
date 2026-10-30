@@ -69,7 +69,9 @@ ctx.effect(() => declareMcpToolRegistration('dsh-global', 'search', {
 
 模型通过 `qbf_capability_catalog` 查分类或搜索摘要，指定单个 `id` 才读取其参数，再用 `qbf_capability_call` 执行。二级目录条目不会额外投影到每轮顶层工具 schema；控制台仍显示其真实扩展来源。模型是否使用目录，需要结合实际会话及模型请求日志观察。
 
-可选的 `image-generation` v1 服务使用 `ImageGenerationService` 契约：接受提示词、稳定幂等键、主体选择和取消信号，返回原始图片字节、类型与 SHA-256，不隐式发送。服务实现由生图扩展提供，自己的形象参考可在服务内部组合；依赖它的业务插件无需复制 QQ 发送或会话鉴权链路。组合服务示例见 [空间生活日记](../examples/qzone-diary/README.md)，需安装者另行提供生图实现、素材与模型配置，不随框架自动启用。
+可选的 `image-generation` v1 服务使用 `ImageGenerationService` 契约：接受提示词、稳定幂等键、主体选择和取消信号，返回原始图片字节、类型与 SHA-256，不隐式发送。服务实现由扩展提供；依赖它的业务插件无需复制 QQ 发送或会话鉴权链路。实现、素材和模型配置由安装者自行提供。
+
+本机私人、非通用扩展统一存放在 Git 忽略的 `private/extensions/<扩展标识>/`；专属文档、测试和素材随扩展保存，运行状态、会话和产物放在 `runtime/`。公开示例只演示通用框架接口，不包含安装者的私人业务实现。独立扩展接入已有可信 bootstrap，仍受原有身份、生命周期和 policy 约束。
 
 ## 插件代码重载与配置即时更新
 

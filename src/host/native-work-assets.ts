@@ -41,7 +41,8 @@ export function createNativeWorkAssets(options: {
     const files = await readdir(directory);
     assert(files.length <= 1024, 'WORK_ASSET_BACKPRESSURE', 'The work asset directory exceeds its maintenance bound.');
     let count = 0; let total = 0;
-    for (const name of files) {
+    for (const [index, name] of files.entries()) {
+      if (index > 0 && index % 32 === 0) await new Promise(resolve => setTimeout(resolve, 10));
       assert(/^work-asset-[a-f0-9]{64}$/.test(name), 'WORK_ASSET_DIRECTORY_INVALID', 'The work asset directory contains an unknown entry.');
       const filename = join(directory, name);
       const info = await lstat(filename);

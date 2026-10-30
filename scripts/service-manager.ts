@@ -1,3 +1,4 @@
+import { setPriority } from 'node:os';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
@@ -211,12 +212,6 @@ async function startOne(config: Configuration, id: string, deadline: number): Pr
   }
   if (!running) {
     if (await listening(service)) fail(`${id} 端口已占用但尚未就绪。`);
-    if (id === 'dsh') {
-      // No serving writer is alive; the manager lock prevents another managed start during the mark/sweep.
-      const gc = await execute(process.execPath, [path.join(root, 'scripts/dsh-attachment-maintenance.ts'), config.dshHome],
-        { cwd: root, env: { ...process.env, QQ_BRIDGE_FRAMEWORK_OPS_LOCKED: '1' }, timeout: remaining(deadline, 30000) });
-      console.log(gc.code === 0 ? `DSH 附件回收：${gc.output.trim()}` : `DSH 附件核对未完成，保留未核清的对象并继续启动。${gc.output.trim()}`);
-    }
     if (service.prepare) {
       const result = await execute(service.prepare.command, service.prepare.args, { cwd: service.prepare.cwd ?? service.cwd, env: { ...process.env, ...service.env }, timeout: remaining(deadline, 10000) });
       if (result.code !== 0) fail(`${id} 启动准备失败（${result.code}）。`);
@@ -384,7 +379,7 @@ console [组件]     显示配置中的控制台地址
 protocol [napcat|snowluma]  查看或切换协议端并保存选择
 extensions [list] 查看已登记插件的版本、调用与排空状态
 extensions reload <插件标识>  核对当前版本后重载指定插件
-maintenance [--apply]  预览存储回收；--apply 清理旧部署、过期模拟与可再生成缓存
+maintenance [--apply]  预览存储回收；--apply 清理旧部署与过期模拟
 describe --json    输出框架部署的只读标识
 help              显示帮助`);
 }
@@ -393,7 +388,7 @@ async function lockAndRun(config: Configuration, argumentsList: string[]): Promi
   const file = await open(config.lockFile, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
   await file.chmod(0o600);
   await file.close();
-  const result = await execute('/usr/bin/flock', ['--exclusive', '--nonblock', '--conflict-exit-code', '75', '--close', config.lockFile, process.execPath, entry, ...argumentsList], {
+  const result = await execute('/usr/bin/flock', ['--exclusive', '--nonblock', '--conflict-exit-code', '75', '--close', config.lockFile, process.execPath, ...(argumentsList[0] === 'maintenance' ? ['--max-old-space-size=128'] : []), entry, ...argumentsList], {
     env: { ...process.env, QQ_BRIDGE_FRAMEWORK_OPS_LOCKED: '1' }, inherit: true, timeout: 300000,
   });
   if (result.code === 75) fail('另一项运维操作正在运行，请稍后查看状态。');
@@ -425,8 +420,9 @@ async function main(): Promise<void> {
   if (action === 'protocol' && rest[0] !== 'napcat' && rest[0] !== 'snowluma') fail('协议端须为 napcat 或 snowluma。');
   if (action === 'maintenance') {
     if (process.env.QQ_BRIDGE_FRAMEWORK_OPS_LOCKED !== '1') { await lockAndRun(config, argumentsList); return; }
+    setPriority(19);
     const { runRuntimeMaintenance } = await import('./runtime-maintenance.ts');
-    console.log(JSON.stringify(await runRuntimeMaintenance(root, config.dshHome, rest.includes('--apply'))));
+    console.log(JSON.stringify(await runRuntimeMaintenance(root, rest.includes('--apply'))));
     return;
   }
   const id = action === 'logs' ? rest.find(value => value !== '-f') : rest[0];

@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, readlink, realpath, rm, unlink, writeFile, rename } from 'node:fs/promises';
+import { lstat, readdir, readFile, readlink, realpath, rm, writeFile, rename } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { isRecord, assert } from '../src/core/values.ts';
 
@@ -9,8 +9,12 @@ export async function processPaths(): Promise<string[]> {
   const paths: string[] = [];
   for (const pid of (await readdir('/proc')).filter(value => /^\d+$/.test(value))) {
     try {
+      const command = (await readFile(`/proc/${pid}/cmdline`)).toString();
+      if (!command) continue; // Kernel threads cannot use deployment code or simulation directories.
+      paths.push(command.replaceAll('\0', '\n'));
+      if (paths.length % 32 === 0) await new Promise(resolve => setTimeout(resolve, 10));
       paths.push(await readlink(`/proc/${pid}/cwd`).catch(error => { if (missing(error)) return ''; throw error; }));
-      for (const name of ['cmdline', 'environ']) paths.push((await readFile(`/proc/${pid}/${name}`)).toString().replaceAll('\0', '\n'));
+      for (const name of ['environ']) paths.push((await readFile(`/proc/${pid}/${name}`)).toString().replaceAll('\0', '\n'));
       for (const fd of await readdir(`/proc/${pid}/fd`)) {
         paths.push(await readlink(`/proc/${pid}/fd/${fd}`).catch(error => { if (missing(error)) return ''; throw error; }));
       }
@@ -29,32 +33,39 @@ async function entries(path: string): Promise<string[]> {
   return names;
 }
 async function treeBytes(path: string): Promise<number> {
-  let bytes = 0; let count = 0; const pending = [path];
+  let bytes = 0; let count = 0; const pending = [path]; const started = Date.now();
   while (pending.length) {
     const current = pending.pop()!; const info = await lstat(current);
-    assert(++count < 300000, 'MAINTENANCE_SCAN_LIMIT', 'The maintenance tree is too large.');
+    assert(++count < 50000 && Date.now() - started < 5000, 'MAINTENANCE_SCAN_LIMIT', 'The maintenance tree is too large.');
+    if (count % 128 === 0) await new Promise(resolve => setTimeout(resolve, 10));
     if (info.isSymbolicLink()) continue;
     if (info.isDirectory()) pending.push(...(await readdir(current)).map(name => join(current, name)));
     else if (info.isFile()) bytes += info.blocks * 512;
   }
   return bytes;
 }
-export async function runRuntimeMaintenance(root: string, dshHome: string, apply = false) {
+export async function runRuntimeMaintenance(root: string, apply = false) {
   root = await realpath(root);
   const runtime = join(root, 'runtime');
   const now = Date.now();
+  const cpu = process.cpuUsage();
   const active = await processPaths();
   const live = join(runtime, 'live');
   for (const name of await entries(live)) if (name.endsWith('.json')) {
     const path = join(live, name); const info = await lstat(path);
     if (info.isFile() && !info.isSymbolicLink() && info.size <= 1024 * 1024) active.push(await readFile(path, 'utf8'));
   }
-  const used = (path: string) => active.some(text => text.includes(path + sep) || text.split(/[\s"\0]/).includes(path));
-  const result = { schema: 1, at: now, applied: apply, removedTrees: 0, removedFiles: 0, reclaimedBytes: 0, protectedTrees: 0 };
+  const used = (path: string) => active.some(text => text.includes(path + sep) || text.endsWith(path) || text.includes(path + '\n') || text.includes(path + '"'));
+  const result = { schema: 1, at: now, applied: apply, removedTrees: 0, removedFiles: 0, reclaimedBytes: 0, protectedTrees: 0, deferred: false, durationMs: 0, cpuMs: 0, peakRssBytes: 0 };
   async function removeTree(path: string) {
+    if (result.removedTrees >= 3 || Date.now() - now > 15000) { result.deferred = true; return; }
     if (used(path)) { result.protectedTrees++; return; }
     const info = await lstat(path);
-    const bytes = await treeBytes(path);
+    let bytes: number;
+    try { bytes = await treeBytes(path); } catch (error) {
+      if (isRecord(error) && error.code === 'MAINTENANCE_SCAN_LIMIT') { result.deferred = true; return; }
+      throw error;
+    }
     if (apply) {
       const current = await lstat(path);
       assert(info.dev === current.dev && info.ino === current.ino && !current.isSymbolicLink(), 'MAINTENANCE_PATH_CHANGED', 'The cleanup target changed.');
@@ -69,9 +80,14 @@ export async function runRuntimeMaintenance(root: string, dshHome: string, apply
     'MAINTENANCE_DEPLOYMENT_UNKNOWN', 'The current deployment must be known before recycling snapshots.');
   const selectedName = selection.entry.slice(deployments.length + 1).split(sep)[0]!;
   assert(await regularDirectory(join(deployments, selectedName)), 'MAINTENANCE_DEPLOYMENT_UNKNOWN', 'The current deployment is missing.');
+  const selectedAt = (await lstat(join(deployments, selectedName))).mtimeMs;
   for (const name of await entries(deployments)) {
+    if (Date.now() - now > 15000) { result.deferred = true; break; }
     const path = join(deployments, name);
     if (name === selectedName || !await regularDirectory(path)) continue;
+    const info = await lstat(path);
+    // A newer directory may still be staging before the atomic deployment selector is switched.
+    if (info.mtimeMs > selectedAt && info.mtimeMs > now - 3600000) { result.protectedTrees++; continue; }
     try {
       const manifest: unknown = JSON.parse(await readFile(join(path, 'package.json'), 'utf8'));
       if (!isRecord(manifest) || !['qq-bridge-framework', 'qq-agent-framework'].includes(String(manifest.name))) continue;
@@ -98,29 +114,10 @@ export async function runRuntimeMaintenance(root: string, dshHome: string, apply
   }
   runs.sort((a, b) => b.at - a.at);
   for (const run of runs.slice(4)) if (run.at < now - 30 * day) await removeTree(run.path);
-  // Request-size image variants are reproducible from immutable attachment objects.
-  const cache = join(dshHome, 'cache/attachments/request-images');
-  const candidates: { path: string; at: number; size: number; dev: number; ino: number }[] = [];
-  for (const shard of await entries(cache)) {
-    if (!/^[a-f0-9]{2}$/.test(shard)) continue;
-    for (const name of await entries(join(cache, shard))) {
-      if (!/^[a-f0-9]{64}$/.test(name) || !name.startsWith(shard)) continue;
-      const path = join(cache, shard, name); const info = await lstat(path);
-      if (info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.uid === process.getuid?.())
-        candidates.push({ path, at: info.mtimeMs, size: info.size, dev: info.dev, ino: info.ino });
-    }
-  }
-  candidates.sort((a, b) => a.at - b.at);
-  let total = candidates.reduce((sum, file) => sum + file.size, 0);
-  for (const file of candidates) {
-    if (file.at > now - day || file.at > now - 7 * day && total <= 256 * 1024 * 1024) continue;
-    if (apply) {
-      const info = await lstat(file.path).catch(error => { if (missing(error)) return null; throw error; });
-      if (!info || info.dev !== file.dev || info.ino !== file.ino || info.mtimeMs !== file.at) continue;
-      await unlink(file.path);
-    }
-    total -= file.size; result.removedFiles++; result.reclaimedBytes += file.size;
-  }
+  result.durationMs = Date.now() - now;
+  const usedCpu = process.cpuUsage(cpu);
+  result.cpuMs = Math.round((usedCpu.user + usedCpu.system) / 1000);
+  result.peakRssBytes = process.resourceUsage().maxRSS * 1024;
   if (apply) {
     const temporary = join(runtime, 'storage-maintenance.next.json');
     await writeFile(temporary, JSON.stringify(result) + '\n', { mode: 0o600 });

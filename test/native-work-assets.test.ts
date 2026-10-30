@@ -19,7 +19,7 @@ test('SDK result assets survive registry reconstruction and remain bound to acco
     async readAsset() { return { asset, data }; } };
   let generation = 1;
   let allowed = true;
-  const options = { directory, store, accountId: '999', port,
+  const options = { directory, store, accountId: '999', port, signal: context.signal,
     parent: () => ({ conversationId: 'private:123', generation }),
     authorize: async () => { assert(allowed); } };
   const address = { issuerEpoch: 'epoch', id: 'work', childId: 'child', parentSessionId: 'parent', generation: 1 };

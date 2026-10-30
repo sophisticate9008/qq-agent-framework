@@ -82,9 +82,11 @@ test('public diary package starts under the real package manager with declared s
   const started = await manager.start();
   assert.deepEqual(started.map(entry => [entry.id, entry.state]), [[PLUGIN_RUNTIME_PACKAGE_ID, 'running'], ['fixture-images', 'running'], ['qzone-diary', 'running']]);
   const diary = started.find(entry => entry.id === 'qzone-diary')!;
+  // Immediate-execution providers use the workflow manager. Register them
+  // after it, so reverse-order teardown revokes callbacks before closing it.
   assert.deepEqual(diary.resources.map(entry => [entry.kind, entry.id, entry.state]), [
-    ['subscription', 'schedule-details-plan', 'active'], ['subscription', 'schedule-details-publish', 'active'],
     ['task', 'workflow', 'active'], ['subscription', 'workflow-reload', 'active'], ['subscription', 'workflow-handlers', 'active'],
+    ['subscription', 'schedule-details-plan', 'active'], ['subscription', 'schedule-details-publish', 'active'],
     ['subscription', 'status', 'active'], ['subscription', 'plan', 'active'], ['subscription', 'set-enabled', 'active'],
   ]);
   assert.deepEqual(f.extensions.list().map(entry => entry.id), ['qzone-diary']);
@@ -145,7 +147,6 @@ test('a workflow startup failure rolls back already registered owned tools and s
   const diary = (await manager.start()).find(entry => entry.id === 'qzone-diary')!;
   assert.equal(diary.state, 'failed'); assert.equal(diary.reason, 'DIARY_CONFIGURATION_INVALID');
   assert.deepEqual(diary.resources.map(entry => [entry.kind, entry.id, entry.state]), [
-    ['subscription', 'schedule-details-plan', 'disposed'], ['subscription', 'schedule-details-publish', 'disposed'],
     ['task', 'workflow', 'disposed'], ['subscription', 'workflow-reload', 'disposed'],
   ]);
   assert.equal(f.tools.entries().length, 0); assert.equal(f.scheduler.status().handlers, 0);

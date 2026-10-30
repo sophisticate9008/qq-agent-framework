@@ -39,7 +39,7 @@ function fixture(reply: (method: DshSessionMigrationMethod, input: Record<string
 }
 
 test('migration preview and commit preserve every reference and expected constraint without other RPCs', async () => {
-  for (const pluginVersion of ['1.4.1', '1.5.0', '1.5.1', '1.5.2', '1.5.3', '1.6.0'] as const) {
+  for (const pluginVersion of ['1.4.1', '1.5.0', '1.5.1', '1.5.2', '1.5.3', '1.6.0', '1.6.1'] as const) {
     const fake = fixture(method => method === 'bridgePlugin/forkPreview' ? preview() : receipt(), description({ pluginVersion }))
     assert.deepEqual(await fake.port.forkPreview(previewRequest, signal()), preview())
     assert.deepEqual(await fake.port.forkWithPreset(request, signal()), receipt())

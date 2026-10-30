@@ -98,7 +98,7 @@ export function createDshSessionMigrationPort(options: {
     const description = await options.describe(signal)
     signal.throwIfAborted()
     proof(description.protocol === BRIDGE_PLUGIN_PROTOCOL && description.sdkVersion === '0.2.1-rc.2'
-      && ['1.4.1', '1.5.0'].includes(description.pluginVersion)
+      && ['1.4.1', '1.5.0', '1.5.1'].includes(description.pluginVersion)
       && description.authentication === 'dsh-owner-peer' && validIdentifier(description.issuerEpoch)
       && description.migrationProtocol === MIGRATION_PROTOCOL && description.externalToolAuthorizationVerified === false
       && Array.isArray(description.methods) && description.methods.length <= 32 && description.methods.every(validIdentifier)

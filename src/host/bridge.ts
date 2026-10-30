@@ -327,7 +327,7 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
               ? readAgentPresentation(store, requestId, binding) : null;
             if (presentation && presentation.value.delivery === null) store.write(AGENT_PRESENTATION_NAMESPACE, requestId,
               { ...presentation.value, delivery: receipt.status }, { expectedRevision: presentation.record.revision,
-                expiresAt: clock() + 7 * 24 * 60 * 60 * 1000 });
+                ...(receipt.status === 'unknown' ? {} : { expiresAt: clock() + 7 * 24 * 60 * 60 * 1000 }) });
             onAgentDelivery?.(requestId, receipt);
           }
         }

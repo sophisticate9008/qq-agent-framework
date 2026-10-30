@@ -492,7 +492,7 @@ try {
 
 可信启动扩展可将异步结果交回原聊天会话，由当前 AI 结合人设与历史组织回复。待原会话空闲并重新核验原绑定和当前访问权限后，调用 `host.notifyAgent({ binding, id, content, signal, presentation: 'reply' })`；`content` 应明确说明这是宿主观察到的结果资料，要求本轮只输出面向用户的正文，不调用工具、不重试业务。传入有界失败事实和原请求者身份，具体语气交给当前人设，不固定称呼或套用话术。
 
-`presentation: 'reply'` 为该条宿主通知持久登记一次正文呈现资格；模型文本、普通用户消息和普通最终正文不能自行取得资格。返回 `accepted` 只表示已提交给原模型会话。`host.agentNotificationDelivery(binding, id)` 返回 `pending`、`confirmed`、`rejected` 或 `unknown`，只有实际 QQ 回执确认后才是 `confirmed`。呈现期限为九十秒，仍经过原输出准备、绑定和权限检查；同一通知 ID 不重复提交，参数改变拒绝，未知结果不重放。AI 处理失败时保留未知或拒绝状态，不直接发送原始错误作为兜底。调用方负责有界等待空闲、业务去重及停止排空。
+`presentation: 'reply'` 为该条宿主通知持久登记一次正文呈现资格；模型文本、普通用户消息和普通最终正文不能自行取得资格。返回 `accepted` 只表示已提交给原模型会话。`host.agentNotificationDelivery(binding, id)` 返回 `pending`、`confirmed`、`rejected` 或 `unknown`，只有实际 QQ 回执确认后才是 `confirmed`。呈现期限为九十秒，仍经过原输出准备、绑定和权限检查；记录存在时同一通知 ID 不重复提交，参数改变拒绝，未知结果不重放。已确认或拒绝的送达记录保留七天，未知和未结清记录保留；业务永久去重由调用方保存。AI 处理失败时保留未知或拒绝状态，不直接发送原始错误作为兜底。调用方负责有界等待空闲、业务去重及停止排空。
 
 ## 空间底层服务
 

@@ -8,8 +8,6 @@ export { DIARY_WORKFLOW_CONTRACT } from './workflow-contract.ts'
 
 const namespace = 'qzone-diary.days'
 const terminal = new Set(['published', 'preview', 'skipped'])
-const diaryImageStyle = '生活照质感，保留参考角色形象，自然光影、完整色彩与材质细节'
-const diaryImageDirection = `图片统一采用${diaryImageStyle}。角色可以保留参考图的二次元特征，生活照要求不表示改成真人。自拍、他人帮拍、摆拍、抓拍均可，按情境自由选择拍摄方式和构图。场景、服装、动作、机位与光线可以变化；不采用水彩、速写、素描、线稿、油画、纸张笔触或绘本风，不把生活动态画成画作。旧会话或已有计划中的其他画风不再沿用。`
 function text(value: unknown, maximum: number): string {
   assert(typeof value === 'string' && value.trim().length > 0 && value.length <= maximum, 'DIARY_MODEL_OUTPUT_INVALID', 'The model response did not match the requested format.')
   return value.trim()
@@ -80,8 +78,8 @@ export function createQzoneDiary(options: DiaryOptions) {
       const day = row.value as unknown as DiaryDay
       return day.slots.filter(slot => slot.state === 'published').map(slot => ({ date: day.date, caption: slot.caption }))
     }).slice(-5)
-    const prefix = initialized ? '' : `你为以下虚构角色经营生活动态，延续这段独立会话的经历与偏好：${config().persona}\n口吻自然，有具体生活细节，克制，不像广告或任务汇报。不要编造真实用户隐私、现实定位或他人的经历。不提后台、工具、提示词、账本。角色形象参考在生图服务内部加入，你只写场景、动作、服装与拍摄要求。不要求总是自拍，不复刻参考图三视图。仅输出本次要求的JSON。最近已经发布的内容：${JSON.stringify(recent)}\n`
-    const result = await runtime.models.run({ name: 'diary', model: config().model, prompt: prefix + diaryImageDirection + '\n' + prompt, maxOutputChars: 10000, timeoutMs: 180000, signal: current })
+    const prefix = initialized ? '' : `你为以下虚构角色经营生活动态，延续这段独立会话的经历与偏好：${config().persona}\n口吻自然，有具体生活细节，克制，不像广告或任务汇报。不要编造真实用户隐私、现实定位或他人的经历。不提后台、工具、提示词、账本。角色形象参考在生图服务内部加入，你只写场景、动作、服装与画风。画风遵循角色说明和本会话已确认的偏好，不要求总是自拍，不复刻参考图三视图。仅输出本次要求的JSON。最近已经发布的内容：${JSON.stringify(recent)}\n`
+    const result = await runtime.models.run({ name: 'diary', model: config().model, prompt: prefix + prompt, maxOutputChars: 10000, timeoutMs: 180000, signal: current })
     if (!initialized) store.write('qzone-diary.context', 'identity', { sessionId: result.sessionId }, { expectedRevision: marker?.revision ?? null })
     return parse(result.text)
   }
@@ -136,12 +134,12 @@ export function createQzoneDiary(options: DiaryOptions) {
       try {
         observe('planning', date)
         const times = planned.map(window => new Date(window.at).toLocaleTimeString('zh-CN', { timeZone: c.timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }))
-        const result = await writeModel(`今天是${date}，时区${c.timeZone}。安排${count}个相互连贯但不同的日常生活片段，对应本地时间依次为${times.join('、')}。场景必须符合对应时间：凌晨不写白天阳光，不把未发生的计划说成已完成。避免重复历史日程，也不要每条都拿杯子或对镜头摆拍。统一生活照质感，通过活动、光线与机位区分每段，光线与构图要求直接写进scene。输出 {"slots":[{"scene":"具体活动、生活细节与拍摄要求"}]}，正好${count}段，按上述时间顺序。`, current)
+        const result = await writeModel(`今天是${date}，时区${c.timeZone}。安排${count}个相互连贯但不同的日常生活片段，对应本地时间依次为${times.join('、')}。场景必须符合对应时间：凌晨不写白天阳光，不把未发生的计划说成已完成。避免重复历史日程，也不要每条都拿杯子或对镜头摆拍。画面风格沿用本会话已确认的偏好。输出 {"slots":[{"scene":"具体活动与生活细节","style":"画风"}]}，正好${count}段，按上述时间顺序。`, current)
         assert(Array.isArray(result.slots) && result.slots.length === count, 'DIARY_PLAN_INVALID', 'The day plan must match the bounded number of windows.')
         day.slots = result.slots.map((entry, index) => {
-          assert(isRecord(entry), 'DIARY_PLAN_INVALID', 'A scene is required.')
+          assert(isRecord(entry), 'DIARY_PLAN_INVALID', 'A scene and style are required.')
           const window = planned[index]!, at = Math.max(window.at, now() + 1000)
-          return { index, at, until: window.until, scene: text(entry.scene, 1000), style: diaryImageStyle,
+          return { index, at, until: window.until, scene: text(entry.scene, 1000), style: text(entry.style, 160),
             state: window.until - at >= 1800000 ? 'scheduled' : 'skipped', attempts: 0 }
         })
         current.throwIfAborted(); day.state = 'planned'; save(day); scheduleDay(day); observe('planned', date)
@@ -173,10 +171,10 @@ export function createQzoneDiary(options: DiaryOptions) {
         return
       }
       // Persist intent before any model/image side effect. Interrupted work is retained, never blindly replayed.
-      slot.style = diaryImageStyle; slot.state = 'generating'; save(day, index)
+      slot.state = 'generating'; save(day, index)
       try {
         const draft = await writeModel(`现在是${new Date(now()).toLocaleString('zh-CN', { timeZone: config().timeZone })}。本次日常片段：${slot.scene}，画风：${slot.style}。写一条简短第一人称生活动态（8-100字，随手记感，不必问读者问题），配一幅含自己角色的生活画面。输出 {"caption":"正文","prompt":"独立生图要求，场景服装动作构图与画风，最多2000字"}。画面不要水印或文字。`, current)
-        slot.caption = text(draft.caption, 240); slot.prompt = text(draft.prompt, 3000) + '\n' + diaryImageDirection; save(day, index)
+        slot.caption = text(draft.caption, 240); slot.prompt = text(draft.prompt, 3000); save(day, index)
         let correction = ''
         for (let attempt = 1; attempt <= 3; attempt++) {
           current.throwIfAborted()
@@ -187,7 +185,7 @@ export function createQzoneDiary(options: DiaryOptions) {
           const artifact = await options.media.save(`${date}-${index}-${attempt}`, image)
           slot.artifactId = artifact.id; slot.protocolImage = artifact.protocolImage; slot.state = 'reviewing'; save(day, index); observe('reviewing', date, index, attempt)
           const check = await runtime.models.run({ name: 'visual-review', mode: 'stateless', model: config().visionModel,
-            prompt: `检查实际附图能否用于生活动态。目标：${slot.scene}；要求：${slot.prompt}；文案：${slot.caption}。检查手指/肢体多余或缺失、肢体连接错乱、面部严重畸形、物体穿模、画面内容与文案矛盾、严重乱码水印。${diaryImageDirection} 参考角色的二次元特征和合理遮挡不算错误；明显的速写、水彩等画作质感不符合生活照要求，应给出重新生成的修正建议。看不清关键结构时不能盲目通过。仅返回JSON {"acceptable":布尔值,"captionMatches":布尔值,"issues":["具体可见问题"],"correction":"重生成时的明确修正建议，无问题为空"}。`,
+            prompt: `检查实际附图能否用于生活动态。目标：${slot.scene}；要求：${slot.prompt}；文案：${slot.caption}。检查手指/肢体多余或缺失、肢体连接错乱、面部严重畸形、物体穿模、画面内容与文案矛盾、严重乱码水印。风格化和合理遮挡不算错误，不要求写实。看不清关键结构时不能盲目通过。仅返回JSON {"acceptable":布尔值,"captionMatches":布尔值,"issues":["具体可见问题"],"correction":"重生成时的明确修正建议，无问题为空"}。`,
             images: [{ mediaType: image.mediaType, data: Buffer.from(image.data).toString('base64') }], timeoutMs: 180000, maxOutputChars: 4000, signal: current })
           const review = parse(check.text)
           assert(typeof review.acceptable === 'boolean' && typeof review.captionMatches === 'boolean' && Array.isArray(review.issues)

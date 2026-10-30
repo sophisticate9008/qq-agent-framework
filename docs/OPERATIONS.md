@@ -93,7 +93,11 @@ npm run test:sdk
 
 完整工作流的集成集合通过 `npm run cli -- test --suite integration --shard 1/3` 分成三片，序号分别为 `1/3`、`2/3`、`3/3`；每片互不重叠且合起来覆盖全集。需要复用已准备好的编译产物时使用 `--built --skip-build`，调用者负责产物与源码一致。浏览器下载缓存独立保存，失败诊断保留三天。
 
-浏览器工具按需安装到 `runtime/testing/`，普通安装、构建、启动和单元测试不需要 Playwright。需要预装时执行 `npm run cli -- install --browser`；系统库不足时可加 `--with-deps`。`--skip-browser-download` 只安装工具包。`npm run cli -- uninstall --browser` 只清理浏览器工具，不清业务数据和证据。
+浏览器工具按需安装到 `.cache/testing/`，普通安装、构建、启动和单元测试不需要 Playwright。需要预装时执行 `npm run cli -- install --browser`；系统库不足时可加 `--with-deps`。`--skip-browser-download` 只安装工具包。`npm run cli -- uninstall --browser` 只清理该目录中具有有效安装标记的浏览器工具，不清业务数据、证据或其他缓存。
+
+`.cache/` 整体由 Git 忽略，用于可重建的开发工具与缓存：`.cache/testing/` 保存独立测试依赖与 Chromium，`.cache/vite/` 保存控制台及浏览器夹具的 Vite 缓存。测试截图、诊断报告、模拟记录、部署快照和业务数据仍归 `runtime/`；公共源码检查跳过缓存和私人目录。
+
+旧版本的工具位于 `runtime/testing/`。迁移时先结束使用该目录的浏览器测试进程，在新目录尚不存在时将完整工具目录移动到 `.cache/testing/`，然后执行 `npm run cli -- install --browser --skip-browser-download` 更新其中的 TypeScript 路径。也可在新位置重新安装；CLI 不自动移动或删除旧目录。无需重启框架、DSH 或 QQ 服务。
 
 单组浏览器命令为 `npm run cli -- test --browser --target <名称>`，名称包括 `browser`、`management`、`page-navigation`、`activity`、`usage`、`markdown`、`presentation`、`virtual-list-perf`、`native-chat-ui`、`execution-journal`。这些测试使用隔离配置与协议替身；真实模型质量另行记录。插件测试命令与加载方法见 [DSH](DSH.md)，最终结果及历史失败处理见 [验收记录](VALIDATION.md)。
 

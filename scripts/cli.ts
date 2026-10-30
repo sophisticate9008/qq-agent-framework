@@ -108,10 +108,10 @@ start 默认启动或复用配置匹配的 gateway；--admin-only 仅启动管�
 test 默认执行 fast 源码测试，无需构建；--suite all 执行完整源码测试，--built 默认执行完整编译后测试。
 --suite 可单独选择 integration、deadline 或 artifacts；需要产物时自动构建，--built --skip-build 复用已有产物。
 --shard 1/3 按文件稳定分片；QQ_TEST_CONCURRENCY 设置每个进程的文件并发数（默认 4）。
-install --browser 或 test --browser 才准备 runtime/testing/ 内的独立浏览器测试工具。
+install --browser 或 test --browser 才准备 .cache/testing/ 内的独立浏览器测试工具。
 --skip-browser-download 只安装测试包；--with-deps 额外安装系统库，可能需要管理员权限。
 --target 可选：${Object.keys(BROWSER_TARGETS).join('、')}；省略时执行全部浏览器测试。
-uninstall --browser 只清理 runtime/testing/，不修改项目依赖、配置、会话或测试证据。`;
+uninstall --browser 只清理 .cache/testing/，不修改项目依赖、配置、会话或测试证据。`;
 
 function usage(message: string): never {
   throw new CliUsageError(message);
@@ -385,7 +385,7 @@ async function build(webOnly = false): Promise<void> {
 }
 
 export function browserToolchainPaths(root = PROJECT_ROOT) {
-  const directory = resolve(root, 'runtime/testing');
+  const directory = resolve(root, '.cache/testing');
   return Object.freeze({
     directory,
     manifest: join(directory, 'package.json'),

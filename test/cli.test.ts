@@ -302,14 +302,15 @@ test('uninstall removes only the isolated toolchain and preserves configurations
   const directory = mkdtempSync(join(tmpdir(), 'qq-bridge-framework-toolchain-remove-'));
   try {
     const paths = browserToolchainPaths(directory);
-    assert.equal(paths.manifest, join(directory, 'runtime/testing/package.json'));
-    assert.equal(paths.playwright, join(directory, 'runtime/testing/node_modules/playwright/cli.js'));
-    assert.equal(paths.browsers, join(directory, 'runtime/testing/browsers'));
+    assert.equal(paths.manifest, join(directory, '.cache/testing/package.json'));
+    assert.equal(paths.playwright, join(directory, '.cache/testing/node_modules/playwright/cli.js'));
+    assert.equal(paths.browsers, join(directory, '.cache/testing/browsers'));
     const preserved = [
       'package.json', 'package-lock.json', 'node_modules/retained',
-      'runtime/admin/config.json', 'runtime/sessions/state.json', 'runtime/ui-smoke/evidence.json'
+      'runtime/admin/config.json', 'runtime/sessions/state.json', 'runtime/ui-smoke/evidence.json',
+      'runtime/testing/legacy-marker', '.cache/vite/retained'
     ];
-    for (const filename of [...preserved, 'runtime/testing/browsers/download', 'runtime/testing/node_modules/installed']) {
+    for (const filename of [...preserved, '.cache/testing/browsers/download', '.cache/testing/node_modules/installed']) {
       mkdirSync(dirname(join(directory, filename)), { recursive: true });
       writeFileSync(join(directory, filename), 'keep');
     }

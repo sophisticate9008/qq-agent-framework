@@ -11,7 +11,7 @@ const server = await createServer({
   configFile: false,
   root: fileURLToPath(new URL('../', import.meta.url)),
   resolve: { alias: { '@': fileURLToPath(new URL('../web/', import.meta.url)) } },
-  cacheDir: fileURLToPath(new URL('../runtime/testing/.vite-execution-journal/', import.meta.url)),
+  cacheDir: fileURLToPath(new URL('../.cache/vite/execution-journal/', import.meta.url)),
   optimizeDeps: { entries: ['test/fixtures/execution-journal.html', 'test/fixtures/execution-runtime.html'] },
   plugins: [react(), tailwindcss()],
   server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },

@@ -5,6 +5,7 @@ import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   root: fileURLToPath(new URL('./web/', import.meta.url)),
+  cacheDir: fileURLToPath(new URL('./.cache/vite/web/', import.meta.url)),
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@': fileURLToPath(new URL('./web/', import.meta.url)) } },
   define: { 'process.env.NODE_ENV': JSON.stringify('production') },

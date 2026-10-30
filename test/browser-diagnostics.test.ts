@@ -67,6 +67,8 @@ test('browser diagnostics retain whitelisted synthetic PNG and JSON summaries, n
   await values.put('runtime/page-navigation-smoke/console.log', syntheticSecret);
   await values.put('runtime/page-navigation-smoke/result-1.json', '{' + syntheticSecret);
   await values.put('runtime/testing/failure.png', png);
+  await values.put('.cache/testing/failure.png', png);
+  await values.put('.cache/vite/failure.png', png);
   await values.put('runtime/private/result.json', syntheticSecret);
   await values.put('runtime/engineering/validation/006/private.png', png);
   await values.put('runtime/engineering/validation/006/markdown-page-1.png', png);

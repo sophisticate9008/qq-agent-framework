@@ -6,7 +6,7 @@ import { checkTypeScriptSyntax } from './typescript-syntax.ts';
 import { checkSourceRules } from './source-rules.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const excluded = new Set(['.git', 'node_modules', 'runtime', 'state', 'coverage', 'dist']);
+const excluded = new Set(['.git', '.cache', 'node_modules', 'runtime', 'private', 'state', 'coverage', 'dist']);
 // Directory exceptions are maintained independently of the CI implementation.
 const authoredJavaScriptDirectories = fs.readFileSync(path.join(root, '.ci-js-ignore'), 'utf8')
   .split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#')).map(directory => {

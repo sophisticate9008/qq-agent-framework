@@ -12,7 +12,7 @@ const server = await createServer({
   configFile: false,
   root: fileURLToPath(new URL('../', import.meta.url)),
   resolve: { alias: { '@': fileURLToPath(new URL('../web/', import.meta.url)) } },
-  cacheDir: fileURLToPath(new URL('../node_modules/.vite-virtual-perf/', import.meta.url)),
+  cacheDir: fileURLToPath(new URL('../.cache/vite/virtual-list-perf/', import.meta.url)),
   optimizeDeps: { entries: ['test/fixtures/virtual-list.html', 'test/fixtures/virtualized-pages.html', 'test/fixtures/catalog-lifecycle.html', 'test/fixtures/native-usage.html', 'test/fixtures/session-pages.html'] },
   plugins: [react(), tailwindcss(), { name: 'isolated-native-usage-api', configureServer(server) {
     server.middlewares.use((request, response, next) => {

@@ -68,14 +68,14 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: 初始化私有浏览器测试目录
-        run: install -d -m 700 runtime runtime/testing
+        run: install -d -m 700 .cache .cache/testing
       - name: 缓存 Chromium 下载
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
-            runtime/testing/browsers
-            runtime/testing/package.json
-          key: chromium-with-marker-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/cli.ts') }}
+            .cache/testing/browsers
+            .cache/testing/package.json
+          key: chromium-with-marker-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/cli.ts') }}
       - name: 浏览器验证（仅构建网页）
         id: browser
         run: npm run cli -- test --browser --with-deps

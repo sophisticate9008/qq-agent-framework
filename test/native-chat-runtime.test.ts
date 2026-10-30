@@ -2449,6 +2449,42 @@ test('explicit reply contract: failed model terminal settles its exact watchdog 
   assert.equal(fake.runtime().activity().items.some(item => item.summary === '本轮观察结束，未发言。'), false)
 })
 
+for (const unknownSend of [false, true]) test(`host result feedback keeps the original model context and records its actual delivery (${unknownSend ? 'unknown' : 'confirmed'})`, async context => {
+  const fake = await fixture(context, { unknownSend })
+  await fake.configure(); await fake.start(); fake.message(3104)
+  await until(() => fake.rpc.some(call => call.method === 'session/prompt'))
+  fake.rawFinal(1)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
+  const host = fake.runtime().host()!
+  const binding = host.sessions.get('private:123')!
+  const request = { binding, id: 'extension-result:one', presentation: 'reply' as const,
+    content: [{ type: 'text' as const, text: 'Observed task failure: provider rejected the request. Narrate in the current persona.' }],
+    signal: new AbortController().signal }
+  assert.equal((await host.notifyAgent(request)).status, 'accepted')
+  assert.equal(host.agentNotificationDelivery(binding, request.id), 'pending')
+  const prompts = fake.rpc.filter(call => call.method === 'session/prompt')
+  assert.equal(prompts.length, 2)
+  assert.equal(prompts[1]!.request.sessionId, binding.sessionId)
+  assert.equal(fake.sends.length, 0, 'the task error is model input, never a direct QQ notice')
+  fake.agentEvent('assistant/message', { turn: 2, step: 0, message: { id: 'extension-result-final', role: 'assistant',
+    content: [{ type: 'text', text: '抱歉，这次上游没给我图片，暂时画不出来啦。' }] } })
+  fake.agentEvent('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await until(() => host.agentNotificationDelivery(binding, request.id) !== 'pending')
+  assert.equal(host.agentNotificationDelivery(binding, request.id), unknownSend ? 'unknown' : 'confirmed')
+  assert.equal(fake.sends.length, 1)
+  assert.match(JSON.stringify(fake.sends), /上游没给我图片/)
+  assert.doesNotMatch(JSON.stringify(fake.sends), /Observed task failure/)
+  assert.equal((await host.notifyAgent(request)).status, 'unknown')
+  assert.equal(fake.rpc.filter(call => call.method === 'session/prompt').length, 2, 'a repeated notification is not resubmitted')
+  await assert.rejects(host.notifyAgent({ ...request, content: [{ type: 'text', text: 'changed result' }] }), /cannot change/)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
+  fake.message(3105)
+  await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
+  fake.rawFinal(3)
+  await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
+  assert.equal(fake.sends.length, 1, 'a normal QQ turn still requires explicit reply')
+})
+
 test('explicit reply contract: host work feedback uses final narration while tool names and intermediate child text remain private', async context => {
   const fake = await fixture(context, { workChannel: true })
   await fake.configure(); await fake.start(); fake.message(3004)

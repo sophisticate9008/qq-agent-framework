@@ -18,6 +18,7 @@ import { nativeAuthorizationMode } from './native-access.ts'
 import { digest, json, object } from './data.ts'
 import { mapNativeExecutionObservation } from './native-event-mapping.ts'
 import { recordNativeExecutionInput } from './native-execution-summary.ts'
+import { readAgentPresentation } from './agent-presentation.ts'
 
 export interface NativeAgentResources {
   readonly lifetime: AbortController | undefined
@@ -207,7 +208,7 @@ export function createNativeAgentCoordinator(options: {
                 if (observedMessages.size >= 512) observedMessages.delete(observedMessages.values().next().value!)
                 observedMessages.add(execution.requestId)
                 const pending = matchingReply(binding, execution.requestId)
-                // Only host-authored work feedback uses final text as a presentation result.
+                // Host-authored feedback can explicitly select final-text presentation.
                 // QQ turns speak through qbf_reply; final text is never a fallback send.
                 const feedback = pending?.requestId.startsWith('work-feedback:')
                   ? store.read('native-work.feedback', pending.requestId) : null
@@ -221,7 +222,10 @@ export function createNativeAgentCoordinator(options: {
                   || currentWork.conversationId !== binding.conversationId || currentWork.parentSessionId !== binding.sessionId
                   || currentWork.generation !== binding.generation || !['starting', 'running'].includes(String(currentWork.status)))
                 const decision = parseNativeReplyDecision(event.content ?? [])
-                if (!workFeedback || decision || staleProgress) {
+                const presentation = readAgentPresentation(store, execution.requestId, binding)?.value
+                const hostPresentation = presentation !== undefined && presentation.delivery === null
+                  && presentation.deadlineAt > Date.now() && ['submitting', 'accepted'].includes(presentation.submission)
+                if ((!workFeedback && !hostPresentation) || decision || staleProgress) {
                   settleSilent(execution, decision ?? (staleProgress ? { state: 'silent', reason: 'no-useful-addition' } : null))
                   runtime.host?.releaseDeliveryRequest(execution.requestId)
                   return

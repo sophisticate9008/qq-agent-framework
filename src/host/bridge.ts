@@ -22,6 +22,7 @@ import { bridgeTimeouts, createBoundedAgent, createBoundedTransport, withDeadlin
 import { createReplyWatchdog } from './replies.ts';
 import { createRoutedMessageEvent, routedMessageRelaysToAgent, type MessageRouter } from './routing.ts';
 import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
+import { AGENT_PRESENTATION_NAMESPACE, readAgentPresentation } from './agent-presentation.ts';
 
 type HostEventValidators = NonNullable<EngineOptions['eventValidators']>;
 type HostEffectAdapters = NonNullable<EngineOptions['effectAdapters']>;
@@ -320,7 +321,15 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
           if (result.errorCode === 'AGENT_MESSAGE_SUPPRESSED') return;
           assert(result.status === 'sent', result.errorCode ?? 'DELIVERY_UNKNOWN', 'The transport did not confirm delivery.');
         } finally {
-          if (typeof requestId === 'string') onAgentDelivery?.(requestId, receipt);
+          if (typeof requestId === 'string') {
+            const binding = sessions.get(event.conversationId);
+            const presentation = binding && binding.sessionId === event.sessionId && binding.generation === event.data.generation
+              ? readAgentPresentation(store, requestId, binding) : null;
+            if (presentation && presentation.value.delivery === null) store.write(AGENT_PRESENTATION_NAMESPACE, requestId,
+              { ...presentation.value, delivery: receipt.status }, { expectedRevision: presentation.record.revision,
+                expiresAt: clock() + 7 * 24 * 60 * 60 * 1000 });
+            onAgentDelivery?.(requestId, receipt);
+          }
         }
       });
       services.on('agent.reply-timeout', async (execution, event) => {
@@ -578,11 +587,23 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
     },
     /** A host observation in an existing conversation; never a QQ sender or a new owner instruction. */
     async notifyAgent(request: { readonly binding: SessionBinding; readonly id: string;
-      readonly content: readonly MessageContent[]; readonly signal: AbortSignal }) {
+      readonly content: readonly MessageContent[]; readonly signal: AbortSignal; readonly presentation?: 'reply' }) {
       const { binding, id } = request;
       assert(reference(id), 'INVALID_NOTIFICATION', 'A stable notification identity is required.');
       const signal = AbortSignal.any([controller.signal, request.signal]);
       const content = normalizeContent(request.content);
+      assert(request.presentation === undefined || request.presentation === 'reply', 'INVALID_NOTIFICATION', 'Unknown presentation mode.');
+      const requestId = digest([binding.conversationId, id, 'prompt']);
+      const fingerprint = digest(content);
+      if (request.presentation === 'reply') {
+        const previous = readAgentPresentation(store, requestId, binding);
+        const existing = store.read(AGENT_PRESENTATION_NAMESPACE, requestId);
+        assert(!existing || previous, 'SESSION_STALE', 'The original notification parent changed.');
+        if (previous) {
+          assert(previous.value.fingerprint === fingerprint, 'NOTIFICATION_CONFLICT', 'A notification cannot change its input.');
+          return { status: previous.value.submission === 'rejected' ? 'rejected' as const : 'unknown' as const };
+        }
+      }
       await admitFollow(binding.conversationId, signal, async () => {
         assert(digest(sessions.get(binding.conversationId)) === digest(binding), 'SESSION_STALE', 'The original notification parent changed.');
         await ensureFollow(binding, signal);
@@ -593,13 +614,27 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
         const reservation = policy.reserve({ ...(accountScope ? { accountScope } : {}), featureId: 'agent-relay',
           conversationId: binding.conversationId, capability: 'agent.submit' });
         policy.begin(reservation);
+        if (request.presentation === 'reply') store.write(AGENT_PRESENTATION_NAMESPACE, requestId, {
+          schema: 1, id, conversationId: binding.conversationId, sessionId: binding.sessionId, generation: binding.generation,
+          fingerprint, submission: 'submitting', delivery: null, deadlineAt: clock() + 90_000,
+        }, { expectedRevision: null });
         history.append(binding.conversationId, { id, actor: 'system', content, receivedAt: clock() });
         replies.watch(binding, id);
-        const result = await agent.submit({ sessionId: binding.sessionId,
-          requestId: digest([binding.conversationId, id, 'prompt']), content, signal });
+        const result = await agent.submit({ sessionId: binding.sessionId, requestId, content, signal });
+        if (request.presentation === 'reply') {
+          const presentation = readAgentPresentation(store, requestId, binding);
+          if (presentation) store.write(AGENT_PRESENTATION_NAMESPACE, requestId,
+            { ...presentation.value, submission: result.status }, { expectedRevision: presentation.record.revision });
+        }
         if (result.status === 'rejected') replies.suppress(binding, id);
         return result;
       } finally { releaseFollowUser(binding.conversationId); }
+    },
+    agentNotificationDelivery(binding: SessionBinding, id: string): 'pending' | 'confirmed' | 'rejected' | 'unknown' {
+      const presentation = readAgentPresentation(store, digest([binding.conversationId, id, 'prompt']), binding)?.value;
+      if (!presentation) return 'unknown';
+      return presentation.delivery ?? (presentation.submission === 'rejected' ? 'rejected'
+        : presentation.submission === 'unknown' || presentation.deadlineAt <= clock() ? 'unknown' : 'pending');
     },
     storageStats(options?: DurableStoreStatsOptions) { return store.stats?.(options) ?? null; },
     async dispatchEvent(input: FrameworkEvent, options: { signal?: AbortSignal } = {}): Promise<InboundReceipt> {

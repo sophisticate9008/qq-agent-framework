@@ -490,6 +490,10 @@ try {
 
 扩展的内部生成模板和固定参考素材可直接在服务端组合，不必作为模型可读工具结果或 skill 提供。自身形象生成只接收主体选择与本次附加要求，通用生图继续接收普通内容要求；角色档案、基础提示词和固定参考图不返回聊天上下文。工具回包应区分排队、生成、发送与确认送达，只报告已观察状态，未提供成图就不能让模型把模板细节当作视觉结果。
 
+可信启动扩展可将异步结果交回原聊天会话，由当前 AI 结合人设与历史组织回复。待原会话空闲并重新核验原绑定和当前访问权限后，调用 `host.notifyAgent({ binding, id, content, signal, presentation: 'reply' })`；`content` 应明确说明这是宿主观察到的结果资料，要求本轮只输出面向用户的正文，不调用工具、不重试业务。传入有界失败事实和原请求者身份，具体语气交给当前人设，不固定称呼或套用话术。
+
+`presentation: 'reply'` 为该条宿主通知持久登记一次正文呈现资格；模型文本、普通用户消息和普通最终正文不能自行取得资格。返回 `accepted` 只表示已提交给原模型会话。`host.agentNotificationDelivery(binding, id)` 返回 `pending`、`confirmed`、`rejected` 或 `unknown`，只有实际 QQ 回执确认后才是 `confirmed`。呈现期限为九十秒，仍经过原输出准备、绑定和权限检查；同一通知 ID 不重复提交，参数改变拒绝，未知结果不重放。AI 处理失败时保留未知或拒绝状态，不直接发送原始错误作为兜底。调用方负责有界等待空闲、业务去重及停止排空。
+
 ## 空间底层服务
 
 内置包 `qzone` 提供 `QzoneToolPort`。扩展在 manifest 中声明 `dependencies: ['qzone']` 与 `requires: [serviceDeclaration(QZONE_SERVICE_CONTRACT)]`，通过 `useService(context, QZONE_SERVICE_CONTRACT)` 取得；`inspect` 核对当前协议能力，`execute` 按原 OneBot 名称与参数调用。原生聊天会按实际协议能力另行登记发布与删除工具，复用会话白名单和真实消息来源校验；扩展直接调用底层服务时，自行通过宿主 policy 确认触发与访问范围。完整示例与边界见 [空间说说](QZONE.md)。

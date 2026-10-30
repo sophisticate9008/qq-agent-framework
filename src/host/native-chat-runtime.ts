@@ -1267,6 +1267,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         media = createNativeMediaRegistry({ store: store!, accountId: selfId,
           protocol: readProtocol, transcriber: options.mediaTranscriber,
           videoObserver: createFfmpegVideoObserver({ directory: options.directory }),
+          async observationVersion(signal) { signal.throwIfAborted(); const saved = await packageConfigurationRegistry.read('media');
+            signal.throwIfAborted(); return validateNativeMediaConfiguration(saved.configuration).observationVersion },
           async observeVideo(signal) { signal.throwIfAborted(); const saved = await packageConfigurationRegistry.read('media');
             signal.throwIfAborted(); return validateNativeMediaConfiguration(saved.configuration).observeVideo },
           contentReader: createOneBotMediaReader({ actions: readProtocol,

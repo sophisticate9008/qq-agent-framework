@@ -1,4 +1,7 @@
 import sharp from 'sharp'
+import type { MediaObservationVersion } from '../contracts/native-media-configuration.ts'
+import type { FrameworkFrameGrid } from '../contracts/framework-media.ts'
+import { composeContactSheet, halfFrameSize } from './media-contact-sheets.ts'
 
 export type GifObservation = {
   readonly status: 'animated'
@@ -6,24 +9,25 @@ export type GifObservation = {
   readonly frameCount: number
   /** Zero means infinite looping; otherwise this is the decoder's actual loop count. */
   readonly loopCount: number
-  readonly frames: readonly { readonly timeSeconds: number; readonly mediaType: 'image/jpeg'; readonly data: Uint8Array }[]
+  readonly frames: readonly { readonly timeSeconds: number; readonly grid?: FrameworkFrameGrid; readonly mediaType: 'image/jpeg'; readonly data: Uint8Array }[]
 } | { readonly status: 'static' } | { readonly status: 'rejected'; readonly code: string }
 
 const maxInputBytes = 8 * 1024 * 1024
 const maxFrameBytes = 60 * 1024
 const maxSourceFramePixels = 16_000_000
+let activeObservations = 0
 const maxSourcePixels = 64_000_000
 const rejected = (code: string): GifObservation => ({ status: 'rejected', code })
 
 /** Observe existing GIF bytes locally. libvips owns frame disposal and canvas compositing. */
-export async function observeGif(input: { readonly data: Uint8Array; readonly signal: AbortSignal }): Promise<GifObservation> {
+export async function observeGif(input: { readonly data: Uint8Array; readonly signal: AbortSignal; readonly version?: MediaObservationVersion }): Promise<GifObservation> {
   if (input.signal.aborted) return rejected('gif_aborted')
   if (!(input.data instanceof Uint8Array) || input.data.buffer instanceof SharedArrayBuffer
     || input.data.byteLength < 13 || input.data.byteLength > maxInputBytes) return rejected('gif_input_limit')
   const source = Buffer.from(input.data)
   if (!['GIF87a', 'GIF89a'].includes(source.toString('ascii', 0, 6))) return rejected('gif_unsupported_format')
   // This wall deadline includes time waiting for a libuv/libvips worker, not only native processing.
-  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(9000)])
+  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(input.version === 'v2' ? 20_000 : 9000)])
   async function run<Value>(pipeline: ReturnType<typeof sharp>, operation: Promise<Value>): Promise<Value> {
     let abort: (() => void) | undefined
     try {
@@ -35,6 +39,8 @@ export async function observeGif(input: { readonly data: Uint8Array; readonly si
       })
     } finally { if (abort) signal.removeEventListener('abort', abort); pipeline.destroy() }
   }
+  if (activeObservations > 0) return rejected('gif_observation_backpressure')
+  activeObservations++
   try {
     const probe = sharp(source, { pages: 1, limitInputPixels: maxSourceFramePixels, failOn: 'error' }).timeout({ seconds: 3 })
     const metadata = await run(probe, probe.metadata())
@@ -57,17 +63,31 @@ export async function observeGif(input: { readonly data: Uint8Array; readonly si
     if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0 || milliseconds > 600000) return rejected('gif_duration_limit')
     // Sample the actual time axis. Repeated targets on a long-held frame become one observation.
     const selections: number[] = []
-    const sampleCount = Math.min(6, count)
+    const sampleCount = Math.min(input.version === 'v2' ? 24 : 6, count)
     for (let sample = 0; sample < sampleCount; sample++) {
       const target = Math.min(milliseconds - 1, milliseconds * sample / (sampleCount - 1))
       let page = 0
       while (page + 1 < count && starts[page + 1] <= target) page++
       if (!selections.includes(page)) selections.push(page)
     }
-    const frames: { timeSeconds: number; mediaType: 'image/jpeg'; data: Uint8Array }[] = []
+    const frames: { timeSeconds: number; grid?: FrameworkFrameGrid; mediaType: 'image/jpeg'; data: Uint8Array }[] = []
     let outputBytes = 0
+    const tiles: { data: Buffer; timeSeconds: number }[] = []
+    const tileSize = halfFrameSize(width, height)
     for (const page of selections) {
       if (signal.aborted) throw new Error('gif_cancelled')
+      if (input.version === 'v2') {
+        const pipeline = sharp(source, { page, pages: 1, limitInputPixels: maxSourceFramePixels, failOn: 'error' })
+          .timeout({ seconds: 3 }).resize(tileSize.width, tileSize.height, { fit: 'fill' })
+          .flatten({ background: '#ffffff' }).toColourspace('srgb').removeAlpha().raw()
+        const data = await run(pipeline, pipeline.toBuffer())
+        tiles.push({ data, timeSeconds: starts[page]! / 1000 })
+        if (tiles.length === 4 || page === selections[selections.length - 1]) {
+          frames.push(await composeContactSheet(tiles, tileSize.width, tileSize.height, signal))
+          tiles.length = 0
+        }
+        continue
+      }
       let compact: Buffer | undefined
       for (const [edge, quality] of [[960, 72], [768, 52], [640, 35]] as const) {
         if (signal.aborted) throw new Error('gif_cancelled')
@@ -90,5 +110,5 @@ export async function observeGif(input: { readonly data: Uint8Array; readonly si
     if (signal.aborted) return rejected('gif_processing_timeout')
     const message = error instanceof Error ? error.message : ''
     return rejected(/pixel limit/i.test(message) ? 'gif_source_limit' : /timeout/i.test(message) ? 'gif_processing_timeout' : 'gif_decode_failed')
-  }
+  } finally { activeObservations-- }
 }

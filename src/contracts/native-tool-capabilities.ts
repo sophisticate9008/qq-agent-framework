@@ -41,7 +41,7 @@ export const NATIVE_TOOL_CAPABILITY_CATALOG = Object.freeze([
     description: '检查当前QQ会话中已登记的媒体资源种类、期限和可读状态。不会读取内容。' },
   { capability: 'native.media.read', tool: 'qbf_media_read', name: '读取媒体',
     summary: '读取图片、GIF 动画抽样、文件、转发或获准的视频抽样画面。',
-    description: '读取当前QQ会话已登记资源。图片需当前模型支持看图；GIF 动画按真实显示时序抽取最多六帧，返回单次时长、原帧数与循环次数（0 为无限），只代表抽样帧，不代表逐帧看过完整动画，不受视频观察开关影响。文本文件返回正文，语音需转录服务；视频仅在媒体观察设置允许时抽取最多六帧，带真实时间点，不分析音轨，不代表观看了完整视频；合并转发返回正文及嵌套媒体句柄。不能读取时明确返回原因。' },
+    description: '读取当前QQ会话已登记资源。图片需当前模型支持看图；视频和 GIF 按用户所选方案均匀抽样：V1 最多六张独立画面；V2 最多二十四帧，宽高减半后四帧拼一张，最多六张四宫格，按左上、右上、左下、右下及随附实际时间理解；空白格没有观测内容。GIF 返回单次时长、原帧数与循环次数（0 为无限），只代表抽样帧，不代表逐帧看过完整动画，不受视频观察开关影响。文本文件返回正文，语音需转录服务；视频仅在媒体观察设置允许时读取，带真实时间点，不分析音轨，不代表观看了完整视频；合并转发返回正文及嵌套媒体句柄。不能读取时明确返回原因。' },
   { capability: 'native.tasks.create', tool: 'qbf_task_create', name: '创建会话任务', summary: '安排未来的会话行动。', description: '创建持久任务并绑定当前会话，满足条件后继续执行。' },
   { capability: 'native.tasks.update', tool: 'qbf_task_update', name: '修改会话任务', summary: '修改任务安排或明确衔接会话。', description: '按当前版本更新已结清任务的目的、等待条件和绑定，保留原预算。' },
   { capability: 'native.tasks.list', tool: 'qbf_task_list', name: '查看会话任务', summary: '查看任务进度与状态。', description: '分页查看所属会话的持久任务。' },

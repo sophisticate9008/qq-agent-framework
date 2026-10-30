@@ -1,3 +1,4 @@
+import type { MediaObservationVersion } from '../contracts/native-media-configuration.ts';
 import { withDeadline } from './deadlines.ts';
 import { createNativeImageReferences, nativeImageType as imageType } from './native-image-references.ts';
 import { normalizeModelImage } from '../adapters/image-normalization.ts';
@@ -22,6 +23,7 @@ export function createNativeMediaRegistry(options: {
   readonly contentReader?: NativeMediaContentReader;
   readonly transcriber?: NativeMediaTranscriber;
   readonly videoObserver?: NativeVideoObserver;
+  readonly observationVersion?: (signal: AbortSignal) => Promise<MediaObservationVersion>;
   readonly observeVideo?: (signal: AbortSignal) => Promise<boolean>;
   readonly authorize: (conversationId: string, signal: AbortSignal) => Promise<void>;
 }) {
@@ -84,13 +86,13 @@ export function createNativeMediaRegistry(options: {
           { expectedRevision: current.revision, expiresAt: Number(value.expiresAt) });
         return unavailable('gif_requires_media_read');
       }
-      const observed = mediaType === 'image/gif' ? await observeGif({ data: result.data, signal: request.signal }) : null;
+      const observed = mediaType === 'image/gif' ? await observeGif({ data: result.data, signal: request.signal, version: await options.observationVersion?.(request.signal) ?? 'v1' }) : null;
       request.signal.throwIfAborted();
       if (observed?.status === 'rejected') return unavailable(observed.code);
       if (observed?.status === 'animated') {
         envelope = { schema: FRAMEWORK_MEDIA_PROTOCOL, contentRead: true, kind: 'animation', durationSeconds: observed.durationSeconds,
           frameCount: observed.frameCount, loopCount: observed.loopCount, coverage: 'sampled-frames-only',
-          frames: observed.frames.map(frame => ({ timeSeconds: frame.timeSeconds, mediaType: frame.mediaType, data: Buffer.from(frame.data).toString('base64') })) };
+          frames: observed.frames.map(frame => ({ timeSeconds: frame.timeSeconds, ...(frame.grid ? { grid: json(frame.grid) } : {}), mediaType: frame.mediaType, data: Buffer.from(frame.data).toString('base64') })) };
         assert(parseNativeMediaReadEnvelope(envelope) && observed.frames.every(frame => imageType(frame.data) === 'image/jpeg'),
           'INVALID_NATIVE_GIF_OBSERVATION', 'The GIF observer returned invalid or excessive sampled frames.');
       } else {
@@ -134,7 +136,8 @@ export function createNativeMediaRegistry(options: {
     const unavailable = (reason: string): JsonObject => ({ schema: FRAMEWORK_MEDIA_PROTOCOL, contentRead: false, kind: 'video', reason });
     if (await options.observeVideo?.(request.signal) !== true) return unavailable('native_video_observation_disabled');
     if (!options.videoObserver || !options.contentReader) return unavailable('native_video_observer_not_connected');
-    return withDeadline({ signal: request.signal, timeoutMs: 25_000, code: 'NATIVE_VIDEO_READ_TIMEOUT', run: async signal => {
+    const version = await options.observationVersion?.(request.signal) ?? 'v1';
+    return withDeadline({ signal: request.signal, timeoutMs: version === 'v2' ? 40_000 : 25_000, code: 'NATIVE_VIDEO_READ_TIMEOUT', run: async signal => {
       const allowed = async () => {
         await options.authorize(request.scope.conversationId, signal); signal.throwIfAborted(); read(assetId, request.scope.conversationId);
         return await options.observeVideo?.(signal) === true;
@@ -152,10 +155,10 @@ export function createNativeMediaRegistry(options: {
         return unavailable(/^[a-z][a-z0-9_]{0,79}$/.test(reason) ? reason : 'native_video_read_rejected');
       }
       if (result.data.byteLength < 1 || result.data.byteLength > 64 * 1024 * 1024) return unavailable('native_video_size_limit');
-      const observed = await options.videoObserver!.observe({ data: result.data, signal });
+      const observed = await options.videoObserver!.observe({ data: result.data, signal, version });
       if (!await allowed()) return unavailable('native_video_observation_disabled');
       const envelope: JsonObject = { schema: FRAMEWORK_MEDIA_PROTOCOL, contentRead: true, kind: 'video', durationSeconds: observed.durationSeconds,
-        frames: observed.frames.map(frame => ({ timeSeconds: frame.timeSeconds, mediaType: frame.mediaType, data: Buffer.from(frame.data).toString('base64') })),
+        frames: observed.frames.map(frame => ({ timeSeconds: frame.timeSeconds, ...(frame.grid ? { grid: json(frame.grid) } : {}), mediaType: frame.mediaType, data: Buffer.from(frame.data).toString('base64') })),
         audioObserved: observed.audioObserved, hasAudio: observed.hasAudio, coverage: 'sampled-frames-only' };
       assert(parseNativeMediaReadEnvelope(envelope) && observed.frames.every(frame => imageType(frame.data) === 'image/jpeg'),
         'INVALID_NATIVE_VIDEO_OBSERVATION', 'The video observer returned invalid or excessive sampled frames.');

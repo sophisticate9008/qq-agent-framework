@@ -33,3 +33,30 @@ test('registry invokes fixed policy capability before projecting explicitly regi
   assert.deepEqual(order,['native.media.read','project'])
   registry.close()
 })
+
+test('contact-sheet envelopes keep cell times, reject malformed grids and project all four positions', () => {
+  const frame = { timeSeconds: 0, mediaType: 'image/jpeg', data: 'AQIDBA==', grid: { columns: 2, rows: 2, width: 960, height: 540, times: [0, 1, 2, 3] } }
+  const video = { schema: FRAMEWORK_MEDIA_PROTOCOL, kind: 'video', contentRead: true, durationSeconds: 10, frames: [frame],
+    coverage: 'sampled-frames-only', audioObserved: false, hasAudio: false }
+  assert(parseNativeMediaReadEnvelope(video))
+  const projected = makeFrameworkMediaResultProjector()(definition, video)
+  assert.match(JSON.stringify(projected.value), /"times":\[0,1,2,3\]/)
+  assert.match(JSON.stringify(projected.content?.[0]), /左上、右上、左下、右下/)
+  for (const grid of [{ ...frame.grid, columns: 3 }, { ...frame.grid, times: [0, 1, 1, 3] },
+    { ...frame.grid, times: [0, 1, 2, 11] }, { ...frame.grid, width: 4000 }, { ...frame.grid, times: [0, 1, 2, 3, 4] }]) {
+    assert.equal(parseNativeMediaReadEnvelope({ ...video, frames: [{ ...frame, grid }] }), null)
+  }
+  assert.equal(parseNativeMediaReadEnvelope({ ...video, frames: [frame, { timeSeconds: 4, mediaType: 'image/jpeg', data: 'AQIDBA==' }] }), null)
+})
+
+
+test('six contact sheets fit the new batch budget while individual and aggregate limits remain enforced', () => {
+  const frame = (index: number, bytes: number) => ({ timeSeconds: index * 4, mediaType: 'image/jpeg', data: Buffer.alloc(bytes).toString('base64'),
+    grid: { columns: 2, rows: 2, width: 960, height: 540, times: [0, 1, 2, 3].map(time => time + index * 4) } })
+  const video = { schema: FRAMEWORK_MEDIA_PROTOCOL, kind: 'video', contentRead: true, durationSeconds: 24,
+    frames: Array.from({ length: 6 }, (_, index) => frame(index, 256 * 1024)), coverage: 'sampled-frames-only', audioObserved: false, hasAudio: false }
+  assert(parseNativeMediaReadEnvelope(video))
+  assert.equal(makeFrameworkMediaResultProjector()(definition, video).content?.length, 7)
+  assert.equal(parseNativeMediaReadEnvelope({ ...video, frames: [frame(0, 256 * 1024 + 1)] }), null)
+  assert.equal(parseNativeMediaReadEnvelope({ ...video, frames: [...video.frames, frame(6, 1)] }), null)
+})

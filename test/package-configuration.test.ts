@@ -11,6 +11,8 @@ import { createPackageConfigurationFileStore } from '../src/storage/package-conf
 import { revision } from '../src/storage/private-json.ts'
 import { createPackageConfigurationRoutes } from '../src/admin/package-configuration.ts'
 import { NativeConfigurationRepository } from '../src/admin/native-configuration-repository.ts'
+import { NATIVE_MEDIA_CONFIGURATION } from '../src/host/native-media-configuration.ts'
+import { validateNativeMediaConfiguration } from '../src/contracts/native-media-configuration.ts'
 
 async function fixture(context: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'package-configuration-'))
@@ -151,4 +153,23 @@ test('hot configuration reads and GET defaults never create a missing runtime di
   assert.equal(current.source, 'stored')
   assert.equal(current.effective.enabled, true)
   await assert.rejects(stat(absent), { code: 'ENOENT' })
+})
+
+
+test('stored media settings default to V1 without a write, and V2 uses independent live CAS', async context => {
+  const { directory, signal } = await fixture(context)
+  const filename = join(directory, 'package-media.configuration.json')
+  const bytes = JSON.stringify({ schema: 1, id: 'media', schemaVersion: 1, configuration: { schema: 1, observeVideo: true } }) + '\n'
+  await writeFile(filename, bytes, { mode: 0o600 })
+  const registry = createPackageConfigurationRegistry({ store: createPackageConfigurationFileStore(directory), contributions: [NATIVE_MEDIA_CONFIGURATION] })
+  const native = new NativeConfigurationRepository(directory)
+  const before = await native.read()
+  const current = await registry.read('media')
+  assert.deepEqual(current.configuration, { schema: 1, observeVideo: true, observationVersion: 'v1' })
+  assert.equal(await readFile(filename, 'utf8'), bytes)
+  const saved = await registry.compareAndSet('media', current.revision, { schema: 1, observeVideo: true, observationVersion: 'v2' }, signal)
+  assert.equal(object(saved.configuration).observationVersion, 'v2')
+  assert.deepEqual((await native.read()).revisions, before.revisions)
+  await assert.rejects(registry.compareAndSet('media', current.revision, current.configuration, signal), { code: 'PACKAGE_CONFIGURATION_CONFLICT' })
+  for (const observationVersion of ['auto', 'v3', 2, null]) assert.throws(() => validateNativeMediaConfiguration({ schema: 1, observeVideo: true, observationVersion }), TypeError)
 })

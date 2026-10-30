@@ -10,7 +10,7 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 export function validateFrameworkContent(value: unknown): void {
-  if (!Array.isArray(value) || value.length > 8 || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) throw new TypeError('Invalid media result')
+  if (!Array.isArray(value) || value.length > 8 || Buffer.byteLength(JSON.stringify(value)) > 3 * 1024 * 1024) throw new TypeError('Invalid media result')
   let imageCount = 0
   let textCount = 0
   let totalImageBytes = 0
@@ -26,7 +26,7 @@ export function validateFrameworkContent(value: unknown): void {
     if (!bytes.length || bytes.length > imageBytes || bytes.toString('base64') !== item.data) throw new TypeError('Invalid image encoding')
     imageCount++; totalImageBytes += bytes.length
   }
-  if (imageCount > 1 && (imageCount > 6 || textCount > 1 || totalImageBytes > 360 * 1024)) throw new TypeError('Video frames exceed the aggregate media limit')
+  if (imageCount > 1 && (imageCount > 6 || textCount > 1 || totalImageBytes > 1536 * 1024)) throw new TypeError('Video frames exceed the aggregate media limit')
 }
 
 /** Save encoded owner content as real SDK attachments; never render Base64 as text. */
@@ -82,7 +82,7 @@ export function renderFrameworkMedia(value: unknown): ContentBlock[] {
   if (!Array.isArray(rendered) || rendered.length > 8) throw new TypeError('Invalid canonical media')
   const images = rendered.filter(item => item && typeof item === 'object' && 'type' in item && item.type === 'image')
   if (images.length > 1 && (images.length > 6 || rendered.length - images.length > 1
-    || images.reduce((sum, raw) => sum + Number(object(object(raw).attachment).bytes), 0) > 360 * 1024)) throw new TypeError('Invalid canonical video frames')
+    || images.reduce((sum, raw) => sum + Number(object(object(raw).attachment).bytes), 0) > 1536 * 1024)) throw new TypeError('Invalid canonical video frames')
   return rendered.map(raw => {
     const item = object(raw)
     if (item.type === 'text' && typeof item.text === 'string') return { type: 'text' as const, text: item.text }

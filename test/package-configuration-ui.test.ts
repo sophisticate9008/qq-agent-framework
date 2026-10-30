@@ -54,3 +54,13 @@ test('forward authorization remains independent and exact through whitelist requ
   assert.deepEqual(authorizationValues(authorizationDrafts(counted.grants)), counted.grants);
   assert.equal(authorizationValues([{ ...authorizationDrafts(counted.grants)[0]!, forwardUses: '-1' }]), null);
 });
+
+test('choice configuration fields accept only declared values and preserve other settings', () => {
+  const choices: PackageConfigurationDescriptor = { ...descriptor, fields: [{ id: 'version', path: ['version'], kind: 'choice',
+    label: '画面方案', description: '固定选择', options: [{ value: 'v1', label: '单帧' }, { value: 'v2', label: '四宫格' }] }] }
+  assert(parsePackageConfigurationDescriptor(choices))
+  assert.deepEqual(packageConfigurationDraft(choices, { version: 'v1' }), { version: 'v1' })
+  assert.deepEqual(packageConfigurationChanges(choices, { version: 'v1', other: true }, { version: 'v2' }), { version: 'v2', other: true })
+  assert.throws(() => packageConfigurationChanges(choices, { version: 'v1' }, { version: 'v3' }))
+  assert.equal(parsePackageConfigurationDescriptor({ ...choices, fields: [{ ...choices.fields[0], options: [{ value: 'v1', label: 'one' }, { value: 'v1', label: 'two' }] }] }), null)
+})

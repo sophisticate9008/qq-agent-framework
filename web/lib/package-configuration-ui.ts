@@ -11,6 +11,7 @@ export function packageFieldValue(value: PackageConfigurationValue, path: readon
 export function packageFieldDraft(field: PackageConfigurationField, configuration: PackageConfigurationValue): PackageFieldDraft | null {
   const value = packageFieldValue(configuration, field.path);
   return field.kind === 'boolean' ? typeof value === 'boolean' ? value : null
+    : field.kind === 'choice' ? typeof value === 'string' && field.options.some(option => option.value === value) ? value : null
     : field.kind === 'integer' ? typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : null
       : Array.isArray(value) && value.every(item => typeof item === 'string') ? value.join('\n') : null;
 }
@@ -24,6 +25,7 @@ export function packageConfigurationChanges(descriptor: PackageConfigurationDesc
   for (const field of descriptor.fields) {
     const draft = drafts[field.id]; let value: PackageConfigurationValue;
     if (field.kind === 'boolean') { if (typeof draft !== 'boolean') throw new Error(`${field.label}需要明确选择`); value = draft; }
+    else if (field.kind === 'choice') { if (typeof draft !== 'string' || !field.options.some(option => option.value === draft)) throw new Error(`${field.label}需要选择有效选项`); value = draft; }
     else if (field.kind === 'integer') { if (typeof draft !== 'string' || !/^-?\d+$/.test(draft) || !Number.isSafeInteger(Number(draft)) || Number(draft) < field.minimum || Number(draft) > field.maximum) throw new Error(`${field.label}需要 ${field.minimum} 到 ${field.maximum} 的整数`); value = Number(draft); }
     else { if (typeof draft !== 'string') throw new Error(`${field.label}需要填写列表`); const values = draft.split('\n').map(item => item.trim()).filter(Boolean); if (values.length > field.maximumEntries || values.some(item => item.length > field.maximumLength)) throw new Error(`${field.label}超出列表数量或单项长度限制`); value = values; }
     let target: PackageConfigurationValue = cloned;

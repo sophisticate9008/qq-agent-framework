@@ -251,7 +251,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
     },
     async complete(request: FrameworkToolCompletion, signal: AbortSignal = new AbortController().signal) {
       epoch(request.issuerEpoch)
-      const value = json(request.result, 512 * 1024)
+      const value = json(request.result, 3 * 1024 * 1024)
       if (value === null || typeof value !== 'object' || Array.isArray(value)
         || (value.status !== 'confirmed' || !Object.hasOwn(value, 'value') || Object.keys(value).some(key => key !== 'status' && key !== 'value' && key !== 'content'))
         && (!['unknown', 'rejected'].includes(String(value.status)) || typeof value.code !== 'string'
@@ -259,6 +259,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
         throw new TypeError('Invalid framework tool result')
       }
       if (value.status === 'confirmed' && value.content !== undefined) validateFrameworkContent(value.content)
+      else json(value, 512 * 1024)
       const entry = pending.get(request.ticket)
       if (entry?.completing) return { schema: 1 as const, accepted: false }
       if (entry && value.status === 'confirmed' && value.content !== undefined) {

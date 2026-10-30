@@ -27,7 +27,7 @@ export const NATIVE_MEDIA_TOOLS: readonly FrameworkToolDefinition[] = Object.fre
   (['native.media.inspect', 'native.media.read'] as const).map(capability => {
     const tool = nativeToolCapabilityDefinition(capability);
     return { registrationSource: { origin: 'framework-builtin' as const, ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' as const }, name: tool.tool, capability, description: tool.description, featureId: NATIVE_TOOL_FEATURE,
-      timeoutMs: capability === 'native.media.read' ? 30_000 : 10_000,
+      timeoutMs: capability === 'native.media.read' ? 45_000 : 10_000,
       parameters: { type: 'object', additionalProperties: false, required: ['assetId'],
         properties: { assetId: { type: 'string', pattern: '^media-[a-f0-9]{64}$', maxLength: 70 } } } };
   }));

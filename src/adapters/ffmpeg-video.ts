@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
-import { access, lstat, mkdtemp, open, readdir, realpath, rm } from 'node:fs/promises'
+import { access, lstat, mkdtemp, open, readdir, readFile, realpath, rm } from 'node:fs/promises'
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path'
 import sharp from 'sharp'
+import { compactContactSheet } from './media-contact-sheets.ts'
 import type { NativeVideoObservation, NativeVideoObserver } from '../contracts/native-media.ts'
 import { assert, FrameworkError, isRecord } from '../core/values.ts'
 import { ensurePrivateDirectory } from '../storage/private-json.ts'
@@ -42,7 +43,7 @@ async function binary(name: 'ffmpeg' | 'ffprobe', configured?: string): Promise<
 function command(executable: string, args: readonly string[], signal: AbortSignal, maxBuffer: number) {
   signal.throwIfAborted()
   return new Promise<{ stdout: Buffer; stderr: Buffer }>((accept, reject) => {
-    execFile(executable, [...args], { encoding: 'buffer', signal, killSignal: 'SIGKILL', timeout: 20_000, maxBuffer,
+    execFile(executable, [...args], { encoding: 'buffer', signal, killSignal: 'SIGKILL', timeout: 30_000, maxBuffer,
       windowsHide: true, env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', AV_LOG_FORCE_NOCOLOR: '1' } },
     (error, stdout, stderr) => {
       if (error) { reject(new FrameworkError('VIDEO_DECODE_FAILED', 'The local decoder did not return a complete result.')); return }
@@ -84,7 +85,7 @@ export function createFfmpegVideoObserver(options: {
       && request.data.byteLength > 0 && request.data.byteLength <= inputBytes,
     'VIDEO_INPUT_LIMIT', 'A video of at most 64 MiB is required.')
     const format = container(request.data)
-    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(20_000)])
+    const signal = AbortSignal.any([request.signal, AbortSignal.timeout(request.version === 'v2' ? 30_000 : 20_000)])
     pending = true
     let temporary: string | undefined
     try {
@@ -124,6 +125,42 @@ export function createFfmpegVideoObserver(options: {
       const start = numeric(stream.start_time) ?? numeric(metadata.format.start_time) ?? 0
       assert(duration !== null && duration > 0 && duration <= 600 && Math.abs(start) <= 86_400,
         'VIDEO_DURATION_LIMIT', 'A video duration of at most ten minutes must be verifiable.')
+      if (request.version === 'v2') {
+        // One decoder and one bounded 2x2 tile buffer; never retain 24 full-resolution frames in Node.
+        const end = Math.max(0, duration - Math.min(0.1, duration / 20))
+        const step = end / 23
+        const output = join(temporary, 'sheet-%02d.jpg')
+        const result = await command(ffmpeg, ['-hide_banner', '-nostdin', '-loglevel', 'info', '-max_alloc', '33554432',
+          '-threads', '1', '-filter_threads', '1', '-copyts', ...input, '-map', `0:${stream.index}`, '-an', '-sn', '-dn',
+          '-vf', `select=gte(t-(${start})\\,selected_n*${step.toFixed(9)}),trim=end_frame=24,` +
+            // Account for non-square pixels, cap the displayed frame before halving both dimensions.
+            "scale=w='max(2,trunc(iw*sar*min(0.5,min(960/(iw*sar),960/ih))/2)*2)':h='max(2,trunc(ih*min(0.5,min(960/(iw*sar),960/ih))/2)*2)'," +
+            'setsar=1,showinfo=checksum=0,tile=layout=2x2:nb_frames=4:color=0x181818',
+          '-frames:v', '6', '-fps_mode', 'passthrough', '-threads', '1', '-c:v', 'mjpeg', '-q:v', '4', '-start_number', '0', output], signal, 128 * 1024)
+        const times: number[] = []
+        for (const match of result.stderr.toString('utf8').matchAll(/\bn:\s*(\d+)\b[^\r\n]*?\bpts_time:([+\-.\deE]+)/g)) {
+          const pts = numeric(match[2])
+          assert(Number(match[1]) === times.length && pts !== null && pts - start >= -0.001 && pts - start <= duration + 0.1,
+            'VIDEO_FRAME_TIMESTAMP_UNAVAILABLE', 'The sampled frame needs a genuine presentation timestamp.')
+          const time = Math.max(0, pts - start)
+          assert(times.length < 24 && (times.length === 0 || time > times[times.length - 1]!),
+            'VIDEO_FRAME_TIMESTAMP_UNAVAILABLE', 'The sampled frames must advance in time.')
+          times.push(time)
+        }
+        assert(times.length > 0, 'VIDEO_FRAME_TIMESTAMP_UNAVAILABLE', 'No sampled frame was decoded.')
+        const frames: NativeVideoObservation['frames'][number][] = []
+        const files = (await readdir(temporary)).filter(name => /^sheet-\d{2}\.jpg$/.test(name)).sort()
+        assert(files.length === Math.ceil(times.length / 4), 'VIDEO_FRAME_INVALID', 'Sheet count must match the actual sampled frames.')
+        for (const [index, name] of files.entries()) {
+          signal.throwIfAborted()
+          const path = join(temporary, name); const info = await lstat(path)
+          assert(info.isFile() && !info.isSymbolicLink() && info.size <= 8 * 1024 * 1024,
+            'VIDEO_FRAME_INVALID', 'A bounded local sheet is required.')
+          frames.push(await compactContactSheet(await readFile(path), times.slice(index * 4, index * 4 + 4), signal))
+        }
+        return { durationSeconds: duration, frames, audioObserved: false,
+          hasAudio: metadata.streams.some((item: unknown) => isRecord(item) && item.codec_type === 'audio') }
+      }
       const frames: { timeSeconds: number; data: Uint8Array; mediaType: 'image/jpeg' }[] = []
       const end = Math.max(0, duration - Math.min(0.1, duration / 20))
       for (let index = 0; index < 6; index++) {

@@ -8,6 +8,7 @@ export type PackageConfigurationField = {
   readonly description: string
 } & (
   | { readonly kind: 'boolean' }
+  | { readonly kind: 'choice'; readonly options: readonly { readonly value: string; readonly label: string }[] }
   | { readonly kind: 'integer'; readonly minimum: number; readonly maximum: number; readonly unit?: string }
   | { readonly kind: 'string-list'; readonly maximumEntries: number; readonly maximumLength: number }
 )
@@ -115,6 +116,11 @@ export function parsePackageConfigurationDescriptor(value: unknown): PackageConf
     else if (field.kind === 'integer') {
       if (!configurationKeys(field, [...keys, 'minimum', 'maximum', ...(Object.hasOwn(field, 'unit') ? ['unit'] : [])])
         || !configurationInteger(field.minimum) || !configurationInteger(field.maximum) || field.minimum > field.maximum || field.unit !== undefined && !configurationText(field.unit, 128, true)) return null
+    } else if (field.kind === 'choice') {
+      if (!configurationKeys(field, [...keys, 'options']) || !Array.isArray(field.options) || field.options.length < 1 || field.options.length > 32
+        || !field.options.every(option => configurationRecord(option) && configurationKeys(option, ['value', 'label'])
+          && configurationText(option.value, 128) && configurationText(option.label, 128))
+        || new Set(field.options.map(option => option.value)).size !== field.options.length) return null
     } else if (field.kind === 'string-list') {
       if (!configurationKeys(field, [...keys, 'maximumEntries', 'maximumLength']) || !configurationInteger(field.maximumEntries) || field.maximumEntries < 1 || field.maximumEntries > 1024
         || !configurationInteger(field.maximumLength) || field.maximumLength < 1 || field.maximumLength > 4096) return null

@@ -44,7 +44,7 @@ export function createChatInputNativePackage(options: { readonly directory: stri
 /** The host keeps existing media facts and policy; the package owns only guarded service/effect registrations. */
 export function createMediaNativePackage(options: { readonly registry: NativeMediaPackageService }): NativePackageDefinition {
   return Object.freeze({
-    content: createBuiltinPackageContent(import.meta.url, [...SERVICE_CONTENT, './native-media', './native-image-references', './native-media-configuration', '../contracts/native-media', '../contracts/native-media-configuration', '../contracts/framework-media', '../adapters/ffmpeg-video', '../adapters/gif-observation']),
+    content: createBuiltinPackageContent(import.meta.url, [...SERVICE_CONTENT, './native-media', './native-image-references', './native-media-configuration', '../contracts/native-media', '../contracts/native-media-configuration', '../contracts/framework-media', '../adapters/ffmpeg-video', '../adapters/gif-observation', '../adapters/media-contact-sheets']),
     configurations: [NATIVE_MEDIA_CONFIGURATION],
     manifest: { schema: 1, id: 'media', version: '1.0.0', dependencies: [],
       provides: [serviceDeclaration(MEDIA_SERVICE_CONTRACT)], requires: [],

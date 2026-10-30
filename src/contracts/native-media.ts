@@ -1,4 +1,5 @@
-import type { FrameworkImageMediaType } from './framework-media.ts';
+import type { MediaObservationVersion } from './native-media-configuration.ts';
+import type { FrameworkFrameGrid, FrameworkImageMediaType } from './framework-media.ts';
 
 /** Reads original bytes from a current conversation's registered image only. */
 export interface NativeImageReferenceReader {
@@ -19,14 +20,14 @@ export interface NativeMediaContentReader {
 
 export interface NativeVideoObservation {
   readonly durationSeconds: number;
-  readonly frames: readonly { readonly timeSeconds: number; readonly data: Uint8Array; readonly mediaType: 'image/jpeg' }[];
+  readonly frames: readonly { readonly timeSeconds: number; readonly grid?: FrameworkFrameGrid; readonly data: Uint8Array; readonly mediaType: 'image/jpeg' }[];
   readonly audioObserved: false;
   readonly hasAudio: boolean;
 }
 
 /** Receives registered video bytes only; no model-supplied location or decoder options. */
 export interface NativeVideoObserver {
-  observe(request: { readonly data: Uint8Array; readonly signal: AbortSignal }): Promise<NativeVideoObservation>;
+  observe(request: { readonly data: Uint8Array; readonly signal: AbortSignal; readonly version?: MediaObservationVersion }): Promise<NativeVideoObservation>;
 }
 
 /** Explicit host service; an absent transcriber does not imply that audio was understood. */

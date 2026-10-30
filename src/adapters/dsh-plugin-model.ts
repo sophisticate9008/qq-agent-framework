@@ -5,7 +5,7 @@ import type { PluginModelBackend, PluginModelDescription } from '../contracts/pl
 import type { JsonObject, JsonValue } from '../contracts/data.ts'
 
 export type DshPluginModelMethod = 'bridgePlugin/pluginModels' | 'bridgePlugin/createPluginModelSession'
-  | 'bridgePlugin/inspectPluginModelSession' | 'bridgePlugin/startPluginModel' | 'bridgePlugin/waitPluginModelIdle' | 'bridgePlugin/inspectPluginModelRun'
+  | 'bridgePlugin/inspectPluginModelSession' | 'bridgePlugin/preparePluginModelSession' | 'bridgePlugin/startPluginModel' | 'bridgePlugin/waitPluginModelIdle' | 'bridgePlugin/inspectPluginModelRun'
 
 export function createDshPluginModelBackend(options: {
   readonly client: DshClientPort
@@ -52,8 +52,20 @@ export function createDshPluginModelBackend(options: {
           : { status: 'unknown' }
       } catch { return { status: 'unknown' } }
     },
-    follow(request) {
+    async follow(request) {
       if (!pluginModelIdentifier(request.owner) || !pluginModelIdentifier(request.requestId)) throw new TypeError('Invalid plugin model follow identity')
+      const prepared = await options.invoke('bridgePlugin/preparePluginModelSession', { sessionId: request.sessionId }, request.signal)
+      // Older paired plugins do not expose preparation. Preserve their existing
+      // behavior only on an explicit missing-method result, never on a failure.
+      if (!prepared.ok) {
+        if (prepared.error.code !== 'DSH_PLUGIN_UNAVAILABLE') throw new DshAdapterError('PLUGIN_MODEL_SESSION_UNAVAILABLE', '模型会话预加载失败，尚未提交生成请求。')
+      } else if (isRecord(prepared.value) && prepared.value.sessionId === request.sessionId && prepared.value.prepared === false) {
+        const reportedCode = prepared.value.code
+        const code = PLUGIN_MODEL_REJECTION_CODES.find(code => code === reportedCode)
+        throw new DshAdapterError(code ?? 'PLUGIN_MODEL_SESSION_UNAVAILABLE', '模型会话预加载失败，尚未提交生成请求。')
+      } else if (!isRecord(prepared.value) || prepared.value.sessionId !== request.sessionId || prepared.value.prepared !== true) {
+        throw new DshAdapterError('DSH_PLUGIN_MODEL_INVALID', '模型会话预加载响应无效。')
+      }
       let currentTurn: string | number | undefined
       let matchedTurn: string | number | undefined
       let pendingStart: DshSessionEvent | undefined

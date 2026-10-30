@@ -167,7 +167,7 @@ export default class BridgePlugin extends TypertRemoteService {
         'bridgePlugin/installFrameworkTools', 'bridgePlugin/withdrawFrameworkTools',
         'bridgePlugin/pollFrameworkTools', 'bridgePlugin/completeFrameworkTool', 'bridgePlugin/inspectFrameworkTools',
         'bridgePlugin/verifyWork', 'bridgePlugin/startWork', 'bridgePlugin/inspectWork', 'bridgePlugin/followupWork', 'bridgePlugin/interruptWork', 'bridgePlugin/readWorkAsset', 'bridgePlugin/inspectExecution', 'bridgePlugin/inspectSessionStorage',
-        'bridgePlugin/pluginModels', 'bridgePlugin/createPluginModelSession', 'bridgePlugin/inspectPluginModelSession', 'bridgePlugin/startPluginModel', 'bridgePlugin/waitPluginModelIdle', 'bridgePlugin/inspectPluginModelRun'],
+        'bridgePlugin/preparePluginModelSession', 'bridgePlugin/pluginModels', 'bridgePlugin/createPluginModelSession', 'bridgePlugin/inspectPluginModelSession', 'bridgePlugin/startPluginModel', 'bridgePlugin/waitPluginModelIdle', 'bridgePlugin/inspectPluginModelRun'],
       claimMeaning: 'inbox-claimed-not-completed', durableReceipts: false, externalToolAuthorizationVerified: false }
   }
 
@@ -193,6 +193,11 @@ export default class BridgePlugin extends TypertRemoteService {
   @Remote('startPluginModel')
   startPluginModel(request: Parameters<ReturnType<typeof createPluginModelChannel>['start']>[0]) {
     const invocation = this.assertOperator(); return this.pluginModels.start(request, invocation.signal)
+  }
+
+  @Remote('preparePluginModelSession')
+  preparePluginModelSession(request: { sessionId: string }) {
+    const invocation = this.assertOperator(); return this.pluginModels.prepare(request, invocation.signal)
   }
 
   @Remote('waitPluginModelIdle')

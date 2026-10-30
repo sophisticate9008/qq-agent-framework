@@ -241,7 +241,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
             ...(request.images ? { images: request.images } : {}),
             ...(model ? { model } : {}), signal: active })
           if (result.status === 'rejected') {
-            options.store.write(EXECUTIONS, target.sessionId, json({ schema: 1, owner, requestId, state: 'rejected', updatedAt: Date.now() }))
+            options.store.write(EXECUTIONS, target.sessionId, json({ schema: 1, owner, requestId, state: 'rejected', code: result.code ?? 'PLUGIN_MODEL_REJECTED', updatedAt: Date.now() }))
             submitted = false
             failure(result.code ?? 'PLUGIN_MODEL_REJECTED')
           }

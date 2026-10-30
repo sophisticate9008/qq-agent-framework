@@ -69,6 +69,7 @@ export function createPluginModelChannel(ctx: Context) {
   const runs = new Map<string, ModelRun>()
   const active = new Set<string>()
   const allocations = new Set<Promise<AgentHandle>>()
+  const restorations = new Map<string, Promise<Agent>>()
   let closing = false
   const assertOpen = () => { if (closing) throw new TypeError('Plugin model channel is closing') }
   const allocate = async (sessionId: string, signal: AbortSignal, create: () => Promise<AgentHandle>) => {
@@ -98,7 +99,7 @@ export function createPluginModelChannel(ctx: Context) {
     if (runs.size + active.size >= MAX_RUNS) throw new TypeError('Plugin model run capacity is exhausted')
     active.add(sessionId)
   }
-  const resolve = async (sessionId: string, signal: AbortSignal): Promise<Agent> => {
+  const restore = async (sessionId: string, signal: AbortSignal): Promise<Agent> => {
     const live = ctx.agents.get(SessionId(sessionId))
     if (live) return live
     // Plugin-owned sessions have no chat preset. Resume their
@@ -112,10 +113,38 @@ export function createPluginModelChannel(ctx: Context) {
           const selected = [...observed.events].reverse().find(event => event.type === 'model/selection')
           if (!selected) throw new TypeError('Plugin session model is unavailable')
           const model = selection(selected.data)
-          const handle = await allocate(sessionId, signal, () => ctx.agents.resume({ resumeSessionId: SessionId(sessionId), signal,
-            agentOptions: { provider: model.provider, model: model.model,
-              ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) } }))
-          return handle.agent
+          const raced = ctx.agents.get(SessionId(sessionId))
+          if (raced) return raced
+          try {
+            const handle = await allocate(sessionId, signal, () => ctx.agents.resume({ resumeSessionId: SessionId(sessionId), signal,
+              agentOptions: { provider: model.provider, model: model.model,
+                ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) } }))
+            return handle.agent
+          } catch (error) {
+            if (!(error instanceof Error) || error.name !== 'SessionAlreadyOwnedError') throw error
+            // An independently opened history view may already be promoting
+            // this session. Join its publication event without retrying a write.
+            return await new Promise<Agent>((resolve, reject) => {
+              let settled = false
+              let stop: (() => void) | undefined
+              let timer: ReturnType<typeof setTimeout> | undefined
+              const finish = (agent?: Agent) => {
+                if (settled) return
+                settled = true; clearTimeout(timer); stop?.(); signal.removeEventListener('abort', aborted)
+                if (agent) resolve(agent); else reject(signal.aborted ? signal.reason : error)
+              }
+              const aborted = () => finish()
+              stop = ctx.on('agent/created', ({ agent }) => {
+                if (agent.id === sessionId) finish(agent)
+                return undefined
+              }, { global: true })
+              signal.addEventListener('abort', aborted, { once: true })
+              timer = setTimeout(() => finish(), 5000)
+              const attached = ctx.agents.get(SessionId(sessionId))
+              if (attached) finish(attached)
+              else if (signal.aborted || closing) finish()
+            })
+          }
         }
       } finally { observed[Symbol.dispose]() }
     }
@@ -124,6 +153,16 @@ export function createPluginModelChannel(ctx: Context) {
     const result = await controller.resolveAgent(SessionId(sessionId))
     if ('error' in result) throw result.error
     return result.agent
+  }
+  const resolve = (sessionId: string, signal: AbortSignal): Promise<Agent> => {
+    signal.throwIfAborted()
+    const pending = restorations.get(sessionId)
+    if (pending) return pending
+    const work = restore(sessionId, signal).finally(() => {
+      if (restorations.get(sessionId) === work) restorations.delete(sessionId)
+    })
+    restorations.set(sessionId, work)
+    return work
   }
   const models = async (signal: AbortSignal) => {
     signal.throwIfAborted()
@@ -163,6 +202,20 @@ export function createPluginModelChannel(ctx: Context) {
   }
   return Object.freeze({
     models,
+    async prepare(request: { sessionId: string }, signal: AbortSignal) {
+      if (!object(request) || Object.keys(request).length !== 1 || !identifier(request.sessionId)) throw new TypeError('Invalid plugin session ID')
+      // Finish cold restoration before opening session/follow: that endpoint
+      // also promotes cold sessions, and two writers cannot own the same log.
+      try {
+        const agent = await resolve(request.sessionId, signal)
+        signal.throwIfAborted()
+        return { sessionId: request.sessionId, prepared: true, idle: agent.status === 'idle' }
+      } catch (error) {
+        signal.throwIfAborted()
+        return { sessionId: request.sessionId, prepared: false, code: error instanceof Error && error.name === 'SessionAlreadyOwnedError'
+          ? 'PLUGIN_MODEL_SESSION_WRITER_HELD' : 'PLUGIN_MODEL_SESSION_UNAVAILABLE' }
+      }
+    },
     async inspect(request: { sessionId: string }, signal: AbortSignal) {
       if (!object(request) || Object.keys(request).length !== 1 || !identifier(request.sessionId)) throw new TypeError('Invalid plugin session ID')
       signal.throwIfAborted()
@@ -397,6 +450,7 @@ export function createPluginModelChannel(ctx: Context) {
     },
     async close() {
       closing = true
+      await Promise.allSettled([...restorations.values()])
       await Promise.allSettled([...allocations])
       for (const sessionId of active) ctx.agents.get(SessionId(sessionId))?.cancel({ kind: 'disposed' })
       await Promise.allSettled([...runs.values()].map(run => run.idle))

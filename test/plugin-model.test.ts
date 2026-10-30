@@ -6,6 +6,27 @@ import type { DshFollowRequest } from '../src/adapters/dsh.ts'
 import type { AgentEvent } from '../src/contracts/ports.ts'
 import type { JsonObject } from '../src/contracts/data.ts'
 
+test('cold session preparation finishes before follow starts; failed preparation never opens a subscription', async () => {
+  const order: string[] = []
+  let prepared = true
+  const backend = createDshPluginModelBackend({
+    client: { async createSession() { return { ok: true, value: { sessionId: 'fixture' } } },
+      async prompt() { throw new Error('No model input is expected') }, async cancel() { return { ok: true, value: null } },
+      async follow() { order.push('follow'); return () => {} } },
+    async invoke(method) {
+      assert.equal(method, 'bridgePlugin/preparePluginModelSession')
+      await Promise.resolve(); order.push('prepared')
+      return { ok: true, value: { sessionId: 'fixture', prepared, ...(prepared ? {} : { code: 'PLUGIN_MODEL_SESSION_WRITER_HELD' }) } }
+    },
+  })
+  const request = { sessionId: 'fixture', owner: 'plugin', requestId: 'one', signal: new AbortController().signal, onEvent() {} }
+  await backend.follow(request)
+  assert.deepEqual(order, ['prepared', 'follow'])
+  prepared = false; order.length = 0
+  await assert.rejects(backend.follow(request), { code: 'PLUGIN_MODEL_SESSION_WRITER_HELD' })
+  assert.deepEqual(order, ['prepared'])
+})
+
 test('plugin image contract bounds encoded bytes and rejects malformed or noncanonical Base64', () => {
   assert.deepEqual(parsePluginModelImages([{ mediaType: 'image/png', data: 'aGVsbG8=' }]), [{ mediaType: 'image/png', data: 'aGVsbG8=' }])
   for (const value of [null, [{ mediaType: 'image/gif', data: 'aGVsbG8=' }], [{ mediaType: 'image/png', data: 'aGVsbG9=' }],
@@ -23,7 +44,7 @@ test('plugin follower claims consumed inbox source before model admission and ob
     client: { async createSession() { return { ok: true, value: { sessionId: 'fixture' } } },
       async prompt() { return { ok: true, value: null } }, async cancel() { return { ok: true, value: null } },
       async follow(request) { follower = request; return () => {} } },
-    async invoke() { return { ok: true, value: {} } },
+    async invoke() { return { ok: true, value: { sessionId: 'fixture', prepared: true } } },
   })
   const events: AgentEvent[] = []
   await backend.follow({ sessionId: 'fixture', requestId: 'plugin-request', owner: 'plugin', signal: new AbortController().signal,

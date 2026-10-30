@@ -41,11 +41,11 @@ const result = await client.run({
 
 宿主传入 `store`、`backend: dsh.pluginModels` 和 `withSessionLease`；统一会话队列必须覆盖 QQ、助手与插件对同一实际会话的写入。`defaultModel` 可提供固定选择或读取当前配置的函数；未指定时使用实际 DSH 模型目录的首项。`onUsage` 收到插件身份、执行标识、实际会话和有界终态用量，供账本记录。
 
-DSH 桥接包提供 `pluginModels`、`createPluginModelSession`、`inspectPluginModelSession`、`startPluginModel`、`waitPluginModelIdle`、`inspectPluginModelRun` 六个管理 RPC，只接受已认证的 DSH owner 调用。插件输入持久标记 `source.kind: qbf-plugin`、插件 ID 与请求 ID，不产生 QQ 发言者或主人消息。已有会话沿用历史和原有组成；本次纯模型生成会移除模型输入中的全部工具 schema，并通过 SDK 的单调工具 guard 拒绝执行，包括历史和会话局部登记的工具。限制持续到实际 agent 完全空闲后才撤销。
+DSH 桥接包提供 `pluginModels`、`createPluginModelSession`、`inspectPluginModelSession`、`preparePluginModelSession`、`startPluginModel`、`waitPluginModelIdle`、`inspectPluginModelRun` 七个管理 RPC，只接受已认证的 DSH owner 调用。插件输入持久标记 `source.kind: qbf-plugin`、插件 ID 与请求 ID，不产生 QQ 发言者或主人消息。已有会话沿用历史和原有组成；本次纯模型生成会移除模型输入中的全部工具 schema，并通过 SDK 的单调工具 guard 拒绝执行，包括历史和会话局部登记的工具。限制持续到实际 agent 完全空闲后才撤销。
 
 新建会话使用 SDK 的 `plugin:qbf/model-session` 可忽略记录保存插件归属，供持久读取与续轮使用；工作目录作为原生会话查询与事件流要求的地址元数据，不授予文件或工具能力。自建会话在装配前覆盖全局部署提示词与上下文贡献，并禁用可选运行上下文；SDK 在会话自身作用域登记的必需运行事实（例如当前目录）仍由 SDK 保留，不作为 QQ 人设或能力授权。执行来源同时核对实际 inbox 消费与用户消息，因此模型在写入用户正文之前发生的配置失败也能对应到原请求的失败终态。
 
-宿主先建立结果监听，再提交请求；同一实际会话串行，生成结束并确认 DSH 排空后才释放队列。生命周期停止后拒绝新调用。临时连接失败、提交结果未知或中断均保留原绑定，阻止同一会话继续写入；不通过新建会话绕过未知结果，也不自动重放请求。
+宿主先完成会话预加载，再建立结果监听，最后提交请求；同一实际会话串行，生成结束并确认 DSH 排空后才释放队列。生命周期停止后拒绝新调用。临时连接失败、提交结果未知或中断均保留原绑定，阻止同一会话继续写入；不通过新建会话绕过未知结果，也不自动重放请求。
 
 绑定与实际会话的服务内部队列分别串行，最多容纳 256 个执行或等待项，同一队列键最多 16 项，满载返回 `PLUGIN_MODEL_QUEUE_FULL`。等待支持调用方取消；取消项仍保留原来的队列位置，直到前序操作结清，避免后来的请求越过正在执行的操作。插件与管理入口均合并宿主生命周期信号，运行停止后取消等待并拒绝新管理写入。
 
@@ -68,3 +68,9 @@ DSH 桥接包提供 `pluginModels`、`createPluginModelSession`、`inspectPlugin
 DSH 桥接插件在提交模型前拒绝请求时，分别返回会话读取或恢复失败（`PLUGIN_MODEL_SESSION_UNAVAILABLE`）、模型配置不可用（`PLUGIN_MODEL_SELECTION_UNAVAILABLE`）、会话忙碌（`PLUGIN_MODEL_SESSION_BUSY`）和上下文准备失败（`PLUGIN_MODEL_CONTEXT_UNAVAILABLE`）。这些结果表示本次输入尚未交给模型，不需要把它当作已提交的未知执行。错误码采用固定白名单，不返回供应商错误原文、凭据或上下文。
 
 会话恢复失败时，先核对 DSH 运行状态、会话存储和模型配置；确需重启时先停止聊天并排空执行，保留会话 ID 与绑定，重启后再恢复业务任务。已提交但结果未知的执行仍须核对原请求，不能据此自动重放。
+
+### 冷会话恢复与写句柄
+
+`preparePluginModelSession` 只恢复原会话，不提交模型输入。桥接插件以实际会话 ID 合并并发恢复，各调用共享同一加载 Promise；加载完成后宿主才打开事件订阅。原生 `session/follow` 会后台激活冷会话，因此不能与插件直接恢复同时启动，否则两个恢复路径会争用同一持久写句柄，产生 `SessionAlreadyOwnedError`。其他入口正在激活时，插件等待其 `agent/created` 发布事件并复用已就绪实例，不反复申请写句柄；超时仍占用时返回 `PLUGIN_MODEL_SESSION_WRITER_HELD`。底层存储写锁继续保护会话文件。
+
+1.5.2 框架与同版桥接插件配套提供预加载机制。旧插件明确返回方法不存在时沿用原有行为；传输、鉴权或预加载失败不会当作旧插件降级，也不会提交模型请求。已确认拒绝的执行保留固定原因码，未知提交继续按原请求核对。

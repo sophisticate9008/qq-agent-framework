@@ -1,0 +1,26 @@
+name: 仅保留最新正式发布
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-retention
+  cancel-in-progress: false
+jobs:
+  prune:
+    if: github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24.12.0'
+      - name: 核对最新附件与校验和后清理旧 Release
+        run: node scripts/prune-releases.ts --apply
+        env:
+          GH_TOKEN: ${{ github.token }}

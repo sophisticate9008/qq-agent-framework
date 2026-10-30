@@ -1,6 +1,6 @@
 {
   "name": "@qq-bridge-framework/dsh-bridge-plugin",
-  "version": "1.5.3",
+  "version": "1.6.0",
   "private": true,
   "description": "连接 QQ Bridge Framework 与 DSH 的工具投影、来源证据和独立工作插件。",
   "type": "module",

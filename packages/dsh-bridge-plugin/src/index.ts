@@ -157,7 +157,7 @@ export default class BridgePlugin extends TypertRemoteService {
   @Remote('describe')
   describe() {
     this.assertOperator()
-    return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.5.1', sdkVersion: '0.2.1-rc.2',
+    return { protocol: BRIDGE_PLUGIN_PROTOCOL, pluginVersion: '1.5.2', sdkVersion: '0.2.1-rc.2',
       issuerEpoch: this.journal.issuerEpoch, authentication: 'dsh-owner-peer', retention: RECEIPT_LIMITS,
       migrationProtocol: MIGRATION_PROTOCOL, migrationApiVersion: 2,
       frameworkToolProtocol: 'qq-bridge-framework.tools/1',

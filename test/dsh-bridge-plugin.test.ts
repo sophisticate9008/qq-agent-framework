@@ -7,12 +7,12 @@ import { createDshBridgePluginPort, type ClaimReceiptQuery } from '../src/adapte
 
 test('bridge descriptions accept the current generation and reject earlier or unrecognized versions', async () => {
   const journal = createClaimReceiptJournal()
-  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.3.1', '1.4.0', '1.4.1', '1.5.0', '1.5.1', '2.0.0']) {
+  for (const pluginVersion of ['0.1.0', '0.2.0', '1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.3.1', '1.4.0', '1.4.1', '1.5.0', '1.5.1', '1.5.2', '2.0.0']) {
     const port = createDshBridgePluginPort(async () => ({ protocol: BRIDGE_PLUGIN_PROTOCOL,
       issuerEpoch: journal.issuerEpoch, pluginVersion, sdkVersion: '0.2.1-rc.2',
       authentication: 'dsh-owner-peer', durableReceipts: false, claimMeaning: 'inbox-claimed-not-completed',
       externalToolAuthorizationVerified: false, retention: RECEIPT_LIMITS }))
-    if (!['1.4.1', '1.5.0', '1.5.1'].includes(pluginVersion)) await assert.rejects(port.describe(new AbortController().signal), /DSH_PLUGIN_INVALID_RESPONSE/)
+    if (!['1.4.1', '1.5.0', '1.5.1', '1.5.2'].includes(pluginVersion)) await assert.rejects(port.describe(new AbortController().signal), /DSH_PLUGIN_INVALID_RESPONSE/)
     else assert.equal((await port.describe(new AbortController().signal)).pluginVersion, pluginVersion)
   }
 })

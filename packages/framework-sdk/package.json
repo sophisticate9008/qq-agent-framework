@@ -1,6 +1,6 @@
 {
   "name": "@qq-bridge-framework/sdk",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "QQ Bridge Framework 扩展的类型化功能、宿主、生命周期与存储契约。",
   "type": "module",
   "license": "MIT",

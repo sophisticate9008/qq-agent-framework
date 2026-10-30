@@ -32,7 +32,7 @@ export function createDemoApplication({ clock = Date.now }: { clock?: Clock } = 
     const runtime = engine.describe();
     const messages = new Map(transport.describe().map(message => [message.idempotencyKey, message]));
     return snapshot({
-      overview: { name: 'QQ Bridge Framework', mode: 'demo', version: '1.5.1', status: runtime.status,
+      overview: { name: 'QQ Bridge Framework', mode: 'demo', version: '1.5.2', status: runtime.status,
         realQQ: false, paidModels: false, persistent: false, conversationId: 'demo:room',
         activeFeatures: runtime.features.filter(feature => feature.status === 'active').length },
       features: runtime.features,

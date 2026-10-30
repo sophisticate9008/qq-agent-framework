@@ -30,7 +30,7 @@ export function createPluginScheduleRoutes(options: { readonly runtime: PluginSc
     if (signal.aborted) throw new AdminRequestError(499, 'request_aborted');
     const code = errorCode(error, 'PLUGIN_SCHEDULER_UNAVAILABLE');
     throw new AdminRequestError(/INVALID/.test(code) ? 400 : /NOT_FOUND/.test(code) ? 404
-      : /CONFLICT|BUSY|SKIP_UNAVAILABLE|MANAGEMENT_UNAVAILABLE/.test(code) ? 409 : /UNKNOWN/.test(code) ? 504 : 503, code.toLowerCase());
+      : /CONFLICT|BUSY|SKIP_UNAVAILABLE|RUN_UNAVAILABLE|MANAGEMENT_UNAVAILABLE/.test(code) ? 409 : /UNKNOWN/.test(code) ? 504 : 503, code.toLowerCase());
   }
   return [{ method: 'GET', pathname: '/api/chat/schedules', maxResponseBytes: 2 * 1024 * 1024,
     handle({ query, signal }) {

@@ -40,9 +40,6 @@ export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 
       const tools = useService(context, PLUGIN_TOOLS_SERVICE_CONTRACT)
       const extensions = useService(context, PLUGIN_EXTENSIONS_SERVICE_CONTRACT)
       const workflowOptions: DiaryOptions = { ...options, runtime: { models, capabilities, scheduler }, images, signal: context.signal }
-      for (const handler of ['plan', 'publish'] as const) {
-        context.own('subscription', `schedule-details-${handler}`, scheduler.registerDetailsProvider(handler, createDiaryScheduleDetails(handler, workflowOptions)))
-      }
       const loader = createExtensionModuleLoader({ entry: fileURLToPath(new URL(`./workflow${moduleExtension}`, import.meta.url)),
         root: fileURLToPath(new URL('./', import.meta.url)) })
       const manager = await createReloadableExtension<DiaryWorkflow>({ id: 'qzone-diary', displayName: '空间生活日记', signal: context.signal,
@@ -82,6 +79,19 @@ export function createQzoneDiaryPackage(options: Omit<DiaryOptions, 'runtime' | 
         })
       })
       context.own('subscription', 'workflow-handlers', releaseHandlers)
+      for (const handler of ['plan', 'publish'] as const) {
+        context.own('subscription', `schedule-details-${handler}`, scheduler.registerDetailsProvider(handler, {
+          ...createDiaryScheduleDetails(handler, workflowOptions),
+          runNow: (rule, occurrence) => manager.withCurrent(async diary => {
+            if (handler === 'plan') await diary.planDay(occurrence.signal, { recover: true,
+              ...(typeof rule.payload.date === 'string' ? { date: rule.payload.date } : {}) })
+            else {
+              assert(typeof rule.payload.date === 'string' && typeof rule.payload.slot === 'number', 'DIARY_TRIGGER_INVALID', 'A saved slot is required.')
+              await diary.publishSlot(rule.payload.date, rule.payload.slot, occurrence.signal, { manual: true })
+            }
+          }),
+        }))
+      }
       context.own('subscription', 'status', tools.register({ id: 'status', description: '查看空间生活日记插件的今日时间安排、图文审查与发布状态。',
         readOnly: true, permission: 'owner', parameters: { type: 'object', properties: {}, additionalProperties: false },
         execute() { return manager.withCurrent(diary => json(diary.status())) } }))

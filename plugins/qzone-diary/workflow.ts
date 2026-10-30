@@ -3,7 +3,7 @@ import { assert, errorCode, isRecord } from '../../src/core/values.ts'
 import { json } from '../../src/host/data.ts'
 import type { DiaryConfiguration, DiaryDay, DiaryOptions, DiarySchedulerHandlers, DiarySlot } from './types.ts'
 import { localDay, localMinute } from './time.ts'
-import { diaryPlanRecovery, MAX_AUTOMATIC_PLANS, PLAN_RETRY_DELAY_MS, MANUAL_PLAN_DELAY_MS } from './planning.ts'
+import { diaryPlanRecovery, diarySlotCanRunNow, MAX_AUTOMATIC_PLANS, PLAN_RETRY_DELAY_MS, MANUAL_PLAN_DELAY_MS } from './planning.ts'
 export { DIARY_WORKFLOW_CONTRACT } from './workflow-contract.ts'
 
 const namespace = 'qzone-diary.days'
@@ -154,10 +154,17 @@ export function createQzoneDiary(options: DiaryOptions) {
       }
     })
   }
-  async function publishSlot(date: string, index: number, current: AbortSignal = signal): Promise<void> {
+  async function publishSlot(date: string, index: number, current: AbortSignal = signal, request: { manual?: boolean } = {}): Promise<void> {
     return serial(`publish:${date}:${index}`, async () => {
       const day = read(date), slot = day?.slots.find(slot => slot.index === index)
       assert(day && slot, 'DIARY_SLOT_MISSING', 'A saved day plan is required.')
+      if (request.manual) {
+        current.throwIfAborted()
+        assert(diarySlotCanRunNow(day, index, options), 'DIARY_RUN_UNAVAILABLE', '当前日记不能安全立即执行，请先核对原执行。')
+        slot.at = Math.min(slot.at, now())
+        if (slot.state === 'preview') { save(day, index); await publishApproved(date, index, current); return }
+        slot.state = 'scheduled'; delete slot.error; save(day, index)
+      }
       if (slot.state !== 'scheduled') return
       if (!config().enabled || now() < slot.at || now() >= slot.until) {
         if (now() >= slot.until || !config().enabled) { slot.state = 'skipped'; slot.error = 'DIARY_WINDOW_MISSED_OR_DISABLED'; save(day, index) }

@@ -12,6 +12,7 @@ const states: Readonly<Record<PluginScheduleState, string>> = {
 };
 export function scheduleStateLabel(item: PluginScheduleItem): string {
   if (item.managementState === 'unknown') return '操作待核对';
+  if (item.managementState === 'running-now') return '正在立即执行';
   if (item.managementState === 'skipping') return '正在跳过';
   return states[item.state];
 }
@@ -40,6 +41,7 @@ export function scheduleManagementError(error: unknown): string {
     if (/conflict|revision|stale/i.test(error.code)) return '日程或管理状态已变化，请刷新后重新选择。';
     if (/unsupported|not_supported|skip_unavailable/i.test(error.code)) return '此任务当前不支持该操作，请刷新状态核对。';
     if (/unknown|unsettled/i.test(error.code)) return '原操作的结果尚未确认，请查看详情并核对，暂不提交新的操作。';
+    if (/run_unavailable/i.test(error.code)) return '此日程当前不能立即执行，请核对业务状态、执行窗口和原执行结果。';
     if (/running|busy|skipping/i.test(error.code)) return '此任务仍在处理，请核对执行状态后再操作。';
     if (/unavailable/i.test(error.code)) return '日程服务或所属插件暂时不可用，请检查运行状态。';
   }

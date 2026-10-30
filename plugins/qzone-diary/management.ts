@@ -4,7 +4,7 @@ import type { PluginScheduleBusinessDetails, PluginScheduleBusinessSummary } fro
 import type { PluginSchedulerClient, PluginScheduledRule, PluginScheduledHistory } from '../../src/host/plugin-scheduler.ts'
 import type { DiaryDay, DiaryOptions, DiarySlot } from './types.ts'
 import { localDay } from './time.ts'
-import { diaryPlanRecovery, MAX_AUTOMATIC_PLANS } from './planning.ts'
+import { diaryPlanRecovery, diarySlotUnsubmitted, diarySlotCanRunNow, MAX_AUTOMATIC_PLANS } from './planning.ts'
 
 type DetailsProvider = Parameters<PluginSchedulerClient['registerDetailsProvider']>[1]
 type Step = NonNullable<PluginScheduleBusinessDetails['steps']>[number]
@@ -17,6 +17,7 @@ const explanations: Readonly<Record<string, string>> = {
   DIARY_IMAGE_REJECTED: '三版图片均未通过检查，本条未发布。',
   DIARY_INTERRUPTED_UNKNOWN: '上次执行中断，尚未确认最终结果。',
   PLUGIN_MODEL_SESSION_UNAVAILABLE: '模型会话读取或恢复失败，请检查 DSH 会话状态。',
+  PLUGIN_MODEL_SESSION_WRITER_HELD: '模型会话写句柄仍被占用，本次未提交生成请求。',
   PLUGIN_MODEL_SELECTION_UNAVAILABLE: '所选模型不可用，请检查插件的模型配置。',
   PLUGIN_MODEL_SESSION_BUSY: '模型会话正在处理其他请求，本次尚未提交。',
   PLUGIN_MODEL_CONTEXT_UNAVAILABLE: '模型上下文准备失败，本次尚未提交。',
@@ -24,6 +25,7 @@ const explanations: Readonly<Record<string, string>> = {
 }
 
 function slotStage(slot: DiarySlot): string {
+  if (diarySlotUnsubmitted(slot)) return '执行未开始，可重试'
   if (slot.state === 'generating') return slot.caption ? `正在生成图片 · 第 ${slot.attempts || 1}/3 版` : '正在生成文案'
   if (slot.state === 'reviewing') return `正在检查图片 · 第 ${slot.attempts}/3 版`
   return { scheduled: '等待执行', publishing: '正在发布', published: '已发布到空间',
@@ -89,6 +91,13 @@ export function createDiaryScheduleDetails(handler: 'plan' | 'publish', options:
       description: handler === 'plan' ? '在每日时间段中安排生活片段。' : '生成文案和图片，检查图片后发布。',
     },
     summarize,
+    canRunNow(rule) {
+      const date = dateFor(rule), day = read(date)
+      if (!options.configuration().enabled || date !== localDay(now(), options.configuration().timeZone)) return false
+      if (handler === 'publish') return typeof rule.payload.slot === 'number' && diarySlotCanRunNow(day, rule.payload.slot, options)
+      const recovery = diaryPlanRecovery(day, options)
+      return recovery.state === 'not-needed' || recovery.state === 'ready'
+    },
     async read(rule, occurrence, signal): Promise<PluginScheduleBusinessDetails> {
       signal.throwIfAborted()
       const date = dateFor(rule, occurrence?.scheduledAt), day = read(date)

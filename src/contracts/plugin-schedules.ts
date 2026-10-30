@@ -22,6 +22,7 @@ export interface PluginScheduleHistoryItem {
   readonly deadlineAt: number;
   readonly updatedAt: number;
   readonly coalescedCount: number;
+  readonly trigger?: 'manual';
   readonly status: 'running' | 'completed' | 'failed' | 'unknown';
   readonly errorCode: string | null;
   readonly business: PluginScheduleBusinessSummary | null;
@@ -48,8 +49,8 @@ export interface PluginScheduleItem {
   readonly nextAt: number | null;
   readonly lastOccurrence: PluginScheduleHistoryItem | null;
   readonly business: PluginScheduleBusinessSummary | null;
-  readonly managementState: 'ready' | 'skipping' | 'unknown';
-  readonly actions: { readonly canPause: boolean; readonly canSkip: boolean };
+  readonly managementState: 'ready' | 'skipping' | 'running-now' | 'unknown';
+  readonly actions: { readonly canPause: boolean; readonly canSkip: boolean; readonly canRunNow?: boolean };
 }
 export interface PluginScheduleSnapshot {
   readonly schema: 1;
@@ -84,7 +85,7 @@ export interface PluginScheduleDetail {
 }
 export type PluginScheduleManagementRequest = {
   readonly owner: string; readonly id: string; readonly revision: string;
-} & ({ readonly action: 'set-paused'; readonly paused: boolean } | { readonly action: 'skip' });
+} & ({ readonly action: 'set-paused'; readonly paused: boolean } | { readonly action: 'skip' | 'run-now' });
 export interface PluginScheduleManagementResponse {
   readonly schema: 1; readonly ok: true;
   readonly action: PluginScheduleManagementRequest['action'];
@@ -132,18 +133,19 @@ export function parsePluginSchedulePlan(value: unknown): PluginSchedulePlan | nu
     ? { kind: 'weekly', dayOfWeek: value.dayOfWeek as 1 | 2 | 3 | 4 | 5 | 6 | 7, hour: value.hour, minute: value.minute } : null;
 }
 export function parsePluginScheduleHistoryItem(value: unknown): PluginScheduleHistoryItem | null {
-  if (!isRecord(value) || !exact(value, ['cursor', 'id', 'owner', 'ruleId', 'presentation', 'generation', 'scheduledAt', 'startedAt', 'deadlineAt', 'updatedAt', 'coalescedCount', 'status', 'errorCode', 'business'])
+  if (!isRecord(value) || !exact(value, ['cursor', 'id', 'owner', 'ruleId', 'presentation', 'generation', 'scheduledAt', 'startedAt', 'deadlineAt', 'updatedAt', 'coalescedCount', 'status', 'errorCode', 'business'], ['trigger'])
     || ![value.cursor, value.id, value.owner, value.ruleId].every(reference) || !count(value.generation) || value.generation < 1
     || !timestamp(value.scheduledAt) || !timestamp(value.deadlineAt) || value.deadlineAt <= value.scheduledAt
     || value.startedAt !== null && !timestamp(value.startedAt) || !timestamp(value.updatedAt) || !count(value.coalescedCount, 1000)
     || !['running', 'completed', 'failed', 'unknown'].includes(String(value.status))
-    || value.errorCode !== null && !text(value.errorCode, 128)) return null;
+    || value.errorCode !== null && !text(value.errorCode, 128)
+    || value.trigger !== undefined && value.trigger !== 'manual') return null;
   const business = value.business === null ? null : parsePluginScheduleBusinessSummary(value.business);
   const presentation = value.presentation === null ? null : parsePluginSchedulePresentation(value.presentation);
   if (value.business !== null && !business || value.presentation !== null && !presentation) return null;
   return { cursor: String(value.cursor), id: String(value.id), owner: String(value.owner), ruleId: String(value.ruleId),
     presentation, generation: value.generation, scheduledAt: value.scheduledAt, startedAt: value.startedAt as number | null, deadlineAt: value.deadlineAt, updatedAt: value.updatedAt,
-    coalescedCount: value.coalescedCount, status: value.status as PluginScheduleHistoryItem['status'], errorCode: value.errorCode as string | null, business };
+    coalescedCount: value.coalescedCount, status: value.status as PluginScheduleHistoryItem['status'], errorCode: value.errorCode as string | null, business, ...(value.trigger === 'manual' ? { trigger: 'manual' as const } : {}) };
 }
 export function parsePluginScheduleItem(value: unknown): PluginScheduleItem | null {
   if (!isRecord(value) || !exact(value, ['cursor', 'owner', 'id', 'handler', 'revision', 'ruleRevision', 'generation', 'presentation', 'schedule',
@@ -155,9 +157,10 @@ export function parsePluginScheduleItem(value: unknown): PluginScheduleItem | nu
     || !['enabled', 'disabled', 'paused', 'cancelled', 'running', 'completed', 'failed', 'unknown', 'expired'].includes(String(value.state))
     || ![value.enabled, value.paused, value.cancelled].every(item => typeof item === 'boolean')
     || value.nextAt !== null && !timestamp(value.nextAt)
-    || !['ready', 'skipping', 'unknown'].includes(String(value.managementState))
-    || !isRecord(value.actions) || !exact(value.actions, ['canPause', 'canSkip'])
-    || typeof value.actions.canPause !== 'boolean' || typeof value.actions.canSkip !== 'boolean') return null;
+    || !['ready', 'skipping', 'running-now', 'unknown'].includes(String(value.managementState))
+    || !isRecord(value.actions) || !exact(value.actions, ['canPause', 'canSkip'], ['canRunNow'])
+    || typeof value.actions.canPause !== 'boolean' || typeof value.actions.canSkip !== 'boolean'
+    || value.actions.canRunNow !== undefined && typeof value.actions.canRunNow !== 'boolean') return null;
   const schedule = parsePluginSchedulePlan(value.schedule);
   const presentation = value.presentation === null ? null : parsePluginSchedulePresentation(value.presentation);
   const lastOccurrence = value.lastOccurrence === null ? null : parsePluginScheduleHistoryItem(value.lastOccurrence);
@@ -170,7 +173,7 @@ export function parsePluginScheduleItem(value: unknown): PluginScheduleItem | nu
     windowMs: value.windowMs, activeFrom: value.activeFrom, evaluatedThrough: value.evaluatedThrough,
     enabled: value.enabled as boolean, paused: value.paused as boolean, cancelled: value.cancelled as boolean,
     state: value.state as PluginScheduleState, nextAt: value.nextAt as number | null, lastOccurrence, business,
-    managementState: value.managementState as PluginScheduleItem['managementState'], actions: { canPause: value.actions.canPause, canSkip: value.actions.canSkip } };
+    managementState: value.managementState as PluginScheduleItem['managementState'], actions: { canPause: value.actions.canPause, canSkip: value.actions.canSkip, ...(value.actions.canRunNow === undefined ? {} : { canRunNow: value.actions.canRunNow }) } };
 }
 export function parsePluginScheduleSnapshot(value: unknown): PluginScheduleSnapshot | null {
   if (!isRecord(value) || !exact(value, ['schema', 'available', 'running', 'items', 'next', 'summary', 'limits']) || value.schema !== 1
@@ -248,14 +251,14 @@ export function parsePluginScheduleDetail(value: unknown): PluginScheduleDetail 
 }
 export function parsePluginScheduleManagementRequest(value: unknown): PluginScheduleManagementRequest | null {
   if (!isRecord(value) || !reference(value.owner) || !reference(value.id) || !revision(value.revision)) return null;
-  if (value.action === 'skip') return exact(value, ['action', 'owner', 'id', 'revision'])
-    ? { action: 'skip', owner: value.owner, id: value.id, revision: value.revision } : null;
+  if (value.action === 'skip' || value.action === 'run-now') return exact(value, ['action', 'owner', 'id', 'revision'])
+    ? { action: value.action, owner: value.owner, id: value.id, revision: value.revision } : null;
   if (value.action !== 'set-paused' || !exact(value, ['action', 'owner', 'id', 'revision', 'paused']) || typeof value.paused !== 'boolean') return null;
   return { action: 'set-paused', owner: value.owner, id: value.id, revision: value.revision, paused: value.paused };
 }
 export function parsePluginScheduleManagementResponse(value: unknown): PluginScheduleManagementResponse | null {
   if (!isRecord(value) || !exact(value, ['schema', 'ok', 'action', 'item']) || value.schema !== 1 || value.ok !== true
-    || value.action !== 'set-paused' && value.action !== 'skip') return null;
+    || value.action !== 'set-paused' && value.action !== 'skip' && value.action !== 'run-now') return null;
   const item = parsePluginScheduleItem(value.item);
   return item ? { schema: 1, ok: true, action: value.action, item } : null;
 }

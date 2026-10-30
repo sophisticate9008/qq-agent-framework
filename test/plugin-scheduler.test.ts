@@ -22,6 +22,49 @@ function once(id: string, at: number, changes: Partial<PluginScheduleInput> = {}
   return { id, handler: 'publish', payload: { businessId: id }, schedule: { kind: 'once', at }, ...changes };
 }
 
+test('manual execution consumes a pending once schedule atomically and survives caller cancellation', async context => {
+  const { service, setNow } = fixture(context);
+  const plugin = service.forPlugin('manual', new AbortController().signal);
+  let calls = 0;
+  let finish!: () => void;
+  plugin.registerHandler('publish', () => { calls++; });
+  plugin.registerDetailsProvider('publish', { read: () => null, canRunNow: () => true,
+    async runNow(_rule, occurrence) { calls++; await new Promise<void>(resolve => { finish = resolve; }); occurrence.signal.throwIfAborted(); } });
+  plugin.schedule(once('early', initial + 60_000)); service.start();
+  const item = service.listManaged().items[0]!;
+  assert.equal(item.actions.canRunNow, true);
+  const caller = new AbortController();
+  const accepted = await service.manage({ action: 'run-now', owner: 'manual', id: 'early', revision: item.revision }, caller.signal);
+  caller.abort();
+  assert.equal(accepted.managementState, 'running-now');
+  await assert.rejects(service.manage({ action: 'run-now', owner: 'manual', id: 'early', revision: item.revision }, new AbortController().signal));
+  finish();
+  for (let turn = 0; turn < 10 && service.listManaged().items[0]!.managementState !== 'ready'; turn++) await new Promise<void>(resolve => setImmediate(resolve));
+  setNow(initial + 60_000); await service.tick();
+  assert.equal(calls, 1, 'the original scheduled occurrence is not submitted after the manual run');
+  assert.equal(plugin.history().length, 1);
+  assert.equal(plugin.history()[0]!.status, 'completed');
+});
+
+test('manual execution remains unknown after interruption and is never automatically replayed', async context => {
+  const { service, store } = fixture(context);
+  const plugin = service.forPlugin('interrupted-manual', new AbortController().signal);
+  let calls = 0;
+  plugin.registerHandler('publish', () => {});
+  plugin.registerDetailsProvider('publish', { read: () => null, canRunNow: () => true,
+    async runNow(_rule, occurrence) { calls++; await new Promise<void>(resolve => occurrence.signal.addEventListener('abort', () => resolve(), { once: true })); } });
+  plugin.schedule(once('one', initial + 60_000)); service.start();
+  const item = service.listManaged().items[0]!;
+  await service.manage({ action: 'run-now', owner: item.owner, id: item.id, revision: item.revision }, new AbortController().signal);
+  await service.stop();
+  const restarted = createPluginSchedulerService({ store, clock: () => initial, intervalMs: 60_000 });
+  restarted.start(); await restarted.tick();
+  assert.equal(restarted.listManaged().items[0]!.managementState, 'unknown');
+  assert.equal(restarted.managedHistory().items[0]!.status, 'unknown');
+  assert.equal(calls, 1);
+  await restarted.stop();
+});
+
 test('registration has no activity before start, identities are isolated, and schedule changes use CAS', async context => {
   const { service, setNow } = fixture(context);
   const calls: string[] = [];

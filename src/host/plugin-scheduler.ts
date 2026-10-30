@@ -1,3 +1,4 @@
+import { runImmediatePluginSchedule } from './plugin-scheduler-immediate.ts';
 import type { Clock, JsonObject } from '../core/types.ts';
 import type { DurableStore, StoredRecord } from '../contracts/ports.ts';
 import { FrameworkError, assert, errorCode, identifier, isRecord, reference, snapshot } from '../core/values.ts';
@@ -64,6 +65,8 @@ export interface PluginScheduleDetailsProvider {
   readonly summarize?: (rule: PluginScheduledRule, occurrence: PluginScheduledHistory | undefined) => PluginScheduleBusinessSummary | null;
   readonly read: (rule: PluginScheduledRule, occurrence: PluginScheduledHistory | undefined, signal: AbortSignal)
     => PluginScheduleBusinessDetails | null | Promise<PluginScheduleBusinessDetails | null>;
+  readonly canRunNow?: (rule: PluginScheduledRule) => boolean;
+  readonly runNow?: (rule: PluginScheduledRule, occurrence: PluginScheduledOccurrence) => void | Promise<void>;
   readonly skip?: (rule: PluginScheduledRule, signal: AbortSignal) => void | Promise<void>;
 }
 
@@ -79,7 +82,7 @@ interface Envelope { owner: string; id: string; handler: string; payload: JsonOb
 interface HandlerEntry { handler: PluginScheduledHandler; lifetime: AbortSignal; controller: AbortController; check: () => void }
 interface DetailsEntry { provider: PluginScheduleDetailsProvider; lifetime: AbortSignal; controller: AbortController; check: () => void }
 interface Management { readonly schema: 1; readonly owner: string; readonly id: string; readonly paused: boolean;
-  readonly operation: { readonly kind: 'skip'; readonly state: 'running' | 'unknown' } | null }
+  readonly operation: { readonly kind: 'skip' | 'run-now'; readonly state: 'running' | 'unknown' } | null }
 function fail(code: string): never { throw new FrameworkError(code, '插件定时任务未能完成操作。'); }
 function envelope(record: StoredRecord): Envelope {
   const value = object(record.value);
@@ -101,7 +104,7 @@ function management(record: StoredRecord | null, owner: string, id: string): Man
   if (!record) return { schema: 1, owner, id, paused: false, operation: null };
   const value = object(record.value);
   assert(value.schema === 1 && value.owner === owner && value.id === id && typeof value.paused === 'boolean'
-    && (value.operation === null || isRecord(value.operation) && value.operation.kind === 'skip'
+    && (value.operation === null || isRecord(value.operation) && (value.operation.kind === 'skip' || value.operation.kind === 'run-now')
       && (value.operation.state === 'running' || value.operation.state === 'unknown')),
   'PLUGIN_SCHEDULER_STORED_INVALID', 'Stored schedule management state is invalid.');
   return value as unknown as Management;
@@ -136,7 +139,7 @@ function historyItem(record: StoredRecord, rule: StoredRecord, presentation: Plu
   assert(value.schema === 1 && value.ruleId === rule.key, 'PLUGIN_SCHEDULER_STORED_INVALID', 'Stored occurrence ownership is invalid.');
   const parsed = parsePluginScheduleHistoryItem({ cursor: record.key, id: record.key, owner: identity.owner,
     ruleId: identity.id, generation: value.generation, scheduledAt: value.scheduledAt, startedAt: value.startedAt ?? null, deadlineAt: value.deadlineAt,
-    updatedAt: value.updatedAt, coalescedCount: value.coalescedCount, status: value.status, errorCode: value.errorCode, business: null, presentation });
+    updatedAt: value.updatedAt, coalescedCount: value.coalescedCount, status: value.status, errorCode: value.errorCode, business: null, presentation, ...(value.trigger === 'manual' ? { trigger: 'manual' } : {}) });
   assert(parsed, 'PLUGIN_SCHEDULER_STORED_INVALID', 'Stored schedule occurrence is invalid.');
   return parsed;
 }
@@ -177,7 +180,7 @@ export function createPluginScheduleReader(options: {
   readonly canManage?: boolean;
   readonly maxRules?: number;
   readonly maxHistory?: number;
-  readonly provider?: (owner: string, handler: string) => { readonly presentation?: PluginSchedulePresentation; readonly canSkip: boolean } | undefined;
+  readonly provider?: (owner: string, handler: string) => { readonly presentation?: PluginSchedulePresentation; readonly canSkip: boolean; readonly canRunNow?: (record: StoredRecord) => boolean } | undefined;
   readonly skipping?: (key: string) => boolean;
   readonly business?: (record: StoredRecord, occurrence: PluginScheduleHistoryItem | undefined,
     history: readonly StoredRecord[]) => PluginScheduleBusinessSummary | null;
@@ -202,7 +205,7 @@ export function createPluginScheduleReader(options: {
       .sort((left, right) => right.scheduledAt - left.scheduledAt)[0] ?? null;
     const now = clock();
     const managementState: PluginScheduleItem['managementState'] = !control.operation ? 'ready'
-      : control.operation.state === 'running' && options.skipping?.(record.key) ? 'skipping' : 'unknown';
+      : control.operation.state === 'running' && options.skipping?.(record.key) ? control.operation.kind === 'run-now' ? 'running-now' : 'skipping' : 'unknown';
     let state: PluginScheduleItem['state'] = last?.status === 'running' ? 'running' : managementState === 'unknown' ? 'unknown'
       : rule.cancelled ? 'cancelled' : !rule.enabled ? 'disabled' : last?.status === 'unknown' ? 'unknown' : control.paused ? 'paused' : 'enabled';
     let nextAt: number | null = null;
@@ -222,7 +225,9 @@ export function createPluginScheduleReader(options: {
       presentation, schedule: rule.schedule, timeZone: rule.timeZone, windowMs: rule.windowMs, activeFrom: rule.activeFrom,
       evaluatedThrough: rule.evaluatedThrough, enabled: rule.enabled, paused: control.paused, cancelled: rule.cancelled,
       state, nextAt, lastOccurrence: last, business: options.business?.(record, last ?? undefined, occurrences) ?? null, managementState,
-      actions: { canPause: Boolean(options.canManage && !rule.cancelled && managementState === 'ready'), canSkip } });
+      actions: { canPause: Boolean(options.canManage && !rule.cancelled && managementState === 'ready'), canSkip,
+        canRunNow: Boolean(options.running && options.canManage && managementState === 'ready' && !control.paused && rule.enabled && !rule.cancelled
+          && !history.some(row => row.status === 'running') && provider?.canRunNow?.(record)) } });
     assert(parsed, 'PLUGIN_SCHEDULER_STORED_INVALID', 'The schedule projection is invalid.');
     return snapshot(parsed);
   }
@@ -436,7 +441,8 @@ export function createPluginSchedulerService(options: {
       skipping: key => skipOperations.has(key),
       provider(owner, handler) {
         const entry = providerFor(owner, handler);
-        return entry ? { ...(entry.provider.presentation ? { presentation: entry.provider.presentation } : {}), canSkip: Boolean(entry.provider.skip) } : undefined;
+        return entry ? { ...(entry.provider.presentation ? { presentation: entry.provider.presentation } : {}), canSkip: Boolean(entry.provider.skip),
+          canRunNow: record => { try { return Boolean(entry.provider.runNow && entry.provider.canRunNow?.(projection(record))); } catch { return false; } } } : undefined;
       },
       business(record, occurrence, history) {
         const identity = envelope(record), entry = providerFor(identity.owner, identity.handler);
@@ -534,6 +540,22 @@ export function createPluginSchedulerService(options: {
       ]);
       return reader().detail(identity.owner, identity.id).item;
     }
+    if (request.action === 'run-now') {
+      const view = reader().detail(identity.owner, identity.id).item;
+      const entry = providerFor(identity.owner, identity.handler), handler = entry?.provider.runNow;
+      assert(running && !stopping && view.actions.canRunNow && entry && handler && entryFor(record) && skipPending.size < 32 && historyRows().length < maxHistory,
+        'PLUGIN_SCHEDULER_RUN_UNAVAILABLE', 'The plugin cannot safely execute this schedule now.');
+      entry.check(); signal.throwIfAborted();
+      const controller = new AbortController();
+      const work = runImmediatePluginSchedule({ store, record, override, rule: storedMetadata(record), identity, paused: control.paused,
+        revision: request.revision, clock, timeoutMs: options.callbackTimeoutMs ?? 30_000,
+        signal: AbortSignal.any([entry.lifetime, entry.controller.signal, controller.signal]),
+        run: async occurrence => { entry.check(); await handler(projection(record), occurrence); entry.check(); occurrence.signal.throwIfAborted(); } });
+      skipOperations.add(key); skipControllers.set(key, controller); skipPending.set(key, work);
+      void work.catch(error => { try { options.onFault?.(errorCode(error, 'PLUGIN_SCHEDULER_RUN_UNKNOWN')); } catch {} })
+        .finally(() => { skipOperations.delete(key); skipControllers.delete(key); skipPending.delete(key); });
+      return reader().detail(identity.owner, identity.id).item;
+    }
     const view = reader().detail(identity.owner, identity.id).item;
     const entry = providerFor(identity.owner, identity.handler);
     const skip = entry?.provider.skip;
@@ -627,13 +649,17 @@ export function createPluginSchedulerService(options: {
           check();
           assert(identifier(kind) && provider && typeof provider.read === 'function'
             && (provider.skip === undefined || typeof provider.skip === 'function')
-            && (provider.summarize === undefined || typeof provider.summarize === 'function'),
+            && (provider.summarize === undefined || typeof provider.summarize === 'function')
+            && (provider.canRunNow === undefined || typeof provider.canRunNow === 'function')
+            && (provider.runNow === undefined || typeof provider.runNow === 'function')
+            && Boolean(provider.runNow) === Boolean(provider.canRunNow),
           'PLUGIN_SCHEDULER_INVALID_PROVIDER', 'A read-only schedule details provider is required.');
           const presentation = provider.presentation === undefined ? undefined : parsePluginSchedulePresentation(provider.presentation);
           assert(provider.presentation === undefined || presentation, 'PLUGIN_SCHEDULER_INVALID_PRESENTATION', 'A bounded schedule presentation is required.');
           const key = digest([owner, kind]), previous = detailProviders.get(key);
           if (previous && !previous.lifetime.aborted) fail('PLUGIN_SCHEDULER_DUPLICATE_PROVIDER');
           const entry: DetailsEntry = { provider: { read: provider.read,
+            ...(provider.runNow ? { runNow: provider.runNow, canRunNow: provider.canRunNow } : {}),
             ...(provider.skip ? { skip: provider.skip } : {}), ...(provider.summarize ? { summarize: provider.summarize } : {}),
             ...(presentation ? { presentation: snapshot(presentation) } : {}) }, lifetime, controller: new AbortController(), check };
           detailProviders.set(key, entry);

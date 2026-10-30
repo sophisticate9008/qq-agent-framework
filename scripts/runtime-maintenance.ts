@@ -15,7 +15,8 @@ export async function processPaths(): Promise<string[]> {
       if (paths.length % 32 === 0) await new Promise(resolve => setTimeout(resolve, 10));
       paths.push(await readlink(`/proc/${pid}/cwd`).catch(error => { if (missing(error)) return ''; throw error; }));
       for (const name of ['environ']) paths.push((await readFile(`/proc/${pid}/${name}`)).toString().replaceAll('\0', '\n'));
-      for (const fd of await readdir(`/proc/${pid}/fd`)) {
+      for (const [index, fd] of (await readdir(`/proc/${pid}/fd`)).entries()) {
+        if (index > 0 && index % 64 === 0) await new Promise(resolve => setTimeout(resolve, 20));
         paths.push(await readlink(`/proc/${pid}/fd/${fd}`).catch(error => { if (missing(error)) return ''; throw error; }));
       }
     } catch (error) { if (!missing(error) && !(isRecord(error) && error.code === 'ESRCH')) throw error; }
@@ -49,17 +50,21 @@ export async function runRuntimeMaintenance(root: string, apply = false) {
   const runtime = join(root, 'runtime');
   const now = Date.now();
   const cpu = process.cpuUsage();
-  const active = await processPaths();
+  let active: string[] | undefined;
+  const configuredPaths: string[] = [];
   const live = join(runtime, 'live');
   for (const name of await entries(live)) if (name.endsWith('.json')) {
     const path = join(live, name); const info = await lstat(path);
-    if (info.isFile() && !info.isSymbolicLink() && info.size <= 1024 * 1024) active.push(await readFile(path, 'utf8'));
+    if (info.isFile() && !info.isSymbolicLink() && info.size <= 1024 * 1024) configuredPaths.push(await readFile(path, 'utf8'));
   }
-  const used = (path: string) => active.some(text => text.includes(path + sep) || text.endsWith(path) || text.includes(path + '\n') || text.includes(path + '"'));
+  const used = async (path: string) => {
+    active ??= [...await processPaths(), ...configuredPaths];
+    return active.some(text => text.includes(path + sep) || text.endsWith(path) || text.includes(path + '\n') || text.includes(path + '"'));
+  };
   const result = { schema: 1, at: now, applied: apply, removedTrees: 0, removedFiles: 0, reclaimedBytes: 0, protectedTrees: 0, deferred: false, durationMs: 0, cpuMs: 0, peakRssBytes: 0 };
   async function removeTree(path: string) {
     if (result.removedTrees >= 3 || Date.now() - now > 15000) { result.deferred = true; return; }
-    if (used(path)) { result.protectedTrees++; return; }
+    if (await used(path)) { result.protectedTrees++; return; }
     const info = await lstat(path);
     let bytes: number;
     try { bytes = await treeBytes(path); } catch (error) {

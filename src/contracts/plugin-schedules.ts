@@ -71,6 +71,8 @@ export interface PluginScheduleBusinessDetails {
   readonly summary: string;
   readonly sessionId: string | null;
   readonly canSkip: boolean;
+  /** Same-plugin rules, resolved by the host UI through the ordinary schedule API. */
+  readonly relatedSchedules?: readonly { readonly id: string; readonly label: string }[];
   readonly steps?: readonly { readonly label: string; readonly state: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'unknown' }[];
   readonly result: { readonly title: string; readonly body: string;
     readonly images: readonly { readonly dataUrl: string; readonly alt: string }[] } | null;
@@ -208,8 +210,19 @@ export function parsePluginScheduleHistorySnapshot(value: unknown): PluginSchedu
   return { schema: 1, items, next: value.next };
 }
 export function parsePluginScheduleBusinessDetails(value: unknown): PluginScheduleBusinessDetails | null {
-  if (!isRecord(value) || !exact(value, ['stage', 'summary', 'sessionId', 'canSkip', 'result'], ['steps'])
+  if (!isRecord(value) || !exact(value, ['stage', 'summary', 'sessionId', 'canSkip', 'result'], ['steps', 'relatedSchedules'])
     || !text(value.stage, 160) || !text(value.summary, 4000) || !nullableReference(value.sessionId) || typeof value.canSkip !== 'boolean') return null;
+  let relatedSchedules: PluginScheduleBusinessDetails['relatedSchedules'];
+  if (value.relatedSchedules !== undefined) {
+    if (!Array.isArray(value.relatedSchedules) || value.relatedSchedules.length > 8) return null;
+    const seen = new Set<string>();
+    const links: NonNullable<PluginScheduleBusinessDetails['relatedSchedules']>[number][] = [];
+    for (const link of value.relatedSchedules) {
+      if (!isRecord(link) || !exact(link, ['id', 'label']) || !reference(link.id) || !text(link.label, 160) || !link.label || seen.has(link.id)) return null;
+      seen.add(link.id); links.push({ id: link.id, label: link.label });
+    }
+    relatedSchedules = links;
+  }
   let steps: PluginScheduleBusinessDetails['steps'];
   if (value.steps !== undefined) {
     if (!Array.isArray(value.steps) || value.steps.length > 32) return null;
@@ -237,7 +250,7 @@ export function parsePluginScheduleBusinessDetails(value: unknown): PluginSchedu
     result = { title: value.result.title, body: value.result.body, images };
   }
   return { stage: value.stage, summary: value.summary, sessionId: value.sessionId, canSkip: value.canSkip,
-    ...(steps === undefined ? {} : { steps }), result };
+    ...(steps === undefined ? {} : { steps }), ...(relatedSchedules === undefined ? {} : { relatedSchedules }), result };
 }
 export function parsePluginScheduleDetail(value: unknown): PluginScheduleDetail | null {
   if (!isRecord(value) || !exact(value, ['schema', 'item', 'occurrence', 'details', 'detailsAvailable', 'detailsError']) || value.schema !== 1

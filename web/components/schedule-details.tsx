@@ -1,4 +1,4 @@
-import { RefreshCw } from 'lucide-react';
+import { Play, RefreshCw } from 'lucide-react';
 import { parsePluginScheduleDetail, type PluginScheduleBusinessDetails } from '../../src/contracts/plugin-schedules.ts';
 import type { ApiClient } from '../lib/api.ts';
 import { describeConversationKey } from '../lib/activity.ts';
@@ -7,6 +7,7 @@ import { useReadResource } from '../lib/use-read-resource.ts';
 import { StatusPill } from './management.tsx';
 import { RawDetails, TechnicalDetails } from './read-only-details.tsx';
 import { Button } from './ui/button.tsx';
+import { ScheduleRelatedTask, type ScheduleControls } from './schedule-related-tasks.tsx';
 
 export interface ScheduleDetailTarget {
   readonly owner: string;
@@ -19,7 +20,7 @@ const stepLabels: Readonly<Record<NonNullable<PluginScheduleBusinessDetails['ste
 };
 
 /** Mounted only while its drawer is open; detail payloads and images are never polled. */
-export function ScheduleDetails({ api, connected, target }: { readonly api: ApiClient; readonly connected: boolean; readonly target: ScheduleDetailTarget }) {
+export function ScheduleDetails({ api, connected, target, controls = {} }: { readonly api: ApiClient; readonly connected: boolean; readonly target: ScheduleDetailTarget; readonly controls?: ScheduleControls }) {
   const query = new URLSearchParams({ owner: target.owner, id: target.id });
   if (target.occurrenceId) query.set('occurrenceId', target.occurrenceId);
   const path = `${pluginSchedulesPath}/detail?${query}`;
@@ -37,6 +38,8 @@ export function ScheduleDetails({ api, connected, target }: { readonly api: ApiC
   const scope = details?.sessionId && /^(?:group|private):/.test(details.sessionId) ? describeConversationKey(details.sessionId) : null;
   return <div className="stack">
     <div className="row"><Button size="sm" variant="outline" disabled={resource.loading} onClick={resource.refresh}><RefreshCw className={resource.loading ? 'size-3 animate-spin' : 'size-3'} />刷新详情</Button><span className="push small muted">{resource.updatedAt ? `读取于 ${scheduleTime(resource.updatedAt)}` : '尚未读取'}</span></div>
+    {value && !target.occurrenceId && value.item.actions.canRunNow && controls.onRunNow && <div className="row justify-end"><Button size="sm" variant="outline" disabled={controls.busy || controls.pendingIds?.has(JSON.stringify([value.item.owner, value.item.id])) || resource.loading || Boolean(resource.error)} onClick={() => controls.onRunNow?.(value.item)}><Play className="size-3" />立即执行</Button></div>}
+    {value && controls.errors?.get(JSON.stringify([value.item.owner, value.item.id])) && <p className="strip warn" role="status">{controls.errors.get(JSON.stringify([value.item.owner, value.item.id]))}</p>}
     {resource.error && <p className="strip warn" role="alert">详情读取失败；{value ? '保留上次读取的内容，当前进展待核对。' : '当前执行与业务结果尚未确认。'}</p>}
     {!value ? <p className="small muted" role="status">{resource.loading ? '正在读取任务详情…' : '暂无可核对的任务详情。'}</p> : <>
       <div className="row"><strong className="min-w-0 break-words">{occurrence?.presentation?.title ?? scheduleTitle(value.item)}</strong><span className="push"><StatusPill tone={state ? scheduleTone(state) : 'neutral'}>{occurrence ? scheduleHistoryStateLabel(occurrence.status) : scheduleStateLabel(value.item)}</StatusPill></span></div>
@@ -50,6 +53,7 @@ export function ScheduleDetails({ api, connected, target }: { readonly api: ApiC
           <dl className="info"><dt>关联会话</dt><dd>{scope ? `${scope.label} ${scope.identifier}` : details.sessionId ? '插件独立会话' : '未关联或尚未记录'}</dd></dl>
           {details.steps && details.steps.length > 0 && <ol className="divide-y rounded border">{details.steps.map((step, index) => <li key={`${index}:${step.label}`} className="row px-2 py-1.5 even:bg-muted/40"><span className="small muted">{index + 1}</span><span className="min-w-0 flex-1 break-words">{step.label}</span><StatusPill tone={step.state === 'failed' || step.state === 'unknown' ? 'warning' : step.state === 'completed' ? 'success' : step.state === 'running' ? 'info' : 'neutral'}>{stepLabels[step.state]}</StatusPill></li>)}</ol>}
         </section>
+        {details.relatedSchedules && details.relatedSchedules.length > 0 && <section className="stack border-t pt-2"><h3 className="font-semibold">关联日程</h3><ul className="divide-y">{details.relatedSchedules.filter(link => link.id !== target.id).map(link => <ScheduleRelatedTask key={link.id} api={api} connected={connected} owner={target.owner} link={link} controls={controls} />)}</ul></section>}
         <section className="stack border-t pt-2"><h3 className="font-semibold">实际结果</h3>{details.result ? <>
           {details.result.title && <strong className="break-words">{details.result.title}</strong>}
           {details.result.body && <div className="rounded border bg-card p-2 whitespace-pre-wrap break-words select-text">{details.result.body}</div>}

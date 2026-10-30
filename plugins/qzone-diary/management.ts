@@ -77,7 +77,7 @@ export function createDiaryScheduleDetails(handler: 'plan' | 'publish', options:
       return { stage: !day ? '等待安排' : day.state === 'planning' ? '正在安排今日计划'
         : '今日计划已安排',
       summary: !day ? `${date} 尚未生成计划。` : day.state === 'planned'
-        ? `${date} 已安排 ${count} 条，已发布 ${published} 条。${occurrence && ['failed', 'unknown'].includes(occurrence.status)
+        ? `${date} 已安排 ${count} 条，已发布 ${published} 条。${count > published ? ' 此任务负责规划；请打开关联的发布任务查看进展或立即执行。' : ''}${occurrence && ['failed', 'unknown'].includes(occurrence.status)
           ? ' 此次执行曾失败或中断，后续规划已成功；原执行记录保留。' : ''}` : day.state === 'planning' ? '正在生成各时间段的生活片段。' : '规划中断，保留已有记录。' }
     }
     const slot = day?.slots.find(item => item.index === rule.payload.slot)
@@ -103,7 +103,8 @@ export function createDiaryScheduleDetails(handler: 'plan' | 'publish', options:
       const date = dateFor(rule, occurrence?.scheduledAt), day = read(date)
       const sessionId = options.runtime.models.list().find(binding => binding.name === 'diary' && binding.conversationId === null)?.sessionId ?? null
       if (handler === 'plan') {
-        return { ...summarize(rule, occurrence), sessionId, canSkip: false, result: null }
+        return { ...summarize(rule, occurrence), sessionId, canSkip: false, result: null,
+          relatedSchedules: day?.slots.map(slot => ({ id: `post-${date}-${slot.index}`, label: `${date} 第 ${slot.index + 1} 条日记 · 发布任务` })) ?? [] }
       }
       const slot = day?.slots.find(item => item.index === rule.payload.slot)
       if (!slot) return { stage: '日程记录不可用', summary: '未找到这条任务对应的业务日程。', sessionId, canSkip: false, result: null }

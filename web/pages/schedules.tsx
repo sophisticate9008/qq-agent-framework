@@ -24,7 +24,7 @@ import { useReadResource } from '../lib/use-read-resource.ts';
 
 type ControlAction = 'pause' | 'resume' | 'skip' | 'run-now';
 type WriteState = 'idle' | 'saving' | 'error' | 'conflict' | 'unknown';
-interface ControlTarget { readonly item: PluginScheduleItem; readonly action: ControlAction }
+interface ControlTarget { readonly item: PluginScheduleItem; readonly action: ControlAction; readonly fromDetails?: boolean }
 interface UnknownControl { readonly target: ControlTarget; readonly startedAt: number }
 const uncertainControls = new WeakMap<ApiClient, ReadonlyMap<string, UnknownControl>>();
 const actionLabels: Readonly<Record<ControlAction, string>> = { pause: '暂停日程', resume: '恢复日程', skip: '跳过本次', 'run-now': '立即执行' };
@@ -57,6 +57,7 @@ export function SchedulesPage({ api, connected, connect }: PageProps) {
   const rules = useReadResource(api, scheduleListPath(ruleAfter, owner), connected && tab !== 'tasks', parsePluginScheduleSnapshot);
   const history = useReadResource(api, scheduleHistoryPath(historyAfter, owner), connected && tab === 'history', parsePluginScheduleHistorySnapshot);
   const [details, setDetails] = useState<ScheduleDetailTarget | null>(null);
+  const [detailRevision, setDetailRevision] = useState(0);
   const [target, setTarget] = useState<ControlTarget | null>(null);
   const [writeState, setWriteState] = useState<WriteState>('idle');
   const [writeError, setWriteError] = useState('');
@@ -133,11 +134,11 @@ export function SchedulesPage({ api, connected, connect }: PageProps) {
 
   function refresh() { rules.refresh(); if (tab === 'history') history.refresh(); }
   function changeOwner(value: string) { setOwner(value); setRuleAfter(null); setHistoryAfter(null); }
-  function openControl(item: PluginScheduleItem, action: ControlAction) {
-    if (controller.current || rules.error || rules.loading || item.managementState !== 'ready' || pending.has(scheduleKey(item))
+  function openControl(item: PluginScheduleItem, action: ControlAction, fromDetails = false) {
+    if (controller.current || !fromDetails && (rules.error || rules.loading) || item.managementState !== 'ready' || pending.has(scheduleKey(item))
       || (action === 'run-now' ? !item.actions.canRunNow : action === 'skip' ? !item.actions.canSkip : !item.actions.canPause)) return;
-    if (action !== 'skip') { void submitControl({ item, action }); return; }
-    setTarget({ item, action }); setWriteState('idle'); setWriteError('');
+    if (action !== 'skip') { void submitControl({ item, action, fromDetails }); return; }
+    setTarget({ item, action, fromDetails }); setWriteState('idle'); setWriteError('');
   }
   function closeControl() {
     if (controller.current) return;
@@ -147,14 +148,14 @@ export function SchedulesPage({ api, connected, connect }: PageProps) {
   async function submitControl(direct?: ControlTarget) {
     const chosen = direct ?? target;
     if (!chosen || controller.current || (!direct && (writeState === 'saving' || writeState === 'unknown' || writeState === 'conflict'))
-      || !connected || rules.error || rules.loading || pending.has(scheduleKey(chosen.item))) return;
+      || !connected || !chosen.fromDetails && (rules.error || rules.loading) || pending.has(scheduleKey(chosen.item))) return;
     if ((uncertainControls.get(api)?.size ?? 0) >= maximumCachedSchedules) {
       const message = '待核对操作已达缓存上限，请先刷新核对已有操作。';
       setRowErrors(previous => remember(new Map(previous), scheduleKey(chosen.item), message));
       if (!direct) { setWriteState('error'); setWriteError(message); }
       return;
     }
-    const currentItem = rules.snapshot?.items.find(item => scheduleKey(item) === scheduleKey(chosen.item));
+    const currentItem = chosen.fromDetails ? chosen.item : rules.snapshot?.items.find(item => scheduleKey(item) === scheduleKey(chosen.item));
     if (!currentItem || currentItem.revision !== chosen.item.revision || currentItem.managementState !== 'ready'
       || (chosen.action === 'run-now' ? !currentItem.actions.canRunNow : chosen.action === 'skip' ? !currentItem.actions.canSkip : !currentItem.actions.canPause)) {
       const message = '日程或操作条件已变化，请刷新后重新选择。';
@@ -192,7 +193,7 @@ export function SchedulesPage({ api, connected, connect }: PageProps) {
       const next = new Map(uncertainControls.get(api)); next.delete(key);
       uncertainControls.set(api, next); setUnknownView({ api, items: next });
       setNotice(chosen.action === 'pause' ? '日程已暂停，暂停状态会保留。' : chosen.action === 'resume' ? '日程已恢复。' : chosen.action === 'run-now' ? '已启动本次执行，请在执行记录中查看进展。' : '本次已跳过。');
-      setTarget(null); setWriteState('idle'); refresh();
+      setTarget(null); setWriteState('idle'); setDetailRevision(value => value + 1); refresh();
     } catch (error) {
       if (!live()) return;
       const uncertain = !(error instanceof ApiError && error.status >= 400 && error.status < 500 && !/unknown/i.test(error.code));
@@ -244,7 +245,7 @@ export function SchedulesPage({ api, connected, connect }: PageProps) {
           <div className="row small muted px-2.5 py-1.5"><span>按计划时间倒序；状态筛选仅作用已读取记录。</span><span className="push">{historyAfter && <Button size="sm" variant="ghost" disabled={history.loading} onClick={() => setHistoryAfter(null)}>返回首批</Button>}{history.snapshot?.next && <Button size="sm" variant="outline" disabled={history.loading} onClick={() => setHistoryAfter(history.snapshot?.next ?? null)}>下一批</Button>}</span></div>
         </Section></TabsContent>
       </Tabs>
-      <DetailsWindow open={details !== null} onOpenChange={open => { if (!open) setDetails(null); }} title={details?.title ?? '日程详情'} description="时间规则、关联会话、实际阶段与结果分别展示。">{details && <ScheduleDetails key={JSON.stringify([details.owner, details.id, details.occurrenceId ?? null])} api={api} connected={connected} target={details} />}</DetailsWindow>
+      <DetailsWindow open={details !== null} onOpenChange={open => { if (!open) setDetails(null); }} title={details?.title ?? '日程详情'} description="时间规则、关联会话、实际阶段与结果分别展示。">{details && <ScheduleDetails key={JSON.stringify([details.owner, details.id, details.occurrenceId ?? null, detailRevision])} api={api} connected={connected} target={details} controls={{ busy: writeBusy, errors: rowErrors, pendingIds: new Set(pending.keys()), onOpen: showRule, onRunNow: item => openControl(item, 'run-now', true) }} />}</DetailsWindow>
       <Dialog open={target !== null} onOpenChange={open => { if (!open) closeControl(); }}><DialogContent showCloseButton={!writeBusy}><DialogHeader><DialogTitle>{target ? actionLabels[target.action] : '管理日程'}</DialogTitle><DialogDescription>{target ? scheduleTitle(target.item) : '请核对所选日程'}</DialogDescription></DialogHeader>{target && <div className="stack"><dl className="info"><dt>插件</dt><dd>{scheduleOwner(target.item)}</dd><dt>下次时间</dt><dd>{scheduleTime(target.item.nextAt, true)}</dd></dl><p className="strip">确认后跳过本次任务，不会执行本次生成或发布。</p>{writeError && <p className="strip warn" role="alert">{writeError}</p>}</div>}<DialogFooter><Button variant="ghost" disabled={writeBusy} onClick={closeControl}>{writeState === 'unknown' || writeState === 'conflict' ? '关闭并刷新核对' : '取消'}</Button><Button disabled={!target || writeBusy || writeState === 'unknown' || writeState === 'conflict' || rules.error !== null || rules.loading} onClick={() => void submitControl()}>{writeBusy && <LoaderCircle className="size-3 animate-spin" />}{writeBusy ? '正在处理' : target ? `确认${actionLabels[target.action]}` : '确认'}</Button></DialogFooter></DialogContent></Dialog>
     </>}
   </div>;

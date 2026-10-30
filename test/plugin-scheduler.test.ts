@@ -6,11 +6,25 @@ import { join } from 'node:path';
 import type { JsonValue } from '../src/core/types.ts';
 import type { DurableStore, WriteOptions } from '../src/contracts/ports.ts';
 import { FrameworkError } from '../src/core/values.ts';
+import { parsePluginScheduleBusinessDetails } from '../src/contracts/plugin-schedules.ts';
 import { createPluginSchedulerService, type PluginScheduleInput, type PluginScheduledOccurrence } from '../src/host/plugin-scheduler.ts';
 import { createSqliteStore } from '../src/storage/sqlite.ts';
 
 const initial = Date.parse('2026-01-01T00:00:00Z');
 const day = 86_400_000;
+
+test('related business schedules are bounded same-plugin references without executable destinations', () => {
+  const details = { stage: 'Planned', summary: 'One post is pending', sessionId: null, canSkip: false, result: null,
+    relatedSchedules: [{ id: 'post-one', label: 'Publish one' }] };
+  assert.deepEqual(parsePluginScheduleBusinessDetails(details)?.relatedSchedules, details.relatedSchedules);
+  for (const relatedSchedules of [
+    [{ id: 'post-one', label: 'Publish one', owner: 'another-plugin' }],
+    [{ id: 'post-one', label: 'Publish one', url: '/api/unsafe' }],
+    [{ id: 'post-one', label: '' }],
+    [details.relatedSchedules[0], details.relatedSchedules[0]],
+    Array.from({ length: 9 }, (_, index) => ({ id: `post-${index}`, label: 'Post' })),
+  ]) assert.equal(parsePluginScheduleBusinessDetails({ ...details, relatedSchedules }), null);
+});
 function fixture(context: TestContext, options: { maxRules?: number; maxHistory?: number; callbackTimeoutMs?: number; intervalMs?: number } = {}) {
   let now = initial;
   const store = createSqliteStore({ filename: ':memory:', clock: () => now });

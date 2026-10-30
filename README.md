@@ -74,3 +74,6 @@ npm start
 | 了解验证范围与阶段记录 | [验收记录](docs/VALIDATION.md) · [2026-10-26 交付快照](docs/IMPROVEMENT_CHECKLIST_2026-10-25.md) |
 
 源码采用 [MIT 许可](LICENSE)。第三方来源、致谢及独立素材许可集中在 [NOTICE.md](NOTICE.md)；上游许可证原文保留原语言。
+
+
+聊天资源清理与容量规则见 [资源回收契约](docs/CONTRACTS.md#聊天资源回收)。运维命令 `qqbridge-framework maintenance` 可预览可回收内容，加 `--apply` 执行；当前部署、仍被历史引用的附件及未核清的执行证据受保护。

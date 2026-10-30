@@ -793,6 +793,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     claimTimer = undefined
     const result = await drainNativeRun(resources)
     sessionTurns = undefined
+    await workAssets?.close().catch(error => { result.errors.push(error) })
     await markdown?.close().catch(error => { result.errors.push(error) })
     frameworkTools = undefined
     work = undefined
@@ -1334,7 +1335,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           const resolveTarget = options.resolveWorkTarget
           const workPort = dsh.work
           const workInteractions = dsh
-          workAssets = createNativeWorkAssets({ directory: options.directory, store, accountId: selfId, port: workPort,
+          workAssets = createNativeWorkAssets({ directory: options.directory, store, accountId: selfId, port: workPort, signal: controller.signal,
+            onMaintenanceFault(code) { lastError = code; activity.record('error') },
             parent(sessionId) { const binding = bindingForSession(sessionId); return binding ?? null },
             authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
           const createBackend = (resolveBackendTarget: Parameters<typeof createDshNativeWorkBackend>[0]['resolveTarget']) => createDshNativeWorkBackend({ port: workPort, issuerEpoch: pluginEpoch!,

@@ -106,7 +106,7 @@ export function createNativeMarkdownService(options: {
     if (closed || options.signal?.aborted) return
     timer = setTimeout(() => {
       void maintenance().catch(error => { try { options.onMaintenanceFault?.(errorCode(error, 'NATIVE_MARKDOWN_MAINTENANCE_FAILED')) } catch {} })
-        .finally(() => schedule(5 * 60 * 1000))
+        .finally(() => schedule(60 * 60 * 1000))
     }, ms)
     timer.unref()
   }

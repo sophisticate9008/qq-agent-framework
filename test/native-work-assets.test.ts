@@ -46,3 +46,30 @@ test('SDK result assets survive registry reconstruction and remain bound to acco
   await symlink(target, filename);
   await assert.rejects(restored.resolve(request));
 });
+
+test('expired work bytes are collected while their identity survives and live files remain readable', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'work-assets-retention-'));
+  let now = Date.now();
+  const store = createSqliteStore({ filename: ':memory:', clock: () => now });
+  const data = Buffer.from('durable attachment');
+  const asset: DshWorkMediaReference = { type: 'media-reference', kind: 'file', attachmentId: 'attachment', name: 'report.txt', bytes: data.length };
+  const port: DshWorkPort = { async verify() { return true; }, async start() { throw new Error('unexpected'); },
+    async inspect() { throw new Error('unexpected'); }, async interrupt() {}, async followup() { return { messageId: 'unused' }; },
+    async readAsset() { return { asset, data }; } };
+  const registry = createNativeWorkAssets({ directory, store, accountId: '999', port, clock: () => now,
+    parent: () => ({ conversationId: 'private:123', generation: 1 }), authorize: async () => {} });
+  context.after(async () => { await registry.close(); store.close(); await rm(directory, { force: true, recursive: true }); });
+  const address = { issuerEpoch: 'epoch', id: 'work', childId: 'child', parentSessionId: 'parent', generation: 1 };
+  const signal = new AbortController().signal;
+  const first = await registry.register({ address, asset, signal }); assert('assetId' in first);
+  now += 23 * 3600000;
+  const second = await registry.register({ address: { ...address, id: 'other-work' }, asset, signal }); assert('assetId' in second);
+  now += 2 * 3600000;
+  await registry.maintenance();
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual(await readdir(join(directory, 'work-assets')), [second.assetId]);
+  assert(store.read('native-work.assets', first.assetId));
+  await assert.rejects(registry.register({ address, asset, signal }), { code: 'WORK_ASSET_EXPIRED' });
+  assert.deepEqual(await registry.resolve({ assetId: second.assetId, type: 'file', conversationId: 'private:123', sessionId: 'parent', generation: 1, signal }),
+    { file: `base64://${data.toString('base64')}` });
+});

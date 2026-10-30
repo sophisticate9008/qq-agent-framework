@@ -211,6 +211,12 @@ async function startOne(config: Configuration, id: string, deadline: number): Pr
   }
   if (!running) {
     if (await listening(service)) fail(`${id} 端口已占用但尚未就绪。`);
+    if (id === 'dsh') {
+      // No serving writer is alive; the manager lock prevents another managed start during the mark/sweep.
+      const gc = await execute(process.execPath, [path.join(root, 'scripts/dsh-attachment-maintenance.ts'), config.dshHome],
+        { cwd: root, env: { ...process.env, QQ_BRIDGE_FRAMEWORK_OPS_LOCKED: '1' }, timeout: remaining(deadline, 30000) });
+      console.log(gc.code === 0 ? `DSH 附件回收：${gc.output.trim()}` : `DSH 附件核对未完成，保留未核清的对象并继续启动。${gc.output.trim()}`);
+    }
     if (service.prepare) {
       const result = await execute(service.prepare.command, service.prepare.args, { cwd: service.prepare.cwd ?? service.cwd, env: { ...process.env, ...service.env }, timeout: remaining(deadline, 10000) });
       if (result.code !== 0) fail(`${id} 启动准备失败（${result.code}）。`);
@@ -378,6 +384,7 @@ console [组件]     显示配置中的控制台地址
 protocol [napcat|snowluma]  查看或切换协议端并保存选择
 extensions [list] 查看已登记插件的版本、调用与排空状态
 extensions reload <插件标识>  核对当前版本后重载指定插件
+maintenance [--apply]  预览存储回收；--apply 清理旧部署、过期模拟与可再生成缓存
 describe --json    输出框架部署的只读标识
 help              显示帮助`);
 }
@@ -403,8 +410,9 @@ async function main(): Promise<void> {
     catch (error) { if (error instanceof ExtensionManagementError) fail(error.message); throw error; }
     return;
   }
-  if (!['start', 'stop', 'restart', 'status', 'doctor', 'logs', 'console', 'protocol', 'describe', 'run'].includes(action)) fail('未知命令，请运行 qqbridge-framework help。');
-  if (action === 'describe' ? rest.length !== 1 || rest[0] !== '--json'
+  if (!['start', 'stop', 'restart', 'status', 'doctor', 'logs', 'console', 'protocol', 'describe', 'run', 'maintenance'].includes(action)) fail('未知命令，请运行 qqbridge-framework help。');
+  if (action === 'maintenance' ? rest.some(arg => arg !== '--apply') || rest.length > 1
+    : action === 'describe' ? rest.length !== 1 || rest[0] !== '--json'
     : action === 'logs' ? rest.filter(value => value !== '-f').length > 1 || rest.filter(value => value === '-f').length > 1
     : rest.length > 1) fail('命令参数无效，请运行 qqbridge-framework help。');
   const config = await load();
@@ -415,6 +423,12 @@ async function main(): Promise<void> {
   }
   if (action === 'protocol' && rest.length === 0) { console.log(config.activeProtocol); return; }
   if (action === 'protocol' && rest[0] !== 'napcat' && rest[0] !== 'snowluma') fail('协议端须为 napcat 或 snowluma。');
+  if (action === 'maintenance') {
+    if (process.env.QQ_BRIDGE_FRAMEWORK_OPS_LOCKED !== '1') { await lockAndRun(config, argumentsList); return; }
+    const { runRuntimeMaintenance } = await import('./runtime-maintenance.ts');
+    console.log(JSON.stringify(await runRuntimeMaintenance(root, config.dshHome, rest.includes('--apply'))));
+    return;
+  }
   const id = action === 'logs' ? rest.find(value => value !== '-f') : rest[0];
   if (id && action !== 'protocol') component(config, id);
   if (['start', 'stop', 'restart', 'protocol'].includes(action) && process.env.QQ_BRIDGE_FRAMEWORK_OPS_LOCKED !== '1') {

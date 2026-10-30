@@ -73,6 +73,13 @@ async function main(): Promise<void> {
     const mode = (await lstat(bootPath)).mode & 0o777;
     await replace(bootPath, bootSource, bootNext, mode);
   }
+  if (process.getuid?.() === 0) {
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+    const logDirectory = join(root, 'runtime/logs');
+    await mkdir(logDirectory, { recursive: true, mode: 0o700 });
+    await writeFile('/etc/cron.d/qq-bridge-framework-storage',
+      `# Managed runtime retention; the service manager owns the operation lock.\n17 * * * * root ${quote(process.execPath)} ${quote(join(root, 'scripts/service-manager.ts'))} maintenance --apply >> ${quote(join(logDirectory, 'storage-maintenance.log'))} 2>&1\n`, { mode: 0o644 });
+  }
   console.log('已安装 qqbridge-framework 并更新管理配置。' + (bootPath ? ' boot 已切换到本框架运维入口。' : ''));
   console.log('已有进程保持运行；管理服务下次启动时读取新的维护入口。备份位于 runtime/ops-backups。');
 }

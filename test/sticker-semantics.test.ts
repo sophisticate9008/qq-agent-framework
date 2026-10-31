@@ -73,3 +73,30 @@ test('structured annotations persist without migrating legacy account cache reco
   cache.forget(sticker)
   assert.equal(cache.read(sticker), null)
 })
+
+test('character provenance and visible appearance stay separate from emotional and usage tags', () => {
+  const identity = { character: 'Fixture Character', aliases: ['示例角色'], source: 'model' as const, evidence: '仅图像模型候选，未获用户确认' }
+  const visual = { colors: ['蓝色'], styles: ['手绘'], entities: ['长发', '鱼尾'] }
+  const labelled = validateStickerAnnotation({ ...annotation, identity, visual })
+  assert.deepEqual(labelled.identity, identity)
+  assert.deepEqual(labelled.visual, visual)
+  assert(stickerSemanticScore('蓝色', '', labelled) > 0)
+  const neutral = validateStickerAnnotation({ description: '角色站立', tags: [], avoid: '',
+    identity: { ...identity, character: 'Happy Hug' }, visual })
+  assert.equal(stickerSemanticScore('开心', '', neutral), 0, 'role names do not imply emotions')
+  assert.equal(stickerSemanticScore('hug', '', neutral), 0, 'role names do not imply actions')
+  assert.equal(validateStickerAnnotation(annotation).identity, undefined)
+  assert.throws(() => validateStickerAnnotation({ ...annotation, identity: { ...identity, character: '' } }))
+  assert.throws(() => validateStickerAnnotation({ ...annotation, identity: { ...identity, aliases: ['Fixture_Name', 'ｆｉｘｔｕｒｅ name'] } }))
+  assert.throws(() => validateStickerAnnotation({ ...annotation, visual: { ...visual, senderPreference: 'private' } }))
+})
+
+test('web identity metadata requires bounded public-page references without secret-bearing URLs', () => {
+  const identity = { character: 'Fixture Character', aliases: [], source: 'web', references: [{ url: 'https://example.test/character', title: '公开角色资料' }] }
+  assert.equal(validateStickerAnnotation({ ...annotation, identity }).identity?.source, 'web')
+  assert.throws(() => validateStickerAnnotation({ ...annotation, identity: { ...identity, references: [] } }))
+  for (const url of ['http://example.test/character', 'https://owner:password@example.test/character', 'https://example.test/character?token=secret', 'https://example.test/character#private']) {
+    assert.throws(() => validateStickerAnnotation({ ...annotation, identity: { ...identity, references: [{ url, title: '来源' }] } }))
+  }
+  assert.throws(() => validateStickerAnnotation({ ...annotation, identity: { ...identity, references: [...identity.references, ...identity.references] } }))
+})

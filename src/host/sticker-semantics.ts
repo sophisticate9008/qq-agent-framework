@@ -51,11 +51,26 @@ export interface StickerSemanticFacets {
   readonly scenes: readonly string[]
   readonly visibleText: string
 }
+export interface StickerCharacterIdentity {
+  readonly character: string
+  readonly aliases: readonly string[]
+  /** Describes provenance, never authentication or permission. Model output is tentative. */
+  readonly source: 'model' | 'user' | 'web'
+  readonly evidence?: string
+  readonly references?: readonly { readonly url: string; readonly title: string }[]
+}
+export interface StickerVisualFeatures {
+  readonly colors: readonly string[]
+  readonly styles: readonly string[]
+  readonly entities: readonly string[]
+}
 export interface StickerAnnotation {
   readonly description: string
   readonly tags: readonly string[]
   readonly avoid: string
   readonly facets?: StickerSemanticFacets
+  readonly identity?: StickerCharacterIdentity
+  readonly visual?: StickerVisualFeatures
 }
 
 /** Shared by the independent classifier; annotations are image metadata, never chat replies. */
@@ -63,6 +78,9 @@ export const STICKER_ANNOTATION_GUIDANCE = `按图像事实与可能用途分层
  description：简短描述真正看见的角色、表情、动作、物体及可辨文字表达的含义；不知道角色名字就用外观称呼。
  tags：最多12个简短检索词，覆盖有证据的特征；不凑满、不把所有可爱角色都标开心或亲近。
  facets：{"emotions":[],"actions":[],"intents":[],"scenes":[],"visibleText":""}。
+ identity 可选：{"character":"可辨认的虚构角色或公开作品角色名称","aliases":[],"source":"model","evidence":"简短图像依据"}。只有可靠辨认到具体角色才提供；不知道就不提供identity，不能用蓝发、猫耳、可爱、表情用途代替角色名字，不将聊天成员或私聊称呼当角色名。不确定的相似角色不要编造。
+ 模型识别只记为source:model的候选，不能自称用户确认或网页核验；用户确认与宿主已核验的网页依据由宿主分别记录。不把角色名、别名或本次私聊偏好堆进tags；别名由独立角色表统一保存。
+ visual 可选：{"colors":[],"styles":[],"entities":[]}，分别记录可见颜色、画风和外观元素；每项最多24字，三类最多8、4、8项。角色未知时仍可如实记录蓝色头发、鲸鱼尾巴等外观，不据此断言角色身份。
  emotions 只记图中可辨的情绪，actions 记可见动作，intents 记可能的交流用途，三者不能互相替代；每类最多4项。
  scenes 最多3项，记画面中的环境或主题物体；不写最近聊天地点。visibleText 最多160字，只转录清晰可辨的图中文字，多行用空格连接，看不清或没有文字就留空，不补字。
  用途允许多义，例如玩笑式挑衅与认真愤怒要区分；依据表情、动作和文字共同判断，不能仅凭一句夸张文字强行确定情绪。标签使用常见短语，没有合适固定分类可自由描述，未知字段留空。
@@ -76,6 +94,49 @@ const folded = (value: string): string => value.normalize('NFKC').toLocaleLowerC
 const labels = (value: unknown, maximum: number): value is readonly string[] => Array.isArray(value)
   && value.length <= maximum && value.every(label => text(label, 24))
   && new Set(value.map(label => folded(label as string))).size === value.length
+
+/** Character aliases have their own exact index; visual and emotional synonyms do not change identity. */
+export function normalizeStickerCharacterName(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase().replace(/[\s_]+/g, ' ').trim()
+}
+
+/** Structural validation only. The caller must establish the actual source before storing a claim. */
+export function validateStickerCharacterIdentity(value: unknown): StickerCharacterIdentity {
+  assert(isRecord(value) && Object.keys(value).every(key => ['character', 'aliases', 'source', 'evidence', 'references'].includes(key))
+    && text(value.character, 64) && normalizeStickerCharacterName(value.character).length > 0
+    && !/[\u202a-\u202e\u2066-\u2069]/i.test(value.character)
+    && Array.isArray(value.aliases) && value.aliases.length <= 8
+    && value.aliases.every((alias: unknown) => text(alias, 64) && normalizeStickerCharacterName(alias).length > 0
+      && !/[\u202a-\u202e\u2066-\u2069]/i.test(alias))
+    && new Set(value.aliases.map((alias: unknown) => normalizeStickerCharacterName(String(alias)))).size === value.aliases.length
+    && ['model', 'user', 'web'].includes(String(value.source))
+    && (value.evidence === undefined || text(value.evidence, 160))
+    && (value.references === undefined || Array.isArray(value.references) && value.references.length <= 3),
+  'INVALID_STICKER_ANNOTATION', 'Use a bounded character name, aliases and explicit identification provenance.')
+  const references = value.references?.map((reference: unknown) => {
+    assert(isRecord(reference) && Object.keys(reference).length === 2
+      && text(reference.url, 512) && text(reference.title, 120),
+    'INVALID_STICKER_ANNOTATION', 'Use a bounded source URL and title.')
+    let url: URL
+    try { url = new URL(reference.url) } catch { assert(false, 'INVALID_STICKER_ANNOTATION', 'Use a valid source URL.') }
+    assert(url.protocol === 'https:' && !url.username && !url.password && !url.hash
+      && ![...url.searchParams.keys()].some(key => /token|auth|key|signature|cookie|credential|password|secret|session/i.test(key)),
+    'INVALID_STICKER_ANNOTATION', 'Source references must be HTTPS pages without credentials or secret parameters.')
+    return { url: reference.url, title: reference.title }
+  })
+  assert(!references || new Set(references.map(reference => reference.url)).size === references.length,
+    'INVALID_STICKER_ANNOTATION', 'Source references must not repeat.')
+  assert(value.source !== 'web' || references && references.length > 0,
+    'INVALID_STICKER_ANNOTATION', 'Web identification needs an actual source reference.')
+  return { character: value.character, aliases: value.aliases as string[], source: value.source as StickerCharacterIdentity['source'],
+    ...(value.evidence === undefined ? {} : { evidence: value.evidence }), ...(references === undefined ? {} : { references }) }
+}
+function validateVisualFeatures(value: unknown): StickerVisualFeatures {
+  assert(isRecord(value) && Object.keys(value).length === 3 && Object.keys(value).every(key => ['colors', 'styles', 'entities'].includes(key))
+    && labels(value.colors, 8) && labels(value.styles, 4) && labels(value.entities, 8),
+  'INVALID_STICKER_ANNOTATION', 'Use bounded visible colors, drawing styles and visual entities.')
+  return { colors: value.colors as string[], styles: value.styles as string[], entities: value.entities as string[] }
+}
 function validateFacets(value: unknown): StickerSemanticFacets {
   assert(isRecord(value) && Object.keys(value).length === 5
     && Object.keys(value).every(key => ['emotions', 'actions', 'intents', 'scenes', 'visibleText'].includes(key))
@@ -86,11 +147,13 @@ function validateFacets(value: unknown): StickerSemanticFacets {
     scenes: value.scenes as string[], visibleText: value.visibleText }
 }
 export function validateStickerAnnotation(value: unknown): StickerAnnotation {
-  assert(isRecord(value) && Object.keys(value).every(key => ['description', 'tags', 'avoid', 'facets'].includes(key))
+  assert(isRecord(value) && Object.keys(value).every(key => ['description', 'tags', 'avoid', 'facets', 'identity', 'visual'].includes(key))
     && text(value.description, 240) && labels(value.tags, 12)
     && (value.avoid === undefined || text(value.avoid, 128, true)), 'INVALID_STICKER_ANNOTATION', 'Use a short visual description, up to twelve tags and optional unsuitable contexts.')
   return { description: value.description, tags: value.tags as string[], avoid: value.avoid ?? '',
-    ...(value.facets === undefined ? {} : { facets: validateFacets(value.facets) }) }
+    ...(value.facets === undefined ? {} : { facets: validateFacets(value.facets) }),
+    ...(value.identity === undefined ? {} : { identity: validateStickerCharacterIdentity(value.identity) }),
+    ...(value.visual === undefined ? {} : { visual: validateVisualFeatures(value.visual) }) }
 }
 export function stickerSemanticKey(selfId: string, item: OneBotSticker): string {
   return digest([selfId, item.id, item.md5?.toLowerCase() ?? item.url])
@@ -128,6 +191,7 @@ export function stickerSemanticScore(query: string, name: string, annotation: St
   if (!normalized) return 1
   const tokens = [...new Set(normalized.split(/[\s,，、/;；]+/).filter(Boolean))].slice(0, 16)
   const facets = annotation?.facets
+  const visual = annotation?.visual
   const fields: readonly (readonly [string, number])[] = [
     [name, 1], [annotation?.description ?? '', 1],
     ...(annotation?.tags ?? []).map(tag => [tag, 3] as const),
@@ -136,6 +200,9 @@ export function stickerSemanticScore(query: string, name: string, annotation: St
     ...(facets?.intents ?? []).map(label => [label, 4] as const),
     ...(facets?.scenes ?? []).map(label => [label, 1] as const),
     [facets?.visibleText ?? '', 2],
+    ...(visual?.colors ?? []).map(label => [label, 1] as const),
+    ...(visual?.styles ?? []).map(label => [label, 1] as const),
+    ...(visual?.entities ?? []).map(label => [label, 1] as const),
   ]
   const queryMeanings = meanings(normalized), matchedMeanings = new Map<string, number>()
   let score = 0

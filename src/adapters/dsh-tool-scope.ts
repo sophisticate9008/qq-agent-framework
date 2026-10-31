@@ -11,7 +11,7 @@ export type { ClaimReceipt, ClaimReceiptPage, ClaimReceiptQuery }
 
 export interface DshBridgePluginDescription {
   readonly protocol: typeof BRIDGE_PLUGIN_PROTOCOL
-  readonly pluginVersion: '1.4.1' | '1.5.0' | '1.5.1' | '1.5.2' | '1.5.3' | '1.6.0' | '1.6.1'
+  readonly pluginVersion: '1.4.1' | '1.5.0' | '1.5.1' | '1.5.2' | '1.5.3' | '1.6.0' | '1.6.1' | '1.7.0'
   readonly sdkVersion: '0.2.1-rc.2'
   readonly issuerEpoch: string
   readonly authentication: 'dsh-owner-peer'
@@ -75,7 +75,7 @@ export function createDshBridgePluginPort(invoke: (method: PluginMethod, request
   const port: DshBridgePluginPort = Object.freeze<DshBridgePluginPort>({
     async describe(signal) {
       const value = object(await invoke('bridgePlugin/describe', undefined, signal))
-      requireProof(value.protocol === BRIDGE_PLUGIN_PROTOCOL && (value.pluginVersion === '1.4.1' || value.pluginVersion === '1.5.0' || value.pluginVersion === '1.5.1' || value.pluginVersion === '1.5.2' || value.pluginVersion === '1.5.3' || value.pluginVersion === '1.6.0' || value.pluginVersion === '1.6.1') && value.sdkVersion === '0.2.1-rc.2'
+      requireProof(value.protocol === BRIDGE_PLUGIN_PROTOCOL && (value.pluginVersion === '1.4.1' || value.pluginVersion === '1.5.0' || value.pluginVersion === '1.5.1' || value.pluginVersion === '1.5.2' || value.pluginVersion === '1.5.3' || value.pluginVersion === '1.6.0' || value.pluginVersion === '1.6.1' || value.pluginVersion === '1.7.0') && value.sdkVersion === '0.2.1-rc.2'
         && validIdentifier(value.issuerEpoch) && value.authentication === 'dsh-owner-peer' && value.durableReceipts === false
         && value.claimMeaning === 'inbox-claimed-not-completed' && value.externalToolAuthorizationVerified === false)
       const retention = object(value.retention)

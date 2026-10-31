@@ -1191,7 +1191,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
                 attachImages: active.deployment.modelSettings?.inputModalities?.includes('image') !== false,
                 unread: { ids: unread.messages.filter(item => item.sequence <= through && item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
                   through, partial: historyPartial },
-                quotedMessages, tools: await frameworkTools?.context(event.conversationId, execution.signal),
+                quotedMessages, stickerHints: await stickers?.hints(execution.signal),
+                tools: await frameworkTools?.context(event.conversationId, execution.signal),
                 output: { ...await output.context(execution.signal), forwardAuthorized: !host.policy.describe().paused && host.policy.describe().grants.some(grant =>
                   grant.active && grant.featureId === 'agent-relay' && grant.conversationId === event.conversationId
                   && grant.capabilities.includes('messaging.forward') && (grant.expiresAt === null || grant.expiresAt > Date.now())

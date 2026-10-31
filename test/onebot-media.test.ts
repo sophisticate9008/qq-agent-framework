@@ -63,3 +63,20 @@ test('unsupported file reads and unavailable URLs stay explicit, and cancellatio
   try{assert.deepEqual(await createOneBotMediaReader({actions:stalled,timeoutMs:20}).read({kind:'image',source:{file:'opaque'},signal}),
     {status:'unknown',code:'ONEBOT_MEDIA_TIMEOUT_UNKNOWN'})}finally{clearTimeout(guard)}
 })
+
+test('collection URLs use the full media deadline while refreshable pointers retain a shorter first attempt', async context => {
+  const server = createServer((_request, response) => response.end('image-bytes'))
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  context.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
+  const address = server.address(); assert(address && typeof address === 'object')
+  const origin = `http://127.0.0.1:${address.port}`
+  const actions = createOneBotActionPort({ endpoint: 'http://onebot.invalid' })
+  const original = AbortSignal.timeout.bind(AbortSignal), deadlines: number[] = []
+  context.mock.method(AbortSignal, 'timeout', (milliseconds: number) => { deadlines.push(milliseconds); return original(milliseconds) })
+  const reader = createOneBotMediaReader({ actions, trustedOrigins: [origin], timeoutMs: 15000 })
+  assert.equal((await reader.read({ kind: 'image', source: { url: origin + '/image' }, signal })).status, 'confirmed')
+  assert.deepEqual(deadlines, [15000])
+  deadlines.length = 0
+  assert.equal((await reader.read({ kind: 'image', source: { url: origin + '/image', file: 'refreshable' }, signal })).status, 'confirmed')
+  assert.deepEqual(deadlines, [15000, 5000])
+})

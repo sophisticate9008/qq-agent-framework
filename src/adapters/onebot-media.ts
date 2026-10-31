@@ -110,7 +110,9 @@ export function createOneBotMediaReader(options: { readonly actions: OneBotActio
         // from the protocol client's ordinary-message cache (notably forward nodes).
         if (request.source.url) {
           try {
-            const directSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.min(5000, timeoutMs))])
+            // Reserve refresh time only when a protocol pointer actually permits a second lookup.
+            // Collection and forward URLs without a pointer get the full bounded download deadline.
+            const directSignal = pointer ? AbortSignal.any([signal, AbortSignal.timeout(Math.min(5000, timeoutMs))]) : signal
             const bytes = await download(mediaUrl(request.source.url), directSignal, byteLimit)
             return { status: 'confirmed', ...bytes }
           } catch (error) {

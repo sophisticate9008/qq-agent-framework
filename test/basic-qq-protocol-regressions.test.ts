@@ -209,3 +209,41 @@ test('discovered stickers become scoped readable output assets without leaking s
   const none = asObject(await service.list.execute(request));
   assert.deepEqual(none.items, []); assert.equal(none.empty, true);
 });
+
+test('unclassified sticker candidates can be visually annotated locally, then found by meaning after service recreation', async context => {
+  const store = createSqliteStore({ filename: ':memory:' }); context.after(() => store.close());
+  const setup = sourceFixture(); context.after(() => setup.lifetime.abort());
+  let protocolWrites = 0;
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHd8AAAAASUVORK5CYII=', 'base64');
+  const port = createOneBotStickerPort({ endpoint, fetch: async input => {
+    if (actionOf(input) !== 'fetch_custom_face_detail') { protocolWrites++; throw new Error('Annotations are local'); }
+    return confirmed([{ resId: 'actual-id', emoji_id: '4', md5: 'a'.repeat(32), url: 'https://media.example.test/sticker' }]);
+  } });
+  const registry = createNativeMediaRegistry({ store, accountId: '999', async authorize() {},
+    contentReader: { async read() { return { status: 'confirmed', data: image, mediaType: 'image/png' }; } } });
+  const options = { store, selfId: '999', port, register: registry.register, sources: () => setup.sources.reader, async authorize() {} };
+  const service = createNativeStickerService(options);
+  const request = setup.request('124', { query: '抱抱' });
+  const listed = asObject(await service.list.execute(request));
+  assert.equal(listed.matched, false);
+  assert(Array.isArray(listed.items)); const item = asObject(listed.items[0]!);
+  assert.equal(item.matched, false); assert.equal(item.needsAnnotation, true);
+  const annotate = setup.request('124', { action: 'annotate', stickerKey: item.stickerKey!, assetId: item.assetId!,
+    description: '开心地伸手抱抱', tags: ['亲近', '贴贴'], avoid: '严肃争执' }, 'annotation-message');
+  await assert.rejects(async () => service.manage.execute(annotate), { code: 'STICKER_IMAGE_NOT_READ' });
+  await registry.read.execute({ ...request, input: { assetId: item.assetId! } });
+  assert.equal(asObject(await service.manage.execute(annotate)).cached, true);
+  const found = asObject(await createNativeStickerService(options).list.execute({ ...request, input: { query: 'hug' } }));
+  assert.equal(found.matched, true); assert(Array.isArray(found.items));
+  assert.equal(asObject(found.items[0]!).needsAnnotation, false);
+  assert.equal(protocolWrites, 0);
+  const incoming = await registry.register({ kind: 'image', conversationId: 'group:456', messageId: 'incoming-image',
+    source: { url: 'https://media.example.test/sticker' } }, signal());
+  await registry.read.execute({ ...request, input: { assetId: incoming } });
+  assert.equal(asObject(await service.manage.execute({ ...annotate, input: { action: 'annotate', stickerKey: item.stickerKey!,
+    assetId: incoming, description: '笑着张开手', tags: ['抱抱'] } })).cached, true);
+  const other = await createNativeStickerService(options).list.execute({ ...request, scope: scope('other-message', 'group:457'), input: { query: '贴贴' } });
+  const otherItems = asObject(other).items;
+  assert(Array.isArray(otherItems));
+  assert.notEqual(asObject(otherItems[0]!).assetId, item.assetId);
+});

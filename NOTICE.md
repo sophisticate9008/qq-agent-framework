@@ -39,6 +39,10 @@ SOFTWARE.
 
 ## 本仓库使用的组件与参考资料
 
+### 表情语义检索
+
+表情缓存的“画面描述、情绪、用途、标签”组织参考了 [Capoo Vault](https://github.com/CST-Cat/capoo-vault) 的数据说明，以及 [Small Stickers, Big Meanings](https://arxiv.org/abs/2506.01668) 对表情语义查询的讨论。框架独立实现常用词表、当前账号收藏缓存和会话资源核验，没有复制这些项目的代码、标注数据或图片。核对日期为 2026-10-31。
+
 ### Markdown 图片排版
 
 框架使用 [markdown-it](https://github.com/markdown-it/markdown-it) 解析 Markdown、[Takumi](https://github.com/kane50613/takumi) 完成本机排版和图像渲染、[highlight.js](https://github.com/highlightjs/highlight.js) 提供静态语法高亮、[MathJax](https://github.com/mathjax/MathJax) 处理数学公式、[sharp](https://github.com/lovell/sharp) 完成 PNG 分页。这些依赖保留各自发行包中的许可与声明；此集成不捆绑无头浏览器。

@@ -154,6 +154,8 @@ async function fixture(context: TestContext, options: {
           data: { user_id: options.wrongHttpIdentity ? 998 : options.protocolSelfId ?? 999 } }))
       } else if (url.pathname === '/onebot/get_version_info') {
         response.end(JSON.stringify({ status: 'ok', retcode: 0, data: { app_name: 'SyntheticOneBot', app_version: '1.0.0' } }))
+      } else if (url.pathname === '/onebot/fetch_custom_face_detail') {
+        response.end(JSON.stringify({ status: 'ok', retcode: 0, data: [] }))
       } else if (options.mediaBytes && ['/onebot/get_image', '/onebot/get_record', '/onebot/get_private_file_url'].includes(url.pathname)) {
         const input = JSON.parse(body) as Record<string, unknown>
         if (url.pathname === '/onebot/get_private_file_url') { assert.equal(String(input.user_id), '123'); assert.equal(input.file_id, 'file-token') }

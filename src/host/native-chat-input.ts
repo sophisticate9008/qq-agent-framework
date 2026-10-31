@@ -1,6 +1,6 @@
 import { normalizeContent } from '../core/content.ts';
 import { assert } from '../core/values.ts';
-import type { FrameworkEvent, MessageContent } from '../core/types.ts';
+import type { FrameworkEvent, MessageContent, JsonValue } from '../core/types.ts';
 import type { HistoryMessage } from './history.ts';
 import type { InboundMessage } from './types.ts';
 import type { NativeMemoryContext } from '../contracts/native-memory.ts';
@@ -85,6 +85,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   readonly quotedMessages?: readonly HistoryMessage[];
   readonly unread?: { readonly ids: readonly string[]; readonly readThrough: number; readonly through: number; readonly partial: boolean };
   readonly memory?: NativeMemoryContext;
+  readonly stickerHints?: JsonValue;
   readonly tools?: { readonly available: boolean; readonly tools: readonly { readonly name: string; readonly description: string }[]; readonly reason: string | null };
   readonly output?: { readonly protocol: 'qbf.output/1'; readonly forwardAuthorized?: boolean; readonly bubbles: boolean; readonly longTextAsForward: boolean; readonly longTextThreshold: number; readonly maxDeliveries: number };
 }): readonly MessageContent[] {
@@ -182,7 +183,8 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
       count: options.unread.ids.length, included: recent.filter(item => item.unread).length
         + (options.unread.ids.includes(event.id) && wake?.mode !== 'read-unread' ? 1 : 0),
       partial: options.unread.partial || historyTruncated } : null,
-    recent, quoted, memory: options.memory ?? null, tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ? { ...options.output, sendMode: 'explicit-tool', sendTool: 'qbf_reply' } : null, historyTruncated, currentTruncated });
+    recent, quoted, memory: options.memory ?? null, stickerHints: options.stickerHints ?? null,
+    tools: options.tools ? { available: options.tools.available, tools: options.tools.tools.map(tool => ({ name: tool.name })), reason: options.tools.reason } : { available: false, tools: [] }, output: options.output ? { ...options.output, sendMode: 'explicit-tool', sendTool: 'qbf_reply' } : null, historyTruncated, currentTruncated });
 
   function build(length: number): readonly MessageContent[] {
     const parts: MessageContent[] = [];

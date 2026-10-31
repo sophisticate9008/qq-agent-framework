@@ -15,6 +15,19 @@ const comfort = candidate('comfort', { description: '温和地伸手摸摸', tag
 const tease = candidate('tease', { description: '坏笑着指向前方，配字「笨蛋」', tags: ['调侃'], avoid: '严肃道歉、安慰时' }, { intents: ['调侃'], visibleText: '笨蛋' })
 const food = candidate('food', { description: '角色举着饭碗吃饭', tags: ['吃饭', '饭碗'] }, { actions: ['吃饭'], scenes: ['饭桌'] })
 
+test('avoid directives do not turn unrelated output instructions into refusal context', () => {
+  const joke = candidate('joke', { tags: ['笨蛋', '调侃'],
+    avoid: '不适合在严肃争执、正式场合或关系不熟时使用；文字带骂人含义，可能显得冒犯；不要用来进行人身攻击。' }, { intents: ['开玩笑', '调侃'], visibleText: '笨蛋' })
+  assert.equal(rank('开玩笑调侃对方是笨蛋', [joke], ['收藏后不要发送确认文字。'])[0]?.id, 'joke')
+  assert.deepEqual(rank('开玩笑调侃对方是笨蛋', [joke], ['正在严肃争执。']), [])
+  assert.deepEqual(rank('进行人身攻击', [joke]), [])
+  for (const directive of ['不要在', '不要用于', '不要用来', '避免用作', '勿拿来']) {
+    const guarded = { ...joke, annotation: { ...joke.annotation, avoid: `${directive}严肃争执中使用。` } }
+    assert.equal(rank('开玩笑调侃对方是笨蛋', [guarded], ['不要发送确认文字。'])[0]?.id, 'joke')
+    assert.deepEqual(rank('开玩笑调侃对方是笨蛋', [guarded], ['正在严肃争执。']), [])
+  }
+})
+
 test('local selection matches explicit intent, actions, OCR and bilingual synonyms', () => {
   assert.equal(rank('开心庆祝一下', [food, tease, celebrate])[0]?.id, 'celebrate')
   assert.equal(rank('温柔安慰，陪伴', [celebrate, comfort, food])[0]?.id, 'comfort')

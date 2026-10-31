@@ -58,6 +58,10 @@ const seriousWords = ['认真', '严肃', '安慰', '难过', '委屈', '道歉'
   '伤害', 'comfort', 'grief', 'sorry', 'serious', 'sad']
 const hostileWords = ['侮辱', '辱骂', '骂人', '威胁', '恐吓', '嘲讽', '嘲笑', '挑衅', '调侃', '恶意', '贬低', '笨蛋', '傻逼', '傻瓜', '白痴',
   '去死', '弄死', '电死', '打死', '滚开', '闭嘴', 'insult', 'threat', 'mock', 'taunt', 'tease', 'banter', 'idiot', 'stupid', 'kill']
+// Annotation prose is not itself an unsuitable situation. In particular,
+// “do not send text” must not match an explanation that “the text can offend”.
+const avoidScaffolding = new Set(['文字', '文本', '字样', '画面', '图像', '使用', '用于', '用来', '用作', '场合', '情况', '语境',
+  '可能', '容易', '导致', '造成', '显得', '误解', '含义', '意味', '带有', '进行', 'text', 'caption', 'context', 'using', 'might', 'could'])
 function negatedFeatures(intent: string): ReadonlySet<string> {
   const result = new Set<string>(), source = normalize(intent)
   for (const part of segmenter.segment(source)) {
@@ -73,9 +77,12 @@ function restrictions(annotation: StickerAnnotation, intent: string, context: st
   const image = [annotation.description, ...annotation.tags, ...(annotation.facets?.emotions ?? []), ...(annotation.facets?.actions ?? []),
     ...(annotation.facets?.intents ?? []), annotation.facets?.visibleText ?? ''].join(' / ')
   if (serious && has(image, hostileWords)) return true
-  const avoid = normalize(annotation.avoid).replace(/(?:不适合|不适用|避免用于|不要用于|不宜|勿用于|慎用)(?:在)?/g, '')
+  // Directive wording describes how to read the restriction, not the image's
+  // refusal intent. Keep the actual unsuitable situations after these prefixes.
+  const avoid = normalize(annotation.avoid).replace(/(?:不适合|不适用|(?:避免|不要|勿)(?:用于|用来|用作|拿来)?|不宜|慎用)(?:在)?/g, '')
   if (!avoid) return false
-  const avoided = terms(avoid), situation = terms(`${intent} / ${context}`)
+  const avoided = new Map([...terms(avoid)].filter(([key]) => !key.startsWith('word:') || !avoidScaffolding.has(key.slice(5))))
+  const situation = terms(`${intent} / ${context}`)
   // A shared intent/emotion concept or two lexical words is enough to reject a stated unsuitable context.
   const overlap = [...avoided.keys()].filter(key => situation.has(key))
   if (overlap.some(key => key.startsWith('concept:')) || overlap.filter(key => key.startsWith('word:')).length >= 2) return true

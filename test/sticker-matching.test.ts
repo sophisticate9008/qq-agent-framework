@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { rankStickerCandidates, type StickerMatchCandidate } from '../src/host/sticker-matching.ts'
+import { createStickerMatcher, rankStickerCandidates, type StickerMatchCandidate } from '../src/host/sticker-matching.ts'
 import type { StickerAnnotation, StickerSemanticFacets } from '../src/host/sticker-semantics.ts'
 
 function candidate(id: string, annotation: Partial<StickerAnnotation> = {}, facets?: Partial<StickerSemanticFacets>): StickerMatchCandidate {
@@ -81,4 +81,54 @@ test('recent repetition, duplicate entries, ties and candidate ordering remain d
   assert.equal(rank('开心', [first, first]).length, 1)
   assert.deepEqual(rank('开心', [second, first]), rank('开心', [first, second]))
   assert(rank('开心', [first]).every(item => Number.isFinite(item.score) && item.score > 0))
+})
+
+function named(id: string, character: string, aliases: readonly string[], tags: readonly string[]): StickerMatchCandidate {
+  return candidate(id, { tags, identity: { character, aliases, source: 'user' } })
+}
+test('character phrase postings restrict action matches and never infer identity from appearance', () => {
+  const whale = named('whale', '星河鲸', ['胖团鱼'], ['吃饭'])
+  const cat = named('cat', '纸片猫', [], ['吃饭'])
+  const anonymous = candidate('anonymous', { tags: ['吃饭'], visual: { colors: ['蓝色'], styles: ['卡通'], entities: ['蓝色头发'] } })
+  assert.deepEqual(rank('胖团鱼吃饭', [cat, anonymous, whale]).map(item => item.id), ['whale'])
+  assert.deepEqual(rank('胖团鱼', [whale, cat]).map(item => item.id), ['whale'])
+  assert.deepEqual(rank('胖团鱼抱抱', [whale, cat]), [])
+  assert.deepEqual(rank('蓝色', [anonymous]).map(item => item.id), ['anonymous'])
+  assert.deepEqual(rankStickerCandidates({ intent: '吃饭', character: '未知角色', candidates: [anonymous, cat], context: [], recentlyUsed: [] }), [])
+})
+test('account-owned index removes stale term and character postings after metadata edits and deletion', () => {
+  const matcher = createStickerMatcher('test-account-a')
+  const original = named('same-image', '星河鲸', ['胖团鱼'], ['吃饭'])
+  const query = { intent: '胖团鱼吃饭', candidates: [original], context: [], recentlyUsed: [] }
+  assert.equal(matcher.rank(query)[0]?.id, 'same-image')
+  const edited = named('same-image', '纸片猫', ['小纸团'], ['抱抱'])
+  assert.deepEqual(matcher.rank({ ...query, candidates: [edited] }), [])
+  assert.equal(matcher.rank({ ...query, intent: '小纸团抱抱', candidates: [edited] })[0]?.id, 'same-image')
+  assert.deepEqual(matcher.rank({ ...query, intent: '小纸团抱抱', candidates: [] }), [])
+  matcher.clear()
+  assert.deepEqual(matcher.rank({ ...query, candidates: [] }), [])
+})
+test('account matcher instances never share image IDs, aliases or corpus postings', () => {
+  const first = createStickerMatcher('test-account-a'), second = createStickerMatcher('test-account-b')
+  const options = { intent: '胖团鱼吃饭', candidates: [named('same-id', '星河鲸', ['胖团鱼'], ['吃饭'])], context: [], recentlyUsed: [] }
+  assert.equal(first.rank(options)[0]?.id, 'same-id')
+  assert.deepEqual(second.rank({ ...options, candidates: [named('same-id', '纸片猫', [], ['抱抱'])] }), [])
+  assert.equal(first.rank(options)[0]?.id, 'same-id')
+})
+test('external character alias changes apply without retagging and ambiguous aliases do not guess', () => {
+  const matcher = createStickerMatcher('test-account')
+  const whale = named('whale', '星河鲸', [], ['吃饭'])
+  const cat = named('cat', '纸片猫', [], ['吃饭'])
+  const base = { intent: '胖团鱼吃饭', candidates: [whale, cat], context: [], recentlyUsed: [] }
+  assert.deepEqual(matcher.rank({ ...base, characterAliases: [{ character: '星河鲸', aliases: ['胖团鱼'] }] }).map(item => item.id), ['whale'])
+  assert.deepEqual(matcher.rank({ ...base, characterAliases: [{ character: '纸片猫', aliases: ['胖团鱼'] }] }).map(item => item.id), ['cat'])
+  assert.deepEqual(matcher.rank({ ...base, characterAliases: [{ character: '星河鲸', aliases: ['胖团鱼'] }, { character: '纸片猫', aliases: ['胖团鱼'] }] }), [])
+  assert.deepEqual(matcher.rank({ ...base, intent: '未入库角色吃饭', characterAliases: [{ character: '未入库角色', aliases: [] }] }), [])
+})
+test('explicit negative identity excludes only that character without becoming a rejection mood', () => {
+  const whale = named('whale', '星河鲸', ['胖团鱼'], ['吃饭'])
+  const cat = named('cat', '纸片猫', [], ['吃饭'])
+  assert.deepEqual(rank('不要胖团鱼，要纸片猫吃饭', [whale, cat]).map(item => item.id), ['cat'])
+  assert.deepEqual(rank('不发胖团鱼，要纸片猫吃饭', [whale, cat]).map(item => item.id), ['cat'])
+  assert.deepEqual(rank('吃饭', [whale, cat]).map(item => item.id).sort(), ['cat', 'whale'])
 })

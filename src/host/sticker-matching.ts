@@ -1,4 +1,4 @@
-import { stickerContainsMeaning, stickerSemanticConcepts, type StickerAnnotation } from './sticker-semantics.ts'
+import { normalizeStickerCharacterName, stickerContainsMeaning, stickerSemanticConcepts, type StickerAnnotation } from './sticker-semantics.ts'
 
 export interface StickerMatchCandidate {
   readonly id: string
@@ -10,9 +10,22 @@ export interface StickerMatchOptions {
   readonly context: readonly string[]
   readonly candidates: readonly StickerMatchCandidate[]
   readonly recentlyUsed: readonly string[]
+  readonly character?: string
+  readonly characterAliases?: readonly { readonly character: string; readonly aliases: readonly string[] }[]
 }
 interface IndexedField { readonly text: string; readonly weight: number; readonly terms: ReadonlyMap<string, number> }
-interface IndexedCandidate { readonly candidate: StickerMatchCandidate; readonly fields: readonly IndexedField[] }
+interface IndexedCandidate {
+  readonly fingerprint: string
+  readonly candidate: StickerMatchCandidate
+  readonly fields: readonly IndexedField[]
+  readonly available: ReadonlySet<string>
+  readonly character: string | null
+}
+interface CharacterNode { readonly children: Map<string, CharacterNode>; readonly characters: Set<string> }
+const characterNode = (): CharacterNode => ({ children: new Map(), characters: new Set() })
+const FIELD_COUNT = 11
+const MAX_DOCUMENTS = 5000
+
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
 const normalize = (value: string): string => value.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim()
 // Request scaffolding must not make two unrelated stickers look relevant.
@@ -29,22 +42,13 @@ function terms(value: string): ReadonlyMap<string, number> {
   for (const concept of stickerSemanticConcepts(source)) result.set(`concept:${concept}`, 1)
   return result
 }
-// Only reusable image metadata is cached; query and conversation text stay out of this cache.
-const metadataTerms = new Map<string, ReadonlyMap<string, number>>()
-function indexedTerms(value: string): ReadonlyMap<string, number> {
-  const existing = metadataTerms.get(value)
-  if (existing) return existing
-  const indexed = terms(value)
-  if (metadataTerms.size >= 2048) metadataTerms.delete(metadataTerms.keys().next().value!)
-  metadataTerms.set(value, indexed)
-  return indexed
-}
-function fields(candidate: StickerMatchCandidate): readonly IndexedField[] {
-  const annotation = candidate.annotation, facets = annotation.facets
+function fields(candidate: StickerMatchCandidate, indexedTerms: (value: string) => ReadonlyMap<string, number>): readonly IndexedField[] {
+  const annotation = candidate.annotation, facets = annotation.facets, visual = annotation.visual
   const values: readonly (readonly [string, number])[] = [
     [candidate.name ?? '', 0.6], [annotation.description, 1], [annotation.tags.join(' / '), 2.8],
     [(facets?.emotions ?? []).join(' / '), 3.2], [(facets?.actions ?? []).join(' / '), 3.4],
     [(facets?.intents ?? []).join(' / '), 4.8], [(facets?.scenes ?? []).join(' / '), 1.4], [facets?.visibleText ?? '', 2.6],
+    [(visual?.colors ?? []).join(' / '), 2.8], [(visual?.styles ?? []).join(' / '), 2.8], [(visual?.entities ?? []).join(' / '), 2.8],
   ]
   return values.map(([value, weight]) => ({ text: value, weight, terms: indexedTerms(value) }))
 }
@@ -80,62 +84,192 @@ function restrictions(annotation: StickerAnnotation, intent: string, context: st
 }
 
 /**
- * A small-library BM25F-style ranker with conservative admission rules.
- * This is synchronous metadata selection: no image download, model request, timer or chat notification.
- * Context may veto or slightly reorder a match, but cannot make an unrelated candidate eligible.
+ * An account-owned, bounded inverted index. Metadata changes update postings and corpus statistics;
+ * a request scores only IDs recalled by query postings, restricted by exact character postings.
+ * The index never stores query/context text and performs no I/O or model calls.
  */
-export function rankStickerCandidates(options: StickerMatchOptions): readonly { readonly id: string; readonly score: number }[] {
-  const intent = normalize(options.intent).slice(0, 480)
-  if (!intent) return []
-  const query = new Map(terms(intent)), excluded = negatedFeatures(intent)
-  for (const key of excluded) query.delete(key)
-  if (!query.size) return []
-  const context = options.context.slice(-5).map(value => normalize(value).slice(0, 500)).join(' / ')
-  const serious = has(`${intent} / ${context}`, seriousWords)
-  const contextTerms = terms(context), recent = new Set(options.recentlyUsed), ids = new Set<string>()
-  const indexed: IndexedCandidate[] = options.candidates.slice(0, 5000).filter(candidate => {
-    if (!candidate.id || ids.has(candidate.id)) return false
-    ids.add(candidate.id); return true
-  }).map(candidate => ({ candidate, fields: fields(candidate) }))
-  if (!indexed.length) return []
-  const averages = Array.from({ length: 8 }, (_, index) => Math.max(1,
-    indexed.reduce((total, item) => total + item.fields[index]!.terms.size, 0) / indexed.length))
-  const frequencies = new Map<string, number>()
-  for (const item of indexed) {
-    const present = new Set(item.fields.flatMap(field => [...field.terms.keys()]))
-    for (const key of query.keys()) if (present.has(key)) frequencies.set(key, (frequencies.get(key) ?? 0) + 1)
+export function createStickerMatcher(accountId: string) {
+  if (!accountId.trim()) throw new Error('STICKER_MATCHER_ACCOUNT_REQUIRED')
+  const documents = new Map<string, IndexedCandidate>(), postings = new Map<string, Set<string>>()
+  const characterPostings = new Map<string, Set<string>>(), metadataTerms = new Map<string, ReadonlyMap<string, number>>()
+  const lengths = Array<number>(FIELD_COUNT).fill(0)
+  let aliasesRoot = characterNode(), aliasesFingerprint = '', aliasesDirty = true
+  let registeredAliases: NonNullable<StickerMatchOptions['characterAliases']> = []
+  function indexedTerms(value: string): ReadonlyMap<string, number> {
+    const existing = metadataTerms.get(value)
+    if (existing) return existing
+    const indexed = terms(value)
+    if (metadataTerms.size >= 2048) metadataTerms.delete(metadataTerms.keys().next().value!)
+    metadataTerms.set(value, indexed)
+    return indexed
   }
-  const requestedConcepts = [...query.keys()].filter(key => key.startsWith('concept:'))
-  const results: { id: string; score: number }[] = []
-  for (const { candidate, fields: values } of indexed) {
-    if (recent.has(candidate.id) || restrictions(candidate.annotation, intent, context, serious)) continue
-    const available = new Set(values.flatMap(field => [...field.terms.keys()]))
-    if ([...excluded].some(key => available.has(key))) continue
-    if (requestedConcepts.length && !requestedConcepts.some(key => available.has(key))) continue
-    let score = 0, strongest = 0, wordMatches = 0, conceptMatch = false
-    for (const key of query.keys()) {
-      let frequency = 0, strongestField = 0
-      values.forEach((field, index) => {
-        const count = field.terms.get(key) ?? 0
-        if (!count) return
-        frequency += field.weight * count / (0.25 + 0.75 * field.terms.size / averages[index]!)
-        strongestField = Math.max(strongestField, field.weight)
-      })
-      if (!frequency) continue
-      if (key.startsWith('concept:')) conceptMatch = true
-      else wordMatches += 1
-      strongest = Math.max(strongest, strongestField)
-      const count = frequencies.get(key) ?? 0
-      // A floor stabilises the one- or two-image library; a cap prevents rare typos dominating small collections.
-      const idf = Math.min(2, Math.max(0.75, Math.log(1 + (indexed.length - count + 0.5) / (count + 0.5))))
-      score += idf * frequency * 2.2 / (frequency + 1.2) * (key.startsWith('concept:') ? 1.6 : 1)
+  function remove(id: string) {
+    const previous = documents.get(id)
+    if (!previous) return
+    for (const term of previous.available) {
+      const ids = postings.get(term); ids?.delete(id)
+      if (!ids?.size) postings.delete(term)
     }
-    // A lone incidental description/name word is insufficient, regardless of its corpus rarity.
-    if (strongest < 2.4 && (wordMatches < 2 || !conceptMatch)) continue
-    if (score < 1.1) continue
-    const contextHits = [...contextTerms.keys()].filter(key => available.has(key)).length
-    score += Math.min(0.3, contextHits * 0.05)
-    results.push({ id: candidate.id, score: Math.round(score * 1000) / 1000 })
+    if (previous.character) {
+      const ids = characterPostings.get(previous.character); ids?.delete(id)
+      if (!ids?.size) characterPostings.delete(previous.character)
+    }
+    previous.fields.forEach((field, index) => { lengths[index] = lengths[index]! - field.terms.size })
+    documents.delete(id); aliasesDirty = true
   }
-  return results.sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+  function update(candidates: readonly StickerMatchCandidate[], aliases: NonNullable<StickerMatchOptions['characterAliases']> = registeredAliases) {
+    const seen = new Set<string>()
+    for (const candidate of candidates.slice(0, MAX_DOCUMENTS)) {
+      if (!candidate.id || seen.has(candidate.id)) continue
+      seen.add(candidate.id)
+      // Image metadata only: no account credentials, chat context or caller state enters this fingerprint.
+      const annotation = candidate.annotation
+      const fingerprint = JSON.stringify([candidate.name, annotation.description, annotation.tags, annotation.avoid,
+        annotation.facets, annotation.visual, annotation.identity ? [annotation.identity.character, annotation.identity.aliases] : null])
+      if (documents.get(candidate.id)?.fingerprint === fingerprint) continue
+      remove(candidate.id)
+      const indexed = fields(candidate, indexedTerms), available = new Set(indexed.flatMap(field => [...field.terms.keys()]))
+      const character = candidate.annotation.identity?.character ? normalizeStickerCharacterName(candidate.annotation.identity.character) : null
+      documents.set(candidate.id, { candidate, fingerprint, fields: indexed, available, character })
+      for (const term of available) {
+        let ids = postings.get(term)
+        if (!ids) { ids = new Set(); postings.set(term, ids) }
+        ids.add(candidate.id)
+      }
+      if (character) {
+        let ids = characterPostings.get(character)
+        if (!ids) { ids = new Set(); characterPostings.set(character, ids) }
+        ids.add(candidate.id)
+      }
+      indexed.forEach((field, index) => { lengths[index] = lengths[index]! + field.terms.size })
+      aliasesDirty = true
+    }
+    for (const id of documents.keys()) if (!seen.has(id)) remove(id)
+    const boundedAliases = aliases.slice(0, MAX_DOCUMENTS)
+    registeredAliases = boundedAliases
+    const fingerprint = JSON.stringify(boundedAliases.map(({ character, aliases }) => [character, aliases.slice(0, 8)]))
+    if (fingerprint !== aliasesFingerprint) { aliasesFingerprint = fingerprint; aliasesDirty = true }
+    if (!aliasesDirty) return
+    aliasesRoot = characterNode()
+    function add(character: string, alias: string) {
+      const normalized = normalizeStickerCharacterName(alias)
+      if (normalized.length < 2 || normalized.length > 64 || stopWords.has(normalized)) return
+      let node = aliasesRoot
+      for (const char of normalized.split('')) {
+        let next = node.children.get(char)
+        if (!next) { next = characterNode(); node.children.set(char, next) }
+        node = next
+      }
+      node.characters.add(character)
+    }
+    for (const { candidate, character } of documents.values()) {
+      if (!character) continue
+      add(character, character)
+      for (const alias of candidate.annotation.identity?.aliases ?? []) add(character, alias)
+    }
+    for (const record of boundedAliases) {
+      const character = normalizeStickerCharacterName(record.character)
+      if (!character) continue
+      add(character, character)
+      for (const alias of record.aliases.slice(0, 8)) add(character, alias)
+    }
+    aliasesDirty = false
+  }
+  function characters(intent: string, explicit: string | undefined) {
+    const positive = new Set<string>(), negative = new Set<string>(), ranges: { start: number; end: number }[] = []
+    let ambiguous = false
+    for (let start = 0; start < intent.length; start += 1) {
+      let node = aliasesRoot, longest: { end: number; characters: ReadonlySet<string> } | null = null
+      for (let end = start; end < Math.min(intent.length, start + 64); end += 1) {
+        const next = node.children.get(intent[end]!)
+        if (!next) break
+        node = next
+        if (node.characters.size) longest = { end: end + 1, characters: node.characters }
+      }
+      if (!longest) continue
+      const alias = intent.slice(start, longest.end), before = intent.slice(0, start), after = intent.slice(longest.end)
+      if (/^[a-z ]+$/.test(alias) && (/[a-z]$/.test(before) || /^[a-z]/.test(after))) continue
+      const negation = before.match(/(?:(?:不要|别|不用|不想要|不需要)(?:用|发)?|不(?:是|要|用|发)?|没|非|not\s+|without\s+)$/i)
+      if (!negation && longest.characters.size > 1) ambiguous = true
+      for (const character of longest.characters) (negation ? negative : positive).add(character)
+      ranges.push({ start: negation ? start - negation[0].length : start, end: longest.end }); start = longest.end - 1
+    }
+    if (explicit?.trim()) {
+      const requested = normalizeStickerCharacterName(explicit)
+      let node: CharacterNode | undefined = aliasesRoot
+      for (const char of requested.split('')) node = node?.children.get(char)
+      positive.clear()
+      if (node?.characters.size === 1) positive.add([...node.characters][0]!)
+      else if (node?.characters.size) ambiguous = true
+      else positive.add(requested)
+    }
+    let query = intent
+    for (const range of ranges.reverse()) query = query.slice(0, range.start) + ' '.repeat(range.end - range.start) + query.slice(range.end)
+    return { positive, negative, query, ambiguous }
+  }
+  function rank(options: StickerMatchOptions): readonly { readonly id: string; readonly score: number }[] {
+    const intent = normalizeStickerCharacterName(options.intent).slice(0, 480)
+    if (!intent) return []
+    update(options.candidates, options.characterAliases)
+    const requested = characters(intent, options.character)
+    if (requested.ambiguous) return []
+    const query = new Map(terms(requested.query)), excluded = negatedFeatures(requested.query)
+    for (const key of excluded) query.delete(key)
+    if (!query.size && !requested.positive.size) return []
+    const context = options.context.slice(-5).map(value => normalize(value).slice(0, 500)).join(' / ')
+    const serious = has(`${intent} / ${context}`, seriousWords), contextTerms = terms(context), recent = new Set(options.recentlyUsed)
+    const recalled = new Set<string>()
+    if (requested.positive.size) {
+      for (const character of requested.positive) for (const id of characterPostings.get(character) ?? []) recalled.add(id)
+      // Identity restricts the recall set; a matching action never broadens it to other characters.
+      if (query.size) for (const id of recalled) {
+        if (![...query.keys()].some(key => postings.get(key)?.has(id))) recalled.delete(id)
+      }
+    } else {
+      for (const key of query.keys()) for (const id of postings.get(key) ?? []) recalled.add(id)
+    }
+    for (const character of requested.negative) for (const id of characterPostings.get(character) ?? []) recalled.delete(id)
+    const averages = lengths.map(length => Math.max(1, length / Math.max(1, documents.size)))
+    const requestedConcepts = [...query.keys()].filter(key => key.startsWith('concept:'))
+    const results: { id: string; score: number }[] = []
+    for (const id of recalled) {
+      const indexed = documents.get(id)!
+      const { candidate, fields: values, available } = indexed
+      if (recent.has(id) || restrictions(candidate.annotation, intent, context, serious)) continue
+      if ([...excluded].some(key => available.has(key))) continue
+      if (requestedConcepts.length && !requestedConcepts.some(key => available.has(key))) continue
+      let score = 0, strongest = 0, wordMatches = 0, conceptMatch = false
+      for (const key of query.keys()) {
+        let frequency = 0, strongestField = 0
+        values.forEach((field, index) => {
+          const count = field.terms.get(key) ?? 0
+          if (!count) return
+          frequency += field.weight * count / (0.25 + 0.75 * field.terms.size / averages[index]!)
+          strongestField = Math.max(strongestField, field.weight)
+        })
+        if (!frequency) continue
+        if (key.startsWith('concept:')) conceptMatch = true
+        else wordMatches += 1
+        strongest = Math.max(strongest, strongestField)
+        const count = postings.get(key)?.size ?? 0
+        const idf = Math.min(2, Math.max(0.75, Math.log(1 + (documents.size - count + 0.5) / (count + 0.5))))
+        score += idf * frequency * 2.2 / (frequency + 1.2) * (key.startsWith('concept:') ? 1.6 : 1)
+      }
+      if (query.size && (strongest < 2.4 && (wordMatches < 2 || !conceptMatch) || score < 1.1)) continue
+      if (requested.positive.size) score += 3
+      const contextHits = [...contextTerms.keys()].filter(key => available.has(key)).length
+      score += Math.min(0.3, contextHits * 0.05)
+      results.push({ id, score: Math.round(score * 1000) / 1000 })
+    }
+    return results.sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+  }
+  return Object.freeze({ rank, update, clear() {
+    documents.clear(); postings.clear(); characterPostings.clear(); metadataTerms.clear(); lengths.fill(0)
+    aliasesRoot = characterNode(); aliasesFingerprint = ''; aliasesDirty = true; registeredAliases = []
+  } })
+}
+
+/** Stateless compatibility entry point. Long-lived callers should own one matcher per account. */
+export function rankStickerCandidates(options: StickerMatchOptions): readonly { readonly id: string; readonly score: number }[] {
+  return createStickerMatcher('isolated-call').rank(options)
 }

@@ -82,6 +82,19 @@ test('one percent has an exact boundary, retained duplicates never redraw, and a
   assert.equal(f.inbox.list()[0]!.entries.at(-1)!.trigger, 'continuation')
 })
 
+test('half percent draws at 0.005 and preserves the normal wake lifecycle', async context => {
+  const f = await fixture(context)
+  f.probability(0.5)
+  f.sample(0.005)
+  await f.message(30)
+  assert.equal(f.inbox.summary().pending, 0)
+  f.sample(0.004999)
+  await f.message(31)
+  assert.equal(f.draws(), 2)
+  assert.equal(f.inbox.list()[0]!.entries[0]!.trigger, 'probability')
+  assert.equal(f.inbound.observationActive('group:456', 90000), true)
+})
+
 test('a pending admission prevents a second probability wake even when continuation is disabled', async context => {
   const f = await fixture(context, 0)
   const gate = f.holdAdmission()

@@ -41,7 +41,7 @@ export function validateChatInputConfiguration(input: unknown): ChatInputConfigu
     || typeof input.wakeOnReply !== 'boolean' || typeof input.continuationMs !== 'number'
     || !Number.isSafeInteger(input.continuationMs) || input.continuationMs < 0 || input.continuationMs > 300_000
     || input.replyExtensionMs !== undefined && (!Number.isSafeInteger(input.replyExtensionMs) || Number(input.replyExtensionMs) < 0 || Number(input.replyExtensionMs) > 60000)
-    || input.groupWakeProbabilityPercent !== undefined && (!Number.isSafeInteger(input.groupWakeProbabilityPercent)
+    || input.groupWakeProbabilityPercent !== undefined && (!Number.isFinite(input.groupWakeProbabilityPercent)
       || Number(input.groupWakeProbabilityPercent) < 0 || Number(input.groupWakeProbabilityPercent) > 100)
     || !Array.isArray(input.nicknames) || input.nicknames.length > 16
     || !input.nicknames.every(name => typeof name === 'string' && name.trim() === name && name.length > 0

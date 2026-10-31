@@ -3,6 +3,7 @@ import { validateChatPersona, type ChatPersona } from '../../src/contracts/chat-
 import { DEFAULT_PERSONA_WAKE, validatePersonaWake } from '../../src/contracts/persona-wake.ts'
 import { asRecord, errorMessage } from '../lib/api.ts'
 import { parsePlanCatalog } from '../lib/chat-plans.ts'
+import { parseGroupWakeProbabilityPercent } from '../lib/chat-input-ui.ts'
 import { useReadResource } from '../lib/use-read-resource.ts'
 import { writeResource } from '../lib/resource-reader.ts'
 import type { PageProps } from '../lib/types.ts'
@@ -35,17 +36,24 @@ export function ConversationWakeSettings({ api, connected, setDirty }: Pick<Page
     if (!draft || !catalog.snapshot || !persona || draft.id !== persona.id || draft.revision !== catalog.snapshot.revision) {
       setNotice('当前人设或配置已变化，请重新读取后编辑。'); return
     }
+    if (![draft.base, draft.extra].every(value => /^\d+(?:\.\d{1,3})?$/.test(value))) {
+      setNotice('时长需要是非负数字，最多三位小数。'); return
+    }
+    const probability = parseGroupWakeProbabilityPercent(draft.probability)
+    if (probability === null) { setNotice('群聊唤醒概率需要在 0–100% 之间，支持 0.5 等小数，0 表示关闭。'); return }
+    let next: ReturnType<typeof validatePersonaWake>
+    try { next = validatePersonaWake({ ...wake, continuationMs: Math.round(Number(draft.base) * 1000),
+      replyExtensionMs: Math.round(Number(draft.extra) * 1000), groupWakeProbabilityPercent: probability }) }
+    catch { setNotice('基础续聊需要在 0–300 秒之间，发言后追加需要在 0–60 秒之间。'); return }
     try {
-      if (![draft.base, draft.extra].every(value => /^\d+(?:\.\d{1,3})?$/.test(value))) throw new Error('时长需要是非负数字，最多三位小数。')
-      if (!/^\d+$/.test(draft.probability) || Number(draft.probability) > 100) throw new Error('群聊唤醒概率需要是 0–100 的整数，0 表示关闭。')
-      const next = validatePersonaWake({ ...wake, continuationMs: Math.round(Number(draft.base) * 1000), replyExtensionMs: Math.round(Number(draft.extra) * 1000),
-        groupWakeProbabilityPercent: Number(draft.probability) })
       setBusy(true); setUncertain(true)
       const result = parse(await writeResource(api, '/api/chat/personas', { revision: draft.revision,
         personas: catalog.snapshot.personas.map(item => item.id === draft.id ? { ...item, wake: next } : item) }))
       if (!result || !result.personas.some(item => item.id === draft.id && item.wake?.continuationMs === next.continuationMs
         && item.wake?.replyExtensionMs === next.replyExtensionMs
-        && item.wake?.groupWakeProbabilityPercent === next.groupWakeProbabilityPercent)) throw new Error('保存结果尚未确认，请重新读取核对。')
+        && item.wake?.groupWakeProbabilityPercent === next.groupWakeProbabilityPercent)) {
+        setNotice('保存结果尚未确认，请重新读取核对。'); return
+      }
       setUncertain(false); setDraft(null); setNotice('已保存，后续输入使用新设置。'); catalog.refresh()
     } catch (error) { setNotice(errorMessage(error)) } finally { setBusy(false) }
   }
@@ -60,8 +68,8 @@ export function ConversationWakeSettings({ api, connected, setDirty }: Pick<Page
           <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">秒</span></div>
       </div>
       <div className="min-w-0"><div className="row small mb-1"><label htmlFor="overview-group-wake-probability">群聊概率唤醒</label>
-        <HelpTip label="群聊概率唤醒">默认每条消息有 1% 概率唤醒，仅对白名单群聊生效。群聊未唤醒且没有排队、处理或等待中的请求时才抽取；命中后沿用正常唤醒的上下文和续聊窗口，模型自行决定是否发言。已唤醒期间不重复抽取，0% 关闭，100% 表示每次符合条件都唤醒。保存后即时生效。</HelpTip></div>
-        <div className="relative"><Input id="overview-group-wake-probability" className="w-full pr-7" type="number" min={0} max={100} step={1}
+        <HelpTip label="群聊概率唤醒">默认每条消息有 1% 概率唤醒，支持 0.5% 等小数，仅对白名单群聊生效。群聊未唤醒且没有排队、处理或等待中的请求时才抽取；命中后沿用正常唤醒的上下文和续聊窗口，模型自行决定是否发言。已唤醒期间不重复抽取，0% 关闭，100% 表示每次符合条件都唤醒。保存后即时生效。</HelpTip></div>
+        <div className="relative"><Input id="overview-group-wake-probability" className="w-full pr-7" type="number" min={0} max={100} step="any"
           value={draft?.probability ?? wake.groupWakeProbabilityPercent ?? 1} disabled={!persona || busy || uncertain} onChange={event => edit('probability', event.target.value)} />
           <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">%</span></div>
       </div>

@@ -13,14 +13,20 @@ export function chatInputForm(value: ChatInputConfiguration): ChatInputForm {
     continuationSeconds: String(value.continuationMs / 1000), groupWakeProbabilityPercent: String(value.groupWakeProbabilityPercent ?? 1), group: value.scopes.group, private: value.scopes.private,
     include: value.scopes.include.join('\n'), exclude: value.scopes.exclude.join('\n') };
 }
+export function parseGroupWakeProbabilityPercent(value: string): number | null {
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)) return null;
+  const probability = Number(value);
+  return Number.isFinite(probability) && probability >= 0 && probability <= 100 ? probability : null;
+}
 export function chatInputConfiguration(form: ChatInputForm): ChatInputConfiguration | null {
   if (!/^\d+(?:\.\d{1,3})?$/.test(form.continuationSeconds)) return null;
-  if (!/^\d+$/.test(form.groupWakeProbabilityPercent ?? '1')) return null;
+  const probability = parseGroupWakeProbabilityPercent(form.groupWakeProbabilityPercent ?? '1');
+  if (probability === null) return null;
   const lines = (value: string) => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   try {
     return validateChatInputConfiguration({ schema: 1, enabled: form.enabled, nicknames: lines(form.nicknames),
       wakeOnMention: form.wakeOnMention, wakeOnReply: form.wakeOnReply, continuationMs: Math.round(Number(form.continuationSeconds) * 1000),
-      groupWakeProbabilityPercent: Number(form.groupWakeProbabilityPercent ?? '1'),
+      groupWakeProbabilityPercent: probability,
       scopes: { group: form.group, private: form.private, include: lines(form.include), exclude: lines(form.exclude) } });
   } catch { return null; }
 }

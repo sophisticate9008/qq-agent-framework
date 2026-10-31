@@ -19,10 +19,10 @@ test('group wake probability defaults to one percent for legacy personas and rej
   const legacy = { nicknames: [], wakeOnReply: true, continuationMs: 90000 }
   assert.equal(DEFAULT_PERSONA_WAKE.groupWakeProbabilityPercent, 1)
   assert.equal(resolveChatInputConfiguration({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, ...validatePersonaWake(legacy) }, 'group:123').groupWakeProbabilityPercent, 1)
-  for (const probability of [0, 1, 100]) {
+  for (const probability of [0, 0.001, 0.5, 1, 99.9, 100]) {
     assert.equal(validatePersonaWake({ ...legacy, groupWakeProbabilityPercent: probability }).groupWakeProbabilityPercent, probability)
   }
-  for (const probability of [-1, 101, 0.5, NaN, Infinity, '1', null]) {
+  for (const probability of [-1, -0.5, 100.01, 101, NaN, Infinity, -Infinity, '0.5', '1', null]) {
     assert.throws(() => validatePersonaWake({ ...legacy, groupWakeProbabilityPercent: probability }), TypeError)
   }
   assert.throws(() => validatePersonaWake({ ...legacy, unknown: 1 }), TypeError)

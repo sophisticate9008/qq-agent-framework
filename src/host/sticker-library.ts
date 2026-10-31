@@ -55,6 +55,15 @@ export function stickerMessageAssets(message: InboundMessage, raw: unknown): rea
   }
   return ids.slice(0, 2)
 }
+export interface StickerSelectionRequest {
+  readonly intent: string
+  readonly character?: string
+  readonly context: readonly string[]
+  readonly conversationId: string
+  readonly candidates: readonly { readonly id: string; readonly score: number; readonly annotation: StickerAnnotation }[]
+  readonly signal: AbortSignal
+  readonly deadlineAt: number
+}
 
 /** The background collector owns model work; local selection and QQ writes remain owned by the host. */
 export function createStickerLibrary(options: {
@@ -427,19 +436,25 @@ export function createStickerLibrary(options: {
     })
   }
   const recent = new Map<string, readonly { readonly id: string; readonly at: number }[]>()
-  async function choose(intent: string, conversationId: string, callerSignal: AbortSignal, deadlineAt: number, character?: string): Promise<string | null> {
-    const remaining = deadlineAt - Date.now()
-    if (remaining <= 0) return null
-    return withDeadline({ signal: active(callerSignal), timeoutMs: remaining, code: 'STICKER_SEND_TIMEOUT', run: async signal => {
+  async function choose(intent: string, conversationId: string, callerSignal: AbortSignal, deadlineAt: number, character?: string,
+    selector?: (request: StickerSelectionRequest) => Promise<string | null>): Promise<string | null> {
+    if (deadlineAt !== Infinity && !Number.isFinite(deadlineAt) || deadlineAt <= Date.now()) return null
+    const run = async (signal: AbortSignal): Promise<string | null> => {
       await options.authorize(conversationId, signal)
       signal.throwIfAborted()
       const rules = recognition.list()
       const candidates = all().filter(({ item }) => !item.deleted && item.state === 'ready' && (item.account || item.extra) && item.annotation)
         .map(({ item }) => ({ id: item.id, name: item.account?.name, annotation: enrich(imageAnnotation(item)!, rules) }))
-      const matched = matcher.rank({ intent, context: options.context(conversationId).slice(-5), candidates, ...(character === undefined ? {} : { character }),
+      const context = options.context(conversationId).slice(-5)
+      const matched = matcher.rank({ intent, context, candidates, ...(character === undefined ? {} : { character }),
         characterAliases: characters.list({ limit: 1024 }).map(({ character, aliases }) => ({ character, aliases })),
         recentlyUsed: (recent.get(conversationId) ?? []).filter(item => Date.now() - item.at < 120_000).map(item => item.id) })
-      const chosen = matched[0]
+      const allowed = matched.slice(0, 8)
+      if (!allowed.length || Date.now() >= deadlineAt) return null
+      const selectedId = selector ? await selector({ intent, ...(character === undefined ? {} : { character }), context, conversationId,
+        candidates: allowed.map(candidate => ({ ...candidate, annotation: candidates.find(item => item.id === candidate.id)!.annotation })), signal, deadlineAt }) : allowed[0]?.id
+      signal.throwIfAborted()
+      const chosen = allowed.find(candidate => candidate.id === selectedId)
       if (!chosen || Date.now() >= deadlineAt) return null
       const assetId = await options.register(chosen.id, conversationId, signal)
       signal.throwIfAborted()
@@ -447,7 +462,10 @@ export function createStickerLibrary(options: {
       if (recent.size >= 1024 && !recent.has(conversationId)) recent.delete(recent.keys().next().value!)
       recent.set(conversationId, [{ id: chosen.id, at: Date.now() }, ...(recent.get(conversationId) ?? [])].slice(0, 3))
       return assetId
-    } }).catch(() => null)
+    }
+    const signal = active(callerSignal)
+    return deadlineAt === Infinity ? run(signal).catch(() => null)
+      : withDeadline({ signal, timeoutMs: Math.max(1, Math.floor(deadlineAt - Date.now())), code: 'STICKER_SEND_TIMEOUT', run }).catch(() => null)
   }
   function track(job: Promise<unknown>) {
     jobs.add(job); void job.finally(() => jobs.delete(job)).catch(() => undefined)

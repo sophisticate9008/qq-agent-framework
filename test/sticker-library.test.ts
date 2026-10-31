@@ -123,6 +123,19 @@ test('unclassified account images accept a manual character without inventing se
   await assert.rejects(f.library.annotateIdentity(initial.id, current.revision, { character: '角色乙', aliases: [] }, signal()), { code: 'STICKER_NOT_FOUND' })
 })
 
+test('optional selection receives only actual matched candidates and cannot register an invented id', async t => {
+  const f = await fixture(t); f.seed()
+  const item = (await f.library.snapshot(signal())).items[0]!
+  assert.equal(await f.library.choose('开心', 'group:123', signal(), Infinity, undefined, async request => {
+    assert.equal(request.candidates.length, 1); assert.equal(request.candidates[0]!.id, item.id)
+    assert.equal(request.candidates[0]!.annotation.description, annotation.description)
+    assert.equal(request.deadlineAt, Infinity)
+    return 'outside-candidates'
+  }), null)
+  assert.deepEqual(f.writes, [])
+  assert.equal(await f.library.choose('开心', 'group:123', signal(), Infinity, undefined, async request => request.candidates[0]!.id), `media-${item.id}`)
+  assert.deepEqual(f.writes, ['register'])
+})
 
 test('manual collection bypasses both probability gates, filters in a persistent helper and deduplicates across incoming aliases', async t => {
   const f = await fixture(t, { probabilities: 0 })

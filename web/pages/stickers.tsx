@@ -4,6 +4,7 @@ import { PackageConfigurationManager } from '../components/package-configuration
 import { ConnectPrompt, PageHeading, Section } from '../components/management.tsx'
 import { Button } from '../components/ui/button.tsx'
 import { Input } from '../components/ui/input.tsx'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.tsx'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx'
 import { errorMessage, type ApiClient } from '../lib/api.ts'
 import { useReadResource } from '../lib/use-read-resource.ts'
@@ -23,6 +24,34 @@ function deletionLocks(api: ApiClient) {
   let locks = pendingDeletes.get(api)
   if (!locks) { locks = new Map(); pendingDeletes.set(api, locks) }
   return locks
+}
+const identitySources = { model: '模型推测', user: '用户确认', web: '网页依据' } as const
+const searchText = (value: string): string => value.normalize('NFKC').toLocaleLowerCase().replace(/[\s_]+/g, ' ').trim()
+function metadataSearchText(item: StickerLibraryItem): string {
+  const { identity, facets, visual } = item
+  return searchText([item.name, item.description, ...item.tags, identity?.character ?? '', ...(identity?.aliases ?? []),
+    identity ? identitySources[identity.source] : '', ...(facets?.emotions ?? []), ...(facets?.actions ?? []),
+    ...(facets?.intents ?? []), ...(facets?.scenes ?? []), facets?.visibleText ?? '', ...(visual?.colors ?? []),
+    ...(visual?.styles ?? []), ...(visual?.entities ?? [])].join(' '))
+}
+
+function StickerMetadata({ item }: { readonly item: StickerLibraryItem }) {
+  const { identity, facets, visual } = item
+  const rows = [
+    ['情绪', facets?.emotions.join(' · ')], ['动作', facets?.actions.join(' · ')], ['用途', facets?.intents.join(' · ')],
+    ['场景', facets?.scenes.join(' · ')], ['图中文字', facets?.visibleText], ['颜色', visual?.colors.join(' · ')],
+    ['画风', visual?.styles.join(' · ')], ['可见元素', visual?.entities.join(' · ')],
+  ].filter(([, value]) => Boolean(value))
+  return <div className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+    <p className="break-words">角色：{identity?.character ?? '未识别'}{identity && <span className="ml-1 rounded bg-muted px-1 py-0.5">{identitySources[identity.source]}</span>}</p>
+    {identity && identity.aliases.length > 0 && <p className="break-words">别名：{identity.aliases.join(' · ')}</p>}
+    {rows.length > 0 && <dl className="grid gap-1">{rows.map(([label, value]) => <div key={label} className="flex min-w-0"><dt className="shrink-0">{label}：</dt><dd className="min-w-0 break-words">{value}</dd></div>)}</dl>}
+    {identity && (identity.evidence || !!identity.references?.length) && <details className="min-w-0">
+      <summary className="cursor-pointer">识别依据</summary>
+      {identity.evidence && <p className="mt-1 break-words">{identity.evidence}</p>}
+      {!!identity.references?.length && <ul className="mt-1 grid gap-1">{identity.references.map(reference => <li key={reference.url}><a href={reference.url} target="_blank" rel="noopener noreferrer" className="break-words underline underline-offset-2">{reference.title}</a></li>)}</ul>}
+    </details>}
+  </div>
 }
 
 function StickerPreview({ api, item }: { readonly api: ApiClient; readonly item: StickerLibraryItem }) {
@@ -51,6 +80,7 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
   const reader = useMemo<ApiClient>(() => ({ get: (path, signal) => api.get(path, signal), post: (path, body, signal) => api.post(path, body, signal) }), [api])
   const resource = useReadResource(reader, '/api/chat/stickers/library', connected, parseStickerLibrarySnapshot)
   const [filter, setFilter] = useState('all'), [query, setQuery] = useState(''), [page, setPage] = useState(0)
+  const [character, setCharacter] = useState('all'), [identitySource, setIdentitySource] = useState('all')
   const [deleting, setDeleting] = useState<StickerLibraryItem | null>(null), [busy, setBusy] = useState(false), [message, setMessage] = useState('')
   const [, updateLocks] = useState(0)
   const request = useRef<AbortController | null>(null)
@@ -67,9 +97,22 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
     }
     if (changed) updateLocks(value => value + 1)
   }, [resource.snapshot, locks])
-  const items = useMemo(() => (resource.snapshot?.items ?? []).filter(item => (filter === 'all' || item.storage === filter)
-    && `${item.name} ${item.description} ${item.tags.join(' ')}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [resource.snapshot, filter, query])
-  useEffect(() => { setPage(0) }, [filter, query])
+  const characters = useMemo(() => {
+    const names = new Map<string, string>()
+    for (const item of resource.snapshot?.items ?? []) if (item.identity) names.set(searchText(item.identity.character), item.identity.character)
+    return [...names].sort((left, right) => left[1].localeCompare(right[1], 'zh-CN'))
+  }, [resource.snapshot])
+  const items = useMemo(() => {
+    const terms = searchText(query).split(' ').filter(Boolean).slice(0, 16)
+    return (resource.snapshot?.items ?? []).filter(item => {
+      if (filter !== 'all' && item.storage !== filter
+        || character !== 'all' && (character === 'unknown' ? !!item.identity : !item.identity || `role:${searchText(item.identity.character)}` !== character)
+        || identitySource !== 'all' && (item.identity?.source ?? 'unknown') !== identitySource) return false
+      const text = metadataSearchText(item)
+      return terms.every(term => text.includes(term))
+    })
+  }, [resource.snapshot, filter, query, character, identitySource])
+  useEffect(() => { setPage(0) }, [filter, query, character, identitySource])
   const pages = Math.max(1, Math.ceil(items.length / 24)), currentPage = Math.min(page, pages - 1)
   async function remove() {
     if (!deleting || busy || request.current || locks.has(deleting.id) || resource.error) return
@@ -93,14 +136,25 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
   const snapshot = resource.snapshot
   return <div className="grid gap-4">
     <PageHeading title="表情库" description="管理账号收藏和额外保存的表情，按含义挑选和使用。" />
-    <Section title="自动收藏设置" description="两个概率依次抽取。明确要求收藏时跳过概率，仍会筛选和去重；收藏与选图各用独立绑定会话。">
+    <Section title="自动收藏设置" description="两个概率依次抽取。明确要求收藏时跳过概率，仍会筛选和去重；收藏打标在后台完成，发送直接读取本地索引。">
       <PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['sticker-library']} embedded />
     </Section>
     <Section title="已有表情" description={snapshot ? `账号${snapshot.accountCollection === 'confirmed' ? '已读取' : '上次读取'} ${snapshot.capacity.count} 张；总容量未知，达到 ${snapshot.capacity.nearFullAt} 张后新收藏转存额外库。` : '启动聊天后可查看、筛选和管理表情。'}>
       <div className="flex flex-wrap items-center gap-2">
         {([['all', '全部'], ['account', '账号收藏'], ['extra', '额外存储']] as const).map(([value, label]) => <Button key={value} size="sm" variant={filter === value ? 'default' : 'outline'} onClick={() => setFilter(value)}>{label} {value === 'all' ? snapshot?.items.length ?? 0 : snapshot?.items.filter(item => item.storage === value).length ?? 0}</Button>)}
-        <Input aria-label="搜索表情含义或标签" className="max-w-xs" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索含义或标签" />
+        <Input aria-label="搜索表情角色、别名或标签" className="max-w-xs" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索角色、别名、动作或标签" />
         <Button size="sm" variant="outline" disabled={resource.loading || busy} onClick={resource.refresh}>刷新</Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-2"><span id="sticker-character-label">角色</span><Select value={character} onValueChange={value => setCharacter(typeof value === 'string' ? value : 'all')}>
+          <SelectTrigger aria-labelledby="sticker-character-label" className="max-w-52"><SelectValue>{character === 'all' ? '全部角色' : character === 'unknown' ? '未识别角色' : characters.find(([key]) => `role:${key}` === character)?.[1] ?? '原角色已不在当前列表'}</SelectValue></SelectTrigger>
+          <SelectContent><SelectItem value="all">全部角色</SelectItem><SelectItem value="unknown">未识别角色</SelectItem>{characters.map(([key, name]) => <SelectItem key={key} value={`role:${key}`}>{name}</SelectItem>)}</SelectContent>
+        </Select></div>
+        <div className="flex min-w-0 items-center gap-2"><span id="sticker-identity-source-label">角色来源</span><Select value={identitySource} onValueChange={value => setIdentitySource(typeof value === 'string' ? value : 'all')}>
+          <SelectTrigger aria-labelledby="sticker-identity-source-label"><SelectValue>{identitySource === 'all' ? '全部来源' : identitySource === 'unknown' ? '未识别' : identitySources[identitySource as keyof typeof identitySources]}</SelectValue></SelectTrigger>
+          <SelectContent><SelectItem value="all">全部来源</SelectItem>{Object.entries(identitySources).map(([source, label]) => <SelectItem key={source} value={source}>{label}</SelectItem>)}<SelectItem value="unknown">未识别</SelectItem></SelectContent>
+        </Select></div>
+        <span>角色与来源按已有索引展示，推测不等同确认。</span>
       </div>
       {resource.error && <p role="alert" className="text-sm text-destructive">{errorMessage(resource.error)}</p>}
       {snapshot?.accountCollection === 'unavailable' && <p role="status" className="text-sm text-muted-foreground">账号收藏暂未读取成功，保留上次结果；账号删除暂不可用。</p>}
@@ -108,11 +162,12 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
       {!!snapshot?.pending && <p role="status" className="text-sm text-muted-foreground">正在处理 {snapshot.pending} 项表情任务。</p>}
       {message && <p role="status" className="text-sm">{message}</p>}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
-        {items.slice(currentPage * 24, currentPage * 24 + 24).map(item => <article key={item.id} className="grid content-start gap-2 rounded-lg border p-3">
+        {items.slice(currentPage * 24, currentPage * 24 + 24).map(item => <article key={item.id} className="grid min-w-0 content-start gap-2 rounded-lg border p-3">
           <StickerPreview api={api} item={item} />
-          <p className="text-sm">{item.description || item.name || '尚未分类'}</p>
-          <p className="text-xs text-muted-foreground">{item.storage === 'account' ? '账号收藏' : '额外存储'} · {item.state === 'unknown' || locks.has(item.id) ? '结果待核对' : item.tags.join(' · ') || '待打标'}</p>
-          {item.avoid && <p className="text-xs text-muted-foreground">慎用：{item.avoid}</p>}
+          <p className="break-words text-sm">{item.description || item.name || '尚未分类'}</p>
+          <p className="break-words text-xs text-muted-foreground">{item.storage === 'account' ? '账号收藏' : '额外存储'} · {item.state === 'unknown' || locks.has(item.id) ? '结果待核对' : item.tags.join(' · ') || '待打标'}</p>
+          <StickerMetadata item={item} />
+          {item.avoid && <p className="break-words text-xs text-muted-foreground">慎用：{item.avoid}</p>}
           <Button size="sm" variant="outline" disabled={!item.canDelete || locks.has(item.id) || busy || resource.loading || resource.error !== null} onClick={() => setDeleting(item)}>删除</Button>
         </article>)}
       </div>

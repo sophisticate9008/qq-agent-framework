@@ -79,7 +79,12 @@ function restrictions(annotation: StickerAnnotation, intent: string, context: st
   if (serious && has(image, hostileWords)) return true
   // Directive wording describes how to read the restriction, not the image's
   // refusal intent. Keep the actual unsuitable situations after these prefixes.
-  const avoid = normalize(annotation.avoid).replace(/(?:不适合|不适用|(?:避免|不要|勿)(?:用于|用来|用作|拿来)?|不宜|慎用)(?:在)?/g, '')
+  const caption = normalize(annotation.facets?.visibleText ?? '')
+  const avoid = normalize(annotation.avoid)
+    // A warning may quote the visible caption to explain its tone. That quote
+    // names image content, rather than an unsuitable conversation situation.
+    .replace(/[“「『"']([^”」』"']{1,160})[”」』"']/g, (quote, text: string) => caption && normalize(text) === caption ? '' : quote)
+    .replace(/(?:不适合|不适用|(?:避免|不要|勿)(?:用于|用来|用作|拿来)?|不宜|慎用)(?:在)?/g, '')
   if (!avoid) return false
   const avoided = new Map([...terms(avoid)].filter(([key]) => !key.startsWith('word:') || !avoidScaffolding.has(key.slice(5))))
   const situation = terms(`${intent} / ${context}`)

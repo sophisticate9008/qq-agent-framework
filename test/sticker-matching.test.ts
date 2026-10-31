@@ -40,6 +40,15 @@ test('local selection matches explicit intent, actions, OCR and bilingual synony
   const fishing = candidate('fishing', { tags: ['摸鱼'] })
   assert.equal(rank('摸鱼', [fishing])[0]?.id, 'fishing', 'open vocabulary does not require a predefined emotion')
 })
+test('warnings quoting the image caption do not veto a playful request for that caption', () => {
+  const joke = candidate('joke', { tags: ['笨蛋', '俏皮', '玩笑调侃'],
+    avoid: '不适合对陌生人或严肃争执使用，文字“笨蛋”可能被视为真实辱骂；正式场合、安慰他人或需要表达认真歉意时也不贴切。' },
+  { intents: ['玩笑式调侃', '卖萌撒娇'], visibleText: '笨蛋' })
+  assert.equal(rank('开玩笑地吐槽对方是小笨蛋，轻松打趣', [joke], ['发个开玩笑说笨蛋的表情'])[0]?.id, 'joke')
+  assert.deepEqual(rank('开玩笑说笨蛋', [joke], ['正在严肃争执']), [])
+  const farewell = candidate('bye', { tags: ['再见'], avoid: '“葬礼”时不适用' }, { visibleText: '再见' })
+  assert.deepEqual(rank('再见', [farewell], ['参加葬礼']), [])
+})
 test('ordinary background words cannot create intent or make an unrelated sticker eligible', () => {
   assert.deepEqual(rank('发一个表情', [food, celebrate], ['刚才吃饭了', '今晚开庆祝会']), [])
   assert.deepEqual(rank('温柔安慰', [food], ['早上吃饭了']), [])

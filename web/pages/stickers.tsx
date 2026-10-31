@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Popover } from '@base-ui/react/popover'
 import { parseStickerLibrarySnapshot, parseStickerLibraryDeleteResult, type StickerImageDimensions, type StickerLibraryItem,
   type StickerLibraryThumbnail } from '../../src/contracts/sticker-library.ts'
 import { PackageConfigurationManager } from '../components/package-configuration-manager.tsx'
 import { ConnectPrompt, PageHeading, Section } from '../components/management.tsx'
 import { VirtualMasonry, type VirtualMasonryItemContext } from '../components/virtual-masonry.tsx'
+import { StickerCharacterEditor } from '../components/sticker-character-editor.tsx'
 import { Button } from '../components/ui/button.tsx'
 import { Input } from '../components/ui/input.tsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select.tsx'
@@ -38,8 +40,7 @@ function metadataSearchText(item: StickerLibraryItem): string {
     ...(visual?.styles ?? []), ...(visual?.entities ?? [])].join(' '))
 }
 
-function StickerMetadata({ item, expanded, onExpandedChange }: { readonly item: StickerLibraryItem; readonly expanded: boolean;
-  readonly onExpandedChange: (id: string, open: boolean) => void }) {
+function StickerMetadata({ item }: { readonly item: StickerLibraryItem }) {
   const { identity, facets, visual } = item
   const rows = [
     ['情绪', facets?.emotions.join(' · ')], ['动作', facets?.actions.join(' · ')], ['用途', facets?.intents.join(' · ')],
@@ -50,13 +51,47 @@ function StickerMetadata({ item, expanded, onExpandedChange }: { readonly item: 
     <p className="break-words">角色：{identity?.character ?? '未识别'}{identity && <span className="ml-1 rounded bg-muted px-1 py-0.5">{identitySources[identity.source]}</span>}</p>
     {identity && identity.aliases.length > 0 && <p className="break-words">别名：{identity.aliases.join(' · ')}</p>}
     {rows.length > 0 && <dl className="grid gap-1">{rows.map(([label, value]) => <div key={label} className="flex min-w-0"><dt className="shrink-0">{label}：</dt><dd className="min-w-0 break-words">{value}</dd></div>)}</dl>}
-    {identity && (identity.evidence || !!identity.references?.length) && <details className="min-w-0" open={expanded}
-      onToggle={event => onExpandedChange(item.id, event.currentTarget.open)}>
-      <summary className="cursor-pointer">识别依据</summary>
+    {identity && (identity.evidence || !!identity.references?.length) && <div className="min-w-0">
+      <p className="mt-2 font-medium text-foreground">识别依据</p>
       {identity.evidence && <p className="mt-1 break-words">{identity.evidence}</p>}
       {!!identity.references?.length && <ul className="mt-1 grid gap-1">{identity.references.map(reference => <li key={reference.url}><a href={reference.url} target="_blank" rel="noopener noreferrer" className="break-words underline underline-offset-2">{reference.title}</a></li>)}</ul>}
-    </details>}
+    </div>}
   </div>
+}
+
+const compact = (value: string, maximum: number): string => {
+  const characters = Array.from(value)
+  return characters.length > maximum ? `${characters.slice(0, maximum).join('')}…` : value
+}
+function StickerDetails({ item, open, onOpenChange, onEditRole, canEditRole }: { readonly item: StickerLibraryItem; readonly open: boolean;
+  readonly onOpenChange: (id: string, open: boolean) => void; readonly onEditRole: (item: StickerLibraryItem) => void; readonly canEditRole: boolean }) {
+  const triggerId = useId()
+  const description = item.description || item.name || '尚未分类'
+  return <Popover.Root open={open} onOpenChange={next => onOpenChange(item.id, next)} triggerId={triggerId} modal={false}>
+    <Popover.Trigger id={triggerId} type="button" openOnHover delay={250} closeDelay={150}
+      aria-label={`查看表情详情：${compact(item.name || description, 36)}`}
+      onFocus={event => { if (event.currentTarget.matches(':focus-visible')) onOpenChange(item.id, true) }}
+      className="grid min-w-0 gap-1 rounded-sm text-left outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+      <span className="line-clamp-2 break-words text-sm leading-5">{compact(description, 56)}</span>
+      {item.identity && <span className="truncate text-xs text-muted-foreground">{compact(item.identity.character, 18)}</span>}
+      {item.tags.length > 0 && <span className="truncate text-xs text-muted-foreground">{item.tags.slice(0, 3).map(tag => compact(tag, 8)).join(' · ')}{item.tags.length > 3 ? ` +${item.tags.length - 3}` : ''}</span>}
+    </Popover.Trigger>
+    <Popover.Portal><Popover.Positioner side="right" align="start" sideOffset={8} collisionPadding={12} className="z-[80]">
+      <Popover.Popup initialFocus={false} finalFocus={false}
+        className="grid max-h-[min(70dvh,var(--available-height))] w-80 max-w-[calc(100vw-1.5rem)] gap-3 overflow-y-auto overscroll-contain rounded-lg border bg-popover p-4 text-popover-foreground shadow-lg outline-none">
+        <div className="flex items-start justify-between gap-3">
+          <Popover.Title className="min-w-0 break-words text-sm font-medium">{item.name || '表情详情'}</Popover.Title>
+          <Popover.Close render={<Button type="button" size="sm" variant="ghost" className="h-6 shrink-0 px-2 text-xs" />}>关闭</Popover.Close>
+        </div>
+        <Popover.Description className="whitespace-pre-wrap break-words text-sm leading-relaxed">{description}</Popover.Description>
+        <p className="break-words text-xs text-muted-foreground">{item.storage === 'account' ? '账号收藏' : '额外存储'}{item.dimensions ? ` · ${item.dimensions.width} × ${item.dimensions.height}` : ''}</p>
+        {item.tags.length > 0 && <p className="break-words text-xs leading-relaxed">标签：{item.tags.join(' · ')}</p>}
+        <StickerMetadata item={item} />
+        {item.avoid && <p className="break-words text-xs text-muted-foreground">慎用：{item.avoid}</p>}
+        <div className="flex justify-end border-t pt-2"><Button type="button" size="sm" variant="outline" disabled={!canEditRole} onClick={() => onEditRole(item)}>标角色</Button></div>
+      </Popover.Popup>
+    </Popover.Positioner></Popover.Portal>
+  </Popover.Root>
 }
 
 // Bound unusually long or wide images without cropping their actual content.
@@ -110,24 +145,35 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
   const resource = useReadResource(reader, '/api/chat/stickers/library', connected, parseStickerLibrarySnapshot)
   const [filter, setFilter] = useState('all'), [query, setQuery] = useState('')
   const [previewEpoch, setPreviewEpoch] = useState(0)
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const [detailsId, setDetailsId] = useState<string | null>(null)
   const learnedDimensions = useRef(new Map<string, StickerImageDimensions>())
   const [character, setCharacter] = useState('all'), [identitySource, setIdentitySource] = useState('all')
   const [deleting, setDeleting] = useState<StickerLibraryItem | null>(null), [busy, setBusy] = useState(false), [message, setMessage] = useState('')
+  const [editing, setEditing] = useState<StickerLibraryItem | null>(null)
   const [, updateLocks] = useState(0)
   const request = useRef<AbortController | null>(null)
+  const dialogFrame = useRef<number | null>(null)
   const locks = deletionLocks(api)
   const onDimensions = useCallback((id: string, dimensions: StickerImageDimensions) => {
     learnedDimensions.current.delete(id); learnedDimensions.current.set(id, dimensions)
     if (learnedDimensions.current.size > 7000) learnedDimensions.current.delete(learnedDimensions.current.keys().next().value!)
   }, [])
-  const onExpandedChange = useCallback((id: string, open: boolean) => setExpanded(current => {
-    if (current.has(id) === open) return current
-    const next = new Set(current)
-    if (open) { next.add(id); if (next.size > 7000) next.delete(next.values().next().value!) } else next.delete(id)
-    return next
-  }), [])
-  useEffect(() => () => { request.current?.abort() }, [])
+  const onDetailsChange = useCallback((id: string, open: boolean) => {
+    if (open && (deleting || editing || dialogFrame.current !== null)) return
+    setDetailsId(current => open ? id : current === id ? null : current)
+  }, [deleting, editing])
+  const showItemDialog = useCallback((item: StickerLibraryItem, kind: 'identity' | 'delete') => {
+    if (busy || deleting || editing || dialogFrame.current !== null) return
+    setDetailsId(null)
+    // Let the nonmodal popup close before the modal dialog takes focus.
+    dialogFrame.current = requestAnimationFrame(() => {
+      dialogFrame.current = null
+      if (kind === 'identity') setEditing(item)
+      else setDeleting(item)
+    })
+  }, [busy, deleting, editing])
+  const editRole = useCallback((item: StickerLibraryItem) => showItemDialog(item, 'identity'), [showItemDialog])
+  useEffect(() => () => { request.current?.abort(); if (dialogFrame.current !== null) cancelAnimationFrame(dialogFrame.current) }, [])
   useEffect(() => {
     const snapshot = resource.snapshot
     if (!snapshot || snapshot.limited) return
@@ -154,20 +200,15 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
       return terms.every(term => text.includes(term))
     }).map(({ item }) => item)
   }, [searchEntries, filter, query, character, identitySource])
+  useEffect(() => { if (detailsId && !items.some(item => item.id === detailsId)) setDetailsId(null) }, [detailsId, items])
   const masonryReset = JSON.stringify([filter, query, character, identitySource])
   const estimateHeight = useCallback((item: StickerLibraryItem, _index: number, width: number) => {
     const contentWidth = Math.max(56, width - 26), perLine = Math.max(8, Math.floor(contentWidth / 7))
     const lines = (text: string) => Math.max(1, Math.ceil(text.length / perLine))
-    const { identity, facets, visual } = item
-    const metadata = [identity?.character ?? '未识别', identity?.aliases.join(' · ') ?? '', facets?.emotions.join(' · ') ?? '',
-      facets?.actions.join(' · ') ?? '', facets?.intents.join(' · ') ?? '', facets?.scenes.join(' · ') ?? '', facets?.visibleText ?? '',
-      visual?.colors.join(' · ') ?? '', visual?.styles.join(' · ') ?? '', visual?.entities.join(' · ') ?? ''].filter(Boolean)
-    const textHeight = lines(item.description || item.name || '尚未分类') * 20 + lines(item.tags.join(' · ') || '待打标') * 16
-      + metadata.reduce((height, text) => height + lines(text) * 16, 0) + (item.avoid ? lines(item.avoid) * 16 : 0)
-    const details = identity && (identity.evidence || identity.references?.length) ? 20 + (expanded.has(item.id)
-      ? lines(identity.evidence ?? '') * 16 + (identity.references ?? []).reduce((height, reference) => height + lines(reference.title) * 16, 0) : 0) : 0
-    return contentWidth / previewRatio(item.dimensions ?? learnedDimensions.current.get(item.id)) + textHeight + details + 100
-  }, [expanded])
+    const textHeight = Math.min(2, lines(compact(item.description || item.name || '尚未分类', 56))) * 20
+      + (item.identity ? 20 : 0) + (item.tags.length ? 20 : 0)
+    return contentWidth / previewRatio(item.dimensions ?? learnedDimensions.current.get(item.id)) + textHeight + 76
+  }, [])
   const refresh = () => { clearFailedStickerPreviews(api); setPreviewEpoch(value => value + 1); resource.refresh() }
   async function remove() {
     if (!deleting || busy || request.current || locks.has(deleting.id) || resource.error) return
@@ -191,8 +232,8 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
   const snapshot = resource.snapshot
   return <div className="grid gap-4">
     <PageHeading title="表情库" description="管理账号收藏和额外保存的表情，按含义挑选和使用。" />
-    <Section title="自动收藏设置" description="两个概率依次抽取。明确要求收藏时跳过概率，仍会筛选和去重；收藏打标在后台完成，发送直接读取本地索引。">
-      <PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['sticker-library']} embedded />
+    <Section title="收藏与发送设置" description="收藏在后台筛选打标；发送可选择独立意图转换、本地匹配或DSH选图。">
+      <PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['sticker-library', 'sticker-sending']} embedded />
     </Section>
     <Section title="已有表情" description={snapshot ? `账号${snapshot.accountCollection === 'confirmed' ? '已读取' : '上次读取'} ${snapshot.capacity.count} 张；总容量未知，达到 ${snapshot.capacity.nearFullAt} 张后新收藏转存额外库。` : '启动聊天后可查看、筛选和管理表情。'}>
       <div className="flex flex-wrap items-center gap-2">
@@ -217,18 +258,24 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
       {!!snapshot?.pending && <p role="status" className="text-sm text-muted-foreground">正在处理 {snapshot.pending} 项表情任务。</p>}
       {message && <p role="status" className="text-sm">{message}</p>}
       <VirtualMasonry items={items} getItemKey={stickerKey} estimateSize={estimateHeight} resetKey={masonryReset}
-        pinnedKeys={deleting ? [deleting.id] : []}>
+        pinnedKeys={[...(deleting ? [deleting.id] : []), ...(editing ? [editing.id] : []), ...(detailsId ? [detailsId] : [])]}>
         {(item, _index, context) => <article className="grid min-w-0 content-start gap-2 rounded-lg border p-3">
           <StickerPreview api={api} item={item} context={context} knownDimensions={learnedDimensions.current.get(item.id)} onDimensions={onDimensions} refreshEpoch={previewEpoch} />
-          <p className="break-words text-sm">{item.description || item.name || '尚未分类'}</p>
-          <p className="break-words text-xs text-muted-foreground">{item.storage === 'account' ? '账号收藏' : '额外存储'} · {item.state === 'unknown' || locks.has(item.id) ? '结果待核对' : item.tags.join(' · ') || '待打标'}</p>
-          <StickerMetadata item={item} expanded={expanded.has(item.id)} onExpandedChange={onExpandedChange} />
-          {item.avoid && <p className="break-words text-xs text-muted-foreground">慎用：{item.avoid}</p>}
-          <Button size="sm" variant="outline" disabled={!item.canDelete || locks.has(item.id) || busy || resource.loading || resource.error !== null} onClick={() => setDeleting(item)}>删除</Button>
+          <StickerDetails item={item} open={detailsId === item.id} onOpenChange={onDetailsChange} onEditRole={editRole}
+            canEditRole={item.state === 'ready' && !locks.has(item.id) && !busy && !resource.loading && resource.error === null} />
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <span className="min-w-0 truncate text-xs text-muted-foreground">{item.state === 'unknown' || locks.has(item.id) ? '待核对' : item.storage === 'account' ? '账号收藏' : '额外存储'}</span>
+            <div className="flex shrink-0 items-center gap-1">
+              <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={item.state !== 'ready' || locks.has(item.id) || busy || resource.loading || resource.error !== null} onClick={() => editRole(item)}>标角色</Button>
+              <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={!item.canDelete || locks.has(item.id) || busy || resource.loading || resource.error !== null} onClick={() => showItemDialog(item, 'delete')}>删除</Button>
+            </div>
+          </div>
         </article>}
       </VirtualMasonry>
       {items.length === 0 && <p className="text-sm text-muted-foreground">{resource.loading ? '正在读取…' : '没有符合条件的表情。'}</p>}
     </Section>
+    <StickerCharacterEditor api={api} item={editing && (snapshot?.items.find(item => item.id === editing.id) ?? editing)}
+      onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setMessage('角色已保存为用户确认。'); resource.refresh() }} />
     <Dialog open={deleting !== null} onOpenChange={open => { if (!open && !busy) setDeleting(null) }}><DialogContent><DialogHeader><DialogTitle>删除这张表情？</DialogTitle><DialogDescription>{deleting?.storage === 'account' ? '将从QQ账号收藏中删除，表情库也会同步移除。' : '将删除框架额外保存的图片。'} 删除后不会自动重新收藏。</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="destructive" disabled={busy} onClick={() => void remove()}>{busy ? '正在删除…' : '删除'}</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }

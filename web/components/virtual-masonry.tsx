@@ -187,7 +187,7 @@ export function VirtualMasonry<Item>({ items, getItemKey, estimateSize, minimumC
     onFocusCapture={event => { const element = (event.target as HTMLElement).closest<HTMLElement>('[data-masonry-key]'); if (element) setFocusedKey(element.dataset.masonryKey ?? null) }}
     onBlurCapture={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null) }}
     onKeyDownCapture={event => {
-      if (!items.length || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key !== 'Home' && event.key !== 'End'
+      if (!items.length || !event.currentTarget.contains(event.target as Node) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key !== 'Home' && event.key !== 'End'
         || (event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
       event.preventDefault(); setKeyboardTarget(event.key === 'Home' ? 0 : items.length - 1)
     }}>

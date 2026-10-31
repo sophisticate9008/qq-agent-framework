@@ -60,3 +60,14 @@ test('media-only activity shows the actual content kind without leaking internal
   ]))
   assert.equal(activity.read('running').items[0]!.content, '[图片] [QQ表情] [文件：hello.txt]')
 })
+
+
+test('silent completion summaries cover private tool endings as well as group observation', () => {
+  const activity = createNativeActivity()
+  activity.record('reply_suppressed', 'private:123')
+  activity.record('reply_suppressed', 'group:456')
+  const items = activity.read('running').items
+  assert.equal(items.length, 2)
+  assert(items.every(item => item.summary === '本轮处理结束，未发送聊天回复。'))
+  assert(items.every(item => item.type === 'processed'))
+})

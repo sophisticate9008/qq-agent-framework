@@ -96,7 +96,7 @@ test('owner is exclusively the configured account, never a self-elected relation
 
 test('group participation separates strong calls, follow-up and unrelated quoted speakers', () => {
   const { instructions } = BUILTIN_DAILY_CHAT_PLAN
-  assert.match(instructions, /当前直接 @ 你、引用你的话提问或明确向你发问应优先回应/)
+  assert.match(instructions, /当前直接 @ 你、引用你的话提问或明确向你发问应及时处理并回应/)
   assert.match(instructions, /仅在句子里出现你的名字可能是旁人谈论你，不必纠正称呼或抢话/)
   assert.match(instructions, /唤醒与续聊仅提供参与机会.*不扩大工具授权/)
   assert.match(instructions, /主人人设不代替真实发言账号/)

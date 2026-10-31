@@ -105,7 +105,9 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   const currentAddressing = addressing(original, event.id);
   // Observation is not an instruction to analyze every picture posted by a third
   // party or another bot. Relevant images remain available through normal media tools.
-  const observeOnly = group && (!['direct', 'reply', 'nickname', 'probability'].includes(participation) || currentAddressing.target === 'others');
+  const directlyAddressed = participation === 'direct' || participation === 'reply';
+  const observeOnly = group && !directlyAddressed
+    && (!['nickname', 'probability'].includes(participation) || currentAddressing.target === 'others');
   const images = options.attachImages && !observeOnly
     ? [...new Set(original.filter(part => part.type === 'image').map(part => part.assetId))].slice(0, 4) : [];
   const text = contentText(original, new Set(images));

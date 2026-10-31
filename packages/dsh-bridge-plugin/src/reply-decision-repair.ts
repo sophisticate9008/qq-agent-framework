@@ -47,6 +47,18 @@ function silent(text: string): boolean {
   } catch { return false }
 }
 
+function quietStickerCall(block: Record<string, unknown>): boolean {
+  if (block.name === 'qbf_sticker_send') return true
+  if (block.name !== 'qbf_sticker_manage') return false
+  // Native SDK assistant blocks retain the provider's JSON argument string;
+  // some projections already expose its decoded input instead.
+  let input: unknown = block.input ?? block.arguments
+  if (typeof input === 'string' && input.length <= 65536) {
+    try { input = JSON.parse(input) } catch { return false }
+  }
+  return object(input) && input.action === 'add'
+}
+
 /** A bounded same-turn reminder. It never manufactures a QQ send or a user claim. */
 export function createReplyDecisionRepair(options: {
   readonly current: (agent: ReplyDecisionAgent) => boolean
@@ -65,7 +77,8 @@ export function createReplyDecisionRepair(options: {
     assistant(agent: ReplyDecisionAgent, turn: number, content: unknown): void {
       const decision = decisions.get(agent)
       if (!decision || decision.turn !== turn || !Array.isArray(content)) return
-      if (content.some(block => object(block) && block.type === 'tool-call' && block.name === 'qbf_reply')) decision.attempted = true
+      if (content.some(block => object(block) && block.type === 'tool-call' && (block.name === 'qbf_reply' || quietStickerCall(block))))
+        decision.attempted = true
       decision.final = content.filter(block => object(block) && block.type === 'text' && typeof block.text === 'string')
         .map(block => object(block) ? String(block.text) : '').join('').trim()
     },

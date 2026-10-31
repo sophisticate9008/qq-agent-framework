@@ -163,13 +163,21 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
               return [{ type: 'text', text: JSON.stringify(summary) }, ...renderFrameworkMedia(value)]
             } },
             execute: async (args, exec): Promise<unknown> => {
-              if (validateJsonSchemaValue(spec.parameters, args).length) return { status: 'rejected', code: 'INVALID_TOOL_INPUT' }
               const claim = claims.get(agent)
               const root = lease.roots.get(exec.rootCallId)
               if (leases.get(agent.id) !== lease || options.getAgent(agent.id) !== agent || exec.agent !== agent
                 || agent.status !== 'running' || !claim || !root || root.turn !== claim.turn || root.requestId !== claim.requestId
                 || root.userMessageId !== claim.userMessageId || exec.callId === exec.rootCallId && root.name !== spec.name
                 || exec.signal.aborted) return { status: 'rejected', code: 'TOOL_SOURCE_UNAVAILABLE' }
+              const quietSticker = spec.name === 'qbf_sticker_send' || spec.name === 'qbf_sticker_manage'
+                && args !== null && typeof args === 'object' && 'action' in args && args.action === 'add'
+              // This marker belongs to the authentic SDK call, including local validation
+              // and capacity failures. Its receipt must never start another model step.
+              if (quietSticker) {
+                options.onReplyAttempt?.(agent, claim)
+                exec.concludeTurn()
+              }
+              if (validateJsonSchemaValue(spec.parameters, args).length) return { status: 'rejected', code: 'INVALID_TOOL_INPUT' }
               if (pending.size >= 128 || lease.seen.size >= 4096) return { status: 'rejected', code: 'TOOL_CALL_CAPACITY' }
               if (lease.seen.has(exec.callId)) return { status: 'unknown', code: 'TOOL_CALL_ALREADY_OBSERVED' }
               const input = json(args)
@@ -184,7 +192,7 @@ export function createFrameworkToolChannel(options: { issuerEpoch: string; getAg
                   if (!pending.delete(ticket)) return
                   clearTimeout(timer)
                   exec.signal.removeEventListener('abort', abort)
-                  if (spec.name === 'qbf_reply' && !exec.signal.aborted && replyConcludesTurn(result)) exec.concludeTurn()
+                  if (!exec.signal.aborted && (quietSticker || spec.name === 'qbf_reply' && replyConcludesTurn(result))) exec.concludeTurn()
                   resolve(result)
                 }
                 const wire = { ticket, leaseId: lease.id, call: { id: exec.callId, sessionId: agent.id, generation: lease.generation,

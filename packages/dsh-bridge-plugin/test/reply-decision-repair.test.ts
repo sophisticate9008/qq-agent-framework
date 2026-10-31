@@ -63,3 +63,25 @@ test('ordinary observations, work feedback, explicit silence, attempted sends an
     assert.equal(steering.length, 0, mode)
   }
 })
+
+test('sticker selection and collection attempts suppress repair for native and projected call arguments', () => {
+  for (const block of [
+    { name: 'qbf_sticker_send', arguments: '{}' },
+    { name: 'qbf_sticker_manage', arguments: '{"action":"add"}' },
+    { name: 'qbf_sticker_manage', arguments: { action: 'add' } },
+    { name: 'qbf_sticker_manage', input: { action: 'add' } },
+  ]) {
+    const { agent, repair, steering } = fixture()
+    repair.assistant(agent, 7, [{ type: 'tool-call', ...block }])
+    repair.assistant(agent, 7, [{ type: 'text', text: 'A receipt must not turn into a reply' }])
+    repair.stopping(agent, 7, new AbortController().signal)
+    assert.equal(steering.length, 0, JSON.stringify(block))
+  }
+  for (const action of ['annotate', 'describe', 'delete']) {
+    const { agent, repair, steering } = fixture()
+    repair.assistant(agent, 7, [{ type: 'tool-call', name: 'qbf_sticker_manage', arguments: JSON.stringify({ action }) }])
+    repair.assistant(agent, 7, [{ type: 'text', text: 'A normal workflow omitted its decision' }])
+    repair.stopping(agent, 7, new AbortController().signal)
+    assert.equal(steering.length, 1, action)
+  }
+})

@@ -34,6 +34,8 @@ const definitions = [
   { id: 'sessions', label: '会话与执行记录', description: '查看群聊与私聊的会话关联、统计和记录', icon: 'MessagesSquare',
     navigation: { label: '会话与日志', order: 5 }, searchAliases: 'session sessions 群聊 私聊 会话 助手 独立工作 工作记录',
     shortcut: { order: 5, description: '原生宿主接入后查看会话' } },
+  { id: 'stickers', configurationCategory: true, label: '表情库', description: '管理账号收藏和额外表情，设置自动收藏概率', icon: 'Sparkles',
+    navigation: { label: '表情库', order: 6.5 }, searchAliases: '表情 收藏 贴纸 额外存储 标签 sticker stickers' },
   { id: 'schedules', label: '任务与日程', description: '查看插件日程、暂停状态与实际执行记录', icon: 'CalendarClock',
     navigation: { label: '任务与日程', order: 6 }, searchAliases: '任务 日程 定时 计划 调度 待执行 执行记录 暂停 恢复 插件 schedule schedules' },
   { id: 'usage', label: '用量统计', description: '查看真实 token 用量与按价目表估算的费用', icon: 'Activity',

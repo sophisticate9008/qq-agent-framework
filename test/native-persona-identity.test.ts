@@ -19,6 +19,11 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(valu
 test('persona content version excludes plan, instructions, provider, model, reasoning and context settings', () => {
   const original = createNativePersonaIdentity(persona)
   const first = buildChatSessionDefinition(plan, persona)
+  for (const groupWakeProbabilityPercent of [0, 1, 100]) {
+    const changed = { ...persona, wake: { nicknames: [], wakeOnReply: true, continuationMs: 90000, groupWakeProbabilityPercent } }
+    assert.equal(createNativePersonaIdentity(changed).version, original.version)
+    assert.equal(hash(buildChatSessionDefinition(plan, changed)), hash(first))
+  }
   for (const changes of [{ id: 'other-plan' }, { instructions: 'Different runtime instructions.' },
     { provider: 'provider-2' }, { model: 'model-2' }, { reasoningEffort: 'high' as const },
     { contextLimits: { group: 10_000, private: 20_000 } }]) {

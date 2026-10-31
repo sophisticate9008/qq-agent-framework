@@ -7,7 +7,7 @@ import type { NativeMemoryContext } from '../contracts/native-memory.ts';
 import { normalizeSenderDisplayName } from '../contracts/sender-display-name.ts';
 import { nativeChatWakeKind } from './native-chat-wake.ts';
 
-export type NativeParticipationReason = 'direct' | 'nickname' | 'reply' | 'continuation' | 'ambient';
+export type NativeParticipationReason = 'direct' | 'nickname' | 'reply' | 'probability' | 'continuation' | 'ambient';
 export interface NativeParticipationOptions {
   readonly names: readonly string[];
   readonly continuationMs: number;
@@ -33,7 +33,7 @@ export function nativeParticipation(message: InboundMessage, history: readonly H
     .some(entry => entry.id === part.messageId && entry.actor === 'assistant'))) return 'reply';
   const text = message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n').toLocaleLowerCase();
   if (options.names.some(name => text.includes(name.toLocaleLowerCase()))) return 'nickname';
-  // A real call starts the window. Accepted speak decisions can add a bounded
+  // An admitted wake starts the window. Accepted speak decisions can add a bounded
   // increment; ordinary input, silent or superseded executions do not.
   const activatedAt = options.activatedAt ?? -Infinity;
   if (Number.isFinite(activatedAt) && options.continuationMs > 0 && now >= activatedAt && now <= Math.max(activatedAt + options.continuationMs, options.extendedUntil ?? -Infinity)) return 'continuation';
@@ -104,7 +104,7 @@ export function prepareNativeChatInput(event: FrameworkEvent, history: readonly 
   const currentAddressing = addressing(original, event.id);
   // Observation is not an instruction to analyze every picture posted by a third
   // party or another bot. Relevant images remain available through normal media tools.
-  const observeOnly = group && (!['direct', 'reply', 'nickname'].includes(participation) || currentAddressing.target === 'others');
+  const observeOnly = group && (!['direct', 'reply', 'nickname', 'probability'].includes(participation) || currentAddressing.target === 'others');
   const images = options.attachImages && !observeOnly
     ? [...new Set(original.filter(part => part.type === 'image').map(part => part.assetId))].slice(0, 4) : [];
   const text = contentText(original, new Set(images));

@@ -1521,6 +1521,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             const observing = inbound.observationActive(entry.message.conversationId, effective.continuationMs)
             const enabled = entries.filter(item => item.message.conversationId.startsWith('private:')
               || item.trigger === 'mention' || item.trigger === 'private'
+              || item.trigger === 'probability' && (effective.groupWakeProbabilityPercent ?? 1) > 0
               || item.trigger === 'observation' && observing
               || item.trigger === 'reply' && effective.wakeOnReply
               || item.trigger === 'continuation' && observing
@@ -1553,6 +1554,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             const { effective } = await inbound.readInputConfiguration(conversationId)
             return hasWaiting(entry =>
               conversationId.startsWith('private:') || entry.trigger === 'mention' || entry.trigger === 'private'
+              || entry.trigger === 'probability' && (effective.groupWakeProbabilityPercent ?? 1) > 0
               || entry.trigger === 'observation'
               || entry.trigger === 'reply' && effective.wakeOnReply
               || entry.trigger === 'continuation' && effective.continuationMs > 0

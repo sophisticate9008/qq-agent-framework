@@ -13,6 +13,20 @@ import { createPackageConfigurationRoutes } from '../src/admin/package-configura
 import { NativeConfigurationRepository } from '../src/admin/native-configuration-repository.ts'
 import { NATIVE_MEDIA_CONFIGURATION } from '../src/host/native-media-configuration.ts'
 import { validateNativeMediaConfiguration } from '../src/contracts/native-media-configuration.ts'
+import { DEFAULT_PERSONA_WAKE, validatePersonaWake } from '../src/contracts/persona-wake.ts'
+
+test('group wake probability defaults to one percent for legacy personas and rejects invalid configuration', () => {
+  const legacy = { nicknames: [], wakeOnReply: true, continuationMs: 90000 }
+  assert.equal(DEFAULT_PERSONA_WAKE.groupWakeProbabilityPercent, 1)
+  assert.equal(resolveChatInputConfiguration({ ...DEFAULT_CHAT_INPUT_CONFIGURATION, ...validatePersonaWake(legacy) }, 'group:123').groupWakeProbabilityPercent, 1)
+  for (const probability of [0, 1, 100]) {
+    assert.equal(validatePersonaWake({ ...legacy, groupWakeProbabilityPercent: probability }).groupWakeProbabilityPercent, probability)
+  }
+  for (const probability of [-1, 101, 0.5, NaN, Infinity, '1', null]) {
+    assert.throws(() => validatePersonaWake({ ...legacy, groupWakeProbabilityPercent: probability }), TypeError)
+  }
+  assert.throws(() => validatePersonaWake({ ...legacy, unknown: 1 }), TypeError)
+})
 
 async function fixture(context: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'package-configuration-'))

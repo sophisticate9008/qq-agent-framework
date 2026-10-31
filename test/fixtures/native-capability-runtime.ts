@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { parse, stringify } from 'yaml'
+import { DEFAULT_PERSONA_WAKE } from '../../src/contracts/persona-wake.ts'
 import { createNativeDshDeploymentRuntime } from '../../src/host/native-dsh-deployment.ts'
 import { createNativeCapabilityApprovalResolver } from '../../src/admin/native-capabilities.ts'
 import { startGatewayAdmin } from '../../src/admin/gateway.ts'
@@ -305,7 +306,8 @@ export async function createNativeCapabilityRuntimeFixture(context: NativeCapabi
     return { schema: 1, presetId: source.presetId, revision: source.revision }
   }
   async function configure(selectedCapability = true, toolDelegationUses?: number) {
-    await save('personas', { personas: [{ id: 'independent', name: 'Independent persona', identity: 'Independent identity.', style: 'Concise.' }] })
+    await save('personas', { personas: [{ id: 'independent', name: 'Independent persona', identity: 'Independent identity.', style: 'Concise.',
+      wake: { ...DEFAULT_PERSONA_WAKE, groupWakeProbabilityPercent: 0 } }] })
     await save('providers', { providers: [{ id: 'synthetic', name: 'Synthetic no-network model', type: 'openai', enabled: true,
       baseUrl: `${base}/model-network-forbidden`, apiKey: 'synthetic-model-key-never-used', models: [{ id: 'synthetic-model', name: 'Synthetic' }] }] })
     await save('adapters', { adapters: {

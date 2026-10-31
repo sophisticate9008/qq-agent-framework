@@ -61,6 +61,7 @@ export function createNativeInboundController(options: {
   readonly safeCode: (error: unknown) => string
   readonly onMessage?: (message: InboundMessage) => void
   readonly onDispatched?: (requestId: string, accepted: boolean) => void
+  readonly random?: () => number
 }) {
   const runtime = options.resources
   const { activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode } = options
@@ -74,6 +75,9 @@ export function createNativeInboundController(options: {
   const extendedUntil = new Map<string, number>()
   const speakDecisions = new Set<string>()
   const wakeSettings = new Map<string, { continuationMs: number; replyExtensionMs?: number }>()
+  const probabilityChecks = new Map<string, boolean>()
+  const pendingAdmissions = new Map<string, Set<symbol>>()
+  const random = options.random ?? Math.random
   let received = 0
   let rejected = 0
   let unknown = 0
@@ -174,12 +178,35 @@ export function createNativeInboundController(options: {
       const quotedMessages = inputSettings.effective.wakeOnReply && !['direct', 'nickname', 'reply'].includes(initialParticipation)
         ? await runtime.quotedContext?.read(message, history.messages, context.signal) : undefined
       if (current !== runtime.host || runtime.lifetime !== generation || context.signal.aborted) return
-      const participation = nativeParticipation({ ...message, content }, history.messages,
+      let participation = nativeParticipation({ ...message, content }, history.messages,
         { ...inputSettings.effective, activatedAt: activationTimes.get(message.conversationId), extendedUntil: extendedUntil.get(message.conversationId), quotedMessages }, admittedAt)
-      if (['direct', 'nickname', 'reply'].includes(participation)
-        && !history.messages.some(entry => entry.id === message.id)
-        && !runtime.inbox?.contains(message.conversationId, message.id)) {
-        // Activate on the call itself, before model submission or reply delivery.
+      const probability = inputSettings.effective.groupWakeProbabilityPercent ?? 1
+      const activatedAt = activationTimes.get(message.conversationId)
+      const currentTime = Math.max(Date.now(), admittedAt)
+      const alreadyAwake = activatedAt !== undefined && inputSettings.effective.continuationMs > 0
+        && currentTime >= activatedAt && currentTime <= Math.max(activatedAt + inputSettings.effective.continuationMs, extendedUntil.get(message.conversationId) ?? 0)
+      const probabilityKey = digest([message.conversationId, message.id])
+      const knownMessage = history.messages.some(entry => entry.id === message.id)
+        || runtime.inbox?.contains(message.conversationId, message.id) === true
+      // Preserve the original directed envelope on duplicate callbacks without
+      // drawing again or refreshing the window for an already registered wake.
+      if (participation === 'ambient' && knownMessage && probabilityChecks.get(probabilityKey) === true) participation = 'probability'
+      if (participation === 'ambient' && message.conversationId.startsWith('group:') && probability > 0 && !alreadyAwake
+        && !activeConversations.has(message.conversationId) && !pendingAdmissions.has(message.conversationId)
+        && !runtime.inbox?.hasPending(message.conversationId) && !runtime.executions?.forConversation(message.conversationId)
+        && current.replies.get(message.conversationId)?.status !== 'waiting' && !runtime.feedbackBusy?.(message.conversationId)
+        && !knownMessage
+        && !probabilityChecks.has(probabilityKey)) {
+        // Sample only at first eligible admission, never during quote lookup, queue
+        // coalescing, model preparation or replay of a retained protocol callback.
+        if (probabilityChecks.size >= 4096) probabilityChecks.delete(probabilityChecks.keys().next().value!)
+        probabilityChecks.set(probabilityKey, false)
+        const sample = random()
+        if (!Number.isFinite(sample) || sample < 0 || sample >= 1) failure('NATIVE_CHAT_RANDOM_INVALID')
+        if (sample * 100 < probability) { participation = 'probability'; probabilityChecks.set(probabilityKey, true) }
+      }
+      if (['direct', 'nickname', 'reply', 'probability'].includes(participation) && !knownMessage) {
+        // Activate on the admitted wake, before model submission or reply delivery.
         // This account owns the map; the conversation key never crosses accounts.
         for (const [conversationId, activatedAt] of activationTimes) {
           if (admittedAt > Math.max(activatedAt + 300_000, extendedUntil.get(conversationId) ?? 0) || !allowed(configuration, conversationId)) {
@@ -202,6 +229,12 @@ export function createNativeInboundController(options: {
       // Release the protocol callback after durable admission, before model preparation/submission.
       // Otherwise subsequent QQ corrections remain stuck in the WebSocket queue.
       if (incoming.directed) {
+        // Cover the awaited guard even when continuation is disabled, so another
+        // message cannot randomly wake this group before the first wake is queued.
+        const admission = Symbol()
+        const admissions = pendingAdmissions.get(message.conversationId) ?? new Set<symbol>()
+        admissions.add(admission)
+        pendingAdmissions.set(message.conversationId, admissions)
         try {
           await guard(message.conversationId, context.signal, false, 'admission')
           if (!runtime.inbox || runtime.lifetime !== generation || generation!.signal.aborted) failure('NATIVE_CHAT_STOPPED')
@@ -218,7 +251,11 @@ export function createNativeInboundController(options: {
           rejected++
           lastReceipt = { status: 'rejected', errorCode: safeCode(error) }
           activity.record('rejected', message.conversationId)
-        } finally { participationReasons.delete(digest([message.conversationId, message.id, 'prompt'])) }
+        } finally {
+          participationReasons.delete(digest([message.conversationId, message.id, 'prompt']))
+          admissions.delete(admission)
+          if (!admissions.size && pendingAdmissions.get(message.conversationId) === admissions) pendingAdmissions.delete(message.conversationId)
+        }
         return
       }
       await dispatchIncoming(message, incoming, admittedAt, context.signal)
@@ -333,6 +370,6 @@ export function createNativeInboundController(options: {
       if (groupWakes.size >= 256 && !groupWakes.has(requestId)) groupWakes.delete(groupWakes.keys().next().value!)
       groupWakes.set(requestId, wake.slice(-16))
     },
-    clear() { participationReasons.clear(); groupWakes.clear(); inputSequences.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear(); extendedUntil.clear(); speakDecisions.clear(); wakeSettings.clear() }
+    clear() { participationReasons.clear(); groupWakes.clear(); inputSequences.clear(); preparedReadCursors.clear(); admissionTimes.clear(); activationTimes.clear(); extendedUntil.clear(); speakDecisions.clear(); wakeSettings.clear(); probabilityChecks.clear(); pendingAdmissions.clear() }
   })
 }

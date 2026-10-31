@@ -11,7 +11,7 @@ export interface NativeInboxEntry {
   readonly admittedAt: number;
   readonly deadlineAt: number;
   readonly historySequence?: number;
-  readonly trigger?: 'private' | 'mention' | 'nickname' | 'reply' | 'continuation' | 'observation';
+  readonly trigger?: 'private' | 'mention' | 'nickname' | 'reply' | 'probability' | 'continuation' | 'observation';
 }
 type Outcome = 'accepted' | 'rejected' | 'unknown' | 'expired' | 'coalesced';
 interface Receipt { readonly id: string; readonly outcome: Outcome; readonly requestMessageId: string | null }
@@ -41,7 +41,7 @@ function decode(record: StoredRecord): Queue {
       && typeof item.message.isSelf === 'boolean' && Number.isFinite(item.admittedAt)
       && Number.isFinite(item.deadlineAt) && Number(item.deadlineAt) > Number(item.admittedAt),
     'NATIVE_INBOX_CORRUPT', 'Invalid queued message.');
-    assert(item.trigger === undefined || ['private', 'mention', 'nickname', 'reply', 'continuation', 'observation'].includes(String(item.trigger)),
+    assert(item.trigger === undefined || ['private', 'mention', 'nickname', 'reply', 'probability', 'continuation', 'observation'].includes(String(item.trigger)),
       'NATIVE_INBOX_CORRUPT', 'Invalid input trigger.');
     assert(item.historySequence === undefined || Number.isSafeInteger(item.historySequence) && Number(item.historySequence) > 0,
       'NATIVE_INBOX_CORRUPT', 'Invalid original input history sequence.');

@@ -8,7 +8,9 @@ test('trigger form preserves domain defaults and converts seconds without broade
   assert.deepEqual(chatInputConfiguration(form), DEFAULT_CHAT_INPUT_CONFIGURATION);
   const parsed = chatInputConfiguration({ ...form, nicknames: '鲸鲸\n小鲸鱼', continuationSeconds: '0.001', include: 'group:123', exclude: 'private:456' });
   assert.equal(parsed?.continuationMs, 1); assert.deepEqual(parsed?.scopes.include, ['group:123']); assert.deepEqual(parsed?.scopes.exclude, ['private:456']);
-  for (const patch of [{ continuationSeconds: '301' }, { continuationSeconds: '1e2' }, { nicknames: 'Name\nname' }, { include: '123' }]) {
+  assert.equal(chatInputConfiguration({ ...form, groupWakeProbabilityPercent: '0' })?.groupWakeProbabilityPercent, 0);
+  for (const patch of [{ continuationSeconds: '301' }, { continuationSeconds: '1e2' }, { nicknames: 'Name\nname' }, { include: '123' },
+    { groupWakeProbabilityPercent: '101' }, { groupWakeProbabilityPercent: '0.5' }, { groupWakeProbabilityPercent: '' }]) {
     assert.equal(chatInputConfiguration({ ...form, ...patch }), null);
   }
 });

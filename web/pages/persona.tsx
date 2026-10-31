@@ -238,7 +238,7 @@ export function PersonaPage(props: PageProps) {
     if (!connected || connection.current.api !== api || !connection.current.connected || !catalog || !dirty || editingDisabled || currentView.current.blocked || pendingDelete.current || saveController.current) return;
     const normalized = { ...draft, id: draft.id.trim(), name: draft.name.trim() };
     try { if (normalized.wake) normalized.wake = validatePersonaWake({ ...normalized.wake, nicknames: normalized.wake.nicknames.filter(name => name.length > 0) }); }
-    catch { setFieldError('昵称最多 16 个，每个不超过 128 字且不能重复；续聊时长为 0–300 秒。'); return; }
+    catch { setFieldError('昵称最多 16 个，每个不超过 128 字且不能重复；续聊时长为 0–300 秒，群聊唤醒概率为 0–100 的整数百分比。'); return; }
     if (!normalized.id || !normalized.name || !normalized.identity.trim() || !normalized.style.trim()) {
       setFieldError('内部标识、名称、身份和表达风格必须填写。');
       return;
@@ -391,6 +391,7 @@ export function PersonaPage(props: PageProps) {
                 <div className="flex items-center gap-0.5"><h3 className="text-xs font-medium">唤醒与续聊</h3><HelpTip label="唤醒与续聊">保存后即时生效。白名单内的私聊和群聊 @ 必定唤醒。</HelpTip></div>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
                   <label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={editingDisabled} checked={(draft.wake ?? DEFAULT_PERSONA_WAKE).wakeOnReply} onChange={event => update('wake', { ...(draft.wake ?? DEFAULT_PERSONA_WAKE), wakeOnReply: event.target.checked })} />引用机器人时唤醒</label>
+                  <Field id="persona-group-wake-probability" label="群聊唤醒概率（%）" tip="未唤醒且空闲时，每条群消息按此概率唤醒。默认 1%，0% 关闭；已唤醒期间不重复触发。"><Input id="persona-group-wake-probability" type="number" min={0} max={100} step={1} disabled={editingDisabled} value={(draft.wake ?? DEFAULT_PERSONA_WAKE).groupWakeProbabilityPercent ?? 1} onChange={event => update('wake', { ...(draft.wake ?? DEFAULT_PERSONA_WAKE), groupWakeProbabilityPercent: Number(event.target.value) })} /></Field>
                   <p className="small muted">基础续聊时长和每轮发言追加时长在概览的“续聊策略”中设置。</p>
                 </div>
                 <div className="row border-t pt-2"><Button disabled={!dirty || editingDisabled} onClick={() => void save()}>{saving ? '正在保存' : '保存人设设置'}</Button></div>

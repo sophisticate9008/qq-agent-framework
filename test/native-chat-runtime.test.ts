@@ -36,8 +36,10 @@ import type { LoadedNativeBootstrap } from '../src/host/native-bootstrap.ts'
 import { capabilityLabel, featureLabel } from '../web/lib/feature-labels.ts'
 import type { DshWorkSnapshot } from '../src/contracts/dsh-work.ts'
 import type { FrameworkToolPendingCall, FrameworkToolResult } from '../src/contracts/framework-tools.ts'
+import { DEFAULT_PERSONA_WAKE } from '../src/contracts/persona-wake.ts'
 
-const persona = { id: 'native', name: 'Native', identity: 'A test-only identity.', style: 'Concise.' }
+const persona = { id: 'native', name: 'Native', identity: 'A test-only identity.', style: 'Concise.',
+  wake: { ...DEFAULT_PERSONA_WAKE, groupWakeProbabilityPercent: 0 } }
 const plan = { id: 'daily', name: 'Daily', description: '', instructions: 'Test behavior.',
   personaId: 'native', provider: 'provider', model: 'model', reasoningEffort: 'off' as const,
   contextLimits: { group: 100_000, private: 120_000 } }
@@ -1249,6 +1251,54 @@ test('native group nickname, bot quote and continuation deliver bounded speaker 
   fake.message(305, { ...group, user_id: 777, message: [{ type: 'text', data: { text: '再补充一下' } }] })
   await until(() => prompts().length === 3)
   assert.match(JSON.stringify(prompts()[2]!.request.content), /continuation/)
+})
+
+test('probability wake enters the normal group conversation with truthful sender facts and then continues without another wake', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  await fake.save('personas', { personas: [{ ...persona, wake: { ...DEFAULT_PERSONA_WAKE, groupWakeProbabilityPercent: 100 } }] })
+  await fake.start()
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  const group = { message_type: 'group', group_id: 456, user_id: 777 }
+  fake.message(3201, { ...group, message: [{ type: 'text', data: { text: '今天发现了一件有意思的事' } }] })
+  await until(() => prompts().length === 1)
+  const first = JSON.stringify(prompts()[0]!.request.content)
+  assert.match(first, /probability/)
+  assert.match(first, /777/)
+  assert.match(first, /senderIsConfiguredOwner\\?":false/)
+  assert.doesNotMatch(first, /对方 @ 了你/)
+  fake.message(3202, { ...group, message: [{ type: 'text', data: { text: '再补一个细节' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 2)
+  assert.equal(prompts().length, 1)
+  await fake.answer()
+  await until(() => prompts().length === 2)
+  assert.match(JSON.stringify(prompts()[1]!.request.content), /continuation/)
+  assert.doesNotMatch(JSON.stringify(prompts()[1]!.request.content), /probability/)
+  assert.equal(fake.creates(), 1)
+})
+
+test('probability wake is suppressed while the group is busy even with no continuation, and its live switch preserves sessions', async context => {
+  const fake = await fixture(context)
+  await fake.configure()
+  const wake = { ...DEFAULT_PERSONA_WAKE, continuationMs: 0, groupWakeProbabilityPercent: 100 }
+  await fake.save('personas', { personas: [{ ...persona, wake }] })
+  await fake.start()
+  const prompts = () => fake.rpc.filter(value => value.method === 'session/prompt')
+  const group = { message_type: 'group', group_id: 456 }
+  fake.message(3211, { ...group, message: [{ type: 'text', data: { text: '一次概率唤醒' } }] })
+  await until(() => prompts().length === 1)
+  fake.message(3212, { ...group, message: [{ type: 'text', data: { text: '处理期间的普通闲聊' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.length === 2)
+  assert.equal(fake.runtime().inboxSummary().pending, 0)
+  await fake.answer()
+  await until(() => fake.runtime().executions()!.forConversation('group:456') === null)
+  await fake.save('personas', { personas: [{ ...persona, wake: { ...wake, groupWakeProbabilityPercent: 0 } }] })
+  fake.message(3213, { ...group, message: [{ type: 'text', data: { text: '关闭概率后只记入历史' } }] })
+  await until(() => fake.runtime().host()!.history.snapshot('group:456', { afterSequence: 0 }).messages.some(item => item.id === '3213'))
+  assert.equal(prompts().length, 1)
+  fake.message(3214, { ...group, message: [{ type: 'at', data: { qq: '999' } }, { type: 'text', data: { text: '真正的呼叫仍正常' } }] })
+  await until(() => prompts().length === 2)
+  assert.equal(fake.creates(), 1)
 })
 
 test('native busy corrections suppress the stale reply and merge into one subsequent submission', async context => {

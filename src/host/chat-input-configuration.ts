@@ -15,6 +15,7 @@ export const CHAT_INPUT_CONFIGURATION_CONTRIBUTION: PackageConfigurationContribu
       { id: 'wake-on-reply', path: ['wakeOnReply'], kind: 'boolean', label: '引用唤醒', description: '群聊引用机器人消息时参与。' },
       { id: 'continuation', path: ['continuationMs'], kind: 'integer', label: '会话续聊时长', description: '从最近一次呼叫起，本会话所有发言者的消息都可进入参与判断；普通消息不刷新基础时长，实际决定发言可按追加配置延长，不相关时保持安静，0表示关闭。', minimum: 0, maximum: 300_000, unit: 'ms' },
       { id: 'reply-extension', path: ['replyExtensionMs'], kind: 'integer', label: '有效发言追加时长', description: '每轮通过覆盖检查并决定发言后增加一次，分气泡不重复计数；剩余时间自然减少。', minimum: 0, maximum: 60000, unit: 'ms' },
+      { id: 'group-wake-probability', path: ['groupWakeProbabilityPercent'], kind: 'integer', label: '群聊概率唤醒', description: '未唤醒且空闲时，每条群消息独立按此概率唤醒；0表示关闭。', minimum: 0, maximum: 100, unit: '%' },
       { id: 'group', path: ['scopes', 'group'], kind: 'boolean', label: '群聊', description: '在已获准的群聊中使用。' },
       { id: 'private', path: ['scopes', 'private'], kind: 'boolean', label: '私聊', description: '在已获准的私聊中使用。' },
       { id: 'include', path: ['scopes', 'include'], kind: 'string-list', label: '限定会话', description: '留空使用已开启的会话类型，填写后仅在列出的会话生效。', maximumEntries: 256, maximumLength: 40 },

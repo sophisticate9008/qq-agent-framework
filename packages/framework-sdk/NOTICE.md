@@ -39,6 +39,27 @@ SOFTWARE.
 
 ## 本仓库使用的组件与参考资料
 
+### 表情语义检索
+
+表情索引依据以下公开一手资料独立实现：
+
+- [Capoo Vault 标注规范](https://github.com/CST-Cat/capoo-vault/blob/main/docs/spec.md)：将画面描述、情绪、动作、场景与标签分别组织，供多字段检索参考。
+- [PerSRV: Personalized Sticker Retrieval with Vision-Language Model](https://arxiv.org/html/2410.21801v2)：将图像语义理解、图中文字与在线召回分别处理。框架参考语义与文字分离的思路，没有实现论文的个体偏好画像或训练模型。
+- [Small Stickers, Big Meanings](https://arxiv.org/html/2506.01668v1)：讨论图像描述与真实表情查询之间的差异，以及语用理解的主观性和模型误判。框架允许开放用途、多义与空标签，不将少量情绪类别当作完整语义。
+- [Selecting Stickers in Open-Domain Dialogue through Multitask Learning](https://aclanthology.org/2022.findings-acl.241/)：对话历史、情绪与表情含义需要共同理解，单一情绪匹配不能替代语境判断。
+- [Elastic combined fields 文档](https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-combined-fields-query)与 [similarity 设置](https://www.elastic.co/docs/reference/elasticsearch/index-settings/similarity)：多字段加权、词频饱和与长度归一化的 BM25F/BM25 检索思路。框架使用自己的短库实现及小库平滑，不依赖 Elasticsearch。
+- [Emotion and Intention Guided Multi-Modal Learning for Sticker Response Selection](https://ojs.aaai.org/index.php/AAAI/article/view/38509)：情绪与表达意图不一致会导致表情选择偏差。框架将表达意图准入与情绪、动作、文字信号分开处理，不复现该论文的训练模型。
+
+本框架的字段权重、小库平滑、匹配阈值、小范围同义词、否定与不适用处理、重复排除、账号缓存与最终本地选择均为本项目实现；这些具体规则是工程取舍，不表述为论文结论。没有复制上述项目的源码、模型、标注数据或图片，不捆绑第三方表情素材。核对日期为 2026-10-31。
+
+角色名称、别名、来源记录与可见外观分面同样由本框架独立建模。名称归一化用于本地检索，不代表取得第三方角色目录或识别服务。当前没有接入外部识图、反向图片搜索或网络角色数据库；索引中的“网页依据”只标记实际核对后保存的受限来源记录，不声称自动联网验证。
+
+QQ 收藏接口依据 NapCat 的 [CustomFace 动作实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/CustomFace.ts) 核对：读取明细、添加、删除与修改备注为不同动作，读取结果不提供账号总容量。实际支持范围由当前协议端决定。
+
+### 页面虚拟化
+
+列表与表情瀑布流使用 [TanStack Virtual](https://tanstack.com/virtual/latest/docs/api/virtualizer) 提供的动态尺寸测量、滚动区域与多列虚拟化能力。该依赖使用 MIT 许可；框架负责卡片内容、账号隔离、图片请求与有界缓存，不捆绑第三方图片素材。
+
 ### Markdown 图片排版
 
 框架使用 [markdown-it](https://github.com/markdown-it/markdown-it) 解析 Markdown、[Takumi](https://github.com/kane50613/takumi) 完成本机排版和图像渲染、[highlight.js](https://github.com/highlightjs/highlight.js) 提供静态语法高亮、[MathJax](https://github.com/mathjax/MathJax) 处理数学公式、[sharp](https://github.com/lovell/sharp) 完成 PNG 分页。这些依赖保留各自发行包中的许可与声明；此集成不捆绑无头浏览器。

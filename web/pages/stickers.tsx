@@ -232,7 +232,7 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
   const snapshot = resource.snapshot
   return <div className="grid gap-4">
     <PageHeading title="表情库" description="管理账号收藏和额外保存的表情，按含义挑选和使用。" />
-    <Section title="收藏与发送设置" description="收藏在后台筛选打标；发送可选择独立意图转换、本地匹配或DSH选图。">
+    <Section title="收藏与发送设置" description="收藏在后台筛选打标；发送先按本地标注检索，可开启独立DSH会话筛选。">
       <PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['sticker-library', 'sticker-sending']} embedded />
     </Section>
     <Section title="已有表情" description={snapshot ? `账号${snapshot.accountCollection === 'confirmed' ? '已读取' : '上次读取'} ${snapshot.capacity.count} 张；总容量未知，达到 ${snapshot.capacity.nearFullAt} 张后新收藏转存额外库。` : '启动聊天后可查看、筛选和管理表情。'}>

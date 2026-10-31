@@ -138,6 +138,8 @@ import { createStickerPackages } from './sticker-packages.ts'
 import { createStickerLibrary } from './sticker-library.ts'
 import { createNativeStickerSendEffect, NATIVE_STICKER_SEND_TOOLS } from './native-sticker-send.ts'
 import { validateStickerLibraryConfiguration } from '../contracts/sticker-library.ts'
+import { validateStickerSendingConfiguration } from '../contracts/sticker-sending.ts'
+import { createStickerDshSelector } from './sticker-dsh-selector.ts'
 import { createOneBotConversationPort } from '../adapters/onebot-conversation.ts'
 import { createNativeConversationService, NATIVE_CONVERSATION_TOOLS } from './native-conversation-tools.ts'
 import { createNativeReplyEffects, NATIVE_REPLY_TOOLS } from './native-reply-tools.ts'
@@ -1121,7 +1123,16 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           readImage: request => { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.readImage(request) },
           selfId, store: store!, sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+        const stickerModel = { provider: selected.deployment.presetBindings.find(b => b.externalProvider)?.externalProvider ?? definition.model.provider,
+          model: definition.model.name, reasoningEffort: definition.model.reasoningEffort, contextWindow: 128_000 }
+        const stickerSelector = createStickerDshSelector({
+          client: () => pluginModels?.forPlugin('sticker-sending', controller.signal), model: () => stickerModel,
+          async reconcile(name, conversationId, revision, signal) {
+            await pluginModels?.reconcile('sticker-sending', { name, conversationId, expectedRevision: revision }, signal)
+          } })
         const stickerSend = createNativeStickerSendEffect({ library: () => stickerLibrary, sources: () => messageSources?.reader,
+          configuration: async () => validateStickerSendingConfiguration((await packageConfigurationRegistry.read('sticker-sending')).configuration),
+          selector: stickerSelector,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
         const replyEffects = createNativeReplyEffects({ sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
@@ -1298,8 +1309,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           },
           collector: pluginModels.forPlugin('sticker-library', controller.signal),
           configuration: async () => validateStickerLibraryConfiguration((await packageConfigurationRegistry.read('sticker-library')).configuration),
-          signal: controller.signal, model: { provider: selected.deployment.presetBindings.find(b => b.externalProvider)?.externalProvider ?? definition.model.provider,
-            model: definition.model.name, reasoningEffort: definition.model.reasoningEffort },
+          signal: controller.signal, model: stickerModel,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource'),
           register(id, conversationId, signal) { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.registerLibraryImage(id, conversationId, signal) },
           context(conversationId, beforeMessageId) {

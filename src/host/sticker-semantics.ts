@@ -8,7 +8,7 @@ import { digest, json } from './data.ts'
 export const STICKER_EMOTIONS = Object.freeze({
   开心: ['开心', '高兴', '快乐', '大笑', '哈哈', 'happy', 'laugh', 'joy'],
   得意: ['得意', '骄傲', '嘚瑟', 'proud', 'smug'],
-  难过: ['难过', '伤心', '忧郁', '不开心', '不高兴', 'sad'],
+  难过: ['难过', '伤心', '忧郁', '不开心', '不高兴', 'sad', 'unhappy'],
   委屈: ['委屈', '受委屈', 'aggrieved'],
   无语: ['无语', 'speechless'],
   疑惑: ['疑惑', '困惑', '疑问', '不懂', 'confused', 'puzzled'],
@@ -100,7 +100,7 @@ function containsMeaning(value: string, term: string): boolean {
   while (offset !== -1) {
     const before = value.slice(Math.max(0, offset - 12), offset), after = value.slice(offset + term.length)
     const bounded = !/^[a-z ]+$/.test(term) || !/[a-z]$/.test(before) && !/^[a-z]/.test(after)
-    if (bounded && !/(?:(?:不|没|别|非|无)(?:要|想|愿|再|太|很|那么|怎么|是)?|not\s+)$/i.test(before)
+    if (bounded && !/(?:(?:不|没|别|非|无)(?:要|想|愿|再|太|很|那么|怎么|是(?:在)?|有(?:在)?|在)?|not\s+)$/i.test(before)
       && !/^(?:不起来|不了)/.test(after)) return true
     offset = value.indexOf(term, offset + 1)
   }
@@ -117,7 +117,12 @@ function meanings(value: string): string[] {
     .flatMap((vocabulary, index) => concepts(value, vocabulary).map(concept => `${index}:${concept}`))
 }
 
-/** Local bounded, field-weighted recall. The sending helper still decides contextual suitability. */
+/** Normalized semantic concepts for the local selector. Prefixes keep dimensions distinct. */
+export function stickerSemanticConcepts(value: string): readonly string[] { return meanings(folded(value)) }
+/** Literal evidence, with conservative word boundaries and negation handling. */
+export function stickerContainsMeaning(value: string, term: string): boolean { return containsMeaning(folded(value), folded(term)) }
+
+/** Local bounded, field-weighted recall for library management queries. */
 export function stickerSemanticScore(query: string, name: string, annotation: StickerAnnotation | null): number {
   const normalized = folded(query).slice(0, 480)
   if (!normalized) return 1

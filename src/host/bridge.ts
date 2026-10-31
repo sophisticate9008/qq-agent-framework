@@ -328,6 +328,12 @@ export function createBridgeHost({ store, agent: sourceAgent, transport: sourceT
             if (presentation && presentation.value.delivery === null) store.write(AGENT_PRESENTATION_NAMESPACE, requestId,
               { ...presentation.value, delivery: receipt.status }, { expectedRevision: presentation.record.revision,
                 ...(receipt.status === 'unknown' ? {} : { expiresAt: clock() + 7 * 24 * 60 * 60 * 1000 }) });
+            // This final feedback has finished its one delivery attempt. An unknown
+            // receipt stays unknown; its exact wait must not block a later QQ turn.
+            const waiting = presentation && replies.get(event.conversationId);
+            if (!controller.signal.aborted && presentation && binding && waiting && ['waiting', 'timed-out'].includes(waiting.status)
+              && waiting.sessionId === binding.sessionId && waiting.generation === binding.generation
+              && waiting.requestId === presentation.value.id) replies.suppress(binding, presentation.value.id);
             onAgentDelivery?.(requestId, receipt);
           }
         }

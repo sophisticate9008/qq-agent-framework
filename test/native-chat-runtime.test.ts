@@ -1349,13 +1349,14 @@ test('native mixed and media-only input retain scoped handles and explicitly unr
   fake.message(502, { message: [{ type: 'record', data: { file: 'opaque-audio-token' } }] })
   await until(() => prompts().length === 2)
   assert.match(JSON.stringify(prompts()[1]!.request.content), /audio资源 media-/)
-  const counts = fake.rpc.length
+  const effectfulRpcCount = () => fake.rpc.filter(call => ['session/create', 'session/prompt'].includes(String(call.method))).length
+  const counts = effectfulRpcCount()
   const media = await invoke(fake.routes(), 'GET', '/api/chat/media', null, new URLSearchParams({ conversationId: 'private:123', limit: '100' }))
   assert(Array.isArray(media.items) && media.items.length === 2)
   assert(media.items.some(item => isRecord(item) && item.kind === 'audio' && item.readingAvailable === false
     && Array.isArray(item.missingReasons) && item.missingReasons.includes('native_media_transcriber_not_connected')))
   assert(!JSON.stringify(media).includes('private-test-token'))
-  assert.equal(fake.rpc.length, counts)
+  assert.equal(effectfulRpcCount(), counts)
   await fake.runtime().stop()
   const stopped = await invoke(fake.routes(), 'GET', '/api/chat/media', null, new URLSearchParams({ conversationId: 'private:123' }))
   assert.equal(stopped.running, false); assert(Array.isArray(stopped.items) && stopped.items.length === 2)
@@ -2523,6 +2524,8 @@ for (const unknownSend of [false, true]) test(`host result feedback keeps the or
   fake.agentEvent('turn/end', { turn: 2, reason: { kind: 'completed' } })
   await until(() => host.agentNotificationDelivery(binding, request.id) !== 'pending')
   assert.equal(host.agentNotificationDelivery(binding, request.id), unknownSend ? 'unknown' : 'confirmed')
+  assert.equal(host.replies.get('private:123')?.status, unknownSend ? 'suppressed' : 'responded')
+  assert.equal(host.outbox.list()[0]?.status, unknownSend ? 'unknown' : 'confirmed', 'settling the wait does not rewrite delivery evidence')
   assert.equal(fake.sends.length, 1)
   assert.match(JSON.stringify(fake.sends), /上游没给我图片/)
   assert.doesNotMatch(JSON.stringify(fake.sends), /Observed task failure/)
@@ -2532,6 +2535,7 @@ for (const unknownSend of [false, true]) test(`host result feedback keeps the or
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   fake.message(3105)
   await until(() => fake.rpc.filter(call => call.method === 'session/prompt').length === 3)
+  assert.equal(fake.rpc.filter(call => call.method === 'session/create').length, 1, 'later messages keep the same bound session')
   fake.rawFinal(3)
   await until(() => fake.runtime().executions()!.forConversation('private:123') === null)
   assert.equal(fake.sends.length, 1, 'a normal QQ turn still requires explicit reply')

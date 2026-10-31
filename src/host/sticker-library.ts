@@ -213,17 +213,25 @@ export function createStickerLibrary(options: {
       for (const account of roster) {
         const suppliedMd5 = account.md5?.toLowerCase() ?? null
         const existing = match(suppliedMd5, account.url)
+        const cachedAnnotation = cache.read(account)
         const md5 = suppliedMd5 ?? existing?.item.md5 ?? null
         const id = existing?.item.id ?? digest([options.accountId, md5 ?? account.url])
         present.add(id)
         const item: Entry = { id, accountId: options.accountId, md5, url: account.url, account, extra: false, deleted: existing?.item.deleted ?? false,
-          annotation: existing?.item.annotation ?? cache.read(account), createdAt: existing?.item.createdAt ?? Date.now(),
+          annotation: existing?.item.annotation ?? cachedAnnotation, createdAt: existing?.item.createdAt ?? Date.now(),
           ...(existing?.item.manualIdentity ? { manualIdentity: existing.item.manualIdentity } : {}),
           state: existing?.item.state === 'unknown' ? 'unknown' : 'ready' }
         // Presence reconciles an uncertain add, absence below reconciles an uncertain delete.
         const operation = existing && options.store.read(WRITES, id)
-        if (operation && object(operation.value).action === 'add') save({ ...item, state: 'ready' })
-        else save(item)
+        const associated = operation && object(operation.value).action === 'add' ? { ...item, state: 'ready' as const } : item
+        save(associated)
+        // A roster refresh can discover an already collected image after its
+        // background annotation was saved. Keep the account-list cache coherent,
+        // but never transfer labels across conflicting content hashes.
+        const sameImage = existing && (suppliedMd5 && existing.item.md5
+          ? suppliedMd5 === existing.item.md5.toLowerCase() : account.url === existing.item.url)
+        if (sameImage && associated.annotation && !associated.deleted && associated.state === 'ready'
+          && digest(cachedAnnotation) !== digest(associated.annotation)) cache.remember(account, associated.annotation)
         if (existing?.item.extra) await rm(join(directory, id), { force: true })
       }
       if (!limited) for (const { item } of all()) if (item.account && !present.has(item.id)) {

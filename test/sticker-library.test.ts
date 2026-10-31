@@ -10,6 +10,7 @@ import type { OneBotSticker, OneBotStickerPort } from '../src/adapters/onebot-st
 import { createSqliteStore } from '../src/storage/sqlite.ts'
 import { createStickerLibrary, stickerMessageAssets } from '../src/host/sticker-library.ts'
 import { createStickerSemanticCache } from '../src/host/sticker-semantics.ts'
+import { createNativeStickerService } from '../src/host/native-sticker-tools.ts'
 import { createStickerCharacterRecognition } from '../src/host/sticker-character-recognition.ts'
 import { createStickerCharacterAliases } from '../src/host/sticker-character-aliases.ts'
 import { DEFAULT_STICKER_LIBRARY_CONFIGURATION, parseStickerLibrarySnapshot, validateStickerLibraryConfiguration } from '../src/contracts/sticker-library.ts'
@@ -56,9 +57,42 @@ async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'fu
   }
   asset('incoming')
   t.after(async () => { await library.stop(); store.close(); await rm(directory, { recursive: true, force: true }) })
-  return { library, store, bytes, calls, writes, asset, imageReads: () => imageReads, setClassifier: (next: typeof classify) => { classify = next },
+  return { library, store, bytes, calls, writes, asset, port, imageReads: () => imageReads, setClassifier: (next: typeof classify) => { classify = next },
+    setRoster: (items: readonly OneBotSticker[]) => { roster = items },
     seed() { const item = { id: 'known', stickerId: 'known', md5, url: 'https://media.example/image' }; roster = [item]; createStickerSemanticCache(store, '999').remember(item, annotation) } }
 }
+
+test('an account image discovered after tagging reuses collection and exposes its annotation through the existing sticker list', async t => {
+  for (const sameContent of [true, false]) {
+    const f = await fixture(t)
+    const item: OneBotSticker = { id: 'account-discovered-after-tagging', stickerId: 'actual-id',
+      md5: sameContent ? createHash('md5').update(f.bytes).digest('hex') : 'b'.repeat(32), url: 'https://media.example/image' }
+    const cache = createStickerSemanticCache(f.store, '999')
+    assert.equal(cache.read(item), null)
+    f.setClassifier(async () => {
+      // The account becomes visible only on the forced refresh after annotation.
+      f.setRoster([item])
+      return JSON.stringify({ isSticker: true, safeToShare: true, ...annotation })
+    })
+    assert.deepEqual(await f.library.collect('incoming', 'group:123', true, signal()), { status: 'confirmed', reused: true, quiet: true })
+    assert.deepEqual(f.writes, [], 'an already collected image must not be added again')
+    assert.equal(f.calls.length, 1)
+    if (!sameContent) {
+      assert.equal(cache.read(item), null, 'a reused URL with conflicting content hashes must not receive the old annotation')
+      continue
+    }
+    assert.deepEqual(cache.read(item), annotation)
+    assert.equal(createStickerSemanticCache(f.store, 'other-account').read(item), null)
+    const legacy = createNativeStickerService({ port: f.port, store: f.store, selfId: '999', async authorize() {},
+      async register(asset) { assert.equal(asset.source.url, item.url); return 'listed-sticker' } })
+    const result = await legacy.list.execute({ input: { query: '问候', limit: 10 },
+      scope: { featureId: 'framework-tools', version: '1.0.0', eventId: 'list-after-tagging', conversationId: 'group:123' }, signal: signal() })
+    assert(isRecord(result)); assert.equal(result.matched, true); assert(Array.isArray(result.items))
+    const listed = result.items[0]
+    assert(isRecord(listed)); assert.equal(listed.needsAnnotation, false)
+    assert.equal(listed.description, annotation.description); assert.deepEqual(listed.tags, annotation.tags)
+  }
+})
 
 test('old library dimensions are filled on preview without downloading during snapshot or changing the reviewed item revision', async t => {
   const f = await fixture(t); f.seed()

@@ -102,7 +102,7 @@ export function OverviewPage(props: PageProps) {
       </div>
       <div className="split overview-activity-layout">
         <RecentActivity api={api} connected={connected} onViewAll={() => navigate('sessions')} />
-        <Section title="当前聊天" className="[&>.panel-body]:p-0" actions={<Button size="xs" variant="link" onClick={() => navigate('model')}>完整编辑</Button>}>
+        <Section title="当前聊天" scrollable height="lg" className="[&>.panel-body]:p-0 [&>.panel-body]:max-h-[min(32rem,70dvh)]" actions={<Button size="xs" variant="link" onClick={() => navigate('model')}>完整编辑</Button>}>
           <ChatPlanManager {...props} compact setDirty={(dirty, scope) => { setLocalDirty(dirty); setDirty(dirty, scope); }}>
             <ConversationWakeSettings api={api} connected={connected} setDirty={setDirty} />
             <PackageConfigurationManager api={api} connected={connected} setDirty={setDirty} onlyIds={['chat-output', 'media']} embedded />

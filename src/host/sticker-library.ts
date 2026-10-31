@@ -12,6 +12,7 @@ import { assert, isRecord } from '../core/values.ts'
 import { digest, json, object } from './data.ts'
 import { withDeadline } from './deadlines.ts'
 import { createStickerMatcher } from './sticker-matching.ts'
+import { createStickerSemanticRefinement, type StickerRefinementCandidate } from './sticker-semantic-refinement.ts'
 import { createStickerThumbnailCache } from './sticker-thumbnail-cache.ts'
 import { createStickerImageMetadata, readStickerImageDimensions, stickerImageIdentity } from './sticker-image-metadata.ts'
 import { createStickerCharacterAliases } from './sticker-character-aliases.ts'
@@ -89,6 +90,26 @@ export function createStickerLibrary(options: {
   const jobs = new Set<Promise<unknown>>(), reservations = new Set<string>()
   const lifetime = new AbortController()
   const active = (signal: AbortSignal) => AbortSignal.any([signal, options.signal, lifetime.signal])
+  const refinement: ReturnType<typeof createStickerSemanticRefinement> = createStickerSemanticRefinement({ store: options.store, accountId: options.accountId,
+    client: options.collector, model: options.model, signal: active(options.signal), authorize: options.authorize,
+    reconcile: (name, conversationId, signal) => options.reconcile?.('sticker-library', name, conversationId, signal) ?? Promise.resolve(),
+    candidates: semanticCandidates,
+    rank: (intent, character, context, candidates) => matcher.rank({ intent, context, recentlyUsed: [],
+      candidates: candidates.map(candidate => ({ ...candidate, annotation: refinement.annotation(candidate.id, candidate.version, candidate.annotation) })),
+      ...(character === undefined ? {} : { character }), characterAliases: characterAliases() }),
+    image: async (candidate, signal) => {
+      assert(currentSemanticCandidate(candidate), 'STICKER_IMAGE_CHANGED', 'The image metadata changed.')
+      const item = availableImage(candidate.id, signal), bytes = await readImage(candidate.id, signal)
+      assert(!item.md5 || createHash('md5').update(bytes).digest('hex') === item.md5.toLowerCase(),
+        'STICKER_IMAGE_CHANGED', 'The image content changed.')
+      const image = await sharp(bytes, { pages: 1, limitInputPixels: 40_000_000 }).timeout({ seconds: 3 }).rotate()
+        .resize({ width: 768, height: 768, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 75 }).toBuffer()
+      signal.throwIfAborted()
+      assert(currentSemanticCandidate(candidate), 'STICKER_IMAGE_CHANGED', 'The image metadata changed.')
+      return { mediaType: 'image/jpeg', data: image.toString('base64') }
+    },
+    current: currentSemanticCandidate, onFault: options.onFault,
+  })
   let roster: readonly OneBotSticker[] = [], refreshedAt = 0, confirmed = false, limited = false
   let refresh: Promise<void> | undefined
   let mutations: Promise<unknown> = Promise.resolve()
@@ -108,6 +129,9 @@ export function createStickerLibrary(options: {
     if (item.deleted || item.state !== 'ready' || previous && imageVersion(parse(previous.value)) !== imageVersion(item)) thumbnails.invalidate(item.id)
     const saved = previous && digest(previous.value) === digest({ schema: 1, ...item }) ? previous
       : options.store.write(RECORDS, item.id, json({ schema: 1, ...item }), { expectedRevision: previous?.revision ?? null })
+    if (item.deleted) {
+      try { refinement.forget(item.id) } catch { options.onFault?.('STICKER_SEMANTIC_REFINEMENT_INCOMPLETE') }
+    }
     if (item.annotation?.identity) {
       try { characters.remember(item.annotation.identity) }
       catch { options.onFault?.('STICKER_CHARACTER_INDEX_INCOMPLETE') }
@@ -143,6 +167,28 @@ export function createStickerLibrary(options: {
   }
   function imageAnnotation(item: Entry): StickerAnnotation | null {
     return item.annotation ? { ...item.annotation, ...(item.manualIdentity ? { identity: item.manualIdentity } : {}) } : null
+  }
+  function characterAliases() {
+    return characters.list({ limit: 1024 }).map(({ character, aliases }) => ({ character, aliases }))
+  }
+  function semanticVersion(item: Entry, annotation: StickerAnnotation): string {
+    // Signed URL rotation does not invalidate a label verified against the same known content hash.
+    return digest([options.accountId, item.id, stickerImageIdentity(item), annotation])
+  }
+  function semanticCandidates(): readonly StickerRefinementCandidate[] {
+    const rules = recognition.list()
+    return all().filter(({ item }) => !item.deleted && item.state === 'ready' && (item.account || item.extra) && item.annotation)
+      .map(({ item }) => {
+        const annotation = enrich(imageAnnotation(item)!, rules)
+        return { id: item.id, name: item.account?.name, annotation, version: semanticVersion(item, annotation) }
+      })
+  }
+  function currentSemanticCandidate(candidate: StickerRefinementCandidate): boolean {
+    const row = options.store.read(RECORDS, candidate.id)
+    if (!row) return false
+    const item = parse(row.value)
+    return item.accountId === options.accountId && !item.deleted && item.state === 'ready' && Boolean(item.account || item.extra)
+      && Boolean(item.annotation) && semanticVersion(item, enrich(imageAnnotation(item)!, recognition.list())) === candidate.version
   }
   function serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = mutations.catch(() => undefined).then(operation)
@@ -439,20 +485,24 @@ export function createStickerLibrary(options: {
   async function choose(intent: string, conversationId: string, callerSignal: AbortSignal, deadlineAt: number, character?: string,
     selector?: (request: StickerSelectionRequest) => Promise<string | null>): Promise<string | null> {
     if (deadlineAt !== Infinity && !Number.isFinite(deadlineAt) || deadlineAt <= Date.now()) return null
+    let needsRefinement = false, selecting = false, authorized = false
+    let context: readonly string[] = []
     const run = async (signal: AbortSignal): Promise<string | null> => {
       await options.authorize(conversationId, signal)
-      signal.throwIfAborted()
-      const rules = recognition.list()
-      const candidates = all().filter(({ item }) => !item.deleted && item.state === 'ready' && (item.account || item.extra) && item.annotation)
-        .map(({ item }) => ({ id: item.id, name: item.account?.name, annotation: enrich(imageAnnotation(item)!, rules) }))
-      const context = options.context(conversationId).slice(-5)
+      signal.throwIfAborted(); authorized = true
+      const candidates = semanticCandidates().map(candidate => ({ ...candidate,
+        annotation: refinement.annotation(candidate.id, candidate.version, candidate.annotation) }))
+      context = options.context(conversationId).slice(-5)
       const matched = matcher.rank({ intent, context, candidates, ...(character === undefined ? {} : { character }),
-        characterAliases: characters.list({ limit: 1024 }).map(({ character, aliases }) => ({ character, aliases })),
+        characterAliases: characterAliases(),
         recentlyUsed: (recent.get(conversationId) ?? []).filter(item => Date.now() - item.at < 120_000).map(item => item.id) })
       const allowed = matched.slice(0, 8)
-      if (!allowed.length || Date.now() >= deadlineAt) return null
+      if (!allowed.length || Date.now() >= deadlineAt) { needsRefinement = Boolean(selector); return null }
+      selecting = Boolean(selector)
       const selectedId = selector ? await selector({ intent, ...(character === undefined ? {} : { character }), context, conversationId,
         candidates: allowed.map(candidate => ({ ...candidate, annotation: candidates.find(item => item.id === candidate.id)!.annotation })), signal, deadlineAt }) : allowed[0]?.id
+      selecting = false
+      needsRefinement = Boolean(selector) && (!allowed.some(candidate => candidate.id === selectedId) || Date.now() >= deadlineAt)
       signal.throwIfAborted()
       const chosen = allowed.find(candidate => candidate.id === selectedId)
       if (!chosen || Date.now() >= deadlineAt) return null
@@ -464,8 +514,21 @@ export function createStickerLibrary(options: {
       return assetId
     }
     const signal = active(callerSignal)
-    return deadlineAt === Infinity ? run(signal).catch(() => null)
-      : withDeadline({ signal, timeoutMs: Math.max(1, Math.floor(deadlineAt - Date.now())), code: 'STICKER_SEND_TIMEOUT', run }).catch(() => null)
+    let result: string | null
+    try {
+      result = deadlineAt === Infinity ? await run(signal)
+        : await withDeadline({ signal, timeoutMs: Math.max(1, Math.floor(deadlineAt - Date.now())), code: 'STICKER_SEND_TIMEOUT', run })
+    } catch {
+      result = null
+      if (selecting) needsRefinement = true
+    }
+    // Only an AI miss/timeout starts learning. Its lifetime is independent of the expired send deadline,
+    // but cancellation, shutdown and revoked authorization cannot start a new helper model request.
+    if (!result && selector && authorized && needsRefinement && !signal.aborted && jobs.size < 8) {
+      const job = refinement.request({ intent, conversationId, context, ...(character === undefined ? {} : { character }) })
+      if (job) track(job)
+    }
+    return result
   }
   function track(job: Promise<unknown>) {
     jobs.add(job); void job.finally(() => jobs.delete(job)).catch(() => undefined)

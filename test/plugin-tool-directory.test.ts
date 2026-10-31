@@ -42,3 +42,27 @@ test('installed extension tools are discovered on demand with owner checks and d
   assert.throws(() => registry.forPlugin('example', lifetime.signal).register({ id: 'another', description: '状态',
     parameters: { type: 'object' }, permission: 'autonomous', readOnly: true, async execute() { return {} } }))
 })
+
+test('chat directory cannot expose or invoke raw collection while the host protocol capability remains declared', async context => {
+  const store = createSqliteStore({ filename: ':memory:' }); context.after(() => store.close())
+  let protocolCalls = 0
+  const source: NativeMessageSource = { conversationId: 'group:123', sourceMessageId: 'request', userId: 'owner',
+    receivedAt: 0, expiresAt: Date.now() + 10000, isOwner: true, assurance: 'normalized-onebot-source-only',
+    workIntentVerified: false, capabilityAuthorizationVerified: false, externalToolAuthorizationVerified: false }
+  const directory = createNativeCapabilityDirectory({ store, selfId: 'bot', tools: () => [],
+    inventory: { protocol: 'napcat', version: 'fixture', source: 'reported-actions', supportedIds: ['add_custom_face', 'fetch_custom_face_detail'] },
+    sources: () => ({ lookup: async () => source, requireOwner: async () => source }), authorize: async () => {},
+    port: { inspect: async () => ({ status: 'rejected', code: 'unused' }), call: async () => { protocolCalls++; return { status: 'confirmed', data: {} } } } })
+  const request = (input: JsonValue): EffectRequest => ({ input, signal: new AbortController().signal,
+    scope: { eventId: 'collection-attempt', conversationId: 'group:123', featureId: 'framework-tools', version: '1.0.0' } })
+  const catalog = directory.effects['native.capabilities.catalog'], call = directory.effects['native.capabilities.call']
+  assert(QQ_CAPABILITIES.some(entry => entry.id === 'add_custom_face'), 'trusted host protocol integrations keep the low-level capability')
+  assert(!directory.inventory().some(entry => entry.id === 'qq.add_custom_face'))
+  assert(!JSON.stringify(await catalog.execute(request({ category: 'stickers' }))).includes('add_custom_face'))
+  assert.deepEqual(await catalog.execute(request({ id: 'qq.add_custom_face' })), { status: 'rejected', code: 'CAPABILITY_NOT_FOUND' })
+  await assert.rejects(call.execute(request({ id: 'qq.add_custom_face', input: { file: 'base64://unused' } })), { code: 'CAPABILITY_USE_SCOPED_TOOL' })
+  assert.equal(protocolCalls, 0)
+  assert.equal(store.list('native-chat.protocol-writes').length, 0)
+  await call.execute(request({ id: 'qq.fetch_custom_face_detail', input: {} }))
+  assert.equal(protocolCalls, 1, 'unrelated read-only protocol tools still work')
+})

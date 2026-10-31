@@ -10,6 +10,9 @@ import { digest, json, object } from './data.ts'
 
 export interface DirectoryTool { readonly tool: NativeToolContribution; readonly effect: EffectAdapter; readonly category: string; readonly permission: 'owner' | 'autonomous' }
 const source = { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' } as const
+// Chat collection must use the scoped, filtered, quiet-ending collector. The host's
+// protocol service keeps its independent low-level API for trusted integrations.
+const scopedOnly = new Set(['add_custom_face'])
 function catalogInput(input: JsonValue): { id?: string; category?: string; query?: string } {
   assert(isRecord(input) && Object.keys(input).every(k => ['id', 'category', 'query'].includes(k))
     && Object.values(input).every(v => typeof v === 'string' && v.length > 0 && v.length <= 160), 'INVALID_CAPABILITY_QUERY', 'Use a category, tool ID or short query.')
@@ -44,7 +47,7 @@ export function createNativeCapabilityDirectory(options: {
   const entries = () => [
     ...options.tools().map(t => ({ id: t.tool.definition.name, category: t.category, description: t.tool.definition.description,
       permission: t.permission, inputSchema: t.tool.definition.parameters })),
-    ...QQ_CAPABILITIES.filter(t => supported.has(t.id)).map(t => ({ id: `qq.${t.id}`, category: t.category,
+    ...QQ_CAPABILITIES.filter(t => supported.has(t.id) && !scopedOnly.has(t.id)).map(t => ({ id: `qq.${t.id}`, category: t.category,
       description: t.description, permission: 'owner' as const, inputSchema: t.inputSchema })),
   ]
   async function execute(request: EffectRequest): Promise<JsonValue> {
@@ -54,6 +57,7 @@ export function createNativeCapabilityDirectory(options: {
     if (delegated) return delegated.effect.execute({ ...request, input: delegated.tool.validate(input.input) })
     assert(input.id.startsWith('qq.'), 'CAPABILITY_NOT_FOUND', 'Read a valid capability ID from the directory.')
     const id = input.id.slice(3), definition = findQqCapability(id)
+    assert(!scopedOnly.has(id), 'CAPABILITY_USE_SCOPED_TOOL', 'Collect current conversation images with qbf_sticker_manage add.')
     assert(definition && supported.has(id), 'CAPABILITY_UNSUPPORTED', 'The connected protocol has not confirmed this capability.')
     if (!definition.write) return bounded(await options.port.call({ id, input: input.input, signal: request.signal }))
     const namespace = 'native-chat.protocol-writes', key = digest([options.selfId, request.scope.accountScope ?? null,

@@ -22,7 +22,8 @@ function model(run: PluginModelClient['run']): PluginModelClient {
   return { run, models: async () => [], list: () => [], unbind: async () => false,
     bind: async () => { throw new Error('No explicit bind expected') }, create: async () => { throw new Error('run owns binding creation') } }
 }
-async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'full' | 'unknown'; filter?: boolean; probabilities?: number; random?: number } = {}) {
+async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'full' | 'unknown'; filter?: boolean; probabilities?: number;
+  triggerProbability?: number; collectProbability?: number; random?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'qbf-sticker-library-'))
   const store = createSqliteStore({ filename: ':memory:' })
   const bytes = await sharp({ create: { width: 16, height: 16, channels: 3, background: 'blue' } }).png().toBuffer()
@@ -46,14 +47,15 @@ async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'fu
   }
   const library = createStickerLibrary({ directory, store, accountId: '999', port, reader: { async read() { imageReads++; return { status: 'confirmed', data: bytes, mediaType: 'image/png' } } },
     collector, signal: signal(), configuration: async () => ({ ...DEFAULT_STICKER_LIBRARY_CONFIGURATION,
-      triggerProbabilityPercent: settings.probabilities ?? 100, collectProbabilityPercent: settings.probabilities ?? 100, accountNearFullAt: settings.nearFull ? 1 : 240 }),
+      triggerProbabilityPercent: settings.triggerProbability ?? settings.probabilities ?? 100,
+      collectProbabilityPercent: settings.collectProbability ?? settings.probabilities ?? 100, accountNearFullAt: settings.nearFull ? 1 : 240 }),
     async authorize(conversationId) { assert.equal(conversationId, 'group:123') }, context: () => ['one', 'two', 'three', 'four', 'five'],
     async register(id, conversationId, current) { current.throwIfAborted(); assert.equal(conversationId, 'group:123'); writes.push('register'); return `media-${id}` },
     random: () => settings.random ?? 0,
   })
-  function asset(id: string, url = 'https://media.example/image') {
+  function asset(id: string, url = 'https://media.example/image', file?: string) {
     store.write('native-chat.media', id, { schema: 1, accountId: '999', conversationId: 'group:123', kind: 'image', expiresAt: Date.now() + 60_000,
-      source: { url } }, { expectedRevision: null })
+      source: { url, ...(file ? { file } : {}) } }, { expectedRevision: null })
   }
   asset('incoming')
   t.after(async () => { await library.stop(); store.close(); await rm(directory, { recursive: true, force: true }) })
@@ -287,4 +289,60 @@ test('only protocol-marked sticker images trigger automatic collection and perce
   assert.equal(validateStickerLibraryConfiguration({ ...DEFAULT_STICKER_LIBRARY_CONFIGURATION, triggerProbabilityPercent: 0.5 }).triggerProbabilityPercent, 0.5)
   assert.equal(DEFAULT_STICKER_LIBRARY_CONFIGURATION.collectProbabilityPercent, 15)
   assert.throws(() => validateStickerLibraryConfiguration({ ...DEFAULT_STICKER_LIBRARY_CONFIGURATION, collectProbabilityPercent: NaN }))
+})
+
+test('a Tencent-style MD5 file hint does not collide with its own collection reservation', async t => {
+  const f = await fixture(t)
+  const md5 = createHash('md5').update(f.bytes).digest('hex')
+  f.asset('md5-image', 'https://media.example/md5-image', `${md5.toUpperCase()}.gif`)
+  const result = await f.library.collect('md5-image', 'group:123', true, signal())
+  assert(isRecord(result)); assert.equal(result.status, 'confirmed')
+  assert.deepEqual(f.writes, ['add']); assert.equal(f.calls.length, 1)
+  await f.library.collect('md5-image', 'group:123', true, signal())
+  assert.deepEqual(f.writes, ['add'], 'the physical image is added only once')
+})
+
+for (const uncertain of [false, true]) test(`an explicit request upgrades a running automatic collection without a second writer${uncertain ? ' or unknown-result retry' : ''}`, async t => {
+  const f = await fixture(t, { triggerProbability: 100, collectProbability: 0, random: 0.5, ...(uncertain ? { add: 'unknown' } : {}) })
+  let entered!: () => void, release!: () => void
+  const classifying = new Promise<void>(resolve => { entered = resolve })
+  const proceed = new Promise<void>(resolve => { release = resolve })
+  f.setClassifier(async () => {
+    entered(); await proceed
+    return JSON.stringify({ isSticker: true, safeToShare: true, ...annotation })
+  })
+  const automatic = f.library.collect('incoming', 'group:123', false, signal())
+  await classifying
+  try {
+    assert.deepEqual(await f.library.requestCollection('incoming', 'group:123', signal()), { status: 'queued', quiet: true })
+  } finally { release() }
+  const result = await automatic
+  assert(isRecord(result)); assert.equal(result.status, uncertain ? 'unknown' : 'confirmed')
+  assert.equal(f.calls.length, 1)
+  assert.deepEqual(f.writes, ['add'], 'the explicit request bypasses automatic collectProbability=0')
+  await f.library.collect('incoming', 'group:123', true, signal())
+  assert.deepEqual(f.writes, ['add'], 'confirmed and unknown writes are never repeated')
+})
+
+test('manual aliases upgrade the running content hash reservation while keeping image filtering', async t => {
+  for (const suitable of [true, false]) {
+    const f = await fixture(t, { triggerProbability: 100, collectProbability: 0, random: 0.5 })
+    f.asset('alias', 'https://media.example/another-signed-url')
+    let entered!: () => void, release!: () => void
+    const classifying = new Promise<void>(resolve => { entered = resolve })
+    const proceed = new Promise<void>(resolve => { release = resolve })
+    f.setClassifier(async () => {
+      entered(); await proceed
+      return JSON.stringify({ isSticker: suitable, safeToShare: suitable, ...annotation })
+    })
+    const automatic = f.library.collect('incoming', 'group:123', false, signal())
+    await classifying
+    try {
+      assert.deepEqual(await f.library.collect('alias', 'group:123', true, signal()), { status: 'skipped', reason: 'processing', quiet: true })
+    } finally { release() }
+    const result = await automatic
+    assert(isRecord(result)); assert.equal(result.status, suitable ? 'confirmed' : 'skipped')
+    assert.equal(f.calls.length, 1); assert.deepEqual(f.writes, suitable ? ['add'] : [])
+    if (!suitable) assert.equal(result.reason, 'filtered', 'manual promotion never bypasses actual image filtering')
+  }
 })

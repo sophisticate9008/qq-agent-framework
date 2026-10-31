@@ -29,6 +29,7 @@ interface Entry {
   readonly annotation: StickerAnnotation | null; readonly createdAt: number; readonly state: 'ready' | 'unknown'
   readonly manualIdentity?: StickerCharacterIdentity
 }
+interface CollectionReservation { manual: boolean; readonly keys: Set<string> }
 function parse(value: JsonValue): Entry {
   const row = object(value)
   assert(row.schema === 1 && typeof row.id === 'string' && /^[a-f0-9]{64}$/.test(row.id), 'STICKER_LIBRARY_INVALID', 'Invalid library entry.')
@@ -91,6 +92,7 @@ export function createStickerLibrary(options: {
   const matcher = createStickerMatcher(options.accountId)
   const random = options.random ?? Math.random
   const jobs = new Set<Promise<unknown>>(), reservations = new Set<string>()
+  const collectionReservations = new Map<string, CollectionReservation>()
   const lifetime = new AbortController()
   const active = (signal: AbortSignal) => AbortSignal.any([signal, options.signal, lifetime.signal])
   const refinement: ReturnType<typeof createStickerSemanticRefinement> = createStickerSemanticRefinement({ store: options.store, accountId: options.accountId,
@@ -331,6 +333,28 @@ export function createStickerLibrary(options: {
     }
     return annotation
   }
+  function collectionKey(assetId: string, media: Record<string, unknown>): string {
+    const source = object(media.source)
+    const hint = typeof source.file === 'string' ? source.file.match(/^([a-f0-9]{32})(?:\.|$)/i)?.[1]?.toLowerCase() : undefined
+    return digest([options.accountId, hint ?? (typeof source.url === 'string' ? source.url : assetId)])
+  }
+  function reserveCollection(key: string, ticket: CollectionReservation): boolean {
+    const existing = collectionReservations.get(key)
+    if (existing && existing !== ticket) {
+      // An explicit request upgrades the already-running classifier instead of
+      // starting a second writer or losing to its later random collection gate.
+      existing.manual ||= ticket.manual
+      return false
+    }
+    if (!existing && reservations.has(key)) return false
+    reservations.add(key); collectionReservations.set(key, ticket); ticket.keys.add(key)
+    return true
+  }
+  function releaseCollection(ticket: CollectionReservation) {
+    for (const key of ticket.keys) if (collectionReservations.get(key) === ticket) {
+      collectionReservations.delete(key); reservations.delete(key)
+    }
+  }
   async function collect(assetId: string, conversationId: string, manual: boolean, callerSignal: AbortSignal): Promise<JsonValue> {
     const signal = active(callerSignal)
     const context = options.context(conversationId).slice(-5)
@@ -344,17 +368,16 @@ export function createStickerLibrary(options: {
     const url = typeof source.url === 'string' ? source.url : null
     const file = typeof source.file === 'string' ? source.file : undefined
     const hintedMd5 = file?.match(/^([a-f0-9]{32})(?:\.|$)/i)?.[1]?.toLowerCase() ?? null
-    const seenKey = digest([options.accountId, hintedMd5 ?? url ?? assetId])
-    if (reservations.has(seenKey)) return { status: 'skipped', reason: 'processing', quiet: true }
-    const seen = options.store.read(SEEN, seenKey)
-    if (!manual && seen) return { status: 'skipped', reason: 'seen', quiet: true }
-    const configuration = await options.configuration()
-    signal.throwIfAborted()
-    if (!manual && (!configuration.enabled || random() * 100 >= configuration.triggerProbabilityPercent)) {
-      return { status: 'skipped', reason: 'probability', quiet: true }
-    }
-    reservations.add(seenKey)
+    const seenKey = collectionKey(assetId, value), ticket: CollectionReservation = { manual, keys: new Set() }
+    if (!reserveCollection(seenKey, ticket)) return { status: 'skipped', reason: 'processing', quiet: true }
     try {
+      const seen = options.store.read(SEEN, seenKey)
+      if (!ticket.manual && seen) return { status: 'skipped', reason: 'seen', quiet: true }
+      const configuration = await options.configuration()
+      signal.throwIfAborted()
+      if (!ticket.manual && (!configuration.enabled || random() * 100 >= configuration.triggerProbabilityPercent)) {
+        return { status: 'skipped', reason: 'probability', quiet: true }
+      }
       if (!seen) options.store.write(SEEN, seenKey, { at: Date.now() }, { expectedRevision: null, expiresAt: Date.now() + 180 * 86400_000 })
       await sync(signal)
       // An unconfirmed account roster cannot establish cross-storage uniqueness.
@@ -379,76 +402,70 @@ export function createStickerLibrary(options: {
       }
       const existing = match(md5, url)
       if (existing?.item.account && !existing.item.annotation && !existing.item.deleted) {
-        if (reservations.has(existing.item.id)) return { status: 'skipped', reason: 'processing', quiet: true }
-        reservations.add(existing.item.id)
-        try {
-          const annotation = await classify(bytes, conversationId, context, signal)
-          signal.throwIfAborted()
-          const current = options.store.read(RECORDS, existing.item.id)
-          if (current && annotation && !parse(current.value).deleted) {
-            const item = { ...parse(current.value), md5, annotation }
-            save(item); cache.remember(existing.item.account, annotation)
-            imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
-          }
-          return { status: 'confirmed', reused: true, quiet: true }
-        } finally { reservations.delete(existing.item.id) }
+        if (!reserveCollection(existing.item.id, ticket)) return { status: 'skipped', reason: 'processing', quiet: true }
+        const annotation = await classify(bytes, conversationId, context, signal)
+        signal.throwIfAborted()
+        const current = options.store.read(RECORDS, existing.item.id)
+        if (current && annotation && !parse(current.value).deleted) {
+          const item = { ...parse(current.value), md5, annotation }
+          save(item); cache.remember(existing.item.account, annotation)
+          imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
+        }
+        return { status: 'confirmed', reused: true, quiet: true }
       }
       if (existing && (existing.item.deleted || existing.item.account || existing.item.extra || existing.item.state === 'unknown'))
         return { status: existing.item.state === 'unknown' ? 'unknown' : 'confirmed', reused: true, quiet: true }
       const id = existing?.item.id ?? digest([options.accountId, md5])
-      if (reservations.has(id)) return { status: 'skipped', reason: 'processing', quiet: true }
-      reservations.add(id)
-      try {
-        const annotation = existing?.item.annotation ?? await classify(bytes, conversationId, context, signal)
-        signal.throwIfAborted()
-        const item: Entry = { id, accountId: options.accountId, md5, url, account: null, extra: false, deleted: !annotation,
-          annotation, createdAt: existing?.item.createdAt ?? Date.now(), state: 'ready',
-          ...(existing?.item.manualIdentity ? { manualIdentity: existing.item.manualIdentity } : {}) }
-        save(item)
-        if (!annotation) return { status: 'skipped', reason: 'filtered', quiet: true }
-        imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
-        const latestConfiguration = await options.configuration()
-        signal.throwIfAborted()
-        if (!manual && !latestConfiguration.enabled) return { status: 'skipped', reason: 'disabled', quiet: true }
-        if (!manual && random() * 100 >= latestConfiguration.collectProbabilityPercent) return { status: 'skipped', reason: 'not-collected', quiet: true }
-        await sync(signal, true)
-        if (!confirmed) return { status: 'skipped', reason: 'collection-unavailable', quiet: true }
-        return await serial(async () => {
-          await options.authorize(conversationId, signal); signal.throwIfAborted()
-          const current = options.store.read(RECORDS, id)
-          if (!current || parse(current.value).deleted) return { status: 'skipped', reason: 'deleted', quiet: true }
-          if (parse(current.value).account || parse(current.value).extra) return { status: 'confirmed', reused: true, quiet: true }
-          if (parse(current.value).state === 'unknown') return { status: 'unknown', retry: false, quiet: true }
-          async function extra(): Promise<JsonValue> {
-            assert(all().filter(row => row.item.extra).length < MAX_EXTRA, 'STICKER_EXTRA_FULL', 'The extra library is full.')
-            await mkdir(directory, { recursive: true, mode: 0o700 })
-            signal.throwIfAborted()
-            await writeFile(join(directory, id), bytes, { mode: 0o600 })
-            signal.throwIfAborted(); save({ ...item, extra: true })
-            return { status: 'confirmed', storage: 'extra', quiet: true }
-          }
-          if (roster.length >= latestConfiguration.accountNearFullAt || limited) return extra()
-          if (!options.port.add) return { status: 'rejected', code: 'STICKER_ADD_UNSUPPORTED', quiet: true }
-          if (all().filter(row => row.item.state === 'unknown').length >= 100) return { status: 'skipped', reason: 'pending-limit', quiet: true }
-          await disk.write('original', id, stickerImageIdentity(item), Buffer.from(bytes), signal).catch(() => undefined)
+      if (!reserveCollection(id, ticket)) return { status: 'skipped', reason: 'processing', quiet: true }
+      const annotation = existing?.item.annotation ?? await classify(bytes, conversationId, context, signal)
+      signal.throwIfAborted()
+      const item: Entry = { id, accountId: options.accountId, md5, url, account: null, extra: false, deleted: !annotation,
+        annotation, createdAt: existing?.item.createdAt ?? Date.now(), state: 'ready',
+        ...(existing?.item.manualIdentity ? { manualIdentity: existing.item.manualIdentity } : {}) }
+      save(item)
+      if (!annotation) return { status: 'skipped', reason: 'filtered', quiet: true }
+      imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
+      const latestConfiguration = await options.configuration()
+      signal.throwIfAborted()
+      if (!ticket.manual && !latestConfiguration.enabled) return { status: 'skipped', reason: 'disabled', quiet: true }
+      if (!ticket.manual && random() * 100 >= latestConfiguration.collectProbabilityPercent) return { status: 'skipped', reason: 'not-collected', quiet: true }
+      await sync(signal, true)
+      if (!confirmed) return { status: 'skipped', reason: 'collection-unavailable', quiet: true }
+      return await serial(async () => {
+        await options.authorize(conversationId, signal); signal.throwIfAborted()
+        const current = options.store.read(RECORDS, id)
+        if (!current || parse(current.value).deleted) return { status: 'skipped', reason: 'deleted', quiet: true }
+        if (parse(current.value).account || parse(current.value).extra) return { status: 'confirmed', reused: true, quiet: true }
+        if (parse(current.value).state === 'unknown') return { status: 'unknown', retry: false, quiet: true }
+        async function extra(): Promise<JsonValue> {
+          assert(all().filter(row => row.item.extra).length < MAX_EXTRA, 'STICKER_EXTRA_FULL', 'The extra library is full.')
+          await mkdir(directory, { recursive: true, mode: 0o700 })
           signal.throwIfAborted()
-          const previous = options.store.read(WRITES, id)
-          if (previous && !['rejected', 'confirmed'].includes(String(object(previous.value).status))) return { status: 'unknown', retry: false, quiet: true }
-          const prepared = options.store.write(WRITES, id, { action: 'add', status: 'dispatching' }, { expectedRevision: previous?.revision ?? null })
-          save({ ...item, state: 'unknown' })
-          let result: JsonValue
-          try { result = json(await options.port.add({ file: `base64://${Buffer.from(bytes).toString('base64')}`, signal })) }
-          catch { result = { status: 'unknown', code: 'STICKER_ADD_UNKNOWN' } }
-          options.store.write(WRITES, id, { action: 'add', status: String(object(result).status), result }, { expectedRevision: prepared.revision })
-          refreshedAt = 0
-          if (object(result).status === 'rejected') {
-            save(item)
-            if (object(result).code === 'ONEBOT_STICKER_COLLECTION_FULL') return extra()
-          }
-          return { ...object(result), retry: false, quiet: true }
-        })
-      } finally { reservations.delete(id) }
-    } finally { reservations.delete(seenKey) }
+          await writeFile(join(directory, id), bytes, { mode: 0o600 })
+          signal.throwIfAborted(); save({ ...item, extra: true })
+          return { status: 'confirmed', storage: 'extra', quiet: true }
+        }
+        if (roster.length >= latestConfiguration.accountNearFullAt || limited) return extra()
+        if (!options.port.add) return { status: 'rejected', code: 'STICKER_ADD_UNSUPPORTED', quiet: true }
+        if (all().filter(row => row.item.state === 'unknown').length >= 100) return { status: 'skipped', reason: 'pending-limit', quiet: true }
+        await disk.write('original', id, stickerImageIdentity(item), Buffer.from(bytes), signal).catch(() => undefined)
+        signal.throwIfAborted()
+        const previous = options.store.read(WRITES, id)
+        if (previous && !['rejected', 'confirmed'].includes(String(object(previous.value).status))) return { status: 'unknown', retry: false, quiet: true }
+        const prepared = options.store.write(WRITES, id, { action: 'add', status: 'dispatching' }, { expectedRevision: previous?.revision ?? null })
+        save({ ...item, state: 'unknown' })
+        let result: JsonValue
+        try { result = json(await options.port.add({ file: `base64://${Buffer.from(bytes).toString('base64')}`, signal })) }
+        catch { result = { status: 'unknown', code: 'STICKER_ADD_UNKNOWN' } }
+        options.store.write(WRITES, id, { action: 'add', status: String(object(result).status), result }, { expectedRevision: prepared.revision })
+        refreshedAt = 0
+        if (object(result).status === 'rejected') {
+          save(item)
+          if (object(result).code === 'ONEBOT_STICKER_COLLECTION_FULL') return extra()
+        }
+        return { ...object(result), retry: false, quiet: true }
+      })
+    } finally { releaseCollection(ticket) }
   }
   async function snapshot(signal: AbortSignal): Promise<StickerLibrarySnapshot> {
     await sync(active(signal))
@@ -617,6 +634,8 @@ export function createStickerLibrary(options: {
     const row = options.store.read('native-chat.media', assetId), value = row && object(row.value)
     assert(value && value.accountId === options.accountId && value.conversationId === conversationId && value.kind === 'image'
       && Number(value.expiresAt) > Date.now(), 'NATIVE_MEDIA_UNAVAILABLE', 'Use an actual current conversation image.')
+    const pending = typeof value.libraryImageId === 'string' ? undefined : collectionReservations.get(collectionKey(assetId, value))
+    if (pending) { pending.manual = true; return { status: 'queued', quiet: true } }
     if (jobs.size >= 8) return { status: 'skipped', reason: 'busy', quiet: true }
     // Acceptance ends the calling tool. Classification is owned by the mechanism lifetime, not by the ended main turn.
     track(collect(assetId, conversationId, true, active(options.signal)).catch(() => { options.onFault?.('STICKER_COLLECTION_INCOMPLETE') }))

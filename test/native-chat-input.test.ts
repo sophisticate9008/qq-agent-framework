@@ -183,7 +183,7 @@ test('real direct calls remain addressed with third-party quotes and batch calls
   const content: InboundMessage['content'] = [{ type: 'reply', messageId: 'first' },
     { type: 'mention', userId: '999' }, { type: 'mention', userId: '123' },
     { type: 'image', assetId: 'direct-image' }, { type: 'text', text: '这个你怎么看' }]
-  const event: FrameworkEvent = { id: 'current', type: 'message.received', conversationId: 'group:456', userId: '456', data: { content } }
+  const event: FrameworkEvent = { id: 'current', type: 'message.received', conversationId: 'group:456', userId: '456', data: { content: [...content] } }
   const direct = prepareNativeChatInput(event, history, { owner: null, selfId: '999', partial: false, attachImages: true, participation: 'direct' })
   const text = direct.flatMap(part => part.type === 'text' ? [part.text] : []).join('')
   assert.match(text, /"mode":"addressed"/)

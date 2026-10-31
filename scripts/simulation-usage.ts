@@ -2,6 +2,8 @@ import { constants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { validSimulationRunId } from '../src/contracts/admin-activity.ts'
+import { pluginModelIdentifier } from '../src/contracts/plugin-model.ts'
+import { reference } from '../src/contracts/values.ts'
 import { assert, isRecord } from '../src/core/values.ts'
 import { digest, json, object } from '../src/host/data.ts'
 import { NATIVE_USAGE_ARCHIVE_NAMESPACE, NATIVE_USAGE_RETIRED_NAMESPACE, NATIVE_USAGE_TURNS_NAMESPACE,
@@ -58,17 +60,29 @@ export async function publishSimulationUsage(options: {
     })
   } finally { reader.close() }
   if (!rows.length) return { imported: 0, existing: 0, retired: 0 }
+  // Validate the entire source snapshot before importing any of it. Auxiliary model calls
+  // use the host's plugin owner attribution, rather than their originating QQ address.
+  const sources = rows.map(record => {
+    const observed = readNativeUsageStoredTurn(record)
+    const original = object(record.value)
+    const owner = observed.conversationId.startsWith('plugin:') ? observed.conversationId.slice('plugin:'.length) : null
+    assert((/^(group|private):[^:]+$/.test(observed.conversationId)
+      || owner !== null && owner.length <= 153 && pluginModelIdentifier(owner)) && !Object.hasOwn(original, 'simulation'),
+    'SIMULATION_USAGE_SOURCE_INVALID', 'Only original QQ or host-attributed plugin records may be published.')
+    const fullConversation = `simulation:${options.runId}:${observed.conversationId}`
+    // Preserve established keys for existing publications. Long valid plugin owner names
+    // still need a readable native ledger reference; their full source remains in metadata.
+    const conversationId = reference(fullConversation) ? fullConversation : `simulation:${options.runId}:${digest(observed.conversationId)}`
+    assert(reference(conversationId), 'SIMULATION_USAGE_SOURCE_INVALID', 'Invalid published usage identity.')
+    return { record, observed, original, conversationId }
+  })
   const destination = createSqliteStore({ filename: destinationFilename, requireExisting: true })
   const counts = { imported: 0, existing: 0, retired: 0 }
   try {
     assert(destination.read('native-chat.meta', 'session-definition'), 'SIMULATION_USAGE_TARGET_INVALID',
       'An initialized framework ledger is required.')
-    for (const record of rows) {
-      const observed = readNativeUsageStoredTurn(record)
-      assert(/^(group|private):[^:]+$/.test(observed.conversationId), 'SIMULATION_USAGE_SOURCE_INVALID',
-        'Only original simulated conversation records may be published.')
-      const original = object(record.value)
-      const turn = { ...object(original.turn), conversationId: `simulation:${options.runId}:${observed.conversationId}` }
+    for (const { record, observed, original, conversationId } of sources) {
+      const turn = { ...object(original.turn), conversationId }
       const key = digest([turn.conversationId, observed.sessionId, observed.generation, observed.turnId, observed.stepId])
       const fingerprint = digest(turn)
       const prior = destination.read(NATIVE_USAGE_TURNS_NAMESPACE, key) ?? destination.read(NATIVE_USAGE_ARCHIVE_NAMESPACE, key)

@@ -178,7 +178,7 @@ DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树
 模拟启动会将本轮已构建的 framework 插件 `package.json` 与 `dist` 复制到私有运行目录，仅共享已安装依赖。运行中的代码固定，之后构建工作树不会热加载进该轮。主人委派的独立助手任务具有完整本机文件与命令权限，普通聊天不扩大权限；`--batch work` 会额外核对工作目录以外的专用临时目录读写与 shell 执行，回传实际生成的 hello.txt、外目录文字文件与真实 PNG 图片附件。
 
 
-真实模拟的聊天与独立助手用量都先进入本轮 `native/native-chat.sqlite` 的 `native-usage.turns`。入口每两秒将真实观测记录发布到来源账号账本，退出前再等待最终发布完成；发布使用 `simulation:<runId>:<conversation>` 独立会话标记，保留原 token/cache、时间和价格快照，重复读取不会重复记账，已清理记录不复活。发布失败记录 `usage-publish-failed`，不改变模型实际执行结果。
+真实模拟的聊天、独立助手与插件辅助模型用量都先进入本轮 `native/native-chat.sqlite` 的 `native-usage.turns`。入口每两秒将真实观测记录发布到来源账号账本，退出前再等待最终发布完成；发布使用 `simulation:<runId>:<conversation>` 独立会话标记，保留原 token/cache、时间和价格快照，重复读取不会重复记账，已清理记录不复活。插件用量保留宿主登记的 `plugin:<owner>` 来源，只接受合法且有界的插件标识，不改记为 QQ 发言；前缀组合超过账本标识长度时用原来源的稳定摘要替代尾段，完整原来源、本轮编号和源记录键仍保存在来源元数据。发布核对来源配置目录并预先验证整批来源，不接受已发布的模拟记录再次作为原始来源。发布失败记录 `usage-publish-failed`，不改变模型实际执行结果。
 
 `--batch presentation` 在完整 work 专项之后，追加私聊 Markdown 综合排版转 PNG、群聊及私聊长纯文本转发，最后保留活动与真实 chat/work 用量。渲染请求通过 `qbf_reply` 的 content 提交，格式为 `{"schema":"qbf.output/1","format":"markdown-image","body":"Markdown 正文","title":"可选标题"}`，正文最多 32000 字符及 64 KiB，标题最多 120 字符；它请求框架本机渲染图片，不是原生协议 Markdown 卡片或 Markdown 文件发送。
 

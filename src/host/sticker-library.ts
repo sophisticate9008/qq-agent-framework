@@ -5,7 +5,7 @@ import sharp from 'sharp'
 import type { OneBotSticker, OneBotStickerPort } from '../adapters/onebot-stickers.ts'
 import type { NativeMediaContentReader } from '../contracts/native-media.ts'
 import type { PluginModelClient, PluginModelSelection } from '../contracts/plugin-model.ts'
-import type { StickerLibraryConfiguration, StickerLibrarySnapshot } from '../contracts/sticker-library.ts'
+import { parseStickerLibraryIdentityUpdate, type StickerLibraryConfiguration, type StickerLibrarySnapshot, type StickerLibraryIdentityUpdateResult } from '../contracts/sticker-library.ts'
 import type { DurableStore, InboundMessage } from './types.ts'
 import type { JsonValue } from '../core/types.ts'
 import { assert, isRecord } from '../core/values.ts'
@@ -16,7 +16,7 @@ import { createStickerThumbnailCache } from './sticker-thumbnail-cache.ts'
 import { createStickerImageMetadata, readStickerImageDimensions, stickerImageIdentity } from './sticker-image-metadata.ts'
 import { createStickerCharacterAliases } from './sticker-character-aliases.ts'
 import { createStickerCharacterRecognition, type StickerCharacterRecognitionRule } from './sticker-character-recognition.ts'
-import { createStickerSemanticCache, normalizeStickerCharacterName, validateStickerAnnotation, STICKER_ANNOTATION_GUIDANCE, type StickerAnnotation } from './sticker-semantics.ts'
+import { createStickerSemanticCache, normalizeStickerCharacterName, validateStickerAnnotation, validateStickerCharacterIdentity, STICKER_ANNOTATION_GUIDANCE, type StickerAnnotation, type StickerCharacterIdentity } from './sticker-semantics.ts'
 
 const RECORDS = 'native-chat.sticker-library', SEEN = 'native-chat.sticker-seen', WRITES = 'native-chat.sticker-writes'
 const MAX_ITEMS = 5000, MAX_EXTRA = 1000, MAX_RECORDS = 16000
@@ -24,14 +24,17 @@ interface Entry {
   readonly id: string; readonly accountId: string; readonly md5: string | null; readonly url: string | null
   readonly account: OneBotSticker | null; readonly extra: boolean; readonly deleted: boolean
   readonly annotation: StickerAnnotation | null; readonly createdAt: number; readonly state: 'ready' | 'unknown'
+  readonly manualIdentity?: StickerCharacterIdentity
 }
 function parse(value: JsonValue): Entry {
   const row = object(value)
   assert(row.schema === 1 && typeof row.id === 'string' && /^[a-f0-9]{64}$/.test(row.id), 'STICKER_LIBRARY_INVALID', 'Invalid library entry.')
+  const manualIdentity = row.manualIdentity === undefined ? undefined : validateStickerCharacterIdentity(row.manualIdentity)
+  assert(!manualIdentity || manualIdentity.source === 'user', 'STICKER_LIBRARY_INVALID', 'Manual character labels need user provenance.')
   return { id: row.id, accountId: String(row.accountId), md5: typeof row.md5 === 'string' ? row.md5 : null,
     url: typeof row.url === 'string' ? row.url : null, account: isRecord(row.account) ? row.account as unknown as OneBotSticker : null,
     extra: row.extra === true, deleted: row.deleted === true, annotation: row.annotation ? validateStickerAnnotation(row.annotation) : null,
-    createdAt: Number(row.createdAt), state: row.state === 'unknown' ? 'unknown' : 'ready' }
+    createdAt: Number(row.createdAt), state: row.state === 'unknown' ? 'unknown' : 'ready', ...(manualIdentity ? { manualIdentity } : {}) }
 }
 function response(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''))
@@ -129,6 +132,9 @@ export function createStickerLibrary(options: {
     // A confirmed dictionary name does not confirm the identity of this particular image.
     return { ...annotation, identity: { ...identity, aliases: [...aliases.values()].slice(0, 8) } }
   }
+  function imageAnnotation(item: Entry): StickerAnnotation | null {
+    return item.annotation ? { ...item.annotation, ...(item.manualIdentity ? { identity: item.manualIdentity } : {}) } : null
+  }
   function serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = mutations.catch(() => undefined).then(operation)
     mutations = result; return result
@@ -154,6 +160,7 @@ export function createStickerLibrary(options: {
         present.add(id)
         const item: Entry = { id, accountId: options.accountId, md5, url: account.url, account, extra: false, deleted: existing?.item.deleted ?? false,
           annotation: existing?.item.annotation ?? cache.read(account), createdAt: existing?.item.createdAt ?? Date.now(),
+          ...(existing?.item.manualIdentity ? { manualIdentity: existing.item.manualIdentity } : {}),
           state: existing?.item.state === 'unknown' ? 'unknown' : 'ready' }
         // Presence reconciles an uncertain add, absence below reconciles an uncertain delete.
         const operation = existing && options.store.read(WRITES, id)
@@ -301,7 +308,8 @@ export function createStickerLibrary(options: {
         const annotation = existing?.item.annotation ?? await classify(bytes, conversationId, context, signal)
         signal.throwIfAborted()
         const item: Entry = { id, accountId: options.accountId, md5, url, account: null, extra: false, deleted: !annotation,
-          annotation, createdAt: existing?.item.createdAt ?? Date.now(), state: 'ready' }
+          annotation, createdAt: existing?.item.createdAt ?? Date.now(), state: 'ready',
+          ...(existing?.item.manualIdentity ? { manualIdentity: existing.item.manualIdentity } : {}) }
         save(item)
         if (!annotation) return { status: 'skipped', reason: 'filtered', quiet: true }
         imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
@@ -351,18 +359,37 @@ export function createStickerLibrary(options: {
     const configuration = await options.configuration()
     const rules = recognition.list()
     const items = all().filter(({ item }) => !item.deleted && (item.account || item.extra || item.state === 'unknown')).map(({ row, item }) => {
-      const annotation = item.annotation && enrich(item.annotation, rules)
+      const annotated = imageAnnotation(item)
+      const annotation = annotated && enrich(annotated, rules)
       const dimensions = imageMetadata.read(item.id, stickerImageIdentity(item))
       return {
       id: item.id, revision: row.revision, name: item.account?.name ?? '', description: item.annotation?.description ?? '',
       tags: [...(item.annotation?.tags ?? [])], avoid: item.annotation?.avoid ?? '', storage: item.extra ? 'extra' as const : 'account' as const,
       state: item.state, canDelete: item.state === 'ready' && (item.extra || confirmed && item.account?.stickerId !== undefined), createdAt: item.createdAt,
-      ...(annotation?.identity ? { identity: annotation.identity } : {}), ...(annotation?.facets ? { facets: annotation.facets } : {}),
+      ...(item.manualIdentity || annotation?.identity ? { identity: item.manualIdentity ?? annotation?.identity } : {}), ...(annotation?.facets ? { facets: annotation.facets } : {}),
       ...(annotation?.visual ? { visual: annotation.visual } : {}),
       ...(dimensions ? { dimensions } : {}),
     } })
     return { schema: 1, accountCollection: confirmed ? 'confirmed' : 'unavailable', capacity: { count: roster.length,
       nearFullAt: configuration.accountNearFullAt, capacityKnown: false }, items, limited, pending: jobs.size + reservations.size }
+  }
+  async function annotateIdentity(id: string, revision: number, input: { readonly character: string; readonly aliases: readonly string[] }, callerSignal: AbortSignal): Promise<StickerLibraryIdentityUpdateResult> {
+    const request = parseStickerLibraryIdentityUpdate({ id, revision, identity: input })
+    assert(request, 'INVALID_STICKER_IDENTITY', 'Use a character name and up to eight aliases with the current image revision.')
+    const signal = active(callerSignal)
+    return serial(async () => {
+      const item = availableImage(id, signal)
+      const row = options.store.read(RECORDS, id)
+      assert(row && row.revision === revision, 'STICKER_IDENTITY_CONFLICT', 'Refresh the library before changing this character.')
+      const identity = validateStickerCharacterIdentity({ ...request.identity, source: 'user', evidence: '由管理页手动标注' })
+      const characterUpdate = characters.prepareRemember(identity, { replaceAliases: true })
+      assert(options.store.compareAndSetBatch, 'STICKER_IDENTITY_UNAVAILABLE', 'Atomic character annotation is unavailable.')
+      signal.throwIfAborted()
+      const [saved] = options.store.compareAndSetBatch([{ kind: 'write', namespace: RECORDS, key: id, expectedRevision: revision,
+        value: json({ schema: 1, ...item, manualIdentity: identity }) }, characterUpdate])
+      assert(saved, 'STICKER_IDENTITY_UNAVAILABLE', 'The character annotation did not commit.')
+      return { status: 'confirmed', id, revision: saved.revision, identity }
+    })
   }
   async function remove(id: string, revision: number, operationId: string, callerSignal: AbortSignal): Promise<JsonValue> {
     const signal = active(callerSignal)
@@ -408,7 +435,7 @@ export function createStickerLibrary(options: {
       signal.throwIfAborted()
       const rules = recognition.list()
       const candidates = all().filter(({ item }) => !item.deleted && item.state === 'ready' && (item.account || item.extra) && item.annotation)
-        .map(({ item }) => ({ id: item.id, name: item.account?.name, annotation: enrich(item.annotation!, rules) }))
+        .map(({ item }) => ({ id: item.id, name: item.account?.name, annotation: enrich(imageAnnotation(item)!, rules) }))
       const matched = matcher.rank({ intent, context: options.context(conversationId).slice(-5), candidates, ...(character === undefined ? {} : { character }),
         characterAliases: characters.list({ limit: 1024 }).map(({ character, aliases }) => ({ character, aliases })),
         recentlyUsed: (recent.get(conversationId) ?? []).filter(item => Date.now() - item.at < 120_000).map(item => item.id) })
@@ -457,7 +484,7 @@ export function createStickerLibrary(options: {
       await sync(current)
       const rules = recognition.list()
       matcher.update(all().filter(({ item }) => !item.deleted && item.state === 'ready' && (item.account || item.extra) && item.annotation)
-        .map(({ item }) => ({ id: item.id, name: item.account?.name, annotation: enrich(item.annotation!, rules) })),
+        .map(({ item }) => ({ id: item.id, name: item.account?.name, annotation: enrich(imageAnnotation(item)!, rules) })),
       characters.list({ limit: 1024 }).map(({ character, aliases }) => ({ character, aliases })))
       if (conversationId) await indexOne(conversationId, current)
     })().catch(() => { options.onFault?.('STICKER_INDEX_INCOMPLETE') })
@@ -473,7 +500,7 @@ export function createStickerLibrary(options: {
     track(collect(assetId, conversationId, true, active(options.signal)).catch(() => { options.onFault?.('STICKER_COLLECTION_INCOMPLETE') }))
     return { status: 'queued', quiet: true }
   }
-  return Object.freeze({ snapshot, readImage, thumbnail, remove, choose, collect,
+  return Object.freeze({ snapshot, readImage, thumbnail, remove, choose, collect, annotateIdentity,
     warm, requestCollection,
     async hints(conversationId: string, signal: AbortSignal): Promise<JsonValue> {
       signal.throwIfAborted(); warm(conversationId)

@@ -11,6 +11,7 @@ import { createSqliteStore } from '../src/storage/sqlite.ts'
 import { createStickerLibrary, stickerMessageAssets } from '../src/host/sticker-library.ts'
 import { createStickerSemanticCache } from '../src/host/sticker-semantics.ts'
 import { createStickerCharacterRecognition } from '../src/host/sticker-character-recognition.ts'
+import { createStickerCharacterAliases } from '../src/host/sticker-character-aliases.ts'
 import { DEFAULT_STICKER_LIBRARY_CONFIGURATION, parseStickerLibrarySnapshot, validateStickerLibraryConfiguration } from '../src/contracts/sticker-library.ts'
 import { isRecord } from '../src/core/values.ts'
 
@@ -87,6 +88,41 @@ test('cached previews cannot bypass unknown state and changed content hashes do 
   await assert.rejects(f.library.thumbnail(initial.id, signal()), { code: 'STICKER_IMAGE_CHANGED' })
   assert.equal((await f.library.snapshot(signal())).items[0]!.dimensions, undefined)
 })
+
+test('manual character annotation preserves image labels and atomically records a user claim with CAS', async t => {
+  const f = await fixture(t); f.seed()
+  const initial = (await f.library.snapshot(signal())).items[0]!
+  const before = f.store.read('native-chat.sticker-library', initial.id)!.value
+  assert(isRecord(before))
+  const result = await f.library.annotateIdentity(initial.id, initial.revision, { character: ' 角色甲 ', aliases: ['甲_角色', '甲 角色', '角色甲'] }, signal())
+  assert.equal(result.identity.source, 'user'); assert.equal(result.identity.evidence, '由管理页手动标注')
+  assert.deepEqual(result.identity.aliases, ['甲_角色'])
+  const after = f.store.read('native-chat.sticker-library', initial.id)!.value
+  assert(isRecord(after)); assert.deepEqual(after.annotation, before.annotation)
+  assert.equal(createStickerCharacterAliases(f.store, '999').read('角色甲')?.identity.source, 'user')
+  await assert.rejects(f.library.annotateIdentity(initial.id, initial.revision, { character: '角色乙', aliases: [] }, signal()), { code: 'STICKER_IDENTITY_CONFLICT' })
+  assert.equal(createStickerCharacterAliases(f.store, '999').read('角色乙'), null)
+  const snapshot = await f.library.snapshot(signal())
+  assert.equal(snapshot.items[0]!.identity?.character, '角色甲')
+  assert.equal(snapshot.items[0]!.revision, result.revision)
+  assert.deepEqual(f.writes, []); assert.equal(f.calls.length, 0)
+})
+
+test('unclassified account images accept a manual character without inventing semantic labels', async t => {
+  const f = await fixture(t); f.seed()
+  const initial = (await f.library.snapshot(signal())).items[0]!
+  const row = f.store.read('native-chat.sticker-library', initial.id)!
+  assert(isRecord(row.value))
+  const blank = f.store.write(row.namespace, row.key, { ...row.value, annotation: null }, { expectedRevision: row.revision })
+  await f.library.annotateIdentity(initial.id, blank.revision, { character: '角色甲', aliases: [] }, signal())
+  const item = (await f.library.snapshot(signal())).items[0]!
+  assert.equal(item.identity?.source, 'user'); assert.equal(item.description, ''); assert.deepEqual(item.tags, [])
+  const current = f.store.read(row.namespace, row.key)!
+  assert(isRecord(current.value))
+  f.store.write(row.namespace, row.key, { ...current.value, state: 'unknown' }, { expectedRevision: current.revision })
+  await assert.rejects(f.library.annotateIdentity(initial.id, current.revision, { character: '角色乙', aliases: [] }, signal()), { code: 'STICKER_NOT_FOUND' })
+})
+
 
 test('manual collection bypasses both probability gates, filters in a persistent helper and deduplicates across incoming aliases', async t => {
   const f = await fixture(t, { probabilities: 0 })

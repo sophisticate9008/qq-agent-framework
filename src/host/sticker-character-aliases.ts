@@ -1,7 +1,7 @@
 import { assert, isRecord, snapshot } from '../core/values.ts'
 import { digest, json } from './data.ts'
 import { normalizeStickerCharacterName, validateStickerCharacterIdentity, type StickerCharacterIdentity } from './sticker-semantics.ts'
-import type { DurableStore, StoredRecord } from './types.ts'
+import type { DurableCasMutation, DurableStore, StoredRecord } from './types.ts'
 
 export interface StickerCharacterAliasClaim extends StickerCharacterIdentity { readonly updatedAt: number }
 export interface StickerCharacterAliasRecord {
@@ -69,6 +69,32 @@ export function createStickerCharacterAliases(store: DurableStore, accountId: st
     const row = store.read(namespace, key(character))
     return row ? decode(row) : null
   }
+  /** Prepare an atomic host batch without changing either the dictionary or its caller's image. */
+  function prepareRemember(input: StickerCharacterIdentity, options: { readonly replaceAliases?: boolean; readonly expectedRevision?: number | null } = {}): Exclude<DurableCasMutation, { readonly kind: 'delete' }> {
+    const identity = validateStickerCharacterIdentity(input)
+    const id = key(identity.character), previous = store.read(namespace, id), current = previous ? decode(previous) : null
+    assert(options.expectedRevision === undefined || options.expectedRevision === (previous?.revision ?? null),
+      'STORE_CONFLICT', 'The character dictionary changed before this update.')
+    if (!current) assert(records().length < MAX_CHARACTERS, 'STICKER_CHARACTER_CAPACITY', 'The account character dictionary is full.')
+    const priorClaim = current?.claims.find(claim => claim.source === identity.source)
+    const aliases = new Map<string, string>()
+    for (const alias of [...(options.replaceAliases ? [] : priorClaim?.aliases ?? []), ...identity.aliases]) {
+      const normalized = normalizeStickerCharacterName(alias)
+      if (normalized !== normalizeStickerCharacterName(identity.character) && !aliases.has(normalized)) aliases.set(normalized, alias)
+    }
+    assert(aliases.size <= 8, 'STICKER_CHARACTER_ALIAS_CAPACITY', 'Each provenance claim stores at most eight character aliases.')
+    const nextIdentity = {
+      ...(priorClaim?.evidence === undefined ? {} : { evidence: priorClaim.evidence }),
+      ...(priorClaim?.references === undefined ? {} : { references: priorClaim.references }),
+      ...identity, aliases: [...aliases.values()],
+    }
+    if (priorClaim) {
+      const { updatedAt: _time, ...priorIdentity } = priorClaim
+      if (digest(priorIdentity) === digest(nextIdentity)) return { kind: 'check', namespace, key: id, expectedRevision: previous!.revision }
+    }
+    const claims = [...(current?.claims.filter(claim => claim.source !== identity.source) ?? []), { ...nextIdentity, updatedAt: Date.now() }]
+    return { kind: 'write', namespace, key: id, value: json({ schema: 1, accountId, claims }), expectedRevision: previous?.revision ?? null }
+  }
   return Object.freeze({
     read,
     list({ limit = 256 }: { readonly limit?: number } = {}): readonly StickerCharacterAliasRecord[] {
@@ -86,31 +112,14 @@ export function createStickerCharacterAliases(store: DurableStore, accountId: st
         return [project({ key: record.id, revision: record.revision, updatedAt: record.updatedAt }, claims)]
       })
     },
+    prepareRemember,
     /** Only the supplied source's claim changes. replaceAliases never edits other sources. */
     remember(input: StickerCharacterIdentity, options: { readonly replaceAliases?: boolean; readonly expectedRevision?: number | null } = {}): StickerCharacterAliasRecord {
-      const identity = validateStickerCharacterIdentity(input)
-      const id = key(identity.character), previous = store.read(namespace, id), current = previous ? decode(previous) : null
-      assert(options.expectedRevision === undefined || options.expectedRevision === (previous?.revision ?? null),
-        'STORE_CONFLICT', 'The character dictionary changed before this update.')
-      if (!current) assert(records().length < MAX_CHARACTERS, 'STICKER_CHARACTER_CAPACITY', 'The account character dictionary is full.')
-      const priorClaim = current?.claims.find(claim => claim.source === identity.source)
-      const aliases = new Map<string, string>()
-      for (const alias of [...(options.replaceAliases ? [] : priorClaim?.aliases ?? []), ...identity.aliases]) {
-        const normalized = normalizeStickerCharacterName(alias)
-        if (normalized !== normalizeStickerCharacterName(identity.character) && !aliases.has(normalized)) aliases.set(normalized, alias)
-      }
-      assert(aliases.size <= 8, 'STICKER_CHARACTER_ALIAS_CAPACITY', 'Each provenance claim stores at most eight character aliases.')
-      const nextIdentity = {
-        ...(priorClaim?.evidence === undefined ? {} : { evidence: priorClaim.evidence }),
-        ...(priorClaim?.references === undefined ? {} : { references: priorClaim.references }),
-        ...identity, aliases: [...aliases.values()],
-      }
-      if (priorClaim) {
-        const { updatedAt: _time, ...priorIdentity } = priorClaim
-        if (digest(priorIdentity) === digest(nextIdentity)) return current!
-      }
-      const claims = [...(current?.claims.filter(claim => claim.source !== identity.source) ?? []), { ...nextIdentity, updatedAt: Date.now() }]
-      return decode(store.write(namespace, id, json({ schema: 1, accountId, claims }), { expectedRevision: previous?.revision ?? null }))
+      const mutation = prepareRemember(input, options)
+      if (mutation.kind === 'write') return decode(store.write(namespace, mutation.key, mutation.value, { expectedRevision: mutation.expectedRevision }))
+      const current = store.read(namespace, mutation.key)
+      assert(current && current.revision === mutation.expectedRevision, 'STORE_CONFLICT', 'The character dictionary changed before this update.')
+      return decode(current)
     },
     /** Removal is explicit and source-specific; callers supply the version they reviewed. */
     remove(character: string, source: StickerCharacterIdentity['source'], expectedRevision: number): boolean {

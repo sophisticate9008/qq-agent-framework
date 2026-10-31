@@ -18,11 +18,14 @@ function fixture() {
     async remove(stickerId: string, revision: number, operationId: string, signal: AbortSignal) {
       calls.push({ stickerId, revision, operationId }); signal.throwIfAborted(); if (failure) throw failure; return result
     },
+    async annotateIdentity(stickerId: string, revision: number, identity: { readonly character: string; readonly aliases: readonly string[] }, signal: AbortSignal) {
+      calls.push({ stickerId, revision, identity }); signal.throwIfAborted(); if (failure) throw failure; return result
+    },
   }
   const routes = createStickerLibraryRoutes({ stickerLibrary: () => connected ? manager : undefined })
   return { calls, routes, setList(value: unknown) { list = value }, setPreview(value: unknown) { preview = value },
     setResult(value: unknown) { result = value }, setFailure(value: unknown) { failure = value }, disconnect() { connected = false },
-    invoke(path: 'library' | 'preview' | 'delete', body: Record<string, unknown> | null = null, query = new URLSearchParams(), signal = new AbortController().signal) {
+    invoke(path: 'library' | 'preview' | 'delete' | 'identity', body: Record<string, unknown> | null = null, query = new URLSearchParams(), signal = new AbortController().signal) {
       const route = routes.find(route => route.pathname === `/api/chat/stickers/${path}`)
       assert(route); return Promise.resolve().then(() => route.handle({ query, body, signal }))
     } }
@@ -39,6 +42,21 @@ test('sticker routes expose clean snapshots and thumbnails without account, path
   assert.deepEqual(await f.invoke('preview', null, new URLSearchParams({ id })), { image: 'data:image/jpeg;base64,/9j/' })
   assert.deepEqual(f.calls, [id])
   f.disconnect(); await rejected(f.invoke('library'), 503, 'runtime_not_connected')
+})
+
+test('manual character routes normalize only local labels and reject forged provenance before dispatch', async () => {
+  const f = fixture()
+  const identity = { character: '角色甲', aliases: ['角色A'], source: 'user', evidence: '由管理页手动标注' }
+  f.setResult({ status: 'confirmed', id, revision: 2, identity })
+  assert.deepEqual(await f.invoke('identity', { id, revision: 1, identity: { character: ' 角色甲 ', aliases: ['角色A', '角色Ａ'] } }),
+    { status: 'confirmed', id, revision: 2, identity })
+  assert.deepEqual(f.calls, [{ stickerId: id, revision: 1, identity: { character: '角色甲', aliases: ['角色A'] } }])
+  for (const invalid of [{ character: '', aliases: [] }, { character: '角色甲', aliases: [], source: 'web' },
+    { character: '角色甲', aliases: [], evidence: '网页核验' }]) {
+    await rejected(f.invoke('identity', { id, revision: 2, identity: invalid }), 400, 'invalid_sticker_identity')
+  }
+  f.setFailure(new FrameworkError('STICKER_IDENTITY_CONFLICT', 'Private revision details'))
+  await rejected(f.invoke('identity', { id, revision: 1, identity: { character: '角色甲', aliases: [] } }), 409, 'sticker_identity_conflict')
 })
 
 test('sticker routes reject unsupported queries and invalid deletes before dispatch', async () => {

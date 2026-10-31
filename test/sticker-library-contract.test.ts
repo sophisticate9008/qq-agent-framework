@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DEFAULT_STICKER_LIBRARY_CONFIGURATION, parseStickerLibraryDeleteResult, parseStickerLibrarySnapshot,
-  parseStickerLibraryThumbnail, validateStickerLibraryConfiguration } from '../src/contracts/sticker-library.ts'
+  parseStickerLibraryThumbnail, parseStickerLibraryIdentityUpdate, parseStickerLibraryIdentityUpdateResult,
+  validateStickerLibraryConfiguration } from '../src/contracts/sticker-library.ts'
 
 const item = { id: 'a'.repeat(64), revision: 1, name: '招手', description: '开心招手', tags: ['开心', '问候'], avoid: '',
   storage: 'account', state: 'ready', canDelete: true, createdAt: 1 }
@@ -59,4 +60,15 @@ test('layout dimensions remain optional and describe a bounded original aspect r
     assert.equal(parseStickerLibraryThumbnail({ image: 'data:image/jpeg;base64,/9j/', ...invalid }), null)
   }
   assert.equal(parseStickerLibraryThumbnail({ image: 'data:image/jpeg;base64,/9j/', width: 100 }), null)
+})
+
+test('manual character inputs normalize aliases without accepting provenance or empty clearing', () => {
+  const input = { id: item.id, revision: 1, identity: { character: ' 角色甲 ', aliases: ['角色_A', '角色 A', '角色甲'] } }
+  assert.deepEqual(parseStickerLibraryIdentityUpdate(input), { id: item.id, revision: 1, identity: { character: '角色甲', aliases: ['角色_A'] } })
+  for (const invalid of [{ ...input, revision: 0 }, { ...input, identity: { character: '', aliases: [] } },
+    { ...input, identity: { ...input.identity, source: 'user' } }, { ...input, identity: { ...input.identity, references: [] } }]) {
+    assert.equal(parseStickerLibraryIdentityUpdate(invalid), null)
+  }
+  assert.equal(parseStickerLibraryIdentityUpdateResult({ status: 'confirmed', id: item.id, revision: 2,
+    identity: { character: '角色甲', aliases: [], source: 'model' } }), null)
 })

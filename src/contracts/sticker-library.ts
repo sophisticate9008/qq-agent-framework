@@ -157,6 +157,40 @@ export interface StickerLibraryDeleteResult {
   readonly status: 'confirmed' | 'rejected' | 'unknown'
   readonly retry: false
 }
+export interface StickerLibraryIdentityUpdate {
+  readonly id: string
+  readonly revision: number
+  readonly identity: { readonly character: string; readonly aliases: readonly string[] }
+}
+export function parseStickerLibraryIdentityUpdate(value: unknown): StickerLibraryIdentityUpdate | null {
+  if (!isRecord(value) || Object.keys(value).length !== 3 || !Object.keys(value).every(key => ['id', 'revision', 'identity'].includes(key))
+    || typeof value.id !== 'string' || !/^[a-f0-9]{64}$/.test(value.id) || !Number.isSafeInteger(value.revision) || Number(value.revision) < 1
+    || !isRecord(value.identity) || Object.keys(value.identity).length !== 2
+    || !Object.keys(value.identity).every(key => ['character', 'aliases'].includes(key))
+    || typeof value.identity.character !== 'string' || !facetText(value.identity.character.trim(), 64)
+    || /[\u202a-\u202e\u2066-\u2069]/.test(value.identity.character) || !characterKey(value.identity.character)
+    || !Array.isArray(value.identity.aliases) || value.identity.aliases.length > 8) return null
+  const character = value.identity.character.trim(), aliases = new Map<string, string>()
+  for (const alias of value.identity.aliases) {
+    if (typeof alias !== 'string' || !facetText(alias.trim(), 64) || /[\u202a-\u202e\u2066-\u2069]/.test(alias) || !characterKey(alias)) return null
+    const key = characterKey(alias)
+    if (key !== characterKey(character) && !aliases.has(key)) aliases.set(key, alias.trim())
+  }
+  return { id: value.id, revision: Number(value.revision), identity: { character, aliases: [...aliases.values()] } }
+}
+export interface StickerLibraryIdentityUpdateResult {
+  readonly status: 'confirmed'
+  readonly id: string
+  readonly revision: number
+  readonly identity: StickerLibraryIdentity
+}
+export function parseStickerLibraryIdentityUpdateResult(value: unknown): StickerLibraryIdentityUpdateResult | null {
+  if (!isRecord(value) || value.status !== 'confirmed' || typeof value.id !== 'string' || !/^[a-f0-9]{64}$/.test(value.id)
+    || !Number.isSafeInteger(value.revision) || Number(value.revision) < 1) return null
+  const identity = parseStickerLibraryIdentity(value.identity)
+  if (!identity || identity.source !== 'user') return null
+  return { status: 'confirmed', id: value.id, revision: Number(value.revision), identity }
+}
 export function parseStickerLibraryDeleteResult(value: unknown): StickerLibraryDeleteResult | null {
   if (!isRecord(value) || value.status !== 'confirmed' && value.status !== 'rejected' && value.status !== 'unknown'
     || value.retry !== undefined && value.retry !== false) return null

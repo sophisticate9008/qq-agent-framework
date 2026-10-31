@@ -1,4 +1,5 @@
-import { parseStickerLibrarySnapshot, parseStickerLibraryThumbnail, parseStickerLibraryDeleteResult, type StickerLibrarySnapshot } from '../contracts/sticker-library.ts'
+import { parseStickerLibrarySnapshot, parseStickerLibraryThumbnail, parseStickerLibraryDeleteResult,
+  parseStickerLibraryIdentityUpdate, parseStickerLibraryIdentityUpdateResult, type StickerLibrarySnapshot } from '../contracts/sticker-library.ts'
 import { isRecord, errorCode } from '../core/values.ts'
 import { AdminRequestError, type AdminRoute } from './server.ts'
 
@@ -6,6 +7,7 @@ interface StickerLibraryManager {
   snapshot(signal: AbortSignal): Promise<unknown>
   thumbnail(id: string, signal: AbortSignal): Promise<unknown>
   remove(id: string, revision: number, operationId: string, signal: AbortSignal): Promise<unknown>
+  annotateIdentity(id: string, revision: number, identity: { readonly character: string; readonly aliases: readonly string[] }, signal: AbortSignal): Promise<unknown>
 }
 const MAX_LIBRARY_RESPONSE_BYTES = 4 * 1024 * 1024
 function boundSnapshot(value: StickerLibrarySnapshot): StickerLibrarySnapshot {
@@ -54,6 +56,16 @@ export function createStickerLibraryRoutes(runtime: { stickerLibrary(): StickerL
       try {
         const value = parseStickerLibraryDeleteResult(await service().remove(body.id, body.revision, body.operationId, signal))
         if (!value) throw new AdminRequestError(503, 'sticker_delete_result_unknown')
+        return value
+      } catch (error) { failed(error) }
+    } },
+  { method: 'POST', pathname: '/api/chat/stickers/identity', maxRequestBytes: 4096, maxResponseBytes: 8192,
+    async handle({ query, body, signal }) {
+      const request = parseStickerLibraryIdentityUpdate(body)
+      if (query.size || !request) throw new AdminRequestError(400, 'invalid_sticker_identity')
+      try {
+        const value = parseStickerLibraryIdentityUpdateResult(await service().annotateIdentity(request.id, request.revision, request.identity, signal))
+        if (!value || value.id !== request.id || value.revision <= request.revision) throw new AdminRequestError(503, 'sticker_identity_result_unknown')
         return value
       } catch (error) { failed(error) }
     } }]

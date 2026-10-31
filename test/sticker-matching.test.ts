@@ -86,11 +86,13 @@ test('recent repetition, duplicate entries, ties and candidate ordering remain d
 function named(id: string, character: string, aliases: readonly string[], tags: readonly string[]): StickerMatchCandidate {
   return candidate(id, { tags, identity: { character, aliases, source: 'user' } })
 }
-test('character phrase postings restrict action matches and never infer identity from appearance', () => {
+test('plain character mentions weakly prefer matching expressions while explicit identity remains exact', () => {
   const whale = named('whale', '星河鲸', ['胖团鱼'], ['吃饭'])
   const cat = named('cat', '纸片猫', [], ['吃饭'])
   const anonymous = candidate('anonymous', { tags: ['吃饭'], visual: { colors: ['蓝色'], styles: ['卡通'], entities: ['蓝色头发'] } })
-  assert.deepEqual(rank('胖团鱼吃饭', [cat, anonymous, whale]).map(item => item.id), ['whale'])
+  assert.equal(rank('胖团鱼吃饭', [cat, anonymous, whale])[0]?.id, 'whale')
+  assert.equal(rank('胖团鱼吃饭', [cat, anonymous, whale]).length, 3)
+  assert.deepEqual(rankStickerCandidates({ intent: '吃饭', character: '胖团鱼', candidates: [cat, anonymous, whale], context: [], recentlyUsed: [] }).map(item => item.id), ['whale'])
   assert.deepEqual(rank('胖团鱼', [whale, cat]).map(item => item.id), ['whale'])
   assert.deepEqual(rank('胖团鱼抱抱', [whale, cat]), [])
   assert.deepEqual(rank('蓝色', [anonymous]).map(item => item.id), ['anonymous'])
@@ -119,11 +121,11 @@ test('external character alias changes apply without retagging and ambiguous ali
   const matcher = createStickerMatcher('test-account')
   const whale = named('whale', '星河鲸', [], ['吃饭'])
   const cat = named('cat', '纸片猫', [], ['吃饭'])
-  const base = { intent: '胖团鱼吃饭', candidates: [whale, cat], context: [], recentlyUsed: [] }
+  const base = { intent: '吃饭', character: '胖团鱼', candidates: [whale, cat], context: [], recentlyUsed: [] }
   assert.deepEqual(matcher.rank({ ...base, characterAliases: [{ character: '星河鲸', aliases: ['胖团鱼'] }] }).map(item => item.id), ['whale'])
   assert.deepEqual(matcher.rank({ ...base, characterAliases: [{ character: '纸片猫', aliases: ['胖团鱼'] }] }).map(item => item.id), ['cat'])
   assert.deepEqual(matcher.rank({ ...base, characterAliases: [{ character: '星河鲸', aliases: ['胖团鱼'] }, { character: '纸片猫', aliases: ['胖团鱼'] }] }), [])
-  assert.deepEqual(matcher.rank({ ...base, intent: '未入库角色吃饭', characterAliases: [{ character: '未入库角色', aliases: [] }] }), [])
+  assert.deepEqual(matcher.rank({ ...base, character: '未入库角色', characterAliases: [{ character: '未入库角色', aliases: [] }] }), [])
 })
 test('explicit negative identity excludes only that character without becoming a rejection mood', () => {
   const whale = named('whale', '星河鲸', ['胖团鱼'], ['吃饭'])
@@ -131,4 +133,44 @@ test('explicit negative identity excludes only that character without becoming a
   assert.deepEqual(rank('不要胖团鱼，要纸片猫吃饭', [whale, cat]).map(item => item.id), ['cat'])
   assert.deepEqual(rank('不发胖团鱼，要纸片猫吃饭', [whale, cat]).map(item => item.id), ['cat'])
   assert.deepEqual(rank('吃饭', [whale, cat]).map(item => item.id).sort(), ['cat', 'whale'])
+})
+
+test('ordinary identity preference never blocks a better expression or rescues an unsuitable candidate', () => {
+  const favourite = named('favourite', '星河鲸', ['胖团鱼'], ['吃饭'])
+  assert.deepEqual(rank('胖团鱼，安慰', [favourite, comfort]).map(item => item.id), ['comfort'])
+  const preferredHappy = named('preferred-happy', '星河鲸', ['胖团鱼'], ['开心'])
+  const plain = rank('开心庆祝', [preferredHappy, celebrate])
+  const mentioned = rank('胖团鱼，开心庆祝', [preferredHappy, celebrate])
+  assert.equal(mentioned[0]?.id, 'celebrate')
+  const plainScore = plain.find(item => item.id === preferredHappy.id)?.score ?? 0
+  const preferredScore = mentioned.find(item => item.id === preferredHappy.id)?.score ?? 0
+  assert(preferredScore > plainScore && preferredScore <= plainScore + 0.201)
+  assert.deepEqual(rank('胖团鱼，安慰', [favourite]), [])
+})
+test('explicit character constraints and conservative named requests do not substitute other characters', () => {
+  const favourite = named('favourite', '星河鲸', ['胖团鱼'], ['吃饭'])
+  const base = { intent: '安慰', character: '胖团鱼', candidates: [favourite, comfort], context: [], recentlyUsed: [] }
+  assert.deepEqual(rankStickerCandidates(base), [])
+  assert.deepEqual(rank('只要胖团鱼，安慰', [favourite, comfort]), [])
+  assert.deepEqual(rank('指定角色胖团鱼，吃饭', [favourite, food]).map(item => item.id), ['favourite'])
+  assert.deepEqual(rank('发胖团鱼的表情', [favourite, food]).map(item => item.id), ['favourite'])
+})
+test('ambiguous ordinary mentions keep expression matching available but pure identity requests do not guess', () => {
+  const aliases = [{ character: '星河鲸', aliases: ['小团子'] }, { character: '纸片猫', aliases: ['小团子'] }]
+  const candidates = [named('whale', '星河鲸', [], ['吃饭']), named('cat', '纸片猫', [], ['吃饭'])]
+  const base = { intent: '小团子吃饭', candidates, characterAliases: aliases, context: [], recentlyUsed: [] }
+  assert.equal(rankStickerCandidates(base).length, 2)
+  assert.deepEqual(rankStickerCandidates({ ...base, intent: '小团子' }), [])
+  assert.deepEqual(rankStickerCandidates({ ...base, character: '小团子' }), [])
+})
+test('identity alone adds no expression score to visual matches and names do not invent emotions', () => {
+  const visual = { colors: ['蓝色'], styles: [], entities: [] }
+  const favourite = candidate('favourite', { visual, identity: { character: '星河鲸', aliases: ['胖团鱼'], source: 'user' } })
+  const other = candidate('other', { visual })
+  const result = rank('胖团鱼，蓝色', [favourite, other])
+  assert.equal(result[0]?.score, result[1]?.score)
+  const awkwardName = named('awkward', '难过骑士', [], ['调侃'])
+  assert.equal(rank('难过骑士，调侃', [awkwardName])[0]?.id, 'awkward')
+  const collision = named('collision', '开心', [], ['吃饭'])
+  assert.deepEqual(rank('开心', [collision, celebrate]).map(item => item.id), ['celebrate'])
 })

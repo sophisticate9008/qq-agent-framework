@@ -10,6 +10,7 @@ export interface StickerMatchOptions {
   readonly context: readonly string[]
   readonly candidates: readonly StickerMatchCandidate[]
   readonly recentlyUsed: readonly string[]
+  /** An explicit identity requirement; a mere mention in intent is only a weak preference. */
   readonly character?: string
   readonly characterAliases?: readonly { readonly character: string; readonly aliases: readonly string[] }[]
 }
@@ -85,7 +86,8 @@ function restrictions(annotation: StickerAnnotation, intent: string, context: st
 
 /**
  * An account-owned, bounded inverted index. Metadata changes update postings and corpus statistics;
- * a request scores only IDs recalled by query postings, restricted by exact character postings.
+ * a request scores only IDs recalled by query postings. Explicit character requirements restrict
+ * recall; ordinary mentions provide only a small tie-breaking preference after expression admission.
  * The index never stores query/context text and performs no I/O or model calls.
  */
 export function createStickerMatcher(accountId: string) {
@@ -176,8 +178,9 @@ export function createStickerMatcher(accountId: string) {
     aliasesDirty = false
   }
   function characters(intent: string, explicit: string | undefined) {
-    const positive = new Set<string>(), negative = new Set<string>(), ranges: { start: number; end: number }[] = []
-    let ambiguous = false
+    const positive = new Set<string>(), required = new Set<string>(), negative = new Set<string>()
+    const ranges: { start: number; end: number }[] = []
+    let ambiguous = false, ambiguousRequirement = false
     for (let start = 0; start < intent.length; start += 1) {
       let node = aliasesRoot, longest: { end: number; characters: ReadonlySet<string> } | null = null
       for (let end = start; end < Math.min(intent.length, start + 64); end += 1) {
@@ -190,37 +193,57 @@ export function createStickerMatcher(accountId: string) {
       const alias = intent.slice(start, longest.end), before = intent.slice(0, start), after = intent.slice(longest.end)
       if (/^[a-z ]+$/.test(alias) && (/[a-z]$/.test(before) || /^[a-z]/.test(after))) continue
       const negation = before.match(/(?:(?:不要|别|不用|不想要|不需要)(?:用|发)?|不(?:是|要|用|发)?|没|非|not\s+|without\s+)$/i)
-      if (!negation && longest.characters.size > 1) ambiguous = true
-      for (const character of longest.characters) (negation ? negative : positive).add(character)
-      ranges.push({ start: negation ? start - negation[0].length : start, end: longest.end }); start = longest.end - 1
+      const constraint = before.match(/(?:只要|只用|只发|指定(?:角色)?|必须(?:是|用|发)?|就要|仅用|仅要|仅限于?)\s*[「“"']?$/i)
+      const namedImageRequest = /(?:发|来|找|给我)(?:一张|一个|张|个)?\s*[「“"']?$/.test(before)
+        && /^\s*[」”"']?的(?:表情|贴纸|图片)/.test(after)
+      const requiredHere = !negation && (constraint !== null || namedImageRequest)
+      // A character coincidentally called “开心” must not consume an ordinary emotion query.
+      if (!requiredHere && !negation && alias.length <= 2 && stickerSemanticConcepts(alias).length) continue
+      if (!negation && longest.characters.size > 1) {
+        ambiguous = true
+        if (requiredHere) ambiguousRequirement = true
+      }
+      for (const character of longest.characters) {
+        if (negation) negative.add(character)
+        else {
+          if (longest.characters.size === 1) positive.add(character)
+          if (requiredHere) required.add(character)
+        }
+      }
+      const prefix = negation ?? constraint
+      ranges.push({ start: prefix ? start - prefix[0].length : start, end: longest.end }); start = longest.end - 1
     }
     if (explicit?.trim()) {
       const requested = normalizeStickerCharacterName(explicit)
       let node: CharacterNode | undefined = aliasesRoot
       for (const char of requested.split('')) node = node?.children.get(char)
-      positive.clear()
-      if (node?.characters.size === 1) positive.add([...node.characters][0]!)
-      else if (node?.characters.size) ambiguous = true
-      else positive.add(requested)
+      required.clear(); ambiguousRequirement = false
+      if (node?.characters.size === 1) required.add([...node.characters][0]!)
+      else if (node?.characters.size) ambiguousRequirement = true
+      else required.add(requested)
     }
     let query = intent
     for (const range of ranges.reverse()) query = query.slice(0, range.start) + ' '.repeat(range.end - range.start) + query.slice(range.end)
-    return { positive, negative, query, ambiguous }
+    return { positive, required, negative, query, ambiguous, ambiguousRequirement }
   }
   function rank(options: StickerMatchOptions): readonly { readonly id: string; readonly score: number }[] {
     const intent = normalizeStickerCharacterName(options.intent).slice(0, 480)
     if (!intent) return []
     update(options.candidates, options.characterAliases)
     const requested = characters(intent, options.character)
-    if (requested.ambiguous) return []
+    if (requested.ambiguousRequirement) return []
     const query = new Map(terms(requested.query)), excluded = negatedFeatures(requested.query)
     for (const key of excluded) query.delete(key)
-    if (!query.size && !requested.positive.size) return []
+    const identityOnly = query.size === 0
+    if (identityOnly && !requested.required.size && (requested.ambiguous || !requested.positive.size)) return []
     const context = options.context.slice(-5).map(value => normalize(value).slice(0, 500)).join(' / ')
-    const serious = has(`${intent} / ${context}`, seriousWords), contextTerms = terms(context), recent = new Set(options.recentlyUsed)
+    const contextExpression = characters(context, undefined).query
+    const serious = has(`${requested.query} / ${contextExpression}`, seriousWords)
+    const contextTerms = terms(contextExpression), recent = new Set(options.recentlyUsed)
     const recalled = new Set<string>()
-    if (requested.positive.size) {
-      for (const character of requested.positive) for (const id of characterPostings.get(character) ?? []) recalled.add(id)
+    const constrained = requested.required.size ? requested.required : identityOnly ? requested.positive : null
+    if (constrained) {
+      for (const character of constrained) for (const id of characterPostings.get(character) ?? []) recalled.add(id)
       // Identity restricts the recall set; a matching action never broadens it to other characters.
       if (query.size) for (const id of recalled) {
         if (![...query.keys()].some(key => postings.get(key)?.has(id))) recalled.delete(id)
@@ -235,10 +258,10 @@ export function createStickerMatcher(accountId: string) {
     for (const id of recalled) {
       const indexed = documents.get(id)!
       const { candidate, fields: values, available } = indexed
-      if (recent.has(id) || restrictions(candidate.annotation, intent, context, serious)) continue
+      if (recent.has(id) || restrictions(candidate.annotation, requested.query, contextExpression, serious)) continue
       if ([...excluded].some(key => available.has(key))) continue
       if (requestedConcepts.length && !requestedConcepts.some(key => available.has(key))) continue
-      let score = 0, strongest = 0, wordMatches = 0, conceptMatch = false
+      let score = identityOnly ? 1 : 0, strongest = 0, wordMatches = 0, conceptMatch = false, expressionEvidence = false
       for (const key of query.keys()) {
         let frequency = 0, strongestField = 0
         values.forEach((field, index) => {
@@ -246,6 +269,7 @@ export function createStickerMatcher(accountId: string) {
           if (!count) return
           frequency += field.weight * count / (0.25 + 0.75 * field.terms.size / averages[index]!)
           strongestField = Math.max(strongestField, field.weight)
+          if (index >= 3 && index <= 5 || index === 2 && key.startsWith('concept:')) expressionEvidence = true
         })
         if (!frequency) continue
         if (key.startsWith('concept:')) conceptMatch = true
@@ -256,7 +280,9 @@ export function createStickerMatcher(accountId: string) {
         score += idf * frequency * 2.2 / (frequency + 1.2) * (key.startsWith('concept:') ? 1.6 : 1)
       }
       if (query.size && (strongest < 2.4 && (wordMatches < 2 || !conceptMatch) || score < 1.1)) continue
-      if (requested.positive.size) score += 3
+      // Identity cannot admit an otherwise unsuitable image or rescue its threshold.
+      // A plain mention may only slightly prefer an already matching expression.
+      if (!constrained && !requested.ambiguous && expressionEvidence && indexed.character && requested.positive.has(indexed.character)) score += 0.2
       const contextHits = [...contextTerms.keys()].filter(key => available.has(key)).length
       score += Math.min(0.3, contextHits * 0.05)
       results.push({ id, score: Math.round(score * 1000) / 1000 })

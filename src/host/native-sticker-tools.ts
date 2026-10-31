@@ -47,16 +47,16 @@ function manageInput(input: JsonValue): ManageInput {
 export const NATIVE_STICKER_TOOLS: readonly NativeToolContribution[] = Object.freeze<readonly NativeToolContribution[]>([{
   definition: { name: 'qbf_sticker_list', capability: 'native.stickers.list', featureId: 'framework-tools', timeoutMs: 15000,
     registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' },
-    description: '按情绪、用途、语义标签或备注搜索当前QQ收藏，支持开心、得意、贴贴、安慰、无语等同义词。返回当前会话可发送的图片assetId、stickerKey、语义标签及真实stickerId；stickerId为null仍可读取、发送和本地annotate。matched=false只是待看图的未分类候选，不表示匹配；先qbf_media_read少量候选，再用qbf_sticker_manage annotate缓存含义。选择后用qbf_reply({content:[{type:"image",assetId:"实际assetId"}]})发送，纯表情也可以；不用向群友说明选图过程。空库或没有适合的图就保持文字。',
+    description: '按情绪、用途、语义标签或备注搜索当前QQ收藏，支持开心、得意、贴贴、安慰、无语等同义词。返回当前会话可发送的图片assetId、stickerKey、语义标签及真实stickerId；stickerId为null仍可读取、发送和本地annotate。matched=false只是待看图的未分类候选，不表示匹配；先qbf_media_read少量候选，再用qbf_sticker_manage annotate缓存含义。平时发表情统一调用qbf_sticker_send由内置机制按标签即时选图，不在主聊天展开选图过程；本列表用于明确查询或管理。空库或没有适合的图就保持文字。',
     parameters: { type: 'object', additionalProperties: false, properties: {
       query: { type: 'string', maxLength: 128, description: '情绪或用途，例如得意、贴贴、无语；列全部时省略此字段。未分类候选必须看图确认，不把搜索词当作图片含义。' },
       limit: { type: 'integer', minimum: 1, maximum: 50, description: '最多返回数量，默认24。' },
     } } },
   validate,
 }, {
-  definition: { name: 'qbf_sticker_manage', capability: 'native.stickers.manage', featureId: 'framework-tools', timeoutMs: 30000,
+  definition: { name: 'qbf_sticker_manage', capability: 'native.stickers.manage', featureId: 'framework-tools', timeoutMs: 60000,
     registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework', ownerName: '框架内置工具', transport: 'native' },
-    description: '表情管理：annotate为已看过的收藏写入本地语义缓存，传列表的stickerKey、已qbf_media_read的当前assetId、description、tags，可选avoid不适用场景。只记图像情绪和用途，不记人物身份或聊天内容，不改QQ备注。add收藏当前会话图片；delete删除真实stickerId；describe修改QQ备注。先列表核对标识。协议写结果unknown不重试；annotate的cached不等于发出或新收藏。',
+    description: '表情管理：annotate为已看过的收藏写入本地语义缓存，传列表的stickerKey、已qbf_media_read的当前assetId、description、tags，可选avoid不适用场景。只记图像情绪和用途，不记人物身份或聊天内容，不改QQ备注。add将当前会话图片交给独立收藏机制筛选、去重和存储，任何聊天成员都可要求收藏；完成后静默结束本轮，不因回执补充发言；delete删除真实stickerId；describe修改QQ备注。先列表核对标识。协议写结果unknown不重试；annotate的cached不等于发出或新收藏。',
     parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
       action: { enum: ['add', 'delete', 'describe', 'annotate'] }, assetId: { type: 'string', minLength: 1, maxLength: 512 },
       stickerId: { type: 'string', minLength: 1, maxLength: 512 }, description: { type: 'string', maxLength: 255 },
@@ -70,6 +70,7 @@ export const NATIVE_STICKER_TOOLS: readonly NativeToolContribution[] = Object.fr
 /** Collection reads and writes retain scoped source, media and durable operation boundaries. */
 export function createNativeStickerService(options: {
   readonly port: OneBotStickerPort;
+  readonly collect?: (request: EffectRequest) => Promise<JsonValue>;
   readonly register: OneBotIncomingAssetRegistrar;
   readonly store?: DurableStore;
   readonly selfId?: string;
@@ -105,6 +106,7 @@ export function createNativeStickerService(options: {
     async execute(request): Promise<JsonValue> {
       const input = manageInput(request.input);
       const source = await guard(request);
+      if (input.action === 'add' && options.collect) return options.collect(request);
       if (input.action === 'annotate') {
         assert(cache && options.selfId && options.store, 'STICKER_CACHE_UNAVAILABLE', 'Semantic annotations require account storage.');
         const listed = await options.port.list({ limit: 500, signal: request.signal });

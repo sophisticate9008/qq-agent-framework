@@ -10,6 +10,7 @@ export type PackageConfigurationField = {
   | { readonly kind: 'boolean' }
   | { readonly kind: 'choice'; readonly options: readonly { readonly value: string; readonly label: string }[] }
   | { readonly kind: 'integer'; readonly minimum: number; readonly maximum: number; readonly unit?: string }
+  | { readonly kind: 'number'; readonly minimum: number; readonly maximum: number; readonly unit?: string }
   | { readonly kind: 'string-list'; readonly maximumEntries: number; readonly maximumLength: number }
 )
 
@@ -113,9 +114,11 @@ export function parsePackageConfigurationDescriptor(value: unknown): PackageConf
     seen.add(field.id)
     const keys = ['id', 'path', 'label', 'description', 'kind']
     if (field.kind === 'boolean') { if (!configurationKeys(field, keys)) return null }
-    else if (field.kind === 'integer') {
+    else if (field.kind === 'integer' || field.kind === 'number') {
       if (!configurationKeys(field, [...keys, 'minimum', 'maximum', ...(Object.hasOwn(field, 'unit') ? ['unit'] : [])])
-        || !configurationInteger(field.minimum) || !configurationInteger(field.maximum) || field.minimum > field.maximum || field.unit !== undefined && !configurationText(field.unit, 128, true)) return null
+        || typeof field.minimum !== 'number' || typeof field.maximum !== 'number' || !Number.isFinite(field.minimum) || !Number.isFinite(field.maximum)
+        || field.kind === 'integer' && (!configurationInteger(field.minimum) || !configurationInteger(field.maximum))
+        || field.minimum > field.maximum || field.unit !== undefined && !configurationText(field.unit, 128, true)) return null
     } else if (field.kind === 'choice') {
       if (!configurationKeys(field, [...keys, 'options']) || !Array.isArray(field.options) || field.options.length < 1 || field.options.length > 32
         || !field.options.every(option => configurationRecord(option) && configurationKeys(option, ['value', 'label'])

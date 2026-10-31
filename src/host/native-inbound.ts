@@ -59,7 +59,7 @@ export function createNativeInboundController(options: {
   readonly checkpoint: (point: LifecycleCheckpoint, data: JsonObject, signal: AbortSignal) => Promise<void>
   readonly guard: (conversationId: string, signal: AbortSignal, recheck: boolean, phase: 'protocol' | 'admission') => Promise<void>
   readonly safeCode: (error: unknown) => string
-  readonly onMessage?: (message: InboundMessage) => void
+  readonly onMessage?: (message: InboundMessage, raw: unknown) => void
   readonly onDispatched?: (requestId: string, accepted: boolean) => void
   readonly random?: () => number
 }) {
@@ -169,7 +169,7 @@ export function createNativeInboundController(options: {
       }
       received++
       activity.record('received', message.conversationId, activityContent)
-      options.onMessage?.({ ...message, content })
+      options.onMessage?.({ ...message, content }, event)
       const inputSettings = await readInputConfiguration(message.conversationId, persona?.name)
       if (wakeSettings.size >= 1024 && !wakeSettings.has(message.conversationId)) wakeSettings.delete(wakeSettings.keys().next().value!)
       wakeSettings.set(message.conversationId, inputSettings.effective)

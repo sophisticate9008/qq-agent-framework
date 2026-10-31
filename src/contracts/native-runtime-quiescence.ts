@@ -9,6 +9,7 @@ export function nativeRuntimeIsQuiescent(value: unknown): boolean {
     || !Array.isArray(value.packages) || value.packages.some(item => !record(item) || item.state === 'unknown')
     || value.bootstrap !== null && (!record(value.bootstrap) || value.bootstrap.state === 'unknown'
       || value.bootstrap.pendingStart === true || value.bootstrap.pendingStop === true || value.bootstrap.unsettledLifecycle === true)) return false
+  if (value.stickerMechanisms !== undefined && (!record(value.stickerMechanisms) || value.stickerMechanisms.pending !== 0)) return false
   if (value.execution !== undefined) {
     if (!record(value.execution)) return false
     const metrics = value.execution.metrics

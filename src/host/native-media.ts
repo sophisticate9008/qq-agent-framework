@@ -21,6 +21,7 @@ export function createNativeMediaRegistry(options: {
   readonly clock?: () => number;
   readonly protocol?: Pick<OneBotActionPort, 'getForward' | 'describe'>;
   readonly contentReader?: NativeMediaContentReader;
+  readonly readLibraryImage?: (id: string, signal: AbortSignal) => Promise<Uint8Array>;
   readonly transcriber?: NativeMediaTranscriber;
   readonly videoObserver?: NativeVideoObserver;
   readonly observationVersion?: (signal: AbortSignal) => Promise<MediaObservationVersion>;
@@ -60,7 +61,9 @@ export function createNativeMediaRegistry(options: {
     if (!options.contentReader) return unavailable('native_media_reader_not_connected');
     if (kind === 'audio' && !options.transcriber) return unavailable('native_media_transcriber_not_connected');
     const source = object(value.source);
-    const result = await options.contentReader.read({ kind, conversationId: request.conversationId, source: {
+    const result = typeof value.libraryImageId === 'string' && options.readLibraryImage
+      ? { status: 'confirmed' as const, data: await options.readLibraryImage(value.libraryImageId, request.signal), mediaType: null }
+      : await options.contentReader.read({ kind, conversationId: request.conversationId, source: {
       ...(typeof source.url === 'string' ? { url: source.url } : {}),
       ...(typeof source.file === 'string' ? { file: source.file } : {}), ...(typeof source.id === 'string' ? { id: source.id } : {}),
       ...(typeof source.busId === 'number' ? { busId: source.busId } : {}), ...(typeof source.fileHash === 'string' ? { fileHash: source.fileHash } : {}) }, signal: request.signal });
@@ -205,6 +208,19 @@ export function createNativeMediaRegistry(options: {
   const effectAdapter: EffectAdapter = Object.freeze({ execute: inspect });
   const registry = Object.freeze({
     readImage: imageReferences.readImage,
+    async registerLibraryImage(id: string, conversationId: string, signal: AbortSignal): Promise<string> {
+      assert(/^[a-f0-9]{64}$/.test(id) && options.readLibraryImage, 'NATIVE_MEDIA_UNAVAILABLE', 'A host-owned library image is required.');
+      await options.authorize(conversationId, signal); signal.throwIfAborted();
+      const assetId = `media-${digest([options.accountId, conversationId, 'sticker-library', id])}`;
+      const previous = options.store.read(namespace, assetId);
+      if (previous) { read(assetId, conversationId); return assetId; }
+      assert(options.store.list(namespace, { limit: 1000 }).length < 1000, 'NATIVE_MEDIA_BACKPRESSURE', 'Media registrations have reached capacity.');
+      const registeredAt = clock(), expiresAt = registeredAt + 24 * 60 * 60 * 1000;
+      options.store.write(namespace, assetId, { schema: 1, accountId: options.accountId, assetId, conversationId,
+        messageId: `sticker-library-${id}`, libraryImageId: id, kind: 'image', name: null, source: {}, registeredAt, expiresAt },
+      { expectedRevision: null, expiresAt });
+      return assetId;
+    },
     async register(asset: OneBotIncomingAsset, signal: AbortSignal): Promise<string> {
       signal.throwIfAborted();
       assert(reference(asset.messageId) && reference(asset.conversationId)
@@ -247,7 +263,9 @@ export function createNativeMediaRegistry(options: {
       const value = read(request.assetId, request.conversationId)
       assert((value.kind === request.type || value.kind === 'video' && request.type === 'file') && options.contentReader, 'NATIVE_MEDIA_UNAVAILABLE', 'The outgoing resource has no current scoped reader.')
       const source = object(value.source)
-      const result = await options.contentReader.read({ kind: request.type, conversationId: request.conversationId, source: {
+      const result = typeof value.libraryImageId === 'string' && options.readLibraryImage
+        ? { status: 'confirmed' as const, data: await options.readLibraryImage(value.libraryImageId, request.signal) }
+        : await options.contentReader.read({ kind: request.type, conversationId: request.conversationId, source: {
         ...(typeof source.url === 'string' ? { url: source.url } : {}),
         ...(typeof source.file === 'string' ? { file: source.file } : {}), ...(typeof source.id === 'string' ? { id: source.id } : {}),
         ...(typeof source.busId === 'number' ? { busId: source.busId } : {}), ...(typeof source.fileHash === 'string' ? { fileHash: source.fileHash } : {}) }, signal: request.signal })

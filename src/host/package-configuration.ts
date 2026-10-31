@@ -30,9 +30,10 @@ export function validatePackageConfigurationContribution(input: PackageConfigura
         && !['__proto__', 'constructor', 'prototype'].includes(segment))
       || typeof field.label !== 'string' || field.label.length === 0 || field.label.length > 128
       || typeof field.description !== 'string' || field.description.length > 2_000
-      || !['boolean', 'integer', 'string-list', 'choice'].includes(field.kind)) fail('PACKAGE_CONFIGURATION_CONTRIBUTION_INVALID')
+      || !['boolean', 'integer', 'number', 'string-list', 'choice'].includes(field.kind)) fail('PACKAGE_CONFIGURATION_CONTRIBUTION_INVALID')
     if (field.kind === 'integer' && (!Number.isSafeInteger(field.minimum) || !Number.isSafeInteger(field.maximum)
-      || field.minimum > field.maximum) || field.kind === 'string-list' && (!Number.isSafeInteger(field.maximumEntries)
+      || field.minimum > field.maximum) || field.kind === 'number' && (!Number.isFinite(field.minimum) || !Number.isFinite(field.maximum) || field.minimum > field.maximum)
+      || field.kind === 'string-list' && (!Number.isSafeInteger(field.maximumEntries)
       || field.maximumEntries < 1 || field.maximumEntries > 1_024 || !Number.isSafeInteger(field.maximumLength)
       || field.maximumLength < 1 || field.maximumLength > 4_096)) fail('PACKAGE_CONFIGURATION_CONTRIBUTION_INVALID')
     if (field.kind === 'choice' && (!Array.isArray(field.options) || field.options.length < 1 || field.options.length > 32

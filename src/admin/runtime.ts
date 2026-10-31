@@ -3,6 +3,7 @@ import { readAdminActivity } from './simulation-activity.ts'
 import { createNativeToolInventoryRoutes, type NativeToolInventoryReader } from './native-tool-inventory.ts'
 import { createNativeExtensionReloadRoutes } from './native-extension-reload.ts'
 import { createPluginSessionRoutes } from './plugin-sessions.ts'
+import { createStickerLibraryRoutes } from './sticker-library.ts'
 import { createPluginScheduleRoutes } from './plugin-schedules.ts'
 import { validateManualDshModelSettings, type DshDeploymentModelSettings } from '../contracts/dsh-model-settings.ts'
 import { createSimulationSessionRoutes } from './simulation-sessions.ts'
@@ -1030,6 +1031,7 @@ export function createNativeRuntimeRoutes(options: NativeRuntimeRouteOptions): r
         return chatRuntime.readConversationTasks(conversationId ?? undefined, after ?? undefined)
       } })
     routes.push(...createPluginScheduleRoutes({ runtime: chatRuntime }))
+    routes.push(...createStickerLibraryRoutes(chatRuntime))
     routes.push(...nativeChatControlRoutes(directory, chatRuntime, options.deploymentRuntime === undefined ? undefined : checkedNativeDeploymentRuntime(options.deploymentRuntime)))
     routes.push(...createNativeSessionManagementRoutes({ directory, state: () => chatRuntime.activity().state,
       unbind: target => chatRuntime.unbindSession(target), bind: (target, sessionId, signal) => chatRuntime.bindSession(target, sessionId, signal) })

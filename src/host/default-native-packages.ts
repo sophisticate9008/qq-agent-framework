@@ -66,6 +66,7 @@ export function createMediaNativePackage(options: { readonly registry: NativeMed
           return result
         },
         register(asset, signal) { return registry.register(asset, AbortSignal.any([signal, context.signal])) },
+        registerLibraryImage(id, conversationId, signal) { return registry.registerLibraryImage(id, conversationId, AbortSignal.any([signal, context.signal])) },
         readForPrompt(request) { return registry.readForPrompt({ ...request, signal: AbortSignal.any([request.signal, context.signal]) }) },
         resolveOutgoing(request) { return registry.resolveOutgoing({ ...request, signal: AbortSignal.any([request.signal, context.signal]) }) },
         inspect: effect(registry.inspect), read: effect(registry.read)

@@ -163,7 +163,7 @@ export async function startSimulatedOneBot(options: {
       return { status: 'ok', retcode: 0, data: name === 'get_group_member_list' ? [...knownIds].map(member) : member(requested) }
     }
     if (name === 'fetch_custom_face_detail' || name === 'get_custom_face') return { status: 'ok', retcode: 0,
-      data: [...assets].filter(([, asset]) => asset.kind === 'image').map(([key, asset]) => ({ emoji_id: key, desc: asset.name, url: `${endpoint}/assets/${key}` })) }
+      data: [...assets].filter(([, asset]) => asset.kind === 'image').map(([key, asset]) => ({ emoji_id: key, resId: key, md5: createHash('md5').update(asset.bytes).digest('hex'), desc: asset.name, url: `${endpoint}/assets/${key}` })) }
     if (name === 'group_poke' || name === 'friend_poke' || name === 'delete_msg') {
       if (name !== 'delete_msg' && (!knownIds.has(String(params.user_id))
         || name === 'group_poke' && String(params.group_id) !== options.groupId)) return { status: 'failed', retcode: 1404, data: null, message: 'simulation_poke_target_not_found' }

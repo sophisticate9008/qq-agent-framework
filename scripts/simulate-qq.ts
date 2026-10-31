@@ -526,7 +526,7 @@ export async function simulateQq(values = process.argv.slice(2)) {
         const work = native.listWork().records
         const idle = !work.some(item => item.status === 'starting' || item.status === 'running' || item.delivery === 'delivering')
           && current.ingress.activeConversations === 0 && current.execution.metrics?.deadlines === 0
-          && current.execution.metrics.pendingActions === 0
+          && current.execution.metrics.pendingActions === 0 && current.stickerMechanisms.pending === 0
         if (idle) quietSince ??= Date.now()
         else quietSince = undefined
         if (quietSince !== undefined && Date.now() - quietSince >= 1500) { await status(); return }

@@ -32,7 +32,7 @@ function boundedText(value: unknown, max: number): string | null {
   return typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : null;
 }
 function decode(value: unknown, limit: number): { items: readonly OneBotSticker[]; limited: boolean } | null {
-  if (!Array.isArray(value) || value.length > 500) return null;
+  if (!Array.isArray(value) || value.length > 5000) return null;
   const items: OneBotSticker[] = [];
   const seen = new Set<string>();
   for (const entry of value) {
@@ -111,12 +111,14 @@ export function createOneBotStickerPort(options: {
           const part = await reader.read();
           if (part.done) break;
           bytes += part.value.byteLength;
-          if (bytes > 1024 * 1024) return { status: 'unknown', code: 'ONEBOT_STICKER_RESPONSE_TOO_LARGE' };
+          if (bytes > 4 * 1024 * 1024) return { status: 'unknown', code: 'ONEBOT_STICKER_RESPONSE_TOO_LARGE' };
           chunks.push(part.value);
         }
         body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
       } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
       const status = classifyOneBotResponse(body);
+      if (status === 'rejected' && isRecord(body) && /收藏.{0,12}(?:满|上限)|(?:emoji|face).{0,20}(?:full|limit)/i.test(String(body.message ?? body.wording ?? '')))
+        return { status: 'rejected', code: 'ONEBOT_STICKER_COLLECTION_FULL' };
       if (status !== 'confirmed') return { status, code: 'ONEBOT_STICKER_NOT_CONFIRMED' };
       const data = decodeData(isRecord(body) ? body.data : undefined);
       return data === null ? { status: 'unknown', code: 'ONEBOT_STICKER_INVALID_RESPONSE' } : { status: 'confirmed', data };
@@ -124,7 +126,7 @@ export function createOneBotStickerPort(options: {
   }
   return Object.freeze<OneBotStickerPort>({
     async list(request) {
-      if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 500)
+      if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 5000)
         return { status: 'rejected', code: 'ONEBOT_STICKER_INVALID_INPUT' };
       return invoke('fetch_custom_face_detail', { count: request.limit }, request.signal, value => decode(value, request.limit));
     },

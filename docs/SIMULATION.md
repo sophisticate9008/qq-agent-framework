@@ -210,3 +210,5 @@ node scripts/simulate-qq.ts --batch video --prepare-only
 媒体设置控制行 `{"mediaSettings":{"observeVideo":true}}` / `false` 通过本轮真实配置注册表 `media` 的当前 revision 做 CAS 保存，记录 `media-settings-changed`；它们只修改本轮私有配置。准备时复制配置的白名单包含 `package-media.configuration.json`。默认配置为 `{"schema":1,"observeVideo":false}`，视频专项会显式从关闭开始。
 
 专项使用只读核对行 `{"videoReads":{"label":"video-disabled","expect":"none"}}`、`some`、`unchanged`，分别要求尚无视频 GET、从上个核对点起至少发生一次视频 GET、与上个核对点相比没有新增视频 GET。每个核对点写入 `asset-read-checkpoint`；不符合时明确失败。它验证真实下载行为，模型是否读帧、颜色顺序是否准确、是否如实说明音频未观察，仍需结合工具结果与实际模型回复核对。
+
+表情用例的模拟账号收藏列表提供实际注册图片的内容 MD5 和模拟收藏标识；发送仍只写本地捕获。稳定等待同时观察表情辅助机制的未完成任务，避免打标仍在运行时进入下一步或退出。

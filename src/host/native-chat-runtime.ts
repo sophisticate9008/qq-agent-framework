@@ -134,6 +134,10 @@ import { createNativeWorkDelivery } from './native-work-delivery.ts'
 import { createNativeWorkEffects, NATIVE_WORK_TOOLS } from './native-work-tools.ts'
 import { createOneBotStickerPort } from '../adapters/onebot-stickers.ts'
 import { createNativeStickerService, NATIVE_STICKER_TOOLS } from './native-sticker-tools.ts'
+import { createStickerPackages } from './sticker-packages.ts'
+import { createStickerLibrary } from './sticker-library.ts'
+import { createNativeStickerSendEffect, NATIVE_STICKER_SEND_TOOLS } from './native-sticker-send.ts'
+import { validateStickerLibraryConfiguration } from '../contracts/sticker-library.ts'
 import { createOneBotConversationPort } from '../adapters/onebot-conversation.ts'
 import { createNativeConversationService, NATIVE_CONVERSATION_TOOLS } from './native-conversation-tools.ts'
 import { createNativeReplyEffects, NATIVE_REPLY_TOOLS } from './native-reply-tools.ts'
@@ -326,6 +330,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   let memoryPackage: NativeMemoryPackageService | undefined
   let work: ReturnType<typeof createNativeWorkExecutor> | undefined
   let stickers: ReturnType<typeof createNativeStickerService> | undefined
+  let stickerLibrary: ReturnType<typeof createStickerLibrary> | undefined
   let workMissingReasons: readonly string[] = ['native_work_backend_unavailable']
   let workAssets: ReturnType<typeof createNativeWorkAssets> | undefined
   let conversationTasks: ReturnType<typeof createConversationTaskRuntime> | undefined
@@ -491,7 +496,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     get interactionMessages() { return interactionMessages }, get quotedContext() { return quotedContext },
     get inputPackage() { return inputPackage }, feedbackBusy: conversationId => workFeedback?.busy(conversationId) ?? false
   }, accountScope, expectedSelfId, activity, controlDefinitions, getControlCommands, checkpoint, guard, safeCode,
-    onMessage(message) {
+    onMessage(message, raw) {
+      stickerLibrary?.observe(message, raw)
       const binding = host?.sessions.get(message.conversationId)
       if (!binding || !conversationTasks?.list(message.conversationId, undefined, 200).items.some(task => ['waiting', 'running', 'paused'].includes(task.state))) return
       try { conversationTasks.emit({ binding, actorId: message.userId, sourceMessageId: message.id }, 'conversation.message', message.userId,
@@ -593,6 +599,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     return snapshot({ state, chatReady, runtimeConnected: chatReady, protocolConnected,
       configurationIssues, configurationCompatibility, configurationImpact, guard: configurationGuard.describe(),
       packages: packages?.describe() ?? [], services: packages?.services() ?? [], frameworkTools: frameworkTools?.describe() ?? null,
+      stickerMechanisms: { pending: stickerLibrary?.pending() ?? 0 },
       reminders: reminders.status(),
       memory: memory.status(),
       sessionMigration: { eligible: !closed && state === 'stopped' && !adapterOperation && !starting && !stopping
@@ -774,6 +781,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
     interactionMessages = undefined
     clearInterval(taskEventsTimer); taskEventsTimer = undefined
     await conversationTasks?.stop(); conversationTasks = undefined; taskAgent = undefined
+    await stickerLibrary?.stop(); stickerLibrary = undefined
     messageSources = undefined
     workFeedback = undefined
     replyFreshness?.clear()
@@ -1113,6 +1121,8 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           readImage: request => { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.readImage(request) },
           selfId, store: store!, sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+        const stickerSend = createNativeStickerSendEffect({ library: () => stickerLibrary, sources: () => messageSources?.reader,
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
         const replyEffects = createNativeReplyEffects({ sources: () => messageSources?.reader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'delivery') })
         const capabilityDirectory = createNativeCapabilityDirectory({ port: capabilityPort,
@@ -1133,7 +1143,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           loadedInSession: false, registrationSource: { origin: 'framework-builtin', ownerId: 'qq-bridge-framework',
             ownerName: '框架能力目录', transport: 'native' } }))
         const memoryEffects = createNativeMemoryEffects({ service: () => memoryPackage, sources: () => messageSources?.reader })
-        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', 'native.stickers.manage', ...Object.keys(conversationEffects), ...Object.keys(capabilityDirectory.effects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(taskEffects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
+        if (['native.media.inspect', 'native.media.read', 'native.stickers.list', 'native.stickers.manage', 'native.stickers.send', ...Object.keys(conversationEffects), ...Object.keys(capabilityDirectory.effects), ...Object.keys(qzoneEffects), ...Object.keys(replyEffects), ...Object.keys(reminderService.effects), ...Object.keys(taskEffects), ...Object.keys(memoryEffects), ...Object.keys(workEffects)].some(name => bootstrapMount?.bridgeOptions.effectAdapters?.[name])) {
           failure('NATIVE_CHAT_RESERVED_CAPABILITY')
         }
         if ([...ONEBOT_PROTOCOL_EVENT_TYPES, NATIVE_TOOL_EVENT, ...Object.keys(reminderService.eventValidators)].some(type => bootstrapMount?.bridgeOptions.eventValidators?.[type])) {
@@ -1155,6 +1165,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           shouldSendAgentMessage: async event => !await replyFreshness?.hold(event),
           eventValidators: { ...bootstrapMount?.bridgeOptions.eventValidators, ...protocolValidators, ...reminderService.eventValidators, [NATIVE_TOOL_EVENT]: validateNativeToolEvent },
           effectAdapters: { ...bootstrapMount?.bridgeOptions.effectAdapters, ...reminderService.effects, ...taskEffects, ...memoryEffects, ...workEffects, ...conversationEffects, ...capabilityDirectory.effects, ...qzoneEffects, ...replyEffects,
+            'native.stickers.send': stickerSend,
             'native.stickers.manage': { execute(request) { if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE'); return stickers.manage.execute(request) } },
             'native.stickers.list': { execute(request) {
               if (!stickers) failure('NATIVE_STICKERS_UNAVAILABLE')
@@ -1191,7 +1202,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
                 attachImages: active.deployment.modelSettings?.inputModalities?.includes('image') !== false,
                 unread: { ids: unread.messages.filter(item => item.sequence <= through && item.actor !== 'assistant' && item.actor !== 'system').map(item => item.id), readThrough: unread.readThrough,
                   through, partial: historyPartial },
-                quotedMessages, stickerHints: await stickers?.hints(execution.signal),
+                quotedMessages, stickerHints: await stickerLibrary?.hints(event.conversationId, execution.signal),
                 tools: await frameworkTools?.context(event.conversationId, execution.signal),
                 output: { ...await output.context(execution.signal), forwardAuthorized: !host.policy.describe().paused && host.policy.describe().grants.some(grant =>
                   grant.active && grant.featureId === 'agent-relay' && grant.conversationId === event.conversationId
@@ -1266,19 +1277,41 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         const readProtocol = createOneBotActionPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
           ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}),
           allowedActions: ONEBOT_READ_ACTIONS })
+        const mediaReader = createOneBotMediaReader({ actions: readProtocol,
+          trustedOrigins: [new URL(configuration.adapters.onebotHttp.endpoint).origin], maxBytes: 8 * 1024 * 1024, timeoutMs: 15000 })
+        const stickerPort = createOneBotStickerPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
+          ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}) })
         media = createNativeMediaRegistry({ store: store!, accountId: selfId,
+          readLibraryImage(id, signal) { if (!stickerLibrary) failure('NATIVE_STICKERS_UNAVAILABLE'); return stickerLibrary.readImage(id, signal) },
           protocol: readProtocol, transcriber: options.mediaTranscriber,
           videoObserver: createFfmpegVideoObserver({ directory: options.directory }),
           async observationVersion(signal) { signal.throwIfAborted(); const saved = await packageConfigurationRegistry.read('media');
             signal.throwIfAborted(); return validateNativeMediaConfiguration(saved.configuration).observationVersion },
           async observeVideo(signal) { signal.throwIfAborted(); const saved = await packageConfigurationRegistry.read('media');
             signal.throwIfAborted(); return validateNativeMediaConfiguration(saved.configuration).observeVideo },
-          contentReader: createOneBotMediaReader({ actions: readProtocol,
-            trustedOrigins: [new URL(configuration.adapters.onebotHttp.endpoint).origin], maxBytes: 8 * 1024 * 1024, timeoutMs: 15000 }),
+          contentReader: mediaReader,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
+        stickerLibrary = createStickerLibrary({ directory: options.directory, store, accountId: selfId, port: stickerPort, reader: mediaReader,
+          async reconcile(owner, name, conversationId, signal) {
+            const existing = pluginModels?.listBindings(owner).find(binding => binding.name === name && binding.conversationId === conversationId)
+            if (existing?.state === 'unknown' && !existing.busy) await pluginModels!.reconcile(owner, { name, conversationId, expectedRevision: existing.revision }, signal)
+          },
+          collector: pluginModels.forPlugin('sticker-library', controller.signal),
+          configuration: async () => validateStickerLibraryConfiguration((await packageConfigurationRegistry.read('sticker-library')).configuration),
+          signal: controller.signal, model: { provider: selected.deployment.presetBindings.find(b => b.externalProvider)?.externalProvider ?? definition.model.provider,
+            model: definition.model.name, reasoningEffort: definition.model.reasoningEffort },
+          authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource'),
+          register(id, conversationId, signal) { if (!media) failure('NATIVE_MEDIA_UNAVAILABLE'); return media.registerLibraryImage(id, conversationId, signal) },
+          context(conversationId, beforeMessageId) {
+            const messages = host?.history.snapshot(conversationId, { afterSequence: 0, limit: 100 }).messages ?? []
+            const end = beforeMessageId ? messages.findIndex(message => message.id === beforeMessageId) : -1
+            return (end >= 0 ? messages.slice(0, end) : messages).slice(-5).map(message =>
+              message.content.map(part => part.type === 'text' ? part.text : '[媒体]').join('').slice(0, 500))
+          }, onFault: code => activity.record('error', null, undefined, {}, code) })
+        stickerLibrary.warm()
         stickers = createNativeStickerService({
-          port: createOneBotStickerPort({ endpoint: configuration.adapters.onebotHttp.endpoint,
-            ...(configuration.adapters.onebotHttp.secret ? { accessToken: configuration.adapters.onebotHttp.secret } : {}) }),
+          port: stickerPort,
+          collect: request => stickerLibrary!.requestCollection(String(object(request.input).assetId), request.scope.conversationId, request.signal),
           register: media.register, store, selfId, sources: () => messageSources?.reader, resolveAsset: resolveOutputAsset,
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         packages = createNativePackages({ packages: [createChatInputNativePackage({ directory: options.directory,
@@ -1287,7 +1320,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
             const plan = latest.catalog.plans.find(item => item.id === latest.catalog.activePlanId)
             return latest.personas.find(item => item.id === plan?.personaId)
           } }),
-          createMediaNativePackage({ registry: media }), createRemindersNativePackage({ service: reminderService }),
+          ...createStickerPackages(stickerLibrary), createMediaNativePackage({ registry: media }), createRemindersNativePackage({ service: reminderService }),
           createQzoneNativePackage(qzonePort),
           createMemoryNativePackage({ service: memory.start() }), createNativeOutputPackage(output), createNativeServicesPackage({ ports: {
             agent: { status: () => ({ available: state === 'running' && dsh !== undefined && pluginEpoch !== null,
@@ -1407,7 +1440,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
         if (plugin.frameworkToolProtocol !== 'qq-bridge-framework.tools/1' || !dsh.frameworkTools) failure('NATIVE_CHAT_REPLY_TOOL_UNAVAILABLE')
         if (plugin.frameworkToolProtocol === 'qq-bridge-framework.tools/1' && dsh.frameworkTools) {
           frameworkTools = createNativeFrameworkTools({ host, store, onObservation: activity.observe, port: dsh.frameworkTools, issuerEpoch: pluginEpoch,
-            tools: [...NATIVE_REPLY_TOOLS, ...CONVERSATION_TASK_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
+            tools: [...NATIVE_REPLY_TOOLS, ...CONVERSATION_TASK_TOOLS, ...NATIVE_STICKER_SEND_TOOLS, ...NATIVE_STICKER_TOOLS, ...NATIVE_CONVERSATION_TOOLS, ...NATIVE_DIRECTORY_TOOLS, ...(work ? NATIVE_WORK_TOOLS : [])],
             async toolDescriptions(signal): Promise<Readonly<Record<string, string>>> {
               const identity = await options.readWorkIdentity?.(signal)
               signal.throwIfAborted()
@@ -1807,6 +1840,7 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
   }
 
   const runtime = Object.freeze({ status, start, stop, adapterRuntime,
+    stickerLibrary: () => state === 'running' && !closed ? stickerLibrary : undefined,
     pluginModelService: () => state === 'running' && !closed ? pluginModels : undefined,
     pluginCapabilityService: () => state === 'running' && !closed ? pluginCapabilities : undefined, applyAccessChange, reconcileExecution, recoverExecution, diagnostics, mediaDiagnostics,
     extensionStatus() { return extensions.list() },

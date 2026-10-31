@@ -242,7 +242,7 @@ test('unclassified sticker candidates can be visually annotated locally, then fo
   await registry.read.execute({ ...request, input: { assetId: incoming } });
   assert.equal(asObject(await service.manage.execute({ ...annotate, input: { action: 'annotate', stickerKey: item.stickerKey!,
     assetId: incoming, description: '笑着张开手', tags: ['抱抱'] } })).cached, true);
-  const other = await createNativeStickerService(options).list.execute({ ...request, scope: scope('other-message', 'group:457'), input: { query: '贴贴' } });
+  const other = await createNativeStickerService(options).list.execute({ ...request, scope: scope('other-message', 'group:457'), input: { query: 'hug' } });
   const otherItems = asObject(other).items;
   assert(Array.isArray(otherItems));
   assert.notEqual(asObject(otherItems[0]!).assetId, item.assetId);

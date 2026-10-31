@@ -129,7 +129,7 @@ export async function prepareSimulationDsh(options: {
       } finally { await log.close() }
       const current = child
       if (!current) throw new Error('simulation_dsh_spawn_failed')
-      const client = createDshJsonRpcPort({ endpoint, ...createDshAuthenticationOptions(configuration), timeoutMs: 1000 })
+      const client = createDshJsonRpcPort({ endpoint, ...createDshAuthenticationOptions(configuration), timeoutMs: 3000 })
       try {
         const deadline = Date.now() + 60_000
         while (Date.now() < deadline) {

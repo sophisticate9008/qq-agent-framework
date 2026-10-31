@@ -41,7 +41,16 @@ SOFTWARE.
 
 ### 表情语义检索
 
-表情缓存的“画面描述、情绪、用途、标签”组织参考了 [Capoo Vault](https://github.com/CST-Cat/capoo-vault) 的数据说明，以及 [Small Stickers, Big Meanings](https://arxiv.org/abs/2506.01668) 对表情语义查询的讨论。框架独立实现常用词表、当前账号收藏缓存和会话资源核验，没有复制这些项目的代码、标注数据或图片。核对日期为 2026-10-31。
+表情索引依据以下公开一手资料独立实现：
+
+- [Capoo Vault 标注规范](https://github.com/CST-Cat/capoo-vault/blob/main/docs/spec.md)：将画面描述、情绪、动作、场景与标签分别组织，供多字段检索参考。
+- [PerSRV: Personalized Sticker Retrieval with Vision-Language Model](https://arxiv.org/html/2410.21801v2)：将图像语义理解、图中文字与在线召回分别处理。框架参考语义与文字分离的思路，没有实现论文的个体偏好画像或训练模型。
+- [Small Stickers, Big Meanings](https://arxiv.org/html/2506.01668v1)：讨论图像描述与真实表情查询之间的差异，以及语用理解的主观性和模型误判。框架允许开放用途、多义与空标签，不将少量情绪类别当作完整语义。
+- [Selecting Stickers in Open-Domain Dialogue through Multitask Learning](https://aclanthology.org/2022.findings-acl.241/)：对话历史、情绪与表情含义需要共同理解，单一情绪匹配不能替代语境判断。
+
+本框架的字段权重、小范围同义词、否定处理、账号缓存与最终独立选择均为本项目实现；这些具体规则是工程取舍，不表述为论文结论。没有复制上述项目的源码、模型、标注数据或图片，不捆绑第三方表情素材。核对日期为 2026-10-31。
+
+QQ 收藏接口依据 NapCat 的 [CustomFace 动作实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/CustomFace.ts) 核对：读取明细、添加、删除与修改备注为不同动作，读取结果不提供账号总容量。实际支持范围由当前协议端决定。
 
 ### Markdown 图片排版
 

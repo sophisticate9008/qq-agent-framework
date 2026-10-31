@@ -14,6 +14,8 @@ import { withDeadline } from './deadlines.ts'
 import { createStickerMatcher } from './sticker-matching.ts'
 import { createStickerSemanticRefinement, type StickerRefinementCandidate } from './sticker-semantic-refinement.ts'
 import { createStickerThumbnailCache } from './sticker-thumbnail-cache.ts'
+import { createStickerDiskCache } from './sticker-disk-cache.ts'
+import { parseStickerLibraryThumbnail } from '../contracts/sticker-library.ts'
 import { createStickerImageMetadata, readStickerImageDimensions, stickerImageIdentity } from './sticker-image-metadata.ts'
 import { createStickerCharacterAliases } from './sticker-character-aliases.ts'
 import { createStickerCharacterRecognition, type StickerCharacterRecognitionRule } from './sticker-character-recognition.ts'
@@ -83,6 +85,7 @@ export function createStickerLibrary(options: {
   const cache = createStickerSemanticCache(options.store, options.accountId)
   const imageMetadata = createStickerImageMetadata(options.store, options.accountId)
   const thumbnails = createStickerThumbnailCache()
+  const disk = createStickerDiskCache(options)
   const characters = createStickerCharacterAliases(options.store, options.accountId)
   const recognition = createStickerCharacterRecognition(options.store, options.accountId)
   const matcher = createStickerMatcher(options.accountId)
@@ -139,7 +142,7 @@ export function createStickerLibrary(options: {
     return saved
   }
   function imageVersion(item: Entry): string {
-    return digest([options.accountId, item.id, stickerImageIdentity(item), item.extra, item.account?.url ?? null])
+    return digest([options.accountId, item.id, stickerImageIdentity(item), item.extra])
   }
   function availableImage(id: string, signal: AbortSignal, version?: string): Entry {
     signal.throwIfAborted()
@@ -225,6 +228,7 @@ export function createStickerLibrary(options: {
       }
       if (!limited) for (const { item } of all()) if (item.account && !present.has(item.id)) {
         save({ ...item, account: null, deleted: true, state: 'ready' })
+        await disk.forget(item.id).catch(() => undefined)
       }
     }).finally(() => { refresh = undefined })
     return refresh
@@ -237,30 +241,57 @@ export function createStickerLibrary(options: {
       assert(bytes.length <= 8 * 1024 * 1024, 'STICKER_IMAGE_TOO_LARGE', 'The image exceeds the byte limit.')
       return bytes
     }
-    const read = await options.reader.read({ kind: 'image', source: { url: item.account!.url }, signal })
+    const identity = stickerImageIdentity(item)
+    const local = await disk.read('original', id, identity, signal)
+    if (local && (!item.md5 || createHash('md5').update(local).digest('hex') === item.md5.toLowerCase())) {
+      availableImage(id, signal, version); return local
+    }
+    let read = await options.reader.read({ kind: 'image', source: { url: item.account!.url }, signal })
+    signal.throwIfAborted()
+    // Refresh a stale signed URL once. Only the protocol can supply a replacement.
+    if (read.status !== 'confirmed') {
+      await sync(signal, true)
+      const refreshed = availableImage(id, signal, version)
+      if (refreshed.account && refreshed.account.url !== item.account!.url)
+        read = await options.reader.read({ kind: 'image', source: { url: refreshed.account.url }, signal })
+    }
     signal.throwIfAborted(); assert(read.status === 'confirmed', 'STICKER_IMAGE_UNAVAILABLE', 'The collection image cannot be read.')
     availableImage(id, signal, version)
     assert(read.data.length <= 8 * 1024 * 1024, 'STICKER_IMAGE_TOO_LARGE', 'The image exceeds the byte limit.')
+    assert(!item.md5 || createHash('md5').update(read.data).digest('hex') === item.md5.toLowerCase(),
+      'STICKER_IMAGE_CHANGED', 'The collection image content changed.')
+    await disk.write('original', id, identity, Buffer.from(read.data), signal).catch(() => undefined)
+    availableImage(id, signal, version)
     return read.data
   }
   async function thumbnail(id: string, signal: AbortSignal) {
-    const current = active(signal), item = availableImage(id, current), version = imageVersion(item)
+    const current = active(signal), item = availableImage(id, current), version = imageVersion(item), identity = stickerImageIdentity(item)
     const value = await thumbnails.get(id, version, async jobSignal => {
       const processing = active(jobSignal)
       availableImage(id, processing, version)
+      const saved = await disk.read('thumbnail', id, identity, processing)
+      if (saved) {
+        try {
+          const cached = parseStickerLibraryThumbnail(JSON.parse(saved.toString('utf8')) as unknown)
+          if (cached) { availableImage(id, processing, version); return cached }
+        } catch { /* Rebuild an incomplete preview from the verified original. */ }
+      }
       const data = await readImage(id, processing)
-      assert(!item.md5 || createHash('md5').update(data).digest('hex') === item.md5.toLowerCase(),
-        'STICKER_IMAGE_CHANGED', 'The downloaded image does not match its recorded content hash.')
       const dimensions = await readStickerImageDimensions(data, processing)
       const thumb = await sharp(data, { pages: 1, limitInputPixels: 40_000_000 }).timeout({ seconds: 2 }).rotate()
         .resize({ width: 384, height: 384, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 70 }).toBuffer()
       availableImage(id, processing, version)
-      imageMetadata.remember(id, stickerImageIdentity(item), dimensions)
-      return { image: `data:image/jpeg;base64,${thumb.toString('base64')}`, ...dimensions }
+      imageMetadata.remember(id, identity, dimensions)
+      const result = { image: `data:image/jpeg;base64,${thumb.toString('base64')}`, ...dimensions }
+      assert(result.image.length <= 200_000, 'STICKER_PREVIEW_TOO_LARGE', 'The preview exceeds its byte limit.')
+      await disk.write('thumbnail', id, identity, Buffer.from(JSON.stringify(result)), processing).catch(() => undefined)
+      availableImage(id, processing, version)
+      return result
     }, current)
     availableImage(id, current, version)
     return value
   }
+
   async function classify(bytes: Uint8Array, conversationId: string, context: readonly string[], signal: AbortSignal): Promise<StickerAnnotation | null> {
     const image = await sharp(bytes, { pages: 1, limitInputPixels: 40_000_000 }).timeout({ seconds: 3 })
       .rotate().resize({ width: 768, height: 768, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 75 }).toBuffer()
@@ -391,6 +422,8 @@ export function createStickerLibrary(options: {
           if (roster.length >= latestConfiguration.accountNearFullAt || limited) return extra()
           if (!options.port.add) return { status: 'rejected', code: 'STICKER_ADD_UNSUPPORTED', quiet: true }
           if (all().filter(row => row.item.state === 'unknown').length >= 100) return { status: 'skipped', reason: 'pending-limit', quiet: true }
+          await disk.write('original', id, stickerImageIdentity(item), Buffer.from(bytes), signal).catch(() => undefined)
+          signal.throwIfAborted()
           const previous = options.store.read(WRITES, id)
           if (previous && !['rejected', 'confirmed'].includes(String(object(previous.value).status))) return { status: 'unknown', retry: false, quiet: true }
           const prepared = options.store.write(WRITES, id, { action: 'add', status: 'dispatching' }, { expectedRevision: previous?.revision ?? null })
@@ -476,7 +509,7 @@ export function createStickerLibrary(options: {
       save({ ...item, ...(status === 'confirmed' ? { deleted: true, extra: false, account: null } : {}), state: status === 'unknown' ? 'unknown' : 'ready' })
       options.store.write(WRITES, key, { fingerprint, action: 'delete', status, result }, { expectedRevision: prepared.revision })
       if (status === 'confirmed' && item.account) cache.forget(item.account)
-      if (status === 'confirmed') imageMetadata.forget(item.id)
+      if (status === 'confirmed') { imageMetadata.forget(item.id); await disk.forget(item.id).catch(() => undefined) }
       refreshedAt = 0
       return { ...object(result), retry: false }
     })
@@ -595,7 +628,7 @@ export function createStickerLibrary(options: {
         track(collect(assetId, message.conversationId, false, active(options.signal)).catch(() => { options.onFault?.('STICKER_COLLECTION_INCOMPLETE') }))
       }
     },
-    async stop() { lifetime.abort(); await Promise.all([thumbnails.close(), Promise.allSettled([...jobs])]); await mutations.catch(() => undefined); matcher.clear() },
+    async stop() { lifetime.abort(); await Promise.all([thumbnails.close(), Promise.allSettled([...jobs])]); await mutations.catch(() => undefined); await disk.close(); matcher.clear() },
     pending: () => jobs.size + reservations.size + thumbnails.pending(),
   })
 }

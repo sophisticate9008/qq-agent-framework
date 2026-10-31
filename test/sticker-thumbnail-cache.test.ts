@@ -19,21 +19,22 @@ test('shared previews reuse one job without allowing one cancelled viewer to can
   assert.equal(loads, 1); assert.equal(shared.aborted, false)
   release(preview)
   assert.deepEqual(await second, preview)
-  assert.deepEqual(await cache.get('image', 'content', load, signal()), preview)
-  assert.equal(loads, 1)
+  assert.deepEqual(await cache.get('image', 'content', async () => { loads++; return preview }, signal()), preview)
+  assert.equal(loads, 2)
   await cache.close()
 })
 
-test('invalidated late results cannot replace a new image version in the LRU', async () => {
+test('invalidated late work cannot overtake a new image version', async () => {
   const cache = createStickerThumbnailCache()
   let release!: (value: StickerLibraryThumbnail) => void
   const old = cache.get('image', 'old', () => new Promise<StickerLibraryThumbnail>(resolve => { release = resolve }), signal())
   const rejected = assert.rejects(old)
   await tick(); cache.invalidate('image'); await rejected
   const replacement = { ...preview, width: 320, height: 640 }
-  assert.deepEqual(await cache.get('image', 'new', async () => replacement, signal()), replacement)
+  const fresh = cache.get('image', 'new', async () => replacement, signal())
   release(preview); await tick()
-  assert.deepEqual(await cache.get('image', 'new', async () => { throw new Error('The new image should be cached') }, signal()), replacement)
+  assert.deepEqual(await fresh, replacement)
+  assert.deepEqual(await cache.get('image', 'new', async () => replacement, signal()), replacement)
   await cache.close()
 })
 
@@ -45,17 +46,16 @@ test('cancelled raw work retains its concurrency slot until settlement', async (
     loads++; return new Promise<StickerLibraryThumbnail>(resolve => { releases.push(resolve) })
   }, index === 0 ? controller.signal : signal()))
   const completed = Promise.allSettled(pending)
-  await tick(); assert.equal(loads, 3)
-  controller.abort(); await tick(); assert.equal(loads, 3)
-  releases[0]!(preview); await tick(); assert.equal(loads, 4)
-  for (const release of releases.slice(1)) release(preview)
+  await tick(); assert.equal(loads, 1)
+  controller.abort(); await tick(); assert.equal(loads, 1)
+  for (let index = 0; index < 4; index++) { releases[index]!(preview); await tick(); assert.equal(loads, Math.min(index + 2, 4)) }
   const results = await completed
   assert.equal(results[0]!.status, 'rejected')
   assert(results.slice(1).every(result => result.status === 'fulfilled'))
   await cache.close()
 })
 
-test('preview retention evicts at the byte budget before exhausting the entry budget', async () => {
+test('completed previews are not retained in the process', async () => {
   const cache = createStickerThumbnailCache()
   let loads = 0
   const load = async () => { loads++; return { image: `data:image/jpeg;base64,${'a'.repeat(190_000)}` } }

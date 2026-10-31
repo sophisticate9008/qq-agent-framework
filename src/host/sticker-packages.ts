@@ -6,7 +6,7 @@ import { STICKER_SENDING_CONFIGURATION } from './sticker-sending-configuration.t
 /** Background collection and local matching are distinct built-in mechanisms. */
 export function createStickerPackages(service: { readonly stop: () => Promise<void> }): readonly NativePackageDefinition[] {
   const content = createBuiltinPackageContent(import.meta.url, ['./sticker-library', './native-sticker-send', './sticker-library-configuration',
-    './sticker-sending-configuration', './sticker-dsh-selector', './sticker-semantic-refinement', './sticker-semantics', './sticker-matching', '../contracts/sticker-library', '../contracts/sticker-sending'])
+    './sticker-disk-cache', './sticker-sending-configuration', './sticker-dsh-selector', './sticker-semantic-refinement', './sticker-semantics', './sticker-matching', '../contracts/sticker-library', '../contracts/sticker-sending'])
   return [{ content, configurations: [STICKER_LIBRARY_CONFIGURATION],
     manifest: { schema: 1, id: 'sticker-library', version: '1.0.0', dependencies: ['media'], provides: [], requires: [], contributions: [],
       displayName: '表情收藏', description: '用独立绑定会话筛选、打标和收藏表情，统一管理账号与额外存储。' },

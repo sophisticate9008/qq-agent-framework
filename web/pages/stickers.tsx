@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog.tsx'
 import { errorMessage, type ApiClient } from '../lib/api.ts'
 import { useReadResource } from '../lib/use-read-resource.ts'
-import { clearFailedStickerPreviews, peekStickerPreview, readStickerPreview } from '../lib/sticker-previews.ts'
+import { readStickerPreview } from '../lib/sticker-previews.ts'
 import type { PageProps } from '../lib/types.ts'
 
 // Account clients are separate objects. Keep uncertain writes locked across navigation,
@@ -105,9 +105,10 @@ function StickerPreview({ api, item, context, knownDimensions, onDimensions, ref
   const root = useRef<HTMLDivElement>(null)
   const [nearViewport, setNearViewport] = useState(false)
   const key = `${item.id}:${item.revision}`
-  const [loaded, setLoaded] = useState<{ readonly key: string; readonly value: StickerLibraryThumbnail | null }>(() => ({ key, value: peekStickerPreview(api, item.id, item.revision) }))
+  const [loaded, setLoaded] = useState<{ readonly key: string; readonly value: StickerLibraryThumbnail | null }>({ key, value: null })
   const [failed, setFailed] = useState(false)
-  const preview = loaded.key === key ? loaded.value : peekStickerPreview(api, item.id, item.revision)
+  const [retry, setRetry] = useState(0)
+  const preview = loaded.key === key && nearViewport ? loaded.value : null
   const dimensions = item.dimensions ?? knownDimensions ?? (preview?.width && preview.height ? { width: preview.width, height: preview.height } : undefined)
   useEffect(() => {
     const element = root.current
@@ -118,7 +119,7 @@ function StickerPreview({ api, item, context, knownDimensions, onDimensions, ref
     return () => observer.disconnect()
   }, [context.active, context.viewport])
   useEffect(() => {
-    if (!nearViewport || !context.active || item.state !== 'ready') return
+    if (!nearViewport || !context.active || item.state !== 'ready') { setLoaded({ key, value: null }); return }
     const controller = new AbortController()
     setFailed(false)
     void readStickerPreview(api, item.id, item.revision, controller.signal).then(value => {
@@ -127,10 +128,10 @@ function StickerPreview({ api, item, context, knownDimensions, onDimensions, ref
       if (value?.width && value.height) onDimensions(item.id, { width: value.width, height: value.height })
     })
     return () => controller.abort()
-  }, [api, item.id, item.revision, item.state, key, nearViewport, context.active, onDimensions, refreshEpoch])
+  }, [api, item.id, item.revision, item.state, key, nearViewport, context.active, onDimensions, refreshEpoch, retry])
   return <div ref={root} className="flex w-full items-center justify-center overflow-hidden rounded-md bg-muted/40" style={{ aspectRatio: previewRatio(dimensions) }}>
     {preview && item.state === 'ready' ? <img src={preview.image} alt={item.description || item.name || '表情预览'} loading="lazy" decoding="async" className="h-full w-full object-contain" />
-      : <span className="px-2 text-center text-xs text-muted-foreground">{item.state === 'unknown' ? '等待核对' : failed ? '预览暂不可用' : nearViewport ? '正在载入…' : '表情预览'}</span>}
+      : <div className="grid justify-items-center gap-1 px-2 text-center text-xs text-muted-foreground"><span>{item.state === 'unknown' ? '等待核对' : failed ? '预览暂不可用' : nearViewport ? '正在载入…' : '表情预览'}</span>{failed && item.state === 'ready' && <Button size="sm" variant="ghost" onClick={() => setRetry(value => value + 1)}>重试预览</Button>}</div>}
   </div>
 }
 
@@ -209,7 +210,7 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
       + (item.identity ? 20 : 0) + (item.tags.length ? 20 : 0)
     return contentWidth / previewRatio(item.dimensions ?? learnedDimensions.current.get(item.id)) + textHeight + 76
   }, [])
-  const refresh = () => { clearFailedStickerPreviews(api); setPreviewEpoch(value => value + 1); resource.refresh() }
+  const refresh = () => { setPreviewEpoch(value => value + 1); resource.refresh() }
   async function remove() {
     if (!deleting || busy || request.current || locks.has(deleting.id) || resource.error) return
     const latest = resource.snapshot?.items.find(item => item.id === deleting.id)

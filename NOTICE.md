@@ -56,6 +56,10 @@ SOFTWARE.
 
 QQ 收藏接口依据 NapCat 的 [CustomFace 动作实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/action/extends/CustomFace.ts) 核对：读取明细、添加、删除与修改备注为不同动作，读取结果不提供账号总容量。实际支持范围由当前协议端决定。
 
+### 页面虚拟化
+
+列表与表情瀑布流使用 [TanStack Virtual](https://tanstack.com/virtual/latest/docs/api/virtualizer) 提供的动态尺寸测量、滚动区域与多列虚拟化能力。该依赖使用 MIT 许可；框架负责卡片内容、账号隔离、图片请求与有界缓存，不捆绑第三方图片素材。
+
 ### Markdown 图片排版
 
 框架使用 [markdown-it](https://github.com/markdown-it/markdown-it) 解析 Markdown、[Takumi](https://github.com/kane50613/takumi) 完成本机排版和图像渲染、[highlight.js](https://github.com/highlightjs/highlight.js) 提供静态语法高亮、[MathJax](https://github.com/mathjax/MathJax) 处理数学公式、[sharp](https://github.com/lovell/sharp) 完成 PNG 分页。这些依赖保留各自发行包中的许可与声明；此集成不捆绑无头浏览器。

@@ -1,4 +1,4 @@
-import { parseStickerLibrarySnapshot, parseStickerLibraryThumbnail, parseStickerLibraryDeleteResult } from '../contracts/sticker-library.ts'
+import { parseStickerLibrarySnapshot, parseStickerLibraryThumbnail, parseStickerLibraryDeleteResult, type StickerLibrarySnapshot } from '../contracts/sticker-library.ts'
 import { isRecord, errorCode } from '../core/values.ts'
 import { AdminRequestError, type AdminRoute } from './server.ts'
 
@@ -6,6 +6,15 @@ interface StickerLibraryManager {
   snapshot(signal: AbortSignal): Promise<unknown>
   thumbnail(id: string, signal: AbortSignal): Promise<unknown>
   remove(id: string, revision: number, operationId: string, signal: AbortSignal): Promise<unknown>
+}
+const MAX_LIBRARY_RESPONSE_BYTES = 4 * 1024 * 1024
+function boundSnapshot(value: StickerLibrarySnapshot): StickerLibrarySnapshot {
+  let bytes = Buffer.byteLength(JSON.stringify({ ...value, items: [] }))
+  for (let index = 0; index < value.items.length; index++) {
+    bytes += Buffer.byteLength(JSON.stringify(value.items[index])) + (index > 0 ? 1 : 0)
+    if (bytes > MAX_LIBRARY_RESPONSE_BYTES) return { ...value, items: value.items.slice(0, index), limited: true }
+  }
+  return value
 }
 export function createStickerLibraryRoutes(runtime: { stickerLibrary(): StickerLibraryManager | undefined }): readonly AdminRoute[] {
   function service() {
@@ -18,13 +27,13 @@ export function createStickerLibraryRoutes(runtime: { stickerLibrary(): StickerL
     const code = errorCode(error, 'STICKER_LIBRARY_UNAVAILABLE')
     throw new AdminRequestError(/CONFLICT/.test(code) ? 409 : /NOT_FOUND/.test(code) ? 404 : /INVALID/.test(code) ? 400 : 503, code.toLowerCase())
   }
-  return [{ method: 'GET', pathname: '/api/chat/stickers/library', maxResponseBytes: 8 * 1024 * 1024,
+  return [{ method: 'GET', pathname: '/api/chat/stickers/library', maxResponseBytes: MAX_LIBRARY_RESPONSE_BYTES,
     async handle({ query, signal }) {
       if (query.size) throw new AdminRequestError(400, 'invalid_sticker_query')
       try {
         const value = parseStickerLibrarySnapshot(await service().snapshot(signal))
         if (!value) throw new AdminRequestError(503, 'sticker_library_invalid_response')
-        return value
+        return boundSnapshot(value)
       } catch (error) { failed(error) }
     } },
   { method: 'GET', pathname: '/api/chat/stickers/preview', maxResponseBytes: 256 * 1024,

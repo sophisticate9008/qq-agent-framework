@@ -58,7 +58,7 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
   useEffect(() => () => { request.current?.abort() }, [])
   useEffect(() => {
     const snapshot = resource.snapshot
-    if (!snapshot) return
+    if (!snapshot || snapshot.limited) return
     let changed = false
     for (const [id, lock] of locks) {
       if ((lock.storage === 'extra' || snapshot.accountCollection === 'confirmed') && !snapshot.items.some(item => item.id === id)) {
@@ -104,7 +104,7 @@ function ConnectedStickersPage({ api, connected, setDirty }: PageProps) {
       </div>
       {resource.error && <p role="alert" className="text-sm text-destructive">{errorMessage(resource.error)}</p>}
       {snapshot?.accountCollection === 'unavailable' && <p role="status" className="text-sm text-muted-foreground">账号收藏暂未读取成功，保留上次结果；账号删除暂不可用。</p>}
-      {snapshot?.limited && <p className="text-sm text-muted-foreground">当前账号列表达到读取上限。</p>}
+      {snapshot?.limited && <p role="status" className="text-sm text-muted-foreground">当前仅显示部分表情，账号数量与转存阈值保持实际读取结果。</p>}
       {!!snapshot?.pending && <p role="status" className="text-sm text-muted-foreground">正在处理 {snapshot.pending} 项表情任务。</p>}
       {message && <p role="status" className="text-sm">{message}</p>}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">

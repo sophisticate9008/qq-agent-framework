@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createStickerLibraryRoutes } from '../src/admin/sticker-library.ts'
-import { AdminRequestError } from '../src/admin/server.ts'
+import { AdminRequestError, createAdminServer } from '../src/admin/server.ts'
+import { parseStickerLibrarySnapshot } from '../src/contracts/sticker-library.ts'
 import { FrameworkError } from '../src/core/values.ts'
 
 const id = 'a'.repeat(64)
@@ -19,7 +20,7 @@ function fixture() {
     },
   }
   const routes = createStickerLibraryRoutes({ stickerLibrary: () => connected ? manager : undefined })
-  return { calls, setList(value: unknown) { list = value }, setPreview(value: unknown) { preview = value },
+  return { calls, routes, setList(value: unknown) { list = value }, setPreview(value: unknown) { preview = value },
     setResult(value: unknown) { result = value }, setFailure(value: unknown) { failure = value }, disconnect() { connected = false },
     invoke(path: 'library' | 'preview' | 'delete', body: Record<string, unknown> | null = null, query = new URLSearchParams(), signal = new AbortController().signal) {
       const route = routes.find(route => route.pathname === `/api/chat/stickers/${path}`)
@@ -72,4 +73,34 @@ test('sticker routes sanitize malformed results and translate stable host errors
   await rejected(f.invoke('delete', { id, revision: 1, operationId: 'operation-delete-1234' }), 409, 'sticker_delete_conflict')
   f.setFailure(new Error('/private/credentials'))
   await rejected(f.invoke('library'), 503, 'sticker_library_unavailable')
+})
+
+test('sticker routes register with the real admin server and bound large UTF-8 snapshots visibly', async t => {
+  const f = fixture()
+  const server = createAdminServer({ token: 'sticker-admin-test-token', snapshot: () => ({}), routes: f.routes })
+  t.after(() => new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); server.closeAllConnections() }))
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+  const address = server.address(); assert(address && typeof address !== 'string')
+  const url = `http://127.0.0.1:${address.port}/api/chat/stickers/library`
+  const headers = { authorization: 'Bearer sticker-admin-test-token' }
+  const ordinary = await fetch(url, { headers })
+  assert.equal(ordinary.status, 200)
+  assert.deepEqual(await ordinary.json(), snapshot)
+
+  const items = Array.from({ length: 6100 }, (_, index) => ({ id: index.toString(16).padStart(64, '0'), revision: 1,
+    name: '图'.repeat(255), description: '开'.repeat(240), avoid: '慎'.repeat(128),
+    tags: Array.from({ length: 12 }, (_, tag) => `${tag.toString(16)}${'笑'.repeat(23)}`), storage: index < 5000 ? 'account' : 'extra',
+    state: 'ready', canDelete: true, createdAt: 1 }))
+  f.setList({ ...snapshot, capacity: { count: 5000, nearFullAt: 240, capacityKnown: false }, items })
+  const large = await fetch(url, { headers }), text = await large.text()
+  assert.equal(large.status, 200)
+  assert(Buffer.byteLength(text) <= 4 * 1024 * 1024)
+  const parsed = parseStickerLibrarySnapshot(JSON.parse(text) as unknown)
+  assert(parsed && parsed.limited)
+  assert(parsed.items.length > 0 && parsed.items.length < items.length)
+  assert.deepEqual(parsed.items, items.slice(0, parsed.items.length))
+  assert.deepEqual(parsed.capacity, { count: 5000, nearFullAt: 240, capacityKnown: false })
+  const preview = await fetch(`http://127.0.0.1:${address.port}/api/chat/stickers/preview?id=${id}`, { headers })
+  assert.equal(preview.status, 200)
+  assert.deepEqual(await preview.json(), { image: 'data:image/jpeg;base64,/9j/' })
 })

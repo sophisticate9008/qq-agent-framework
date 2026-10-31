@@ -28,6 +28,13 @@ export interface PluginModelServiceOptions {
 
 function failure(code: string): never { throw new FrameworkError(code, '插件模型服务未能安全完成操作。') }
 function json(value: unknown): JsonValue { return snapshot(value) as JsonValue }
+function runLimits(request: PluginModelRunRequest) {
+  const timeout = request.timeoutMs === undefined ? 300_000 : request.timeoutMs
+  const maxOutput = request.maxOutputChars ?? 32_000
+  if (timeout !== null && (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000)
+    || !Number.isSafeInteger(maxOutput) || maxOutput < 1 || maxOutput > 64_000) failure('PLUGIN_MODEL_INVALID_LIMIT')
+  return { timeout, maxOutput }
+}
 function keyOf(owner: string, key: PluginModelSessionKey = {}) {
   if (!pluginModelIdentifier(owner)) failure('PLUGIN_MODEL_INVALID_OWNER')
   const name = key.name ?? 'default'
@@ -199,12 +206,11 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     return options.store.delete(BINDINGS, current.id, current.row.revision)
   })
   const execute = async (owner: string, target: PluginModelBinding, request: PluginModelRunRequest, signal: AbortSignal): Promise<PluginModelRunResult> => {
-    const timeout = request.timeoutMs ?? 300_000
-    const maxOutput = request.maxOutputChars ?? 32_000
-    if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 3_600_000 || !Number.isSafeInteger(maxOutput) || maxOutput < 1 || maxOutput > 64_000) failure('PLUGIN_MODEL_INVALID_LIMIT')
-    const deadline = new AbortController()
-    const active = AbortSignal.any([signal, deadline.signal])
-    const timer = setTimeout(() => deadline.abort(new FrameworkError('PLUGIN_MODEL_TIMEOUT', '插件模型调用超时。')), timeout)
+    const { timeout, maxOutput } = runLimits(request)
+    const deadline = timeout === null ? null : new AbortController()
+    const active = deadline ? AbortSignal.any([signal, deadline.signal]) : signal
+    const timer = deadline && timeout !== null
+      ? setTimeout(() => deadline.abort(new FrameworkError('PLUGIN_MODEL_TIMEOUT', '插件模型调用超时。')), timeout) : undefined
     const requestId = randomUUID()
     try {
       return await serial(`session:${target.sessionId}`, active, () => options.withSessionLease(target.sessionId, active, async () => {
@@ -269,7 +275,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
           running.delete(target.sessionId)
         }
       }))
-    } finally { clearTimeout(timer) }
+    } finally { if (timer !== undefined) clearTimeout(timer) }
   }
   return Object.freeze({
     listBindings,
@@ -341,6 +347,7 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
         async run(request) {
           if (typeof request.prompt !== 'string' || request.prompt.trim() === '' || request.prompt.length > 128_000 || Buffer.byteLength(request.prompt) > 262_144
             || request.mode !== undefined && request.mode !== 'persistent' && request.mode !== 'stateless') failure('PLUGIN_MODEL_INVALID_REQUEST')
+          runLimits(request)
           if (request.images !== undefined) {
             try { request = { ...request, images: parsePluginModelImages(request.images) } }
             catch { failure('PLUGIN_MODEL_INVALID_IMAGES') }

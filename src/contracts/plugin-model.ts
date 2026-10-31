@@ -40,7 +40,8 @@ export interface PluginModelRunRequest extends PluginModelSessionKey {
   readonly mode?: 'persistent' | 'stateless'
   readonly model?: PluginModelSelection
   readonly maxOutputChars?: number
-  readonly timeoutMs?: number
+  /** Omitted: 300000 ms; integer 1000–3600000 ms; null: no generation deadline, lifecycle cancellation still applies. */
+  readonly timeoutMs?: number | null
   readonly signal?: AbortSignal
 }
 export interface PluginModelImage {

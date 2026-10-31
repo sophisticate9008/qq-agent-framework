@@ -2345,8 +2345,9 @@ test('native submit preparation can exceed six seconds within the original turn 
   assert.equal(f.rpc.filter(call => call.method === 'session/prompt').length, 1)
   assert.notEqual((await f.runtime().status()).lastError, 'AGENT_SUBMIT_TIMEOUT_UNKNOWN')
   controls.deploymentDelayMs = 0
-  f.answer()
+  await f.answer()
   await until(() => f.sends.length > 0)
+  await until(() => f.runtime().executions()!.forConversation('private:123') === null)
 })
 
 

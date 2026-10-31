@@ -7,7 +7,7 @@ export type StickerLibraryConfiguration = {
   readonly accountNearFullAt: number
 }
 export const DEFAULT_STICKER_LIBRARY_CONFIGURATION: StickerLibraryConfiguration = Object.freeze({
-  enabled: true, triggerProbabilityPercent: 15, collectProbabilityPercent: 15, accountNearFullAt: 240,
+  enabled: true, triggerProbabilityPercent: 15, collectProbabilityPercent: 15, accountNearFullAt: 500,
 })
 export function validateStickerLibraryConfiguration(value: unknown): StickerLibraryConfiguration {
   if (!isRecord(value) || Object.keys(value).length !== 4

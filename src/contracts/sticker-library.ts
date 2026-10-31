@@ -39,6 +39,13 @@ export interface StickerLibraryVisualFeatures {
   readonly styles: readonly string[]
   readonly entities: readonly string[]
 }
+export interface StickerImageDimensions { readonly width: number; readonly height: number }
+export function parseStickerImageDimensions(value: unknown): StickerImageDimensions | null {
+  if (!isRecord(value) || Object.keys(value).length !== 2 || !Number.isSafeInteger(value.width) || !Number.isSafeInteger(value.height)
+    || Number(value.width) < 1 || Number(value.height) < 1 || Number(value.width) > 100_000 || Number(value.height) > 100_000
+    || Number(value.width) * Number(value.height) > 40_000_000) return null
+  return { width: Number(value.width), height: Number(value.height) }
+}
 const facetText = (value: unknown, maximum: number, empty = false): value is string => typeof value === 'string'
   && value.trim() === value && (empty || value.length > 0) && value.length <= maximum && !/[\x00-\x1f\x7f]/.test(value)
 const facetLabels = (value: unknown, maximum: number, length = 24): value is readonly string[] => Array.isArray(value)
@@ -90,6 +97,7 @@ export interface StickerLibraryItem {
   readonly facets?: StickerLibraryFacets
   readonly identity?: StickerLibraryIdentity
   readonly visual?: StickerLibraryVisualFeatures
+  readonly dimensions?: StickerImageDimensions
   readonly storage: 'account' | 'extra'
   readonly state: 'ready' | 'unknown'
   readonly canDelete: boolean
@@ -114,6 +122,7 @@ export function parseStickerLibrarySnapshot(value: unknown): StickerLibrarySnaps
     const facets = isRecord(item) && item.facets !== undefined ? parseStickerLibraryFacets(item.facets) : undefined
     const identity = isRecord(item) && item.identity !== undefined ? parseStickerLibraryIdentity(item.identity) : undefined
     const visual = isRecord(item) && item.visual !== undefined ? parseStickerLibraryVisualFeatures(item.visual) : undefined
+    const dimensions = isRecord(item) && item.dimensions !== undefined ? parseStickerImageDimensions(item.dimensions) : undefined
     if (!isRecord(item) || typeof item.id !== 'string' || !/^[a-f0-9]{64}$/.test(item.id) || !Number.isSafeInteger(item.revision)
       || Number(item.revision) < 1 || typeof item.name !== 'string' || item.name.length > 255
       || typeof item.description !== 'string' || item.description.length > 240 || typeof item.avoid !== 'string' || item.avoid.length > 128
@@ -122,9 +131,10 @@ export function parseStickerLibrarySnapshot(value: unknown): StickerLibrarySnaps
       || item.storage !== 'account' && item.storage !== 'extra' || item.state !== 'ready' && item.state !== 'unknown'
       || typeof item.canDelete !== 'boolean' || item.state === 'unknown' && item.canDelete
       || typeof item.createdAt !== 'number' || !Number.isSafeInteger(item.createdAt) || item.createdAt < 0
-      || facets === null || identity === null || visual === null) return null
+      || facets === null || identity === null || visual === null || dimensions === null) return null
     items.push({ id: item.id, revision: Number(item.revision), name: item.name, description: item.description, tags: item.tags as string[],
       avoid: item.avoid, ...(facets ? { facets } : {}), ...(identity ? { identity } : {}), ...(visual ? { visual } : {}),
+      ...(dimensions ? { dimensions } : {}),
       storage: item.storage, state: item.state, canDelete: item.canDelete, createdAt: item.createdAt })
   }
   if (new Set(items.map(item => item.id)).size !== items.length) return null
@@ -133,12 +143,14 @@ export function parseStickerLibrarySnapshot(value: unknown): StickerLibrarySnaps
     items, limited: value.limited, pending: Number(value.pending) }
 }
 
-export interface StickerLibraryThumbnail { readonly image: string }
+export interface StickerLibraryThumbnail { readonly image: string; readonly width?: number; readonly height?: number }
 export function parseStickerLibraryThumbnail(value: unknown): StickerLibraryThumbnail | null {
   if (!isRecord(value) || typeof value.image !== 'string' || value.image.length > 200_000
     || !/^data:image\/jpeg;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.image)
     || value.image.length <= 'data:image/jpeg;base64,'.length) return null
-  return { image: value.image }
+  const dimensions = value.width === undefined && value.height === undefined ? undefined : parseStickerImageDimensions({ width: value.width, height: value.height })
+  if (dimensions === null) return null
+  return { image: value.image, ...(dimensions ?? {}) }
 }
 
 export interface StickerLibraryDeleteResult {

@@ -12,6 +12,8 @@ import { assert, isRecord } from '../core/values.ts'
 import { digest, json, object } from './data.ts'
 import { withDeadline } from './deadlines.ts'
 import { createStickerMatcher } from './sticker-matching.ts'
+import { createStickerThumbnailCache } from './sticker-thumbnail-cache.ts'
+import { createStickerImageMetadata, readStickerImageDimensions, stickerImageIdentity } from './sticker-image-metadata.ts'
 import { createStickerCharacterAliases } from './sticker-character-aliases.ts'
 import { createStickerCharacterRecognition, type StickerCharacterRecognitionRule } from './sticker-character-recognition.ts'
 import { createStickerSemanticCache, normalizeStickerCharacterName, validateStickerAnnotation, STICKER_ANNOTATION_GUIDANCE, type StickerAnnotation } from './sticker-semantics.ts'
@@ -66,6 +68,8 @@ export function createStickerLibrary(options: {
 }) {
   const directory = join(options.directory, 'sticker-library', digest(options.accountId))
   const cache = createStickerSemanticCache(options.store, options.accountId)
+  const imageMetadata = createStickerImageMetadata(options.store, options.accountId)
+  const thumbnails = createStickerThumbnailCache()
   const characters = createStickerCharacterAliases(options.store, options.accountId)
   const recognition = createStickerCharacterRecognition(options.store, options.accountId)
   const matcher = createStickerMatcher(options.accountId)
@@ -89,6 +93,7 @@ export function createStickerLibrary(options: {
   function save(item: Entry) {
     const previous = options.store.read(RECORDS, item.id)
     if (!previous) assert(all().length < MAX_RECORDS, 'STICKER_LIBRARY_FULL', 'The library is full.')
+    if (item.deleted || item.state !== 'ready' || previous && imageVersion(parse(previous.value)) !== imageVersion(item)) thumbnails.invalidate(item.id)
     const saved = previous && digest(previous.value) === digest({ schema: 1, ...item }) ? previous
       : options.store.write(RECORDS, item.id, json({ schema: 1, ...item }), { expectedRevision: previous?.revision ?? null })
     if (item.annotation?.identity) {
@@ -96,6 +101,19 @@ export function createStickerLibrary(options: {
       catch { options.onFault?.('STICKER_CHARACTER_INDEX_INCOMPLETE') }
     }
     return saved
+  }
+  function imageVersion(item: Entry): string {
+    return digest([options.accountId, item.id, stickerImageIdentity(item), item.extra, item.account?.url ?? null])
+  }
+  function availableImage(id: string, signal: AbortSignal, version?: string): Entry {
+    signal.throwIfAborted()
+    assert(/^[a-f0-9]{64}$/.test(id), 'STICKER_NOT_FOUND', 'Invalid library image.')
+    const record = options.store.read(RECORDS, id)
+    assert(record, 'STICKER_NOT_FOUND', 'The image is unavailable.')
+    const item = parse(record.value)
+    assert(item.accountId === options.accountId && !item.deleted && item.state === 'ready' && (item.extra || item.account)
+      && (version === undefined || imageVersion(item) === version), 'STICKER_NOT_FOUND', 'The image is unavailable or changed.')
+    return item
   }
   function enrich(input: StickerAnnotation, rules: readonly StickerCharacterRecognitionRule[]): StickerAnnotation {
     const annotation = recognition.apply(input, rules)
@@ -150,29 +168,36 @@ export function createStickerLibrary(options: {
     return refresh
   }
   async function readImage(id: string, callerSignal: AbortSignal): Promise<Uint8Array> {
-    const signal = active(callerSignal); signal.throwIfAborted()
-    assert(/^[a-f0-9]{64}$/.test(id), 'STICKER_NOT_FOUND', 'Invalid library image.')
-    const record = options.store.read(RECORDS, id)
-    assert(record, 'STICKER_NOT_FOUND', 'The image is unavailable.')
-    const item = parse(record.value)
-    assert(item.accountId === options.accountId && !item.deleted && item.state === 'ready' && (item.extra || item.account), 'STICKER_NOT_FOUND', 'The image is unavailable.')
+    const signal = active(callerSignal)
+    const item = availableImage(id, signal), version = imageVersion(item)
     if (item.extra) {
-      const bytes = await readFile(join(directory, id)); signal.throwIfAborted()
+      const bytes = await readFile(join(directory, id)); availableImage(id, signal, version)
       assert(bytes.length <= 8 * 1024 * 1024, 'STICKER_IMAGE_TOO_LARGE', 'The image exceeds the byte limit.')
       return bytes
     }
     const read = await options.reader.read({ kind: 'image', source: { url: item.account!.url }, signal })
     signal.throwIfAborted(); assert(read.status === 'confirmed', 'STICKER_IMAGE_UNAVAILABLE', 'The collection image cannot be read.')
-    const latest = options.store.read(RECORDS, id)
-    assert(latest && !parse(latest.value).deleted && parse(latest.value).state === 'ready', 'STICKER_NOT_FOUND', 'The image was removed during preparation.')
+    availableImage(id, signal, version)
+    assert(read.data.length <= 8 * 1024 * 1024, 'STICKER_IMAGE_TOO_LARGE', 'The image exceeds the byte limit.')
     return read.data
   }
   async function thumbnail(id: string, signal: AbortSignal) {
-    const data = await readImage(id, signal)
-    const thumb = await sharp(data, { pages: 1, limitInputPixels: 40_000_000 }).timeout({ seconds: 2 })
-      .resize({ width: 192, height: 192, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 65 }).toBuffer()
-    signal.throwIfAborted()
-    return { image: `data:image/jpeg;base64,${thumb.toString('base64')}` }
+    const current = active(signal), item = availableImage(id, current), version = imageVersion(item)
+    const value = await thumbnails.get(id, version, async jobSignal => {
+      const processing = active(jobSignal)
+      availableImage(id, processing, version)
+      const data = await readImage(id, processing)
+      assert(!item.md5 || createHash('md5').update(data).digest('hex') === item.md5.toLowerCase(),
+        'STICKER_IMAGE_CHANGED', 'The downloaded image does not match its recorded content hash.')
+      const dimensions = await readStickerImageDimensions(data, processing)
+      const thumb = await sharp(data, { pages: 1, limitInputPixels: 40_000_000 }).timeout({ seconds: 2 }).rotate()
+        .resize({ width: 384, height: 384, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 70 }).toBuffer()
+      availableImage(id, processing, version)
+      imageMetadata.remember(id, stickerImageIdentity(item), dimensions)
+      return { image: `data:image/jpeg;base64,${thumb.toString('base64')}`, ...dimensions }
+    }, current)
+    availableImage(id, current, version)
+    return value
   }
   async function classify(bytes: Uint8Array, conversationId: string, context: readonly string[], signal: AbortSignal): Promise<StickerAnnotation | null> {
     const image = await sharp(bytes, { pages: 1, limitInputPixels: 40_000_000 }).timeout({ seconds: 3 })
@@ -240,6 +265,7 @@ export function createStickerLibrary(options: {
       if (read.status !== 'confirmed') return { status: read.status, code: read.code, quiet: true }
       const bytes = read.data
       assert(bytes.length <= 8 * 1024 * 1024, 'STICKER_IMAGE_TOO_LARGE', 'Image exceeds its byte limit.')
+      const dimensions = await readStickerImageDimensions(bytes, signal)
       const md5 = createHash('md5').update(bytes).digest('hex')
       const unindexed = all().filter(({ item }) => item.account && !item.md5 && !item.deleted)
       if (unindexed.length > 16) return { status: 'skipped', reason: 'dedup-unavailable', quiet: true }
@@ -258,7 +284,11 @@ export function createStickerLibrary(options: {
           const annotation = await classify(bytes, conversationId, context, signal)
           signal.throwIfAborted()
           const current = options.store.read(RECORDS, existing.item.id)
-          if (current && annotation && !parse(current.value).deleted) { save({ ...parse(current.value), md5, annotation }); cache.remember(existing.item.account, annotation) }
+          if (current && annotation && !parse(current.value).deleted) {
+            const item = { ...parse(current.value), md5, annotation }
+            save(item); cache.remember(existing.item.account, annotation)
+            imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
+          }
           return { status: 'confirmed', reused: true, quiet: true }
         } finally { reservations.delete(existing.item.id) }
       }
@@ -274,6 +304,7 @@ export function createStickerLibrary(options: {
           annotation, createdAt: existing?.item.createdAt ?? Date.now(), state: 'ready' }
         save(item)
         if (!annotation) return { status: 'skipped', reason: 'filtered', quiet: true }
+        imageMetadata.remember(item.id, stickerImageIdentity(item), dimensions)
         const latestConfiguration = await options.configuration()
         signal.throwIfAborted()
         if (!manual && !latestConfiguration.enabled) return { status: 'skipped', reason: 'disabled', quiet: true }
@@ -321,12 +352,14 @@ export function createStickerLibrary(options: {
     const rules = recognition.list()
     const items = all().filter(({ item }) => !item.deleted && (item.account || item.extra || item.state === 'unknown')).map(({ row, item }) => {
       const annotation = item.annotation && enrich(item.annotation, rules)
+      const dimensions = imageMetadata.read(item.id, stickerImageIdentity(item))
       return {
       id: item.id, revision: row.revision, name: item.account?.name ?? '', description: item.annotation?.description ?? '',
       tags: [...(item.annotation?.tags ?? [])], avoid: item.annotation?.avoid ?? '', storage: item.extra ? 'extra' as const : 'account' as const,
       state: item.state, canDelete: item.state === 'ready' && (item.extra || confirmed && item.account?.stickerId !== undefined), createdAt: item.createdAt,
       ...(annotation?.identity ? { identity: annotation.identity } : {}), ...(annotation?.facets ? { facets: annotation.facets } : {}),
       ...(annotation?.visual ? { visual: annotation.visual } : {}),
+      ...(dimensions ? { dimensions } : {}),
     } })
     return { schema: 1, accountCollection: confirmed ? 'confirmed' : 'unavailable', capacity: { count: roster.length,
       nearFullAt: configuration.accountNearFullAt, capacityKnown: false }, items, limited, pending: jobs.size + reservations.size }
@@ -361,6 +394,7 @@ export function createStickerLibrary(options: {
       save({ ...item, ...(status === 'confirmed' ? { deleted: true, extra: false, account: null } : {}), state: status === 'unknown' ? 'unknown' : 'ready' })
       options.store.write(WRITES, key, { fingerprint, action: 'delete', status, result }, { expectedRevision: prepared.revision })
       if (status === 'confirmed' && item.account) cache.forget(item.account)
+      if (status === 'confirmed') imageMetadata.forget(item.id)
       refreshedAt = 0
       return { ...object(result), retry: false }
     })
@@ -400,6 +434,9 @@ export function createStickerLibrary(options: {
     options.store.write(SEEN, key, { at: Date.now() }, { expectedRevision: null, expiresAt: Date.now() + 86400_000 })
     try {
       const bytes = await readImage(candidate.item.id, current)
+      assert(!candidate.item.md5 || createHash('md5').update(bytes).digest('hex') === candidate.item.md5.toLowerCase(),
+        'STICKER_IMAGE_CHANGED', 'The downloaded image does not match its recorded content hash.')
+      const dimensions = await readStickerImageDimensions(bytes, current)
       const annotation = await classify(bytes, conversationId, options.context(conversationId).slice(-5), current)
       current.throwIfAborted()
       const row = options.store.read(RECORDS, candidate.item.id)
@@ -409,6 +446,7 @@ export function createStickerLibrary(options: {
           ...(annotation.visual ? { visual: annotation.visual } : {}),
           ...((!current.annotation.identity || current.annotation.identity.source === 'model') && annotation.identity ? { identity: annotation.identity } : {}) }) : annotation
         save({ ...current, annotation: next }); cache.remember(candidate.item.account!, next)
+        imageMetadata.remember(current.id, stickerImageIdentity(current), dimensions)
       }
     } finally { reservations.delete(candidate.item.id) }
   }
@@ -449,8 +487,8 @@ export function createStickerLibrary(options: {
         track(collect(assetId, message.conversationId, false, active(options.signal)).catch(() => { options.onFault?.('STICKER_COLLECTION_INCOMPLETE') }))
       }
     },
-    async stop() { lifetime.abort(); await Promise.allSettled([...jobs]); await mutations.catch(() => undefined); matcher.clear() },
-    pending: () => jobs.size + reservations.size,
+    async stop() { lifetime.abort(); await Promise.all([thumbnails.close(), Promise.allSettled([...jobs])]); await mutations.catch(() => undefined); matcher.clear() },
+    pending: () => jobs.size + reservations.size + thumbnails.pending(),
   })
 }
 export type StickerLibrary = ReturnType<typeof createStickerLibrary>

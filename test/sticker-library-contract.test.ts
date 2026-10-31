@@ -49,3 +49,14 @@ test('sticker previews accept only bounded JPEG data and deletion receipts canno
   assert.equal(parseStickerLibraryDeleteResult({ status: 'confirmed', retry: true }), null)
   assert.equal(parseStickerLibraryDeleteResult({ status: 'success' }), null)
 })
+
+test('layout dimensions remain optional and describe a bounded original aspect ratio', () => {
+  const dimensions = { width: 1200, height: 600 }
+  assert.deepEqual(parseStickerLibrarySnapshot({ ...snapshot, items: [{ ...item, dimensions }] })?.items[0]?.dimensions, dimensions)
+  assert.deepEqual(parseStickerLibraryThumbnail({ image: 'data:image/jpeg;base64,/9j/', ...dimensions }), { image: 'data:image/jpeg;base64,/9j/', ...dimensions })
+  for (const invalid of [{ width: 0, height: 10 }, { width: 1.5, height: 10 }, { width: 100_001, height: 1 }, { width: 8000, height: 8000 }]) {
+    assert.equal(parseStickerLibrarySnapshot({ ...snapshot, items: [{ ...item, dimensions: invalid }] }), null)
+    assert.equal(parseStickerLibraryThumbnail({ image: 'data:image/jpeg;base64,/9j/', ...invalid }), null)
+  }
+  assert.equal(parseStickerLibraryThumbnail({ image: 'data:image/jpeg;base64,/9j/', width: 100 }), null)
+})

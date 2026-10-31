@@ -26,6 +26,7 @@ async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'fu
   const bytes = await sharp({ create: { width: 16, height: 16, channels: 3, background: 'blue' } }).png().toBuffer()
   const md5 = createHash('md5').update(bytes).digest('hex')
   const calls: PluginModelRunRequest[] = [], writes: string[] = []
+  let imageReads = 0
   let roster: readonly OneBotSticker[] = settings.nearFull ? [{ id: 'other', stickerId: 'other', md5: 'a'.repeat(32), url: 'https://media.example/other' }] : []
   let classify: (request: PluginModelRunRequest) => Promise<string> = async () => JSON.stringify({ isSticker: !settings.filter, safeToShare: !settings.filter, ...annotation })
   const collector = model(async request => { calls.push(request); return { requestId: 'classify', sessionId: 'bound-collector',
@@ -41,7 +42,7 @@ async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'fu
     },
     async delete({ stickerId }) { writes.push(`delete:${stickerId}`); roster = roster.filter(item => item.stickerId !== stickerId); return { status: 'confirmed', data: { acknowledged: true } } },
   }
-  const library = createStickerLibrary({ directory, store, accountId: '999', port, reader: { async read() { return { status: 'confirmed', data: bytes, mediaType: 'image/png' } } },
+  const library = createStickerLibrary({ directory, store, accountId: '999', port, reader: { async read() { imageReads++; return { status: 'confirmed', data: bytes, mediaType: 'image/png' } } },
     collector, signal: signal(), configuration: async () => ({ ...DEFAULT_STICKER_LIBRARY_CONFIGURATION,
       triggerProbabilityPercent: settings.probabilities ?? 100, collectProbabilityPercent: settings.probabilities ?? 100, accountNearFullAt: settings.nearFull ? 1 : 240 }),
     async authorize(conversationId) { assert.equal(conversationId, 'group:123') }, context: () => ['one', 'two', 'three', 'four', 'five'],
@@ -54,9 +55,38 @@ async function fixture(t: TestContext, settings: { nearFull?: boolean; add?: 'fu
   }
   asset('incoming')
   t.after(async () => { await library.stop(); store.close(); await rm(directory, { recursive: true, force: true }) })
-  return { library, store, bytes, calls, writes, asset, setClassifier: (next: typeof classify) => { classify = next },
+  return { library, store, bytes, calls, writes, asset, imageReads: () => imageReads, setClassifier: (next: typeof classify) => { classify = next },
     seed() { const item = { id: 'known', stickerId: 'known', md5, url: 'https://media.example/image' }; roster = [item]; createStickerSemanticCache(store, '999').remember(item, annotation) } }
 }
+
+test('old library dimensions are filled on preview without downloading during snapshot or changing the reviewed item revision', async t => {
+  const f = await fixture(t); f.seed()
+  const initial = (await f.library.snapshot(signal())).items[0]!
+  assert.equal(initial.dimensions, undefined); assert.equal(f.imageReads(), 0)
+  const [first, second] = await Promise.all([f.library.thumbnail(initial.id, signal()), f.library.thumbnail(initial.id, signal())])
+  assert.deepEqual(first, second); assert.equal(f.imageReads(), 1)
+  assert.equal(first.width, 16); assert.equal(first.height, 16)
+  await f.library.thumbnail(initial.id, signal()); assert.equal(f.imageReads(), 1)
+  const refreshed = (await f.library.snapshot(signal())).items[0]!
+  assert.deepEqual(refreshed.dimensions, { width: 16, height: 16 })
+  assert.equal(refreshed.revision, initial.revision)
+  await f.library.remove(initial.id, initial.revision, 'delete-preview-fixture', signal())
+  await assert.rejects(f.library.thumbnail(initial.id, signal()), { code: 'STICKER_NOT_FOUND' })
+})
+
+test('cached previews cannot bypass unknown state and changed content hashes do not receive old dimensions', async t => {
+  const f = await fixture(t); f.seed()
+  const initial = (await f.library.snapshot(signal())).items[0]!
+  await f.library.thumbnail(initial.id, signal())
+  const row = f.store.read('native-chat.sticker-library', initial.id)!
+  assert(isRecord(row.value))
+  const value = { ...row.value }
+  const unknown = f.store.write(row.namespace, row.key, { ...value, state: 'unknown' }, { expectedRevision: row.revision })
+  await assert.rejects(f.library.thumbnail(initial.id, signal()), { code: 'STICKER_NOT_FOUND' })
+  f.store.write(row.namespace, row.key, { ...value, md5: 'b'.repeat(32), state: 'ready' }, { expectedRevision: unknown.revision })
+  await assert.rejects(f.library.thumbnail(initial.id, signal()), { code: 'STICKER_IMAGE_CHANGED' })
+  assert.equal((await f.library.snapshot(signal())).items[0]!.dimensions, undefined)
+})
 
 test('manual collection bypasses both probability gates, filters in a persistent helper and deduplicates across incoming aliases', async t => {
   const f = await fixture(t, { probabilities: 0 })

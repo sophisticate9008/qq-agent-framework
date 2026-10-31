@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { constants } from 'node:fs'
 import { createServer } from 'node:http'
-import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
-import { basename, isAbsolute, join, sep } from 'node:path'
+import { lstat, mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join, sep } from 'node:path'
 import { WebSocket, WebSocketServer } from 'ws'
 import { isRecord } from '../src/core/values.ts'
 
@@ -65,6 +67,8 @@ export async function startSimulatedOneBot(options: {
   const messages = new Map<number, Readonly<Record<string, unknown>>>()
   const sockets = new Set<WebSocket>()
   const assets = new Map<string, { readonly bytes: Buffer; readonly name: string; readonly kind: string }>()
+  const favorites = new Map<string, { readonly assetKey: string; readonly emojiId: string; readonly name: string }>()
+  const runDirectory = await realpath(options.directory), temporaryDirectory = await realpath(tmpdir())
   const forwards = new Map<string, readonly Record<string, unknown>[]>()
   let sequence = 1_000_000
   let sent = 0
@@ -90,6 +94,44 @@ export async function startSimulatedOneBot(options: {
     if (![...sockets].some(socket => socket.readyState === WebSocket.OPEN)) throw new Error('simulation_protocol_not_connected')
     options.record({ type: 'protocol-notice', event })
     for (const socket of sockets) if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event))
+  }
+  async function collectionBytes(source: unknown): Promise<{ readonly bytes: Buffer; readonly name: string }> {
+    if (typeof source !== 'string' || !isAbsolute(source)) throw new Error('simulation_collection_source_invalid')
+    const parent = dirname(source), parentInfo = await lstat(parent), information = await lstat(source)
+    if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink() || !information.isFile() || information.isSymbolicLink()
+      || information.size < 1 || information.size > 8 * 1024 * 1024) throw new Error('simulation_collection_source_invalid')
+    const path = await realpath(source), canonicalParent = dirname(path)
+    const adapterTemporary = dirname(canonicalParent) === temporaryDirectory && /^qbf-sticker-[A-Za-z0-9]{6}$/.test(basename(canonicalParent))
+      && /^image\.(?:png|jpg|gif|webp)$/.test(basename(path)) && (parentInfo.mode & 0o077) === 0
+      && (typeof process.getuid !== 'function' || parentInfo.uid === process.getuid() && information.uid === process.getuid())
+    if (!path.startsWith(runDirectory + sep) && !adapterTemporary) throw new Error('simulation_collection_path_outside_run')
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    let bytes: Buffer
+    try {
+      const before = await file.stat()
+      if (!before.isFile() || before.dev !== information.dev || before.ino !== information.ino || before.size !== information.size)
+        throw new Error('simulation_collection_source_changed')
+      const chunks: Buffer[] = []
+      let size = 0
+      for (;;) {
+        const buffer = Buffer.allocUnsafe(Math.min(65536, 8 * 1024 * 1024 + 1 - size))
+        const read = await file.read(buffer, 0, buffer.length, null)
+        if (!read.bytesRead) break
+        size += read.bytesRead
+        if (size > 8 * 1024 * 1024) throw new Error('simulation_collection_source_too_large')
+        chunks.push(buffer.subarray(0, read.bytesRead))
+      }
+      const after = await file.stat()
+      if (size !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs)
+        throw new Error('simulation_collection_source_changed')
+      bytes = Buffer.concat(chunks, size)
+    } finally { await file.close() }
+    const image = bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      || bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
+      || ['GIF87a', 'GIF89a'].includes(bytes.subarray(0, 6).toString('ascii'))
+      || bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+    if (!image) throw new Error('simulation_collection_image_invalid')
+    return { bytes, name: basename(path) }
   }
   async function captureBytes(source: unknown, messageId: number, index: number, kind = 'file') {
     if (typeof source !== 'string') throw new Error('simulation_outbound_asset_invalid')
@@ -162,8 +204,24 @@ export async function startSimulatedOneBot(options: {
       const requested = String(params.user_id)
       return { status: 'ok', retcode: 0, data: name === 'get_group_member_list' ? [...knownIds].map(member) : member(requested) }
     }
+    if (name === 'add_custom_face') {
+      try {
+        const image = await collectionBytes(params.file), md5 = createHash('md5').update(image.bytes).digest('hex')
+        const existing = favorites.get(md5)
+        if (!existing) {
+          if (favorites.size >= 5000) return { status: 'failed', retcode: 1400, data: null, message: 'emoji collection full' }
+          const assetKey = randomBytes(16).toString('hex')
+          assets.set(assetKey, { ...image, kind: 'image' })
+          favorites.set(md5, { assetKey, emojiId: String(favorites.size + 1), name: image.name })
+        }
+        options.record({ type: 'collection-added', md5, reused: Boolean(existing), bytes: image.bytes.length, source: 'simulation-fixture' })
+        return { status: 'ok', retcode: 0, data: { result: 0 } }
+      } catch {
+        return { status: 'failed', retcode: 1400, data: null, message: 'simulation_collection_source_invalid' }
+      }
+    }
     if (name === 'fetch_custom_face_detail' || name === 'get_custom_face') return { status: 'ok', retcode: 0,
-      data: [...assets].filter(([, asset]) => asset.kind === 'image').map(([key, asset]) => ({ emoji_id: key, resId: key, md5: createHash('md5').update(asset.bytes).digest('hex'), desc: asset.name, url: `${endpoint}/assets/${key}` })) }
+      data: [...favorites].map(([md5, item]) => ({ emoji_id: item.emojiId, resId: item.assetKey, md5, desc: item.name, url: `${endpoint}/assets/${item.assetKey}` })) }
     if (name === 'group_poke' || name === 'friend_poke' || name === 'delete_msg') {
       if (name !== 'delete_msg' && (!knownIds.has(String(params.user_id))
         || name === 'group_poke' && String(params.group_id) !== options.groupId)) return { status: 'failed', retcode: 1404, data: null, message: 'simulation_poke_target_not_found' }

@@ -1125,8 +1125,13 @@ export function createNativeChatRuntime(options: NativeChatRuntimeOptions) {
           authorize: (conversationId, signal) => guard(conversationId, signal, true, 'resource') })
         const stickerModel = { provider: selected.deployment.presetBindings.find(b => b.externalProvider)?.externalProvider ?? definition.model.provider,
           model: definition.model.name, reasoningEffort: definition.model.reasoningEffort, contextWindow: 128_000 }
+        // Selection only chooses a numbered, already-labelled candidate. Use the
+        // declared non-thinking mode within its short deadline; image labelling
+        // and main-chat reasoning retain their configured settings.
+        const stickerSelectionModel = { ...stickerModel,
+          ...(Object.hasOwn(configuration.deployment.modelSettings?.reasoningEfforts || {}, 'off') ? { reasoningEffort: 'off' } : {}) }
         const stickerSelector = createStickerDshSelector({
-          client: () => pluginModels?.forPlugin('sticker-sending', controller.signal), model: () => stickerModel,
+          client: () => pluginModels?.forPlugin('sticker-sending', controller.signal), model: () => stickerSelectionModel,
           async reconcile(name, conversationId, revision, signal) {
             await pluginModels?.reconcile('sticker-sending', { name, conversationId, expectedRevision: revision }, signal)
           } })

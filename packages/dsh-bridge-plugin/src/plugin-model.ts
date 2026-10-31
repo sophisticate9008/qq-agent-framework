@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-settings'
+import { createPluginModelContexts } from './plugin-model-context.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -18,9 +19,10 @@ declare module '@deepseek-ai/dsh-llm' {
 declare module '@deepseek-ai/dsh-session/types' {
   interface PluginRecordMap {
     'plugin:qbf/model-session': { readonly owner: string }
+    'plugin:qbf/model-context': { readonly owner: string; readonly model: Selection }
   }
 }
-interface Selection { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+interface Selection { readonly provider: string; readonly model: string; readonly reasoningEffort?: string; readonly contextWindow?: number }
 interface Image { readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; readonly data: string }
 interface ModelRun {
   readonly requestId: string
@@ -59,12 +61,24 @@ function images(value: unknown): readonly Image[] {
 function selection(value: unknown): Selection {
   if (!object(value) || !identifier(value.provider) || !identifier(value.model)
     || value.reasoningEffort !== undefined && !identifier(value.reasoningEffort)
-    || Object.keys(value).some(key => !['provider', 'model', 'reasoningEffort'].includes(key))) throw new TypeError('Invalid plugin model selection')
-  return { provider: value.provider, model: value.model, ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }) }
+    || value.contextWindow !== undefined && (!Number.isSafeInteger(value.contextWindow) || Number(value.contextWindow) < 1024 || Number(value.contextWindow) > 10_000_000)
+    || Object.keys(value).some(key => !['provider', 'model', 'reasoningEffort', 'contextWindow'].includes(key))) throw new TypeError('Invalid plugin model selection')
+  return { provider: value.provider, model: value.model, ...(value.reasoningEffort === undefined ? {} : { reasoningEffort: value.reasoningEffort }),
+    ...(value.contextWindow === undefined ? {} : { contextWindow: Number(value.contextWindow) }) }
+}
+function contextSelection(events: readonly SessionEvent[]): Selection | undefined {
+  for (const event of [...events].reverse()) {
+    const record = pluginRecordOf(event)
+    if (record?.type !== 'plugin:qbf/model-context') continue
+    if (!object(record.data) || !identifier(record.data.owner)) throw new TypeError('Invalid helper context record')
+    return selection(record.data.model)
+  }
+  return undefined
 }
 
 /** Model-only turns use ordinary durable SDK sessions without any QQ caller identity. */
 export function createPluginModelChannel(ctx: Context) {
+  const contexts = createPluginModelContexts(ctx)
   const handles = new Map<string, AgentHandle>()
   const runs = new Map<string, ModelRun>()
   const active = new Set<string>()
@@ -112,12 +126,13 @@ export function createPluginModelChannel(ctx: Context) {
         if (isOwnedSession(observed.events)) {
           const selected = [...observed.events].reverse().find(event => event.type === 'model/selection')
           if (!selected) throw new TypeError('Plugin session model is unavailable')
-          const model = selection(selected.data)
+          const model = contextSelection(observed.events) ?? selection(selected.data)
+          const provider = await contexts.ensure(model, signal)
           const raced = ctx.agents.get(SessionId(sessionId))
           if (raced) return raced
           try {
             const handle = await allocate(sessionId, signal, () => ctx.agents.resume({ resumeSessionId: SessionId(sessionId), signal,
-              agentOptions: { provider: model.provider, model: model.model,
+              agentOptions: { provider, model: model.model,
                 ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) } }))
             return handle.agent
           } catch (error) {
@@ -232,17 +247,19 @@ export function createPluginModelChannel(ctx: Context) {
       if (!persistence) throw new TypeError('Session persistence is unavailable')
       await allocate(request.sessionId, signal, async () => {
         await verifySelection(model, signal)
+        const provider = await contexts.ensure(model, signal)
         if (ctx.agents.get(SessionId(request.sessionId)) || await persistence.stat(SessionId(request.sessionId), { signal })) throw new TypeError('Plugin session already exists')
         assertOpen()
         // The stock session history/follow API requires a cwd in the header.
         // This address metadata grants no tools or filesystem capability.
         return ctx.agents.create({ sessionId: SessionId(request.sessionId), meta: { cwd: process.cwd() }, signal,
-          agentOptions: { provider: model.provider, model: model.model,
+          agentOptions: { provider, model: model.model,
             ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) },
           setup: (_scope, agent) => {
             appendPluginRecord(agent.session, 'plugin:qbf/model-session', { owner: request.owner })
             agent.session.append('model/selection', { provider: model.provider, model: model.model,
               ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) })
+            if (model.contextWindow !== undefined) appendPluginRecord(agent.session, 'plugin:qbf/model-context', { owner: request.owner, model })
           } })
       })
       await persistence.flush()
@@ -262,7 +279,7 @@ export function createPluginModelChannel(ctx: Context) {
       try {
         const agent = await resolve(request.sessionId, signal)
         rejectionCode = 'PLUGIN_MODEL_SELECTION_UNAVAILABLE'
-        const model = request.model === undefined ? undefined : selection(request.model)
+        const model = request.model === undefined ? contextSelection(agent.session.snapshotEvents()) : selection(request.model)
         if (model) await verifySelection(model, signal)
         signal.throwIfAborted()
         assertOpen()
@@ -270,6 +287,8 @@ export function createPluginModelChannel(ctx: Context) {
         if (agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new TypeError('Plugin session is not idle')
         rejectionCode = 'PLUGIN_MODEL_CONTEXT_UNAVAILABLE'
         const ownContext = isOwnedSession(agent.session.snapshotEvents())
+        if (model?.contextWindow !== undefined && !ownContext) throw new TypeError('Context limits apply only to plugin-owned model sessions')
+        const provider = model ? await contexts.ensure(model, signal) : undefined
         // restrict() alone masks global tools only. Assembly removes scoped schemas,
         // while the monotonic guard also rejects calls reconstructed from old history.
         disposers.push(agent.ctx.tools.restrict({ allow: [] }))
@@ -312,7 +331,8 @@ export function createPluginModelChannel(ctx: Context) {
         if (model) disposers.push(agent.ctx.on('agent/request', async (_event, next): Promise<LlmCallConfig> => {
           const current = await next()
           const { reasoningEffort: _previous, ...rest } = current
-          return { ...rest, provider: model.provider, model: model.model,
+          return { ...rest, provider: provider!, model: model.model,
+            ...(model.contextWindow === undefined ? {} : { maxTokens: Math.min(current.maxTokens ?? Math.floor(model.contextWindow / 4), Math.floor(model.contextWindow / 4)) }),
             ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(model.reasoningEffort) }) }
         }))
         if (suppliedImages.length) {
@@ -334,6 +354,10 @@ export function createPluginModelChannel(ctx: Context) {
         const content = suppliedImages.length && attachments ? await attachments.admitPromptContent(promptContent)
           : [{ type: 'text' as const, text: promptText }]
         signal.throwIfAborted()
+        if (ownContext && model) {
+          const previous = contextSelection(agent.session.snapshotEvents())
+          if (JSON.stringify(previous) !== JSON.stringify(model)) appendPluginRecord(agent.session, 'plugin:qbf/model-context', { owner: request.owner, model })
+        }
         const message = createUserMessage({ source: { kind: 'qbf-plugin', owner: request.owner, requestId: request.requestId }, content })
         submitted = true
         agent.followup(message)
@@ -422,6 +446,7 @@ export function createPluginModelChannel(ctx: Context) {
           && pending['next-turn'].length === 0 && pending['next-step'].length === 0
           && (!live || live.status === 'idle' && live.inbox.nextTurn.length === 0 && live.inbox.nextStep.length === 0)
         const usageSteps: UsageStep[] = []
+        const recordedModel = contextSelection(observation.events)
         let usageComplete = claimedTurn !== null
         if (claimedTurn !== null) for (const event of observation.events) {
           if (event.type !== 'assistant/message' || event.data.turn !== claimedTurn) continue
@@ -439,7 +464,7 @@ export function createPluginModelChannel(ctx: Context) {
           if (usage.cacheReadTokens !== undefined && usage.totalTokens !== undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined
             && usage.totalTokens === usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + (usage.cacheWriteTokens ?? 0)) usage.cacheWriteTokens ??= 0
           usageSteps.push({ eventId: `${event.type}:seq:${event.seq}`, turn: claimedTurn, step: event.data.step,
-            provider: source.provider, model: source.model, usage })
+            provider: contexts.originalProvider(source.provider, recordedModel), model: source.model, usage })
         }
         const state: 'running' | 'completed' | 'failed' | 'unknown' = terminal
           ? terminal.data.reason.kind === 'completed' ? 'completed' : 'failed'
@@ -459,6 +484,7 @@ export function createPluginModelChannel(ctx: Context) {
       await persistence?.flush()
       await Promise.allSettled([...handles.values()].map(handle => handle.dispose()))
       handles.clear(); runs.clear()
+      contexts.close()
     },
   })
 }

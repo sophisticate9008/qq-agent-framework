@@ -151,7 +151,8 @@ export function createPluginModelService(options: PluginModelServiceOptions) {
     const model = selected ? parsePluginModelSelection(selected) : models[0]
     if (!model || !models.some(candidate => candidate.provider === model.provider && candidate.model === model.model)) failure('PLUGIN_MODEL_UNAVAILABLE')
     return parsePluginModelSelection({ provider: model.provider, model: model.model,
-      ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }) })
+      ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
+      ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }) })
   }
   const assertSettled = (sessionId: string) => {
     const previous = options.store.read(EXECUTIONS, sessionId)

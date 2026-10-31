@@ -5,6 +5,8 @@ export interface PluginModelSelection {
   readonly provider: string
   readonly model: string
   readonly reasoningEffort?: string
+  /** Optional helper-session capacity, at most the source adapter's verified context window. */
+  readonly contextWindow?: number
 }
 export interface PluginModelDescription extends PluginModelSelection {
   readonly providerName: string
@@ -121,6 +123,8 @@ export function parsePluginModelSelection(value: unknown): PluginModelSelection 
   const row = value as Record<string, unknown>
   if (!pluginModelIdentifier(row.provider) || !pluginModelIdentifier(row.model)
     || row.reasoningEffort !== undefined && !pluginModelIdentifier(row.reasoningEffort)
-    || Object.keys(row).some(key => !['provider', 'model', 'reasoningEffort'].includes(key))) throw new TypeError('Invalid plugin model selection')
-  return { provider: row.provider, model: row.model, ...(row.reasoningEffort === undefined ? {} : { reasoningEffort: row.reasoningEffort }) }
+    || row.contextWindow !== undefined && (!Number.isSafeInteger(row.contextWindow) || Number(row.contextWindow) < 1024 || Number(row.contextWindow) > 10_000_000)
+    || Object.keys(row).some(key => !['provider', 'model', 'reasoningEffort', 'contextWindow'].includes(key))) throw new TypeError('Invalid plugin model selection')
+  return { provider: row.provider, model: row.model, ...(row.reasoningEffort === undefined ? {} : { reasoningEffort: row.reasoningEffort }),
+    ...(row.contextWindow === undefined ? {} : { contextWindow: Number(row.contextWindow) }) }
 }

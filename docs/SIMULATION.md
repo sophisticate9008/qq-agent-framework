@@ -107,9 +107,9 @@ node scripts/simulate-qq.ts --provider deepseek-official --model deepseek-flash
 
 `forwardAssets` 接受最多八个与 `assets` 同格式的素材，登记字节后放入一条模拟群友的转发节点，可与 `forward` 的既有文本节点合并使用。节点中的图片、语音与文件均通过本轮素材查询返回实际字节，无需手工填写素材 URL。图片理解、语音转写与发送仍以实际模型能力、宿主配置和回执为准。
 
-模拟 HTTP 端支持本轮消息/转发/素材查询及固定模拟群、群成员、好友信息与聊天记录。戳一戳、撤回由本地记录确认，撤回后相应消息不再可查询。收藏表情列表包含本轮准备的红蓝图与已登记的图片。没有登记的素材与节点返回失败；未支持的协议动作明确返回失败，并记录 `unsupported-protocol-action`。这些数据均来自模拟实例。
+模拟 HTTP 端支持本轮消息/转发/素材查询及固定模拟群、群成员、好友信息与聊天记录。戳一戳、撤回由本地记录确认，撤回后相应消息不再可查询。收藏列表初始为空，准备和注入图片只登记素材；实际调用收藏新增后才进入列表，同内容按 MD5 去重。没有登记的素材与节点返回失败；未支持的协议动作明确返回失败，并记录 `unsupported-protocol-action`。这些数据均来自模拟实例。
 
-固定动作包括 `get_msg`、`get_forward_msg`、`get_image`、`get_record`、`get_file`、`get_group_file_url`、`get_private_file_url`、`fetch_custom_face_detail`、`get_group_info`、`get_group_member_info`、`get_group_member_list`、`get_group_msg_history`、`get_friend_msg_history`、`get_friend_list`、`get_group_list`、`group_poke`、`friend_poke`、`delete_msg`。消息、合并转发和上传文件使用原有 `send_*_msg`、`send_*_forward_msg`、`upload_*_file` 路由。出站图片、语音和文件必须能够捕获实际字节，否则返回失败；每份字节记录本地路径、大小和 SHA-256。
+固定动作包括 `get_msg`、`get_forward_msg`、`get_image`、`get_record`、`get_file`、`get_group_file_url`、`get_private_file_url`、`fetch_custom_face_detail`、`add_custom_face`、`get_group_info`、`get_group_member_info`、`get_group_member_list`、`get_group_msg_history`、`get_friend_msg_history`、`get_friend_list`、`get_group_list`、`group_poke`、`friend_poke`、`delete_msg`。消息、合并转发和上传文件使用原有 `send_*_msg`、`send_*_forward_msg`、`upload_*_file` 路由。出站图片、语音和文件必须能够捕获实际字节，否则返回失败；每份字节记录本地路径、大小和 SHA-256。
 
 ## 批量聊天与连续追加
 
@@ -141,10 +141,10 @@ node scripts/simulate-qq.ts --batch runtime/simulation-cases.jsonl
 
 ```jsonl
 {"settings":{"bubbles":false}}
-{"actor":"owner","text":"请把收藏的红蓝图发出来。"}
+{"actor":"owner","text":"把刚才发的红蓝测试图发回来。"}
 ```
 
-基础场景包含收藏表情发送、非主人委派拒绝、主人后台工作创建并回传 `hello.txt`、私聊引用机器人与撤回。只有实际执行证据确认时才能据此判断成功。白名单聊天命令复用生产同一控制命令装配与即时授权同步，持久写入仅发生在模拟目录。
+基础场景包含收藏查询与按实际可用素材发送、非主人委派拒绝、主人后台工作创建并回传 `hello.txt`、私聊引用机器人与撤回。只有实际执行证据确认时才能据此判断成功。白名单聊天命令复用生产同一控制命令装配与即时授权同步，持久写入仅发生在模拟目录。
 
 ## 隔离与证据
 
@@ -163,7 +163,7 @@ node scripts/simulate-qq.ts --batch runtime/simulation-cases.jsonl
 
 OneBot 使用独占的本机 HTTP/WS 监听。所有消息、转发、图片和语音发送请求只在该端记录并返回本地回执；没有真实协议上游或发送代理。日志中的 `deliveredTo: local-capture` 指本地捕获，不代表 QQ 已送达。
 
-`runtime/simulations/index.json` 在本轮启动时原子发布 `latestRunId`，供只读活动入口定位最近一次模拟。源配置目录中的 `simulation-activity-index.json` 另存相同索引与绝对 `root` 指针，使管理服务从其他工作目录启动时仍能定位模拟活动及同来源模拟会话；它只记录定位信息，不修改模型配置。每轮 `activity.json` 保留 `native.activity()` 原始结构，外层提供 `schema:1`、`source:"simulation"`、`simulation:true`、`runId`、`sourceDirectory`、`updatedAt`；关闭前刷新最终活动状态。
+`runtime/simulations/index.json` 在本轮启动时原子发布 `latestRunId`，供只读活动入口定位最近一次模拟。源配置目录中的 `simulation-activity-index.json` 另存相同索引与绝对 `root` 指针，使管理服务从其他工作目录启动时仍能定位模拟活动及同来源模拟会话；它只记录定位信息，不修改模型配置。使用私有配置副本作为 `--source-directory` 时，活动归属于该副本，不自动出现在正式账号的页面；要在当前工作台“最近活动”的“全部／模拟”中查看本轮，应从工作台实际使用的配置来源目录启动模拟。此来源隔离也适用于多账号，不通过合并索引绕过归属校验。每轮 `activity.json` 保留 `native.activity()` 原始结构，外层提供 `schema:1`、`source:"simulation"`、`simulation:true`、`runId`、`sourceDirectory`、`updatedAt`；关闭前刷新最终活动状态。
 
 DSH 只装配已经安装的官方 `dsh-base`、`dsh-web-app` 与当前工作树构建的框架 bridge 插件，不加载生产自定义 bundle、MCP、会话、运行意图或助手部署 journal。框架宿主扩展由 `--bootstrap` 显式选择，默认不加载生产选择。当前渠道与模型配置、凭据复制到权限受限的本轮目录，网页签名密钥重新生成。聊天与助手使用模拟专属命名空间，通过现有部署服务只更新模拟 profile；不修改生产 DSH 配置，不重启生产服务，不清理生产会话。
 
@@ -211,4 +211,4 @@ node scripts/simulate-qq.ts --batch video --prepare-only
 
 专项使用只读核对行 `{"videoReads":{"label":"video-disabled","expect":"none"}}`、`some`、`unchanged`，分别要求尚无视频 GET、从上个核对点起至少发生一次视频 GET、与上个核对点相比没有新增视频 GET。每个核对点写入 `asset-read-checkpoint`；不符合时明确失败。它验证真实下载行为，模型是否读帧、颜色顺序是否准确、是否如实说明音频未观察，仍需结合工具结果与实际模型回复核对。
 
-表情用例的模拟账号收藏列表提供实际注册图片的内容 MD5 和模拟收藏标识；发送仍只写本地捕获。稳定等待同时观察表情辅助机制的未完成任务，避免打标仍在运行时进入下一步或退出。
+表情用例从空收藏开始，以自然语言请求收藏图片，再请求发送贴切表情；收藏列表提供实际新增图片的内容 MD5 和模拟收藏标识。新增动作走生产收藏适配器的临时文件路径，写入后可下载核对实际字节；发送仍只写本地捕获。稳定等待同时观察表情辅助机制的未完成任务，避免打标仍在运行时进入下一步或退出。

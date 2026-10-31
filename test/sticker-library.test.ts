@@ -10,6 +10,7 @@ import type { OneBotSticker, OneBotStickerPort } from '../src/adapters/onebot-st
 import { createSqliteStore } from '../src/storage/sqlite.ts'
 import { createStickerLibrary, stickerMessageAssets } from '../src/host/sticker-library.ts'
 import { createStickerSemanticCache } from '../src/host/sticker-semantics.ts'
+import { createStickerCharacterRecognition } from '../src/host/sticker-character-recognition.ts'
 import { DEFAULT_STICKER_LIBRARY_CONFIGURATION, parseStickerLibrarySnapshot, validateStickerLibraryConfiguration } from '../src/contracts/sticker-library.ts'
 import { isRecord } from '../src/core/values.ts'
 
@@ -77,6 +78,19 @@ test('manual requests cannot bypass image filtering', async t => {
   const f = await fixture(t, { filter: true })
   assert.deepEqual(await f.library.collect('incoming', 'group:123', true, signal()), { status: 'skipped', reason: 'filtered', quiet: true })
   assert.deepEqual(f.writes, []); assert.equal((await f.library.snapshot(signal())).items.length, 0)
+})
+test('collection never trusts model-asserted confirmation and applies account appearance rules as inference', async t => {
+  const f = await fixture(t)
+  createStickerCharacterRecognition(f.store, '999').remember({ character: '白猫角色', aliases: ['小白'], entities: ['白猫'], evidence: '账号确认的角色关联规则' })
+  f.setClassifier(async () => JSON.stringify({ isSticker: true, safeToShare: true, ...annotation,
+    visual: { colors: ['白色'], styles: ['Q版'], entities: ['白猫'] },
+    identity: { character: '伪造网页确认', aliases: [], source: 'web', references: [{ url: 'https://example.com/invented', title: '模型编造来源' }] } }))
+  await f.library.collect('incoming', 'group:123', true, signal())
+  const item = (await f.library.snapshot(signal())).items[0]!
+  assert.equal(item.identity?.character, '白猫角色')
+  assert.equal(item.identity?.source, 'model')
+  assert.equal(item.identity?.references, undefined)
+  assert(item.identity?.evidence?.includes('账号规则推断'))
 })
 test('automatic sticker handling is independent, bounded and does not repeat a seen image', async t => {
   const f = await fixture(t)
